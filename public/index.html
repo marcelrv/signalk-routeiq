@@ -1,0 +1,1020 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SignalK Autoroute</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #0b1a2b; color: #e0edf5; }
+
+#map { height: 100%; width: 100%; z-index: 0; }
+
+/* ---------- panel base ---------- */
+.panel {
+  position: absolute;
+  z-index: 1000;
+  background: rgba(11, 26, 43, 0.88);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(79, 148, 212, 0.35);
+  border-radius: 10px;
+  padding: 16px 18px;
+  min-width: 220px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+  font-size: 13px;
+  line-height: 1.5;
+  transition: opacity 0.2s;
+}
+.panel-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: #5c9bd5;
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+.panel label {
+  display: block;
+  font-size: 12px;
+  color: #9bb8da;
+  margin-bottom: 4px;
+}
+.panel input, .panel button {
+  font: inherit;
+  outline: none;
+}
+
+/* ---------- search (top-left) ---------- */
+#search-panel { top: 20px; left: 70px; }
+#search-row { display: flex; gap: 6px; }
+#search-input {
+  flex: 1;
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(79,148,212,0.4);
+  border-radius: 6px;
+  padding: 8px 11px;
+  color: #e0edf5;
+  font-size: 13px;
+  min-width: 160px;
+}
+#search-input::placeholder { color: #5f7a9a; }
+#search-btn {
+  background: #1f6391;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+#search-btn:hover { background: #287bb5; }
+#search-results {
+  margin-top: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  display: none;
+}
+.search-result-item {
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.12s;
+  font-size: 12px;
+}
+.search-result-item:hover { background: rgba(79,148,212,0.25); }
+
+/* ---------- info (below search) ---------- */
+#info-panel { top: 100px; left: 70px; min-width: 240px; }
+#info-panel .info-line {
+  font-size: 12px;
+  padding: 3px 0;
+  color: #c8dcee;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+#info-panel .info-line .label { color: #6d96c0; min-width: 48px; }
+#info-panel .info-line .coords { color: #b8d4f0; font-family: 'SF Mono', 'Cascadia Code', monospace; font-size: 11px; }
+#clear-btn {
+  margin-top: 8px;
+  background: transparent;
+  border: 1px solid rgba(200,70,70,0.55);
+  border-radius: 6px;
+  padding: 5px 12px;
+  color: #e07070;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.12s;
+}
+#clear-btn:hover { background: rgba(200,70,70,0.18); }
+
+/* ---------- settings (top-right) ---------- */
+#settings-panel { top: 20px; right: 20px; }
+#settings-panel input[type="number"] {
+  width: 100%;
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(79,148,212,0.4);
+  border-radius: 6px;
+  padding: 8px 11px;
+  color: #e0edf5;
+  font-size: 13px;
+}
+#settings-panel input[type="number"]:focus,
+#settings-panel input[type="url"]:focus { border-color: #3b8fd4; }
+
+#url-row { display: flex; align-items: center; gap: 6px; }
+#url-row input[type="url"] { flex: 1; background: rgba(255,255,255,0.07); border: 1px solid rgba(79,148,212,0.4); border-radius: 6px; padding: 8px 11px; color: #e0edf5; font-size: 13px; }
+.conn-dot {
+  display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  flex-shrink: 0; transition: background 0.3s;
+}
+.conn-online { background: #3ccf6b; box-shadow: 0 0 6px rgba(60,207,107,0.6); }
+.conn-offline { background: #555; }
+#conn-btn {
+  background: #1f6391; border: none; border-radius: 6px; padding: 8px 10px;
+  color: #fff; font-weight: 600; cursor: pointer; font-size: 11px;
+  white-space: nowrap; transition: background 0.15s;
+}
+#conn-btn:hover { background: #287bb5; }
+
+.boat-info { margin-top: 8px; border-top: 1px solid rgba(79,148,212,0.2); padding-top: 4px; }
+.boat-info .info-line { font-size: 11px; padding: 2px 0; display: flex; align-items: center; gap: 6px; color: #c8dcee; }
+.boat-info .info-line .label { color: #6d96c0; min-width: 50px; font-size: 10px; letter-spacing: 0.5px; }
+.boat-info .info-line .value { color: #b8d4f0; font-family: 'SF Mono', 'Cascadia Code', monospace; font-size: 11px; }
+.debug-toggle input[type="checkbox"] { accent-color: #3b8fd4; width: 14px; height: 14px; cursor: pointer; }
+.debug-toggle span { color: #9bb8da; font-size: 12px; }
+#url-history-list {
+  margin-top: 4px;
+  display: none;
+  background: rgba(11,26,43,0.95);
+  border: 1px solid rgba(79,148,212,0.35);
+  border-radius: 6px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+#url-history-list.visible { display: block; }
+.url-history-item {
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: #b8d4f0;
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+}
+.url-history-item:hover { background: rgba(79,148,212,0.25); }
+.url-history-item:first-child { border-top-left-radius: 6px; border-top-right-radius: 6px; }
+.url-history-item:last-child { border-bottom-left-radius: 6px; border-bottom-right-radius: 6px; }
+
+/* ---------- export (right, below settings) ---------- */
+#export-panel { bottom: 20px; right: 20px; }
+.export-btn {
+  display: block;
+  width: 100%;
+  margin-bottom: 8px;
+  background: #1f6391;
+  border: none;
+  border-radius: 6px;
+  padding: 9px 12px;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s;
+  text-align: center;
+}
+.export-btn:last-child { margin-bottom: 0; }
+.export-btn:hover { background: #287bb5; }
+.export-btn.push-btn { background: #1d7a4a; }
+.export-btn.push-btn:hover { background: #26975b; }
+
+/* ---------- status toast ---------- */
+#toast {
+  position: absolute;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2000;
+  background: rgba(11, 26, 43, 0.92);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(79,148,212,0.4);
+  border-radius: 8px;
+  padding: 10px 22px;
+  font-size: 13px;
+  color: #d6e6f8;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s;
+  white-space: nowrap;
+}
+#toast.visible { opacity: 1; }
+#toast.error { border-color: rgba(200,70,70,0.6); color: #f0a0a0; }
+#toast.success { border-color: rgba(70,180,100,0.6); color: #a0e0b0; }
+
+/* ---------- leaflet overrides ---------- */
+.leaflet-routing-container {
+  display: none !important;
+}
+.leaflet-touch .leaflet-control-layers, .leaflet-touch .leaflet-bar { border: 0 !important; }
+
+/* scrollbar */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(79,148,212,0.35); border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- Search -->
+<div id="search-panel" class="panel">
+  <div class="panel-title">Search POI</div>
+  <div id="search-row">
+    <input id="search-input" type="text" placeholder="harbour, waypoint, ..." />
+    <button id="search-btn">Go</button>
+  </div>
+  <div id="search-results"></div>
+</div>
+
+<!-- Info -->
+<div id="info-panel" class="panel">
+  <div class="panel-title">Route</div>
+  <div id="hint-line" class="info-line" style="color:#9bb8da;font-size:11px;padding-bottom:4px;border-bottom:1px solid rgba(79,148,212,0.2);margin-bottom:4px">
+    Right-click map to set <span id="hint-action" style="color:#7ab8f0;font-weight:600">START</span>
+  </div>
+  <div id="start-info" class="info-line"><span class="label">START</span><span class="coords">—</span></div>
+  <div id="dest-info" class="info-line"><span class="label">DEST</span><span class="coords">—</span></div>
+  <button id="clear-btn">Clear Route</button>
+</div>
+
+<!-- Settings -->
+<div id="settings-panel" class="panel">
+  <div class="panel-title">Settings</div>
+  <label for="api-url">Backend URL</label>
+  <div id="url-row">
+    <span id="conn-dot" class="conn-dot conn-offline"></span>
+     <input id="api-url" type="url" placeholder="http://localhost:3000" autocomplete="off" />
+    <button id="conn-btn">Connect</button>
+  </div>
+  <div id="url-history-list"></div>
+  <label for="min-coast" style="margin-top:10px">Min Coastline Distance (m)</label>
+  <input id="min-coast" type="number" value="1000" min="0" step="500" />
+
+  <label class="debug-toggle" style="margin-top:10px;display:flex;align-items:center;gap:8px;cursor:pointer">
+    <input id="debug-cb" type="checkbox" />
+    <span>Debug logging</span>
+  </label>
+
+  <div id="boat-info" class="boat-info" style="display:none">
+    <div class="panel-title" style="margin-top:12px">Vessel</div>
+    <div id="boat-pos" class="info-line"><span class="label">POS</span><span class="value">—</span></div>
+    <div id="boat-sog" class="info-line"><span class="label">SOG</span><span class="value">—</span></div>
+    <div id="boat-cog" class="info-line"><span class="label">COG</span><span class="value">—</span></div>
+    <div id="boat-draft" class="info-line"><span class="label">DRAFT</span><span class="value">—</span></div>
+    <div id="boat-beam" class="info-line"><span class="label">BEAM</span><span class="value">—</span></div>
+    <div id="boat-airdraft" class="info-line"><span class="label">AIR</span><span class="value">—</span></div>
+  </div>
+</div>
+
+<!-- Export -->
+<div id="export-panel" class="panel">
+  <div class="panel-title">Export</div>
+  <button class="export-btn" id="gpx-btn">Download GPX</button>
+  <button class="export-btn push-btn" id="push-btn">Save to Signal K</button>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // ---- config ----
+  const STORAGE_KEY = 'sandbox_recent_urls';
+  const DEFAULT_URL = '';
+
+  // auto-detect plugin path from URL like /plugins/signalk-autoroute/
+  const PLUGIN_PATH = (() => {
+    const m = window.location.pathname.match(/^(\/plugins\/[^\/]+)\//);
+    return m ? m[1] : '';
+  })();
+
+  function isDebug() { return document.getElementById('debug-cb').checked; }
+
+  function logDebug(type, url, payload, response) {
+    if (!isDebug()) return;
+    const ts = new Date().toISOString().slice(11, 23);
+    console.groupCollapsed(`[${ts}] ${type}`);
+    console.log('URL:', url);
+    if (payload !== undefined) console.log('Payload:', JSON.parse(JSON.stringify(payload)));
+    if (response !== undefined) {
+      if (response instanceof Response) {
+        console.log('Status:', response.status, response.statusText);
+        console.log('Headers:', [...response.headers.entries()]);
+      } else {
+        console.log('Response:', response);
+      }
+    }
+    console.groupEnd();
+  }
+
+  function getApiBase() {
+    const v = document.getElementById('api-url').value.replace(/\/+$/, '');
+    if (v) return v;
+    return PLUGIN_PATH || DEFAULT_URL;
+  }
+  function routeUrl()   { return getApiBase() + '/signalk/v1/api/router/route'; }
+  function searchUrl()  { return getApiBase() + '/signalk/v1/api/router/search'; }
+  function gpxUrl()     { return getApiBase() + '/signalk/v1/api/router/export/gpx'; }
+  function pushUrl()    { return getApiBase() + '/signalk/v1/api/router/push'; }
+
+  // ---- recent URLs (localStorage, max 3) ----
+  function loadRecentUrls() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; }
+    catch { return []; }
+  }
+  function saveRecentUrl(url) {
+    let list = loadRecentUrls().filter(u => u !== url);
+    list.unshift(url);
+    if (list.length > 3) list = list.slice(0, 3);
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); } catch {}
+    return list;
+  }
+
+  // ---- state ----
+  const state = {
+    startLatLng:  null,
+    destLatLng:   null,
+    waypointNext: 'start',   // 'start' | 'dest'
+    routing:      false,
+    latestRoute:  null,       // stored from LRM 'routesfound' event
+    startMarker:  null,
+    destMarker:   null,
+    routeLayers:  null,
+    lastGeoJson:  null,
+  };
+
+  const map = L.map('map', {
+    center: [45.5, -1.0],
+    zoom: 6,
+    zoomControl: true,
+  });
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 18,
+    attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
+  }).addTo(map);
+
+  // ---- custom markers layer ----
+  const routeLayers = L.layerGroup().addTo(map);
+  state.routeLayers = routeLayers;
+
+  const startIcon = L.divIcon({
+    className: '',
+    html: '<div style="width:32px;height:32px;background:#22c55e;border:3px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;color:#fff;box-shadow:0 2px 6px rgba(0,0,0,.4)">S</div>',
+    iconSize: [32, 32],
+    iconAnchor: [16, 16],
+  });
+  const destIcon = L.divIcon({
+    className: '',
+    html: '<div style="width:32px;height:32px;background:#ef4444;border:3px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;color:#fff;box-shadow:0 2px 6px rgba(0,0,0,.4)">E</div>',
+    iconSize: [32, 32],
+    iconAnchor: [16, 16],
+  });
+
+  // ---- URL history dropdown ----
+  const urlInput = document.getElementById('api-url');
+  const urlHistoryEl = document.getElementById('url-history-list');
+
+  function renderUrlHistory(filter) {
+    const list = loadRecentUrls();
+    const filtered = filter ? list.filter(u => u !== urlInput.value && u.toLowerCase().includes(filter.toLowerCase())) : list.filter(u => u !== urlInput.value);
+    urlHistoryEl.innerHTML = filtered.map(u => `<div class="url-history-item" data-url="${u.replace(/"/g, '&quot;')}">${u}</div>`).join('');
+    if (filtered.length > 0) urlHistoryEl.classList.add('visible');
+    else urlHistoryEl.classList.remove('visible');
+  }
+
+  function handleUrlChange() {
+    const val = urlInput.value.trim();
+    if (val) {
+      saveRecentUrl(val);
+    }
+  }
+
+  const initialUrls = loadRecentUrls();
+  if (initialUrls.length > 0) {
+    urlInput.value = initialUrls[0];
+  } else if (PLUGIN_PATH) {
+    urlInput.value = PLUGIN_PATH;
+  }
+
+  urlInput.addEventListener('focus', function () {
+    const list = loadRecentUrls().filter(u => u !== urlInput.value);
+    if (list.length > 0) renderUrlHistory('');
+  });
+  urlInput.addEventListener('input', function () {
+    if (this.value.trim()) renderUrlHistory(this.value);
+    else urlHistoryEl.classList.remove('visible');
+  });
+  urlInput.addEventListener('blur', function () {
+    setTimeout(() => urlHistoryEl.classList.remove('visible'), 180);
+  });
+  urlInput.addEventListener('change', handleUrlChange);
+  urlInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { handleUrlChange(); this.blur(); }
+  });
+  urlHistoryEl.addEventListener('click', function (e) {
+    const item = e.target.closest('.url-history-item');
+    if (item) {
+      urlInput.value = item.dataset.url;
+      urlHistoryEl.classList.remove('visible');
+      handleUrlChange();
+    }
+  });
+
+  // ---- connection + boat data ----
+  const connDot = document.getElementById('conn-dot');
+  const connBtn = document.getElementById('conn-btn');
+  const boatInfo = document.getElementById('boat-info');
+  let connected = false;
+
+  function setConnected(yes) {
+    connected = yes;
+    connDot.className = 'conn-dot ' + (yes ? 'conn-online' : 'conn-offline');
+    connBtn.textContent = yes ? 'Connected' : 'Connect';
+    if (!yes) boatInfo.style.display = 'none';
+  }
+
+  // URL + "/router/vessel"
+  function vesselUrl() { return getApiBase() + '/signalk/v1/api/router/vessel'; }
+  // URL + "/signalk/v1/api/vessels/self"
+  function skSelfUrl() { return getApiBase() + '/signalk/v1/api/vessels/self'; }
+
+  function fetchBoatData() {
+    let draft, beam, airDraft;
+    let lat, lng, sog, cog;
+
+    const vUrl = vesselUrl(), sUrl = skSelfUrl();
+    logDebug('BOAT', vUrl);
+    logDebug('BOAT', sUrl);
+    return Promise.allSettled([
+      fetch(vUrl).then(r => { logDebug('BOAT', vUrl, undefined, r); return r.ok ? r.json() : Promise.reject(); }),
+      fetch(sUrl).then(r => { logDebug('BOAT', sUrl, undefined, r); return r.ok ? r.json() : Promise.reject(); }),
+    ]).then(([vr, sr]) => {
+      if (vr.status === 'fulfilled') {
+        draft = vr.value.draft;
+        beam = vr.value.beam;
+        airDraft = vr.value.airDraft;
+      }
+      if (sr.status === 'fulfilled') {
+        const nav = sr.value?.navigation;
+        const pos = nav?.position;
+        if (pos && pos.value) {
+          lat = pos.value.latitude;
+          lng = pos.value.longitude;
+        }
+        if (!sog) sog = nav?.speedOverGround?.value;
+        if (!cog) cog = nav?.courseOverGroundTrue?.value;
+        draft = draft || sr.value?.design?.draft?.value || nav?.draft?.value;
+        beam = beam || sr.value?.design?.beam?.value;
+        airDraft = airDraft || sr.value?.design?.airDraft?.value;
+      }
+      showBoatData(lat, lng, sog, cog, draft, beam, airDraft);
+    });
+  }
+
+  let lastBoat = {};
+  let boatStartSet = false;
+  function showBoatData(lat, lng, sog, cog, draft, beam, airDraft) {
+    lastBoat = { lat, lng, sog, cog, draft, beam, airDraft };
+    // auto-set start from boat position on first successful fetch
+    if (!boatStartSet && lat != null && lng != null) {
+      boatStartSet = true;
+      state.startLatLng = L.latLng(lat, lng);
+      state.waypointNext = 'dest';
+      map.setView([lat, lng], map.getZoom());
+      applyWaypoints();
+      showToast('Start set to vessel position', 'success');
+    }
+    const fmt = (v, u) => v != null ? v + (u ? ' ' + u : '') : '—';
+    document.getElementById('boat-pos').querySelector('.value').textContent =
+      (lat != null && lng != null) ? lat.toFixed(4) + ', ' + lng.toFixed(4) : '—';
+    document.getElementById('boat-sog').querySelector('.value').textContent = fmt(sog, 'kn');
+    document.getElementById('boat-cog').querySelector('.value').textContent = fmt(cog, '°');
+    document.getElementById('boat-draft').querySelector('.value').textContent = fmt(draft, 'm');
+    document.getElementById('boat-beam').querySelector('.value').textContent = fmt(beam, 'm');
+    document.getElementById('boat-airdraft').querySelector('.value').textContent = fmt(airDraft, 'm');
+    boatInfo.style.display = 'block';
+  }
+
+  function doConnect() {
+    setConnected(false);
+
+    const attempts = [
+      getApiBase() + '/signalk/v1/api/router/vessel',
+      getApiBase() + '/router/vessel',
+    ];
+
+    function tryConnect(i) {
+      if (i >= attempts.length) {
+        showToast('Connection failed — server unreachable', 'error');
+        return;
+      }
+      logDebug('CONNECT', attempts[i]);
+      fetch(attempts[i], { signal: AbortSignal.timeout(5000) })
+        .then(r => {
+          logDebug('CONNECT', attempts[i], undefined, r);
+          if (!r.ok) throw new Error('status ' + r.status);
+          setConnected(true);
+          showToast('Connected', 'success');
+          return r.json();
+        })
+        .then(() => fetchBoatData())
+        .catch(err => {
+          console.warn('[connect] try ' + i + ' failed:', attempts[i], err.message);
+          tryConnect(i + 1);
+        });
+    }
+    tryConnect(0);
+  }
+
+  connBtn.addEventListener('click', doConnect);
+  // re-connect when URL changes (Enter or blur)
+  urlInput.addEventListener('change', function () {
+    if (connected) doConnect();
+  });
+
+  // auto-connect on load
+  setTimeout(doConnect, 500);
+
+  // ---- toast helper ----
+  let toastTimer = null;
+  function showToast(msg, type) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = 'visible' + (type ? ' ' + type : '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.className = ''; }, 3500);
+  }
+
+  // ---- custom router ----
+  const MarineRouter = L.Class.extend({
+    options: {
+      timeout: 30000,
+    },
+
+    initialize: function (options) {
+      L.Util.setOptions(this, options);
+    },
+
+    route: function (waypoints, callback, context) {
+      if (waypoints.length < 2) {
+        callback.call(context, { status: -1, message: 'Need at least 2 waypoints' });
+        return;
+      }
+
+      const wpts = waypoints.map(w => w.latLng);
+      const toPos = ll => ({ latitude: ll.lat, longitude: ll.lng });
+      const start = toPos(wpts[0]);
+      const end   = toPos(wpts[wpts.length - 1]);
+      const via   = wpts.slice(1, -1).map(toPos);
+
+      const minCoastMeters = parseFloat(document.getElementById('min-coast').value) || 0;
+      const minCoastNauticalMiles = minCoastMeters / 1852;
+
+      const payload = {
+        start: start,
+        end: end,
+        via: via,
+        minCoastDistance: minCoastNauticalMiles,
+      };
+
+      state.routing = true;
+      showToast('Routing…', '');
+      logDebug('ROUTE', routeUrl(), payload);
+
+      fetch(routeUrl(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(this.options.timeout),
+      })
+        .then(r => {
+          logDebug('ROUTE', routeUrl(), payload, r);
+          if (!r.ok) throw new Error('Server error ' + r.status);
+          return r.json();
+        })
+        .then(geoJson => {
+          state.lastGeoJson = geoJson;
+          state.routing = false;
+          const result = geoJsonToLRM(geoJson, waypoints);
+          if (!result) {
+            callback.call(context, { status: -1, message: 'Empty route returned' });
+            showToast('Route returned no data', 'error');
+            return;
+          }
+          try {
+            callback.call(context, null, [result]);
+          } catch (_e) { /* LRM internal rendering errors are non-fatal */ }
+          showToast('Route updated', 'success');
+        })
+        .catch(err => {
+          state.routing = false;
+          showToast('Routing failed: ' + err.message, 'error');
+          callback.call(context, { status: -1, message: err.message });
+        });
+    },
+  });
+
+  function geoJsonToLRM(geojson, originalWpts) {
+    if (!geojson) return null;
+
+    let coords = [];
+    if (geojson.type === 'FeatureCollection' && Array.isArray(geojson.features)) {
+      for (const f of geojson.features) {
+        const c = extractCoords(f.geometry);
+        coords = coords.concat(c);
+      }
+    } else if (geojson.type === 'Feature') {
+      coords = extractCoords(geojson.geometry);
+    } else if (geojson.type === 'LineString' || geojson.type === 'MultiLineString') {
+      coords = extractCoords(geojson);
+    }
+
+    if (coords.length < 2) return null;
+
+    const latLngs = coords.map(c => L.latLng(c[1], c[0]));
+
+    const waypoints = latLngs.map(p => ({ latLng: p }));
+    const instructions = makeSimpleInstructions(latLngs, originalWpts);
+
+    let totalDist = 0;
+    for (let i = 1; i < latLngs.length; i++) {
+      totalDist += latLngs[i - 1].distanceTo(latLngs[i]);
+    }
+
+    return {
+      name: '',
+      waypoints: waypoints,
+      instructions: instructions,
+      summary: { totalDistance: totalDist, totalTime: totalDist / 5 },
+    };
+  }
+
+  function extractCoords(geom) {
+    if (!geom) return [];
+    if (geom.type === 'LineString') return geom.coordinates || [];
+    if (geom.type === 'MultiLineString') {
+      const out = [];
+      for (const seg of geom.coordinates || []) {
+        out.push(...seg);
+      }
+      return out;
+    }
+    return [];
+  }
+
+  function closestCoordIndex(coords, lat, lng) {
+    let minD = Infinity, minI = 0;
+    for (let i = 0; i < coords.length; i++) {
+      const d = (coords[i][1] - lat) ** 2 + (coords[i][0] - lng) ** 2;
+      if (d < minD) { minD = d; minI = i; }
+    }
+    return minI;
+  }
+
+  function renderCustomRoute(geoJson) {
+    state.routeLayers.clearLayers();
+    if (!geoJson) return;
+
+    const warnings = geoJson.warnings || [];
+    let coords = [];
+    if (geoJson.type === 'FeatureCollection' && Array.isArray(geoJson.features)) {
+      for (const f of geoJson.features) {
+        coords = coords.concat(extractCoords(f.geometry));
+      }
+    } else if (geoJson.type === 'Feature') {
+      coords = extractCoords(geoJson.geometry);
+    } else {
+      coords = extractCoords(geoJson);
+    }
+    if (coords.length < 2) return;
+
+    const latLngs = coords.map(c => L.latLng(c[1], c[0]));
+
+    if (warnings.length === 0) {
+      L.polyline(latLngs, { color: '#3b8fd4', opacity: 0.9, weight: 4 }).addTo(state.routeLayers);
+      return;
+    }
+
+    const warnIdx = new Set();
+    for (const w of warnings) {
+      if (w.from && w.to) {
+        const fi = closestCoordIndex(coords, w.from.latitude, w.from.longitude);
+        const ti = closestCoordIndex(coords, w.to.latitude, w.to.longitude);
+        for (let i = Math.min(fi, ti); i <= Math.max(fi, ti); i++) warnIdx.add(i);
+      }
+    }
+
+    let segStart = 0;
+    let inWarn = warnIdx.has(0);
+    for (let i = 1; i < latLngs.length; i++) {
+      const w = warnIdx.has(i);
+      if (w !== inWarn) {
+        const seg = latLngs.slice(segStart, i + 1);
+        if (seg.length >= 2) {
+          L.polyline(seg, inWarn
+            ? { color: '#f59e0b', opacity: 0.9, weight: 4, dashArray: '8, 6' }
+            : { color: '#3b8fd4', opacity: 0.9, weight: 4 }
+          ).addTo(state.routeLayers);
+        }
+        segStart = i;
+        inWarn = w;
+      }
+    }
+    const seg = latLngs.slice(segStart);
+    if (seg.length >= 2) {
+      L.polyline(seg, inWarn
+        ? { color: '#f59e0b', opacity: 0.9, weight: 4, dashArray: '8, 6' }
+        : { color: '#3b8fd4', opacity: 0.9, weight: 4 }
+      ).addTo(state.routeLayers);
+    }
+  }
+
+  function makeSimpleInstructions(latLngs, originalWpts) {
+    const inst = [];
+    if (latLngs.length > 1) {
+      inst.push({ type: 'Straight', text: 'Start', distance: 0, time: 0, index: 0 });
+      inst.push({ type: 'Straight', text: 'Destination', distance: 0, time: 0, index: latLngs.length - 1 });
+    } else if (latLngs.length > 0) {
+      inst.push({ type: 'Straight', text: 'Start', distance: 0, time: 0, index: 0 });
+    }
+    return inst;
+  }
+
+  // ---- LRM control ----
+  const router = new MarineRouter();
+  const routingControl = L.Routing.control({
+    router: router,
+    routeWhileDragging: false,
+    waypoints: [],
+    show: false,
+    addWaypoints: false,
+    draggableWaypoints: false,
+    fitSelectedRoutes: true,
+    lineOptions: { styles: [{ color: 'transparent', weight: 0 }] },
+    createMarker: function () { return null; },
+    plan: L.Routing.plan([], {
+      createMarker: function () { return null; },
+      draggableWaypoints: false,
+      addWaypoints: false,
+    }),
+  }).addTo(map);
+
+  // capture the latest route result for export / push
+  routingControl.on('routesfound', function (e) {
+    if (e.routes && e.routes.length > 0) {
+      state.latestRoute = e.routes[0];
+    }
+    try {
+      renderCustomRoute(state.lastGeoJson);
+    } catch (_r) { /* ignore rendering errors */ }
+  });
+
+  // ---- update info panel ----
+  function updateInfo() {
+    document.getElementById('start-info').querySelector('.coords').textContent =
+      state.startLatLng ? fmtLatLng(state.startLatLng) : '—';
+    document.getElementById('dest-info').querySelector('.coords').textContent =
+      state.destLatLng ? fmtLatLng(state.destLatLng) : '—';
+    document.getElementById('hint-action').textContent =
+      state.waypointNext === 'start' ? 'START' : 'DESTINATION';
+  }
+
+  function fmtLatLng(ll) {
+    return ll.lat.toFixed(4) + ', ' + ll.lng.toFixed(4);
+  }
+
+  // ---- set waypoints on LRM ----
+  function updateMarkers() {
+    if (state.startMarker) { map.removeLayer(state.startMarker); state.startMarker = null; }
+    if (state.destMarker) { map.removeLayer(state.destMarker); state.destMarker = null; }
+    if (state.startLatLng) state.startMarker = L.marker(state.startLatLng, { icon: startIcon }).addTo(map);
+    if (state.destLatLng) state.destMarker = L.marker(state.destLatLng, { icon: destIcon }).addTo(map);
+  }
+
+  function applyWaypoints() {
+    const pts = [];
+    if (state.startLatLng) pts.push(state.startLatLng);
+    if (state.destLatLng)  pts.push(state.destLatLng);
+    if (pts.length >= 2) {
+      routingControl.setWaypoints(pts);
+    } else {
+      routingControl.setWaypoints([]);
+    }
+    updateMarkers();
+    updateInfo();
+  }
+
+  // ---- right-click: set start / dest ----
+  map.on('contextmenu', function (e) {
+    if (e.originalEvent) e.originalEvent.preventDefault();
+    const ll = e.latlng;
+
+    if (state.waypointNext === 'start') {
+      state.startLatLng = ll;
+      state.waypointNext = 'dest';
+    } else {
+      state.destLatLng = ll;
+      state.waypointNext = 'start';
+    }
+
+    applyWaypoints();
+  });
+
+  // also suppress browser context menu on the map container
+  document.getElementById('map').addEventListener('contextmenu', function (e) {
+    e.preventDefault();
+  });
+
+  // ---- clear route ----
+  document.getElementById('clear-btn').addEventListener('click', function () {
+    state.startLatLng = null;
+    state.destLatLng  = null;
+    state.waypointNext = 'start';
+    if (state.startMarker) { map.removeLayer(state.startMarker); state.startMarker = null; }
+    if (state.destMarker) { map.removeLayer(state.destMarker); state.destMarker = null; }
+    state.routeLayers.clearLayers();
+    state.lastGeoJson = null;
+    routingControl.setWaypoints([]);
+    updateInfo();
+  });
+
+  // ---- synchronise state when LRM waypoints change externally ----
+  routingControl.on('waypointschanged', function () {
+    const wpts = routingControl.getWaypoints();
+    if (wpts.length === 0) {
+      state.startLatLng = null;
+      state.destLatLng  = null;
+      state.waypointNext = 'start';
+      state.routeLayers.clearLayers();
+      state.lastGeoJson = null;
+    } else {
+      if (wpts[0] && wpts[0].latLng)  state.startLatLng = wpts[0].latLng;
+      if (wpts.length > 1 && wpts[wpts.length - 1].latLng) state.destLatLng = wpts[wpts.length - 1].latLng;
+    }
+    updateMarkers();
+    updateInfo();
+  });
+
+  // ---- search ----
+  document.getElementById('search-btn').addEventListener('click', doSearch);
+  document.getElementById('search-input').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') doSearch();
+  });
+
+  function doSearch() {
+    const q = document.getElementById('search-input').value.trim();
+    if (!q) return;
+
+    const resultsEl = document.getElementById('search-results');
+    resultsEl.style.display = 'none';
+    resultsEl.innerHTML = '';
+
+    const searchQ = searchUrl() + '?q=' + encodeURIComponent(q);
+    logDebug('SEARCH', searchQ);
+    fetch(searchQ)
+      .then(r => {
+        logDebug('SEARCH', searchQ, undefined, r);
+        if (!r.ok) throw new Error('Search error ' + r.status);
+        return r.json();
+      })
+      .then(data => {
+        const items = Array.isArray(data) ? data : (data.features || []);
+        if (items.length === 0) {
+          showToast('No results found', 'error');
+          return;
+        }
+        resultsEl.innerHTML = '';
+        items.forEach(function (item) {
+          const coords = item.geometry &&
+            (item.geometry.coordinates || (item.geometry.type === 'Point' ? null : null));
+          const pos = coords ? { lat: coords[1], lng: coords[0] } :
+            (item.position || item.latlng || item.center);
+          const name = item.properties?.name || item.name || item.label || 'POI';
+          const div = document.createElement('div');
+          div.className = 'search-result-item';
+          div.textContent = pos
+            ? name + ' (' + pos.lat.toFixed(3) + ', ' + pos.lng.toFixed(3) + ')'
+            : name;
+          div.addEventListener('click', function () {
+            if (pos) {
+              map.setView([pos.lat, pos.lng], 12);
+              state.destLatLng = L.latLng(pos.lat, pos.lng);
+              state.waypointNext = 'start';
+              applyWaypoints();
+            }
+            resultsEl.style.display = 'none';
+          });
+          resultsEl.appendChild(div);
+        });
+        resultsEl.style.display = 'block';
+      })
+      .catch(err => {
+        showToast('Search failed: ' + err.message, 'error');
+      });
+  }
+
+  document.addEventListener('click', function (e) {
+    const el = document.getElementById('search-results');
+    if (!e.target.closest('#search-panel')) {
+      el.style.display = 'none';
+    }
+  });
+
+  // ---- build RouteResult GeoJSON from LRM route ----
+  function lrmRouteToGeoJson(lrmRoute, name) {
+    const coords = lrmRoute.waypoints.map(wp => [wp.latLng.lng, wp.latLng.lat]);
+    const totalDist = lrmRoute.summary ? lrmRoute.summary.totalDistance : 0;
+    return {
+      type: 'FeatureCollection',
+      features: [{
+        type: 'Feature',
+        geometry: { type: 'LineString', coordinates: coords },
+        properties: {
+          name: name || 'Autoroute',
+          totalDistance: totalDist,
+          totalCost: totalDist,
+          segments: [],
+        },
+      }],
+    };
+  }
+
+  // ---- export GPX ----
+  document.getElementById('gpx-btn').addEventListener('click', function () {
+    if (!state.latestRoute) {
+      showToast('No route to export — calculate a route first', 'error');
+      return;
+    }
+    showToast('Downloading GPX…', '');
+    const body = { route: lrmRouteToGeoJson(state.latestRoute, 'Autoroute'), name: 'Autoroute' };
+    logDebug('GPX', gpxUrl(), body);
+    fetch(gpxUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(r => {
+        logDebug('GPX', gpxUrl(), body, r);
+        if (!r.ok) throw new Error('GPX export error ' + r.status);
+        return r.text();
+      })
+      .then(gpx => {
+        const blob = new Blob([gpx], { type: 'application/gpx+xml' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = 'route.gpx';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showToast('GPX downloaded', 'success');
+      })
+      .catch(err => {
+        showToast('GPX failed: ' + err.message, 'error');
+      });
+  });
+
+  // ---- push to Signal K ----
+  document.getElementById('push-btn').addEventListener('click', function () {
+    if (!state.latestRoute) {
+      showToast('No route to save — calculate a route first', 'error');
+      return;
+    }
+    showToast('Saving route to Signal K…', '');
+    const body = { route: lrmRouteToGeoJson(state.latestRoute, 'Autoroute Route'), name: 'Autoroute Route' };
+    logDebug('PUSH', pushUrl(), body);
+    fetch(pushUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(r => {
+        logDebug('PUSH', pushUrl(), body, r);
+        if (!r.ok) throw new Error('Push error ' + r.status);
+        return r.json();
+      })
+      .then(data => {
+        showToast('Route saved to Signal K' + (data.routeId ? ' (' + data.routeId + ')' : ''), 'success');
+      })
+      .catch(err => {
+        showToast('Push failed: ' + err.message, 'error');
+      });
+  });
+
+  // ---- expose state for debugging ----
+  window.__marine = { map, routingControl, state, router };
+})();
+</script>
+</body>
+</html>

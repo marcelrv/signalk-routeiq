@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-test/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python virtual environment
+.venv/
+backend/.venv/
+
+# Routing database (large file, should be generated)
+*.sqlite
+*.db
+
+# Data files (generated from ENCs)
+data/
+shapefiles/
+output_geojson/
+
+# Logs
+*.log
+
+# Test fixtures
+test/fixtures/*.sqlite

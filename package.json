@@ -1,0 +1,103 @@
+{
+  "name": "signalk-autoroute",
+  "version": "0.1.0",
+  "description": "SignalK Open-Source Nautical Route Planner - Offline-first vessel-aware routing",
+  "keywords": ["signalk-node-server-plugin", "signalk-webapp"],
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc && tsc test/routing.test.ts --outDir dist-test --moduleResolution node --module es2022 --target es2022 --declaration --declarationMap --sourceMap --esModuleInterop --strict --skipLibCheck",
+    "build:watch": "tsc --watch",
+    "start": "node dist/index.js",
+    "dev": "ts-node --esm src/index.ts",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "test": "node --test --test-force-exit dist-test/routing.test.js",
+    "test:unit": "node --test --test-force-exit dist-test/unit/*.test.js",
+    "test:integration": "node --test --test-force-exit dist-test/integration/*.test.js"
+  },
+  "dependencies": {
+    "@signalk/server-api": "^2.0.0",
+    "express": "^4.18.2",
+    "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/geojson": "^7946.0.14",
+    "@types/node": "^20.11.0",
+    "@types/sqlite3": "^3.1.8",
+    "eslint": "^8.56.0",
+    "prettier": "^3.2.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3",
+    "typescript-eslint": "^8.60.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "signalK": {
+    "pluginConstructor": "pluginConstructor",
+    "name": "signalk-autoroute",
+    "description": "Offline-first nautical route planner with vessel-aware A* pathfinding",
+    "url": "https://github.com/signalk/signalk-autoroute",
+    "scope": "route",
+    "configSchema": {
+      "type": "object",
+      "properties": {
+        "routingDatabase": {
+          "type": "string",
+          "title": "Routing Database Path",
+          "description": "Path to the routing_graph.sqlite database",
+          "default": "./data/routing_graph.sqlite"
+        },
+        "defaultDraft": {
+          "type": "number",
+          "title": "Default Draft (m)",
+          "description": "Default vessel draft in meters",
+          "default": 2,
+          "multipleOf": 0.1
+        },
+        "defaultBeam": {
+          "type": "number",
+          "title": "Default Beam (m)",
+          "description": "Default vessel beam in meters",
+          "default": 4,
+          "multipleOf": 0.1
+        },
+        "defaultAirDraft": {
+          "type": "number",
+          "title": "Default Air Draft (m)",
+          "description": "Default vessel air draft in meters",
+          "default": 10,
+          "multipleOf": 0.1
+        },
+        "defaultCoastDistance": {
+          "type": "number",
+          "title": "Default Min Coast Distance (NM)",
+          "description": "Default minimum distance from coastline in nautical miles",
+          "default": 0.5
+        },
+        "fairwayMultiplier": {
+          "type": "number",
+          "title": "Fairway Multiplier",
+          "description": "Cost multiplier for fairway edges (lower = preferred)",
+          "default": 0.8
+        },
+        "openWaterMultiplier": {
+          "type": "number",
+          "title": "Open Water Multiplier",
+          "description": "Cost multiplier for open water edges (higher = less preferred)",
+          "default": 1.2
+        },
+        "wrongWayPenalty": {
+          "type": "number",
+          "title": "Wrong Way Penalty",
+          "description": "Penalty multiplier for traveling against traffic flow",
+          "default": 5
+        }
+      }
+    }
+  }
+}
