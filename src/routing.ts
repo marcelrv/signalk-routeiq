@@ -448,8 +448,11 @@ export class RoutingEngine {
       current = parent.get(current) ?? null;
     }
 
+    // Apply string-pulling to remove unnecessary grid staircasing
+    const smoothedPath = await this.smoothPath(path);
+
     // Build GeoJSON response
-    return await this.buildRouteResult(path, gScore.get(endNode) || 0);
+    return await this.buildRouteResult(smoothedPath, path, gScore.get(endNode) || 0);
   }
 
   /**
@@ -523,23 +526,28 @@ export class RoutingEngine {
    * Build GeoJSON RouteResult from path node IDs
    */
   private async buildRouteResult(
-    path: number[],
+    smoothedPath: number[],
+    originalPath: number[],
     totalCost: number
   ): Promise<RouteResult> {
     const coordinates: [number, number][] = [];
     const segments: RouteResult['features'][0]['properties']['segments'] = [];
     let totalDistance = 0;
 
-    for (let i = 0; i < path.length; i++) {
-      const node = await this.db.getNodeById(path[i]);
+    for (let i = 0; i < smoothedPath.length; i++) {
+      const node = await this.db.getNodeById(smoothedPath[i]);
       if (node) {
         coordinates.push([node.lon, node.lat]);
       }
 
       if (i > 0) {
-        const prevNode = path[i - 1];
-        const currNode = path[i];
-        const edge = await this.db.getEdge(prevNode, currNode);
+        const prevNode = smoothedPath[i - 1];
+        const currNode = smoothedPath[i];
+        let edge = await this.db.getEdge(prevNode, currNode);
+
+        if (!edge && originalPath !== smoothedPath) {
+          edge = this.db.aggregateSegmentEdges(prevNode, currNode, originalPath);
+        }
 
         if (edge) {
           totalDistance += edge.distance;
@@ -552,6 +560,25 @@ export class RoutingEngine {
             isFairway: edge.is_fairway === 1,
             directionPenalty: edge.direction_penalty,
           });
+        } else {
+          const fromNode = await this.db.getNodeById(prevNode);
+          const toNode = await this.db.getNodeById(currNode);
+          if (fromNode && toNode) {
+            const dist = Math.round(this.haversineDistance(
+              fromNode.lat, fromNode.lon,
+              toNode.lat, toNode.lon
+            ));
+            totalDistance += dist;
+            segments.push({
+              from: prevNode,
+              to: currNode,
+              distance: dist,
+              minDepth: -1,
+              maxAirDraft: -1,
+              isFairway: false,
+              directionPenalty: 1,
+            });
+          }
         }
       }
     }
@@ -573,5 +600,62 @@ export class RoutingEngine {
         },
       ],
     };
+  }
+
+  /**
+   * Apply string-pulling (line-of-sight smoothing) to a grid-based A* path.
+   * Greedy lookahead: for each anchor node, find the furthest node ahead
+   * that has a clear line-of-sight (no land or constraint gaps), and skip
+   * the intermediate grid nodes.
+   */
+  private async smoothPath(path: number[]): Promise<number[]> {
+    if (path.length <= 2) return path;
+
+    const smoothed: number[] = [path[0]];
+    let i = 0;
+
+    while (i < path.length - 1) {
+      let j = path.length - 1;
+      while (j > i + 1) {
+        const coordsI = await this.db.getNodeById(path[i]);
+        const coordsJ = await this.db.getNodeById(path[j]);
+        if (!coordsI || !coordsJ) { j--; continue; }
+
+        if (this.hasLineOfSight(coordsI.lat, coordsI.lon, coordsJ.lat, coordsJ.lon)) {
+          break;
+        }
+        j--;
+      }
+
+      smoothed.push(path[j]);
+      i = j;
+    }
+
+    return smoothed;
+  }
+
+  /**
+   * Check if a straight line between two coordinates stays within navigable water.
+   * Samples points along the great-circle line and verifies each has a graph node
+   * within the search radius. If any sample point has no nearby node, the line
+   * likely crosses land or an unmapped area — reject the shortcut.
+   */
+  private hasLineOfSight(
+    lat1: number, lon1: number,
+    lat2: number, lon2: number,
+    sampleIntervalMeters: number = 500
+  ): boolean {
+    const dist = this.haversineDistance(lat1, lon1, lat2, lon2);
+    const numSamples = Math.max(3, Math.ceil(dist / sampleIntervalMeters));
+
+    for (let i = 1; i < numSamples; i++) {
+      const t = i / numSamples;
+      const lat = lat1 + (lat2 - lat1) * t;
+      const lon = lon1 + (lon2 - lon1) * t;
+      if (!this.db.hasNodeWithinRadius(lat, lon, sampleIntervalMeters)) {
+        return false;
+      }
+    }
+    return true;
   }
 }
