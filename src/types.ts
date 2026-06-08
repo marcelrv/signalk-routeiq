@@ -118,7 +118,7 @@ export interface PluginConfig {
   routingBBoxMargin: number;        // degrees, default 0.1 (~11km)
   routingBBoxMaxExtent: number;     // degrees, default 10.0
   lineOfSightSampleInterval: number; // meters, default 500
-  lineOfSightSearchRadius: number;   // meters, default 800
+  lineOfSightSearchRadius: number;   // meters, default 50
   averageSpeedKnots: number;        // knots, default 6.0
 }
 
@@ -135,6 +135,6 @@ export const DEFAULT_CONFIG: PluginConfig = {
   routingBBoxMargin: 0.1,
   routingBBoxMaxExtent: 10.0,
   lineOfSightSampleInterval: 500,
-  lineOfSightSearchRadius: 800,
+  lineOfSightSearchRadius: 50,
   averageSpeedKnots: 6.0,
 };

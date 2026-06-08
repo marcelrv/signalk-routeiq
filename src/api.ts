@@ -70,6 +70,18 @@ export class ApiHandler {
 
     // PUT /signalk/v1/api/router/vessel
     this.router.put('/vessel', this.handleUpdateVessel.bind(this));
+
+    // GET /signalk/v1/api/router/graph/nodes?bbox=minLon,minLat,maxLon,maxLat
+    this.router.get('/graph/nodes', this.handleGraphNodes.bind(this));
+
+    // GET /signalk/v1/api/router/pois?bbox=minLon,minLat,maxLon,maxLat
+    this.router.get('/pois', this.handlePois.bind(this));
+
+    // GET /signalk/v1/api/router/water?bbox=minLon,minLat,maxLon,maxLat
+    this.router.get('/water', this.handleWater.bind(this));
+
+    // GET /signalk/v1/api/router/waterways?bbox=minLon,minLat,maxLon,maxLat
+    this.router.get('/waterways', this.handleWaterways.bind(this));
   }
 
   /**
@@ -270,6 +282,127 @@ export class ApiHandler {
       res.json({ success: true, vessel: dimensions });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: message });
+    }
+  }
+
+  /**
+   * Handle graph nodes query
+   * GET /signalk/v1/api/router/graph/nodes?bbox=minLon,minLat,maxLon,maxLat&limit=5000
+   */
+  private async handleGraphNodes(req: Request, res: Response): Promise<void> {
+    if (!this.isReady()) {
+      res.status(503).json({ error: 'Database not ready' });
+      return;
+    }
+    try {
+      const bbox = req.query.bbox as string;
+      const limit = parseInt(req.query.limit as string) || 5000;
+      if (!bbox) {
+        res.status(400).json({ error: 'Missing bbox parameter (minLon,minLat,maxLon,maxLat)' });
+        return;
+      }
+      const parts = bbox.split(',').map(Number);
+      if (parts.length !== 4 || parts.some(isNaN)) {
+        res.status(400).json({ error: 'Invalid bbox format, expected minLon,minLat,maxLon,maxLat' });
+        return;
+      }
+      const [minLon, minLat, maxLon, maxLat] = parts;
+      const nodes = await this.db!.getNodesInBBox(minLat, minLon, maxLat, maxLon, limit);
+      res.json({ count: nodes.length, nodes });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.error('[autoroute] graph/nodes error:', error);
+      res.status(500).json({ error: message });
+    }
+  }
+
+  /**
+   * Handle POIs query
+   * GET /signalk/v1/api/router/pois?bbox=minLon,minLat,maxLon,maxLat&limit=2000
+   */
+  private async handlePois(req: Request, res: Response): Promise<void> {
+    if (!this.isReady()) {
+      res.status(503).json({ error: 'Database not ready' });
+      return;
+    }
+    try {
+      const bbox = req.query.bbox as string;
+      const limit = parseInt(req.query.limit as string) || 2000;
+      if (!bbox) {
+        res.status(400).json({ error: 'Missing bbox parameter (minLon,minLat,maxLon,maxLat)' });
+        return;
+      }
+      const parts = bbox.split(',').map(Number);
+      if (parts.length !== 4 || parts.some(isNaN)) {
+        res.status(400).json({ error: 'Invalid bbox format, expected minLon,minLat,maxLon,maxLat' });
+        return;
+      }
+      const [minLon, minLat, maxLon, maxLat] = parts;
+      const pois = await this.db!.getPoisInBBox(minLat, minLon, maxLat, maxLon, limit);
+      res.json({ count: pois.length, pois });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: message });
+    }
+  }
+
+  /**
+   * Handle water polygon query
+   * GET /signalk/v1/api/router/water?bbox=minLon,minLat,maxLon,maxLat
+   */
+  private async handleWater(req: Request, res: Response): Promise<void> {
+    if (!this.db) {
+      res.status(503).json({ error: 'Database not ready' });
+      return;
+    }
+    try {
+      const bbox = req.query.bbox as string;
+      if (!bbox) {
+        res.status(400).json({ error: 'Missing bbox parameter (minLon,minLat,maxLon,maxLat)' });
+        return;
+      }
+      const parts = bbox.split(',').map(Number);
+      if (parts.length !== 4 || parts.some(isNaN)) {
+        res.status(400).json({ error: 'Invalid bbox format, expected minLon,minLat,maxLon,maxLat' });
+        return;
+      }
+      const [minLon, minLat, maxLon, maxLat] = parts;
+      const features = await this.db!.getWaterPolygons(minLat, minLon, maxLat, maxLon);
+      res.json({ type: 'FeatureCollection', features });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.error('[autoroute] water error:', error);
+      res.status(500).json({ error: message });
+    }
+  }
+
+  /**
+   * Handle waterway line query
+   * GET /signalk/v1/api/router/waterways?bbox=minLon,minLat,maxLon,maxLat
+   */
+  private async handleWaterways(req: Request, res: Response): Promise<void> {
+    if (!this.db) {
+      res.status(503).json({ error: 'Database not ready' });
+      return;
+    }
+    try {
+      const bbox = req.query.bbox as string;
+      if (!bbox) {
+        res.status(400).json({ error: 'Missing bbox parameter (minLon,minLat,maxLon,maxLat)' });
+        return;
+      }
+      const parts = bbox.split(',').map(Number);
+      if (parts.length !== 4 || parts.some(isNaN)) {
+        res.status(400).json({ error: 'Invalid bbox format, expected minLon,minLat,maxLon,maxLat' });
+        return;
+      }
+      const [minLon, minLat, maxLon, maxLat] = parts;
+      const features = await this.db!.getWaterways(minLat, minLon, maxLat, maxLon);
+      res.json({ type: 'FeatureCollection', features });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.error('[autoroute] waterways error:', error);
       res.status(500).json({ error: message });
     }
   }

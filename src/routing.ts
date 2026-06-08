@@ -374,7 +374,7 @@ export class RoutingEngine {
         continue;
       }
 
-      if (i === 0) {
+      if (allCoordinates.length === 0) {
         allCoordinates.push(...segmentResult.features[0].geometry.coordinates);
       } else {
         allCoordinates.push(...segmentResult.features[0].geometry.coordinates.slice(1));
@@ -400,7 +400,11 @@ export class RoutingEngine {
       throw new Error('No route found to destination');
     }
 
-    allCoordinates.push(...finalResult.features[0].geometry.coordinates.slice(1));
+    if (allCoordinates.length === 0) {
+      allCoordinates.push(...finalResult.features[0].geometry.coordinates);
+    } else {
+      allCoordinates.push(...finalResult.features[0].geometry.coordinates.slice(1));
+    }
     allSegments.push(...finalResult.features[0].properties.segments);
 
     const allWarnings = [...warnings, ...(globalWarnings || [])];
@@ -439,27 +443,75 @@ export class RoutingEngine {
     warnings: RouteWarning[],
     bbox?: BBox,
   ): Promise<RouteResult | null> {
-    try {
-      return await this.astarSearch(startLat, startLon, endLat, endLon, coastDistanceMeters, bbox);
-    } catch {
-      // First attempt failed — try with relaxed constraints
-      const savedDims = { ...this.vesselDimensions };
-      this.vesselDimensions = { draft: 0, beam: 0, airDraft: 0 };
+    const label = viaIndex >= 0 ? `Via point ${viaIndex + 1}` : 'Destination';
+    const startPt = { latitude: startLat, longitude: startLon };
+    const endPt = { latitude: endLat, longitude: endLon };
+
+    // Try full-constraint A* with expanding bounding box
+    let currentMargin = this.config.routingBBoxMargin;
+    const maxMargin = this.config.routingBBoxMaxExtent;
+
+    while (currentMargin <= maxMargin) {
+      const segmentBbox = bbox ?? bboxFromPoints(startPt, endPt, currentMargin);
       try {
-        const relaxed = await this.astarSearch(startLat, startLon, endLat, endLon, 0, bbox);
-        const label = viaIndex >= 0 ? `Via point ${viaIndex + 1}` : 'Destination';
+        return await this.astarSearch(startLat, startLon, endLat, endLon, coastDistanceMeters, segmentBbox);
+      } catch {
+        bbox = undefined; // force recompute next iteration
+        if (currentMargin >= maxMargin) break;
+        const newMargin = Math.min(currentMargin * 2, maxMargin);
+        if (newMargin > currentMargin) {
+          warnings.push({
+            type: 'via_constrained',
+            message: `Route search for ${label} expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box.`,
+            from: startPt,
+            to: endPt,
+          });
+        }
+        currentMargin = newMargin;
+      }
+    }
+
+    // All full-constraint attempts failed — try relaxed (zero vessel, zero coast)
+    const savedDims = { ...this.vesselDimensions };
+    this.vesselDimensions = { draft: 0, beam: 0, airDraft: 0 };
+    try {
+      const relaxedBbox = bboxFromPoints(startPt, endPt, currentMargin);
+      const relaxed = await this.astarSearch(startLat, startLon, endLat, endLon, 0, relaxedBbox);
+      warnings.push({
+        type: 'via_constrained',
+        message: `${label} unreachable under vessel constraints — routed with relaxed constraints.`,
+        from: startPt,
+        to: endPt,
+      });
+      return relaxed;
+    } catch {
+      // Both full-constraint and relaxed A* failed — graph is likely
+      // disconnected. Bridge the gap via fallbackRoute (straight line to
+      // nearest reachable node) so the via point is preserved.
+      const startNode = await this.db.findNearestNode(startLat, startLon);
+      const endNode = await this.db.findNearestNode(endLat, endLon);
+      if (startNode && endNode) {
         warnings.push({
           type: 'via_constrained',
-          message: `${label} unreachable under vessel constraints — routed with relaxed constraints.`,
-          from: { latitude: startLat, longitude: startLon },
-          to: { latitude: endLat, longitude: endLon },
+          message: `${label} is disconnected in the waterway network — bridged via nearest reachable node.`,
+          from: startPt,
+          to: endPt,
         });
-        return relaxed;
-      } catch {
-        return null;
-      } finally {
-        this.vesselDimensions = savedDims;
+        try {
+          const fallback = await this.fallbackRoute(startNode, endNode, startPt, endPt, 0, []);
+          if (fallback.warnings) {
+            warnings.push(...fallback.warnings);
+            // Remove from result so routeViaPoints doesn't double-append
+            fallback.warnings = undefined;
+          }
+          return fallback;
+        } catch {
+          return null;
+        }
       }
+      return null;
+    } finally {
+      this.vesselDimensions = savedDims;
     }
   }
 

@@ -1,4 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
+import { readFileSync, existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { PoiResult } from './types.js';
 
 interface NodeRow {
@@ -357,6 +359,129 @@ export class RoutingDatabase {
     return row || { nodes: 0, edges: 0, pois: 0 };
   }
 
+  private hasNodeMetaColumns: boolean | null = null;
+
+  private checkNodeMetaColumns(): boolean {
+    if (this.hasNodeMetaColumns === null) {
+      const cols = this.db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>;
+      this.hasNodeMetaColumns = cols.some(c => c.name === 'resolution') && cols.some(c => c.name === 'node_type');
+    }
+    return this.hasNodeMetaColumns;
+  }
+
+  async getNodesInBBox(
+    minLat: number, minLon: number,
+    maxLat: number, maxLon: number,
+    limit: number = 5000,
+  ): Promise<Array<{ id: number; lat: number; lon: number; resolution: number; node_type: string }>> {
+    const cols = this.checkNodeMetaColumns() ? 'id, lat, lon, resolution, node_type' : 'id, lat, lon';
+    const rows = this.db.prepare(
+      `SELECT ${cols}
+       FROM nodes
+       WHERE lat >= ? AND lat <= ? AND lon >= ? AND lon <= ?
+       ORDER BY id
+       LIMIT ?`
+    ).all(minLat, maxLat, minLon, maxLon, limit) as unknown as NodeRow[];
+    return rows.map((r: any) => ({ id: r.id, lat: r.lat, lon: r.lon, resolution: r.resolution ?? 0, node_type: r.node_type ?? 'coastal' }));
+  }
+
+  async getPoisInBBox(
+    minLat: number, minLon: number,
+    maxLat: number, maxLon: number,
+    limit: number = 2000,
+  ): Promise<Array<{ id: number; name: string; type: string; lat: number; lon: number }>> {
+    const rows = this.db.prepare(
+      `SELECT id, name, type, lat, lon
+       FROM pois
+       WHERE lat >= ? AND lat <= ? AND lon >= ? AND lon <= ?
+       ORDER BY name
+       LIMIT ?`
+    ).all(minLat, maxLat, minLon, maxLon, limit) as unknown as PoiRow[];
+    return rows.map(r => ({ id: r.id, name: r.name, type: r.type, lat: r.lat, lon: r.lon }));
+  }
+
+  private waterGeoJson: any = null;
+  private waterGeojsonPath: string | null = null;
+
+  /**
+   * Return water polygon features (from coastal_water_polygons.geojson)
+   * that intersect the given bounding box.
+   */
+  async getWaterPolygons(
+    minLat: number, minLon: number,
+    maxLat: number, maxLon: number,
+  ): Promise<any[]> {
+    // Derive GeoJSON path from SQLite path: same directory, different filename
+    if (!this.waterGeojsonPath) {
+      const dir = dirname(this.dbPath);
+      this.waterGeojsonPath = join(dir, 'coastal_water_polygons.geojson');
+    }
+
+    // Load and cache the GeoJSON on first call
+    if (!this.waterGeoJson) {
+      if (!existsSync(this.waterGeojsonPath)) {
+        this.waterGeoJson = { type: 'FeatureCollection', features: [] };
+      } else {
+        const raw = readFileSync(this.waterGeojsonPath, 'utf-8');
+        try {
+          this.waterGeoJson = JSON.parse(raw);
+        } catch {
+          this.waterGeoJson = { type: 'FeatureCollection', features: [] };
+        }
+      }
+    }
+
+    if (!this.waterGeoJson.features) return [];
+
+    const result: any[] = [];
+    for (const f of this.waterGeoJson.features) {
+      if (featureIntersectsBBox(f, minLat, minLon, maxLat, maxLon)) {
+        result.push(f);
+      }
+    }
+    return result;
+  }
+
+  private waterwaysGeoJson: any = null;
+  private waterwaysGeojsonPath: string | null = null;
+
+  /**
+   * Return waterway line features (from inland_waterways_lines.geojson)
+   * that intersect the given bounding box.
+   */
+  async getWaterways(
+    minLat: number, minLon: number,
+    maxLat: number, maxLon: number,
+  ): Promise<any[]> {
+    if (!this.waterwaysGeojsonPath) {
+      const dir = dirname(this.dbPath);
+      this.waterwaysGeojsonPath = join(dir, 'inland_waterways_lines.geojson');
+    }
+
+    if (!this.waterwaysGeoJson) {
+      if (!existsSync(this.waterwaysGeojsonPath)) {
+        this.waterwaysGeoJson = { type: 'FeatureCollection', features: [] };
+      } else {
+        const raw = readFileSync(this.waterwaysGeojsonPath, 'utf-8');
+        try {
+          this.waterwaysGeoJson = JSON.parse(raw);
+        } catch {
+          this.waterwaysGeoJson = { type: 'FeatureCollection', features: [] };
+        }
+      }
+    }
+
+    if (!this.waterwaysGeoJson.features) return [];
+
+    const result: any[] = [];
+    for (const f of this.waterwaysGeoJson.features) {
+      if (featureIntersectsBBox(f, minLat, minLon, maxLat, maxLon)) {
+        result.push(f);
+      }
+    }
+    return result;
+  }
+
   private buildSpatialIndex(): void {
     this.spatialGrid = new Map();
     const cellSize = 0.01;
@@ -459,4 +584,34 @@ export class RoutingDatabase {
     this.db.close();
     return Promise.resolve();
   }
+}
+
+/**
+ * Check whether a GeoJSON feature's bounding box overlaps a query bounding box.
+ */
+function featureIntersectsBBox(
+  feature: any,
+  minLat: number, minLon: number,
+  maxLat: number, maxLon: number,
+): boolean {
+  const coords = feature.geometry?.coordinates;
+  if (!coords) return false;
+
+  let fMinLat = Infinity, fMaxLat = -Infinity;
+  let fMinLon = Infinity, fMaxLon = -Infinity;
+
+  // Polygon -> [ring, ...]; MultiPolygon -> [[ring, ...], ...]
+  const rings = feature.geometry.type === 'MultiPolygon' ? coords.flat() : coords;
+  for (const ring of rings) {
+    for (const pt of ring) {
+      const lon = pt[0], lat = pt[1];
+      if (lat < fMinLat) fMinLat = lat;
+      if (lat > fMaxLat) fMaxLat = lat;
+      if (lon < fMinLon) fMinLon = lon;
+      if (lon > fMaxLon) fMaxLon = lon;
+    }
+  }
+
+  return fMinLon <= maxLon && fMaxLon >= minLon &&
+         fMinLat <= maxLat && fMaxLat >= minLat;
 }

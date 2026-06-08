@@ -432,7 +432,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   </div>
   <div id="url-history-list"></div>
   <label for="min-coast" style="margin-top:10px">Min Coastline Distance (m)</label>
-  <input id="min-coast" type="number" value="1000" min="0" step="500" />
+  <input id="min-coast" type="number" value="50" min="0" step="50" />
   <label for="avg-speed" style="margin-top:10px">Average Speed (kn)</label>
   <input id="avg-speed" type="number" value="6" min="0.5" max="60" step="0.5" />
   <div id="tt-legend" style="font-size:10px;color:#5f7a9a;margin-top:2px">Used to estimate travel time</div>
@@ -440,6 +440,22 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   <label class="debug-toggle" style="margin-top:10px;display:flex;align-items:center;gap:8px;cursor:pointer">
     <input id="debug-cb" type="checkbox" />
     <span>Debug logging</span>
+  </label>
+  <label class="debug-toggle" style="margin-top:6px;display:flex;align-items:center;gap:8px;cursor:pointer">
+    <input id="graph-cb" type="checkbox" />
+    <span>Show graph</span>
+  </label>
+  <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
+    <input id="poi-cb" type="checkbox" />
+    <span>Show POIs</span>
+  </label>
+  <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
+    <input id="water-cb" type="checkbox" />
+    <span>Show Water</span>
+  </label>
+  <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
+    <input id="waterways-cb" type="checkbox" />
+    <span>Show Waterways</span>
   </label>
 
   <div id="boat-info" class="boat-info" style="display:none">
@@ -551,6 +567,17 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   loadAvgSpeed();
   document.getElementById('avg-speed').addEventListener('change', saveAvgSpeed);
 
+  // ---- persist min coast distance ----
+  const COAST_STORAGE_KEY = 'autoroute_min_coast';
+  function loadMinCoast() {
+    try { const v = localStorage.getItem(COAST_STORAGE_KEY); if (v) document.getElementById('min-coast').value = v; } catch {}
+  }
+  function saveMinCoast() {
+    try { localStorage.setItem(COAST_STORAGE_KEY, document.getElementById('min-coast').value); } catch {}
+  }
+  loadMinCoast();
+  document.getElementById('min-coast').addEventListener('change', saveMinCoast);
+
   // ---- state ----
   const state = {
     startLatLng:  null,
@@ -577,9 +604,129 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
   }).addTo(map);
 
+  // ---- overlay layers for debug / visualization ----
+  const waterLayer = L.featureGroup().addTo(map);
+  const waterwaysLayer = L.featureGroup().addTo(map);
+  const graphLayer = L.featureGroup().addTo(map);
+  const poiLayer = L.featureGroup().addTo(map);
+  let waterVisible = false;
+  let waterwaysVisible = false;
+  let graphVisible = false;
+  let poiVisible = false;
+
   // ---- custom markers layer ----
   const routeLayers = L.featureGroup().addTo(map);
   state.routeLayers = routeLayers;
+
+  function getBboxStr() {
+    const b = map.getBounds();
+    return b.getWest().toFixed(4) + ',' + b.getSouth().toFixed(4) + ',' + b.getEast().toFixed(4) + ',' + b.getNorth().toFixed(4);
+  }
+
+  function graphNodesUrl() { return getApiBase() + '/signalk/v1/api/router/graph/nodes?bbox=' + getBboxStr() + '&limit=8000'; }
+  function poisUrl()        { return getApiBase() + '/signalk/v1/api/router/pois?bbox=' + getBboxStr() + '&limit=4000'; }
+  function waterUrl()       { return getApiBase() + '/signalk/v1/api/router/water?bbox=' + getBboxStr(); }
+  function waterwaysUrl()   { return getApiBase() + '/signalk/v1/api/router/waterways?bbox=' + getBboxStr(); }
+
+  function fetchGraphNodes() {
+    if (!graphVisible) return;
+    graphLayer.clearLayers();
+    logDebug('GRAPH', graphNodesUrl());
+    fetch(graphNodesUrl())
+      .then(r => { logDebug('GRAPH', graphNodesUrl(), undefined, r); return r.ok ? r.json() : null; })
+      .then(data => {
+        if (!data || !data.nodes) return;
+        for (const n of data.nodes) {
+          const color = n.node_type === 'inland' ? '#22c55e' : '#3b8fd4';
+          const radius = n.resolution > 0 ? Math.max(1.5, Math.min(5, n.resolution * 1000)) : 2;
+          L.circleMarker([n.lat, n.lon], {
+            radius, color, fillColor: color, fillOpacity: 0.5, weight: 0.5, opacity: 0.4,
+          }).addTo(graphLayer);
+        }
+      })
+      .catch(() => {});
+  }
+
+  function fetchPois() {
+    if (!poiVisible) return;
+    poiLayer.clearLayers();
+    logDebug('POIS', poisUrl());
+    fetch(poisUrl())
+      .then(r => { logDebug('POIS', poisUrl(), undefined, r); return r.ok ? r.json() : null; })
+      .then(data => {
+        if (!data || !data.pois) return;
+        const typeColor = { harbour: '#3b8fd4', lock: '#f59e0b', bridge: '#ef4444', fairway: '#8b5cf6', waterway: '#14b8a6' };
+        for (const p of data.pois) {
+          const color = typeColor[p.type] || '#6d96c0';
+          const m = L.circleMarker([p.lat, p.lon], {
+            radius: 4, color, fillColor: color, fillOpacity: 0.7, weight: 1, opacity: 0.8,
+          });
+          m.bindTooltip(p.name + ' (' + p.type + ')', { direction: 'top', offset: [0, -4] });
+          m.addTo(poiLayer);
+        }
+      })
+      .catch(() => {});
+  }
+
+  function fetchWater() {
+    if (!waterVisible) return;
+    waterLayer.clearLayers();
+    fetch(waterUrl())
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data || !data.features) return;
+        L.geoJSON(data, {
+          style: { color: '#38bdf8', weight: 0.5, fillColor: '#38bdf8', fillOpacity: 0.12 },
+        }).addTo(waterLayer);
+      })
+      .catch(() => {});
+  }
+
+  function fetchWaterways() {
+    if (!waterwaysVisible) return;
+    waterwaysLayer.clearLayers();
+    fetch(waterwaysUrl())
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data || !data.features) return;
+        L.geoJSON(data, {
+          style: { color: '#f97316', weight: 2, opacity: 0.7 },
+        }).addTo(waterwaysLayer);
+      })
+      .catch(() => {});
+  }
+
+  let moveTimer = null;
+  map.on('moveend', function () {
+    clearTimeout(moveTimer);
+    moveTimer = setTimeout(function () {
+      if (waterVisible) fetchWater();
+      if (waterwaysVisible) fetchWaterways();
+      if (graphVisible) fetchGraphNodes();
+      if (poiVisible) fetchPois();
+    }, 400);
+  });
+
+  document.getElementById('graph-cb').addEventListener('change', function () {
+    graphVisible = this.checked;
+    if (graphVisible) fetchGraphNodes();
+    else graphLayer.clearLayers();
+  });
+  document.getElementById('poi-cb').addEventListener('change', function () {
+    poiVisible = this.checked;
+    if (poiVisible) fetchPois();
+    else poiLayer.clearLayers();
+  });
+  document.getElementById('water-cb').addEventListener('change', function () {
+    waterVisible = this.checked;
+    if (waterVisible) fetchWater();
+    else waterLayer.clearLayers();
+  });
+  document.getElementById('waterways-cb').addEventListener('change', function () {
+    waterwaysVisible = this.checked;
+    if (waterwaysVisible) fetchWaterways();
+    else waterwaysLayer.clearLayers();
+  });
 
   routeLayers.on('click', function (e) {
     if (state.startLatLng && state.destLatLng) {

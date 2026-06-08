@@ -89,9 +89,16 @@ class ENCToGeoJSONPreprocessor:
             # Note for coastal_water: We copy DEPARE (Depth Areas) to act as coastal_water_polygons 
             # so the routing script can generate a navmesh over navigable water.
             if output_filename == 'depare_polygons.geojson':
+                coastal_gdfs = [merged_gdf]
+                locks_key = 'locks_polygons.geojson'
+                if locks_key in self.extracted_data and self.extracted_data[locks_key]:
+                    coastal_gdfs.append(pd.concat(self.extracted_data[locks_key], ignore_index=True))
+                    logger.info(f"Merged {len(self.extracted_data[locks_key])} LOKBSN lock basin groups into coastal water")
+                coastal_merged = pd.concat(coastal_gdfs, ignore_index=True)
+                coastal_merged = coastal_merged[coastal_merged.geometry.notnull()]
                 coastal_path = os.path.join(self.output_directory, 'coastal_water_polygons.geojson')
-                merged_gdf.to_file(coastal_path, driver='GeoJSON')
-                logger.info(f"Saved {coastal_path} (Cloned from DEPARE)")
+                coastal_merged.to_file(coastal_path, driver='GeoJSON')
+                logger.info(f"Saved {coastal_path} (DEPARE + LOKBSN)")
 
             # Save the file
             try:
