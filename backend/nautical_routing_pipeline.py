@@ -544,6 +544,8 @@ class NauticalRoutingPipeline:
                 data['is_fairway'] = False
                 data['direction_penalty'] = 1.0
                 data['distance_to_land'] = 9999.0
+                data['is_one_way'] = False
+                data['traffic_dir'] = 1
                 continue
 
             edge_geom = LineString([(u_node['lon'], u_node['lat']),
@@ -576,12 +578,30 @@ class NauticalRoutingPipeline:
                     if not intersecting.empty and 'HORCLR' in intersecting.columns:
                         data['min_width'] = float(intersecting['HORCLR'].min())
 
-            # 5. Fairway Status
+            # 5. Fairway Status + One-Way (TRAFIC)
             data['is_fairway'] = False
+            data['is_one_way'] = False
+            data['traffic_dir'] = 1
             if not fairways_gdf.empty:
                 fw_candidates = self._candidates_by_bounds(fairways_gdf, edge_geom)
                 if not fw_candidates.empty:
-                    data['is_fairway'] = fw_candidates.intersects(edge_geom).any()
+                    intersecting = fw_candidates[fw_candidates.intersects(edge_geom)]
+                    if not intersecting.empty:
+                        data['is_fairway'] = True
+                        # Parse TRAFIC (S-57 traffic flow attribute)
+                        # 1=with digitisation, 2=two-way, 3=against digitisation
+                        if 'TRAFIC' in intersecting.columns:
+                            trafic_vals = intersecting['TRAFIC'].dropna().unique()
+                            if len(trafic_vals) == 1:
+                                tv = int(trafic_vals[0])
+                                if abs(tv) == 1:
+                                    data['is_one_way'] = True
+                                    # tv=1 → with digitisation (source→target if u<v)
+                                    # tv=-1 or 3 → against digitisation
+                                    data['traffic_dir'] = 1 if tv == 1 else -1
+                                elif abs(tv) == 3:
+                                    data['is_one_way'] = True
+                                    data['traffic_dir'] = 1 if tv == 3 else -1
 
             # 6. Direction Penalty (Asymmetric Traffic Modeling)
             data['direction_penalty'] = 1.0
@@ -630,6 +650,8 @@ class NauticalRoutingPipeline:
                     direction_penalty REAL,
                     distance_to_land REAL,
                     edge_type TEXT DEFAULT 'coastal',
+                    is_one_way INTEGER DEFAULT 0,
+                    traffic_dir INTEGER DEFAULT 1,
                     FOREIGN KEY(source) REFERENCES nodes(id),
                     FOREIGN KEY(target) REFERENCES nodes(id)
                 );
@@ -664,12 +686,14 @@ class NauticalRoutingPipeline:
                 int(data.get('is_fairway', False)),
                 data.get('direction_penalty', 1.0),
                 data.get('distance_to_land', 9999.0),
-                data.get('edge_type', 'coastal')
+                data.get('edge_type', 'coastal'),
+                int(data.get('is_one_way', False)),
+                data.get('traffic_dir', 1)
             ) for u, v, data in self.graph.edges(data=True)]
             cursor.executemany("""
                 INSERT INTO edges 
-                (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, direction_penalty, distance_to_land, edge_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, direction_penalty, distance_to_land, edge_type, is_one_way, traffic_dir)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, edges_data)
             
             # Insert POIs — harvest named locations from multiple layers

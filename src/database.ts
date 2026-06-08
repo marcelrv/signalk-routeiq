@@ -20,6 +20,13 @@ export interface EdgeRow {
   direction_penalty: number;
   distance_to_land: number;
   edge_type?: string;
+  is_one_way?: number;
+  traffic_dir?: number;
+  // Target node coordinates (always populated by loading or queries)
+  lat: number;
+  lon: number;
+  source_lat?: number;
+  source_lon?: number;
 }
 
 interface PoiRow {
@@ -28,6 +35,17 @@ interface PoiRow {
   type: string;
   lat: number;
   lon: number;
+}
+
+export interface EdgeSnapResult {
+  source: number;
+  target: number;
+  fraction: number;       // 0-1 along edge from source→target
+  point: { lat: number; lon: number };
+  distance: number;        // perpendicular distance (meters)
+  nearNode: number;        // nearer endpoint
+  farNode: number;         // farther endpoint
+  edge: EdgeRow;
 }
 
 export class RoutingDatabase {
@@ -62,12 +80,22 @@ export class RoutingDatabase {
     this.buildSpatialIndex();
 
     const edges = this.db.prepare(
-      `SELECT e.*, n.lat, n.lon
+      `SELECT e.*,
+              s.lat AS source_lat, s.lon AS source_lon,
+              t.lat AS target_lat, t.lon AS target_lon
        FROM edges e
-       JOIN nodes n ON e.target = n.id`
-    ).all() as unknown as Array<EdgeRow & { lat: number; lon: number }>;
+       JOIN nodes s ON e.source = s.id
+       JOIN nodes t ON e.target = t.id`
+    ).all() as unknown as Array<
+      EdgeRow & {
+        source_lat: number; source_lon: number;
+        target_lat: number; target_lon: number;
+      }
+    >;
 
     for (const edge of edges) {
+      edge.lat = edge.target_lat;
+      edge.lon = edge.target_lon;
       if (!this.edgesBySource.has(edge.source)) {
         this.edgesBySource.set(edge.source, []);
       }
@@ -83,6 +111,17 @@ export class RoutingDatabase {
     }
     const row = this.db.prepare('SELECT lat, lon FROM nodes WHERE id = ?').get(id) as unknown as NodeRow | undefined;
     return row || null;
+  }
+
+  /**
+   * Synchronous node lookup — only valid when graph is loaded in memory.
+   * Throws if graph is not loaded.
+   */
+  getNodeSync(id: number): { lat: number; lon: number } | null {
+    if (!this.graphLoaded) {
+      throw new Error('Graph must be loaded for synchronous node lookup');
+    }
+    return this.nodes.get(id) || null;
   }
 
   async getOutgoingEdges(nodeId: number): Promise<Array<EdgeRow & { lat: number; lon: number }>> {
@@ -176,6 +215,96 @@ export class RoutingDatabase {
     `;
     const row = this.db.prepare(query).get(latitude, longitude, latitude, maxDistanceMeters) as any | undefined;
     return row ? { id: row.id, lat: row.lat, lon: row.lon, distance: row.distance } : null;
+  }
+
+  /**
+   * Find the nearest graph edge to a point, with perpendicular projection.
+   * Searches edges incident to nodes within ~2km via the spatial grid.
+   * Returns null if no edge is found within maxDistMeters.
+   */
+  async findNearestEdge(
+    latitude: number,
+    longitude: number,
+    maxDistMeters: number = 20000,
+  ): Promise<EdgeSnapResult | null> {
+    if (!this.graphLoaded) return null;
+
+    const radiusDeg = maxDistMeters / 111320;
+    const cellSize = 0.01;
+    const cells = Math.ceil(radiusDeg / cellSize);
+    const centerCol = Math.floor(longitude / cellSize);
+    const centerRow = Math.floor(latitude / cellSize);
+
+    const visitedEdges = new Set<number>();
+    let best: EdgeSnapResult | null = null;
+    let bestDist = maxDistMeters;
+
+    for (let dr = -cells; dr <= cells; dr++) {
+      for (let dc = -cells; dc <= cells; dc++) {
+        const key = `${centerRow + dr}:${centerCol + dc}`;
+        const nodeIds = this.spatialGrid.get(key);
+        if (!nodeIds) continue;
+
+        for (const nodeId of nodeIds) {
+          const edges = this.edgesBySource.get(nodeId);
+          if (!edges) continue;
+
+          for (const edge of edges) {
+            const edgeKey = edge.source * 1000000 + edge.target;
+            if (visitedEdges.has(edgeKey)) continue;
+            visitedEdges.add(edgeKey);
+
+            const s = this.nodes.get(edge.source);
+            const t = this.nodes.get(edge.target);
+            if (!s || !t) continue;
+
+            const { fraction, point, distance } = this.projectOnEdge(
+              s.lat, s.lon, t.lat, t.lon, latitude, longitude,
+            );
+
+            if (distance < bestDist) {
+              bestDist = distance;
+              const distToSource = this.haversineDistance(latitude, longitude, s.lat, s.lon);
+              const distToTarget = this.haversineDistance(latitude, longitude, t.lat, t.lon);
+              const nearNode = distToSource <= distToTarget ? edge.source : edge.target;
+              const farNode = nearNode === edge.source ? edge.target : edge.source;
+              best = { source: edge.source, target: edge.target, fraction, point, distance, nearNode, farNode, edge };
+            }
+          }
+        }
+      }
+    }
+
+    return best;
+  }
+
+  /**
+   * Project a point onto a line segment in lat/lon space.
+   * Uses Euclidean approximation (valid for short distances <2km).
+   * Returns the projection fraction (0-1), projected point, and perpendicular distance in meters.
+   */
+  private projectOnEdge(
+    ax: number, ay: number,
+    bx: number, by: number,
+    px: number, py: number,
+  ): { fraction: number; point: { lat: number; lon: number }; distance: number } {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const lenSq = dx * dx + dy * dy;
+
+    if (lenSq < 1e-12) {
+      const d = this.haversineDistance(py, px, ay, ax);
+      return { fraction: 0, point: { lat: ay, lon: ax }, distance: d };
+    }
+
+    let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+
+    const projLon = ax + t * dx;
+    const projLat = ay + t * dy;
+    const dist = this.haversineDistance(py, px, projLat, projLon);
+
+    return { fraction: t, point: { lat: projLat, lon: projLon }, distance: dist };
   }
 
   getReachableNodes(startNode: number): Set<number> {

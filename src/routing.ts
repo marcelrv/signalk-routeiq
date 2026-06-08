@@ -180,7 +180,11 @@ export class RoutingEngine {
             bbox,
           );
 
-          // Success — attach any expansion warnings
+          // Connect user's start/end to the route coordinates
+          await this.connectUserPoint(start, result, 'start');
+          await this.connectUserPoint(end, result, 'end');
+
+          // Attach any expansion warnings
           if (bboxWarnings.length > 0) {
             result.warnings = [...(result.warnings || []), ...bboxWarnings];
           }
@@ -277,6 +281,9 @@ export class RoutingEngine {
         coastDistanceMeters
       );
 
+      // Connect start user coordinate to the route
+      await this.connectUserPoint(start, mainRoute, 'start');
+
       // Append the remaining leg as a straight-line segment with warning
       mainRoute.features[0].geometry.coordinates.push([end.longitude, end.latitude]);
       mainRoute.features[0].properties.totalDistance += bridge.distance;
@@ -304,6 +311,10 @@ export class RoutingEngine {
         end.latitude, end.longitude,
         0  // also zero out coast distance
       );
+
+      // Connect user start/end coordinates to the route
+      await this.connectUserPoint(start, relaxedResult, 'start');
+      await this.connectUserPoint(end, relaxedResult, 'end');
 
       warnings.push({
         type: 'end_unreachable',
@@ -394,7 +405,7 @@ export class RoutingEngine {
 
     const allWarnings = [...warnings, ...(globalWarnings || [])];
 
-    return {
+    const result: RouteResult = {
       type: 'FeatureCollection',
       features: [{
         type: 'Feature',
@@ -407,6 +418,12 @@ export class RoutingEngine {
       }],
       warnings: allWarnings.length > 0 ? allWarnings : undefined,
     };
+
+    // Connect start and end user coordinates to the route
+    await this.connectUserPoint(start, result, 'start');
+    await this.connectUserPoint(end, result, 'end');
+
+    return result;
   }
 
   /**
@@ -442,6 +459,159 @@ export class RoutingEngine {
         return null;
       } finally {
         this.vesselDimensions = savedDims;
+      }
+    }
+  }
+
+  /**
+   * Connect a user-requested point to the nearest route coordinate.
+   * Prepends/appends the user point and adds a connecting segment + warning.
+   */
+  private async connectUserPoint(
+    userPoint: { latitude: number; longitude: number },
+    route: RouteResult,
+    position: 'start' | 'end',
+  ): Promise<void> {
+    const coords = route.features[0].geometry.coordinates;
+    const segments = route.features[0].properties.segments;
+    if (coords.length === 0) return;
+
+    // Try edge-snapped projection for smoother entry/exit
+    const edgeSnap = await this.db.findNearestEdge(userPoint.latitude, userPoint.longitude);
+
+    if (position === 'start') {
+      const firstCoord = coords[0];
+      const directDist = this.haversineDistance(userPoint.latitude, userPoint.longitude, firstCoord[1], firstCoord[0]);
+      if (directDist <= 1) return;
+
+      if (edgeSnap && edgeSnap.distance < directDist * 0.5 && edgeSnap.fraction > 0.01 && edgeSnap.fraction < 0.99) {
+        // Use edge projection: user → projected → graph_node
+        const snapToNode = this.haversineDistance(
+          edgeSnap.point.lat, edgeSnap.point.lon,
+          firstCoord[1], firstCoord[0],
+        );
+        const edgePortion = edgeSnap.fraction <= 0.5
+          ? edgeSnap.edge.distance * edgeSnap.fraction
+          : edgeSnap.edge.distance * (1 - edgeSnap.fraction);
+
+        coords.unshift(
+          [edgeSnap.point.lon, edgeSnap.point.lat],
+          [userPoint.longitude, userPoint.latitude],
+        );
+        segments.unshift(
+          {
+            from: -1, to: -1,
+            distance: Math.round(edgePortion + snapToNode),
+            minDepth: edgeSnap.edge.min_depth,
+            maxAirDraft: edgeSnap.edge.max_air_draft,
+            isFairway: edgeSnap.edge.is_fairway === 1,
+            directionPenalty: edgeSnap.edge.direction_penalty,
+            isOneWay: edgeSnap.edge.is_one_way === 1,
+            trafficDir: edgeSnap.edge.traffic_dir,
+          },
+          {
+            from: -1, to: -1,
+            distance: Math.round(edgeSnap.distance),
+            minDepth: -1, maxAirDraft: -1,
+            isFairway: false,
+            directionPenalty: 1,
+          },
+        );
+        route.features[0].properties.totalDistance += Math.round(edgeSnap.distance + edgePortion + snapToNode);
+        if (!route.warnings) route.warnings = [];
+        route.warnings.push({
+          type: 'start_connecting',
+          message: `${Math.round(edgeSnap.distance)}m from start position to the nearest waterway edge, then ${Math.round(edgePortion + snapToNode)}m along the waterway.`,
+          from: { latitude: userPoint.latitude, longitude: userPoint.longitude },
+          to: { latitude: firstCoord[1], longitude: firstCoord[0] },
+          distanceMeters: Math.round(edgeSnap.distance),
+        });
+      } else {
+        // Fall back to straight line
+        coords.unshift([userPoint.longitude, userPoint.latitude]);
+        segments.unshift({
+          from: -1, to: -1,
+          distance: Math.round(directDist),
+          minDepth: -1, maxAirDraft: -1,
+          isFairway: false,
+          directionPenalty: 1,
+        });
+        route.features[0].properties.totalDistance += Math.round(directDist);
+        if (!route.warnings) route.warnings = [];
+        route.warnings.push({
+          type: 'start_connecting',
+          message: `${Math.round(directDist)}m from start position to the nearest charted waterway.`,
+          from: { latitude: userPoint.latitude, longitude: userPoint.longitude },
+          to: { latitude: firstCoord[1], longitude: firstCoord[0] },
+          distanceMeters: Math.round(directDist),
+        });
+      }
+    } else {
+      const lastCoord = coords[coords.length - 1];
+      const directDist = this.haversineDistance(userPoint.latitude, userPoint.longitude, lastCoord[1], lastCoord[0]);
+      if (directDist <= 1) return;
+
+      if (edgeSnap && edgeSnap.distance < directDist * 0.5 && edgeSnap.fraction > 0.01 && edgeSnap.fraction < 0.99) {
+        // Use edge projection: graph_node → projected → user
+        const nodeToSnap = this.haversineDistance(
+          lastCoord[1], lastCoord[0],
+          edgeSnap.point.lat, edgeSnap.point.lon,
+        );
+        const edgePortion = edgeSnap.fraction <= 0.5
+          ? edgeSnap.edge.distance * edgeSnap.fraction
+          : edgeSnap.edge.distance * (1 - edgeSnap.fraction);
+
+        coords.push(
+          [edgeSnap.point.lon, edgeSnap.point.lat],
+          [userPoint.longitude, userPoint.latitude],
+        );
+        segments.push(
+          {
+            from: -1, to: -1,
+            distance: Math.round(nodeToSnap + edgePortion),
+            minDepth: edgeSnap.edge.min_depth,
+            maxAirDraft: edgeSnap.edge.max_air_draft,
+            isFairway: edgeSnap.edge.is_fairway === 1,
+            directionPenalty: edgeSnap.edge.direction_penalty,
+            isOneWay: edgeSnap.edge.is_one_way === 1,
+            trafficDir: edgeSnap.edge.traffic_dir,
+          },
+          {
+            from: -1, to: -1,
+            distance: Math.round(edgeSnap.distance),
+            minDepth: -1, maxAirDraft: -1,
+            isFairway: false,
+            directionPenalty: 1,
+          },
+        );
+        route.features[0].properties.totalDistance += Math.round(edgeSnap.distance + edgePortion + nodeToSnap);
+        if (!route.warnings) route.warnings = [];
+        route.warnings.push({
+          type: 'end_connecting',
+          message: `${Math.round(edgeSnap.distance)}m from nearest waterway edge to destination (via edge projection).`,
+          from: { latitude: lastCoord[1], longitude: lastCoord[0] },
+          to: { latitude: userPoint.latitude, longitude: userPoint.longitude },
+          distanceMeters: Math.round(nodeToSnap + edgePortion),
+        });
+      } else {
+        // Fall back to straight line
+        coords.push([userPoint.longitude, userPoint.latitude]);
+        segments.push({
+          from: -1, to: -1,
+          distance: Math.round(directDist),
+          minDepth: -1, maxAirDraft: -1,
+          isFairway: false,
+          directionPenalty: 1,
+        });
+        route.features[0].properties.totalDistance += Math.round(directDist);
+        if (!route.warnings) route.warnings = [];
+        route.warnings.push({
+          type: 'end_connecting',
+          message: `${Math.round(directDist)}m from nearest charted waterway to the destination.`,
+          from: { latitude: lastCoord[1], longitude: lastCoord[0] },
+          to: { latitude: userPoint.latitude, longitude: userPoint.longitude },
+          distanceMeters: Math.round(directDist),
+        });
       }
     }
   }
@@ -591,8 +761,11 @@ export class RoutingEngine {
       current = parent.get(current) ?? null;
     }
 
+    // Compress collinear waypoints (cheap pre-pass before LOS smoothing)
+    const compressedPath = this.compressCollinear(path);
+
     // Apply string-pulling to remove unnecessary grid staircasing
-    const smoothedPath = await this.smoothPath(path);
+    const smoothedPath = await this.smoothPath(compressedPath);
 
     // Build GeoJSON response
     return await this.buildRouteResult(smoothedPath, path, gScore.get(endNode) || 0);
@@ -620,7 +793,7 @@ export class RoutingEngine {
 
   /**
    * Calculate the cost for an edge using the multi-layered cost function
-   * Cost = Distance × FairwayMultiplier × DirectionalPenalty
+   * Cost = Distance × FairwayMultiplier × DirectionalPenalty × OneWayPenalty
    */
   private calculateEdgeCost(edge: EdgeRow & { lat: number; lon: number }): number {
     let cost = edge.distance; // Base cost is distance in meters
@@ -633,6 +806,21 @@ export class RoutingEngine {
 
     // Directional penalty: penalize traveling against traffic flow
     cost *= edge.direction_penalty;
+
+    // One-way penalty: edges are stored source→target.
+    // If edge is one-way (traffic_dir=1, meaning source→target is allowed,
+    // or traffic_dir=-1, meaning target→source is allowed), traversing the
+    // wrong direction incurs a severe cost penalty (~1000× base).
+    // The direction_penalty in the DB already reflects asymmetric traffic
+    // modeling; is_one_way enforces strict regulatory one-way lanes.
+    if (edge.is_one_way === 1 && edge.traffic_dir !== undefined) {
+      // Edges are always traversed source→target via getOutgoingEdges().
+      // If the allowed direction is target→source (traffic_dir=-1),
+      // this traversal is against the one-way restriction.
+      if (edge.traffic_dir === -1) {
+        cost *= 1e6; // virtually impassable wrong-way
+      }
+    }
 
     return cost;
   }
@@ -702,6 +890,8 @@ export class RoutingEngine {
             maxAirDraft: edge.max_air_draft,
             isFairway: edge.is_fairway === 1,
             directionPenalty: edge.direction_penalty,
+            isOneWay: edge.is_one_way === 1,
+            trafficDir: edge.traffic_dir,
           });
         } else {
           const fromNode = await this.db.getNodeById(prevNode);
@@ -743,6 +933,69 @@ export class RoutingEngine {
         },
       ],
     };
+  }
+
+  /**
+   * Compress collinear waypoints: remove intermediate nodes that are nearly
+   * collinear with their neighbors (cross-track distance < 2m).
+   * This is a lightweight pre-pass before the more expensive LOS smoothing.
+   */
+  private compressCollinear(path: number[]): number[] {
+    if (path.length <= 2) return path;
+
+    const coordsCache = new Map<number, { lat: number; lon: number }>();
+
+    const getCoord = (id: number): { lat: number; lon: number } | null => {
+      let c = coordsCache.get(id);
+      if (!c) {
+        const node = this.db.getNodeSync(id);
+        if (!node) return null;
+        c = { lat: node.lat, lon: node.lon };
+        coordsCache.set(id, c);
+      }
+      return c;
+    };
+
+    // Convert signed area calculation to equirectangular meters
+    const isCollinear = (n1: number, n2: number, n3: number, thresholdMeters = 2): boolean => {
+      const p1 = getCoord(n1);
+      const p2 = getCoord(n2);
+      const p3 = getCoord(n3);
+      if (!p1 || !p2 || !p3) return false;
+
+      // Equirectangular approximation: project to meters around mid-latitude
+      const midLat = ((p1.lat + p3.lat) / 2) * Math.PI / 180;
+      const cosMid = Math.cos(midLat);
+      const R = 6371000;
+      const toRad = (d: number) => d * Math.PI / 180;
+
+      const x1 = toRad(p1.lon) * cosMid * R;
+      const y1 = toRad(p1.lat) * R;
+      const x2 = toRad(p2.lon) * cosMid * R;
+      const y2 = toRad(p2.lat) * R;
+      const x3 = toRad(p3.lon) * cosMid * R;
+      const y3 = toRad(p3.lat) * R;
+
+      // Cross-track distance = area of parallelogram / base length
+      const cross = Math.abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1));
+      const base = Math.sqrt((x3 - x1) ** 2 + (y3 - y1) ** 2);
+      if (base < 1) return true; // p1 and p3 are the same point
+
+      return cross / base < thresholdMeters;
+    };
+
+    const compressed: number[] = [path[0]];
+    for (let i = 1; i < path.length - 1; i++) {
+      const prev = compressed[compressed.length - 1];
+      const next = path[i + 1];
+
+      if (!isCollinear(prev, path[i], next)) {
+        compressed.push(path[i]);
+      }
+    }
+    compressed.push(path[path.length - 1]);
+
+    return compressed;
   }
 
   /**

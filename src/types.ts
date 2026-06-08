@@ -38,6 +38,8 @@ export interface EdgeAttributes {
   isFairway: boolean;
   directionPenalty: number;
   distanceToLand: number; // meters
+  isOneWay?: boolean;
+  trafficDir?: number; // 1 = with edge direction (source→target), -1 = against
 }
 
 // A* search node
@@ -51,7 +53,7 @@ export interface SearchNode {
 
 // Route result
 export interface RouteWarning {
-  type: 'start_unreachable' | 'end_unreachable' | 'both_unreachable' | 'via_constrained' | 'via_skipped';
+  type: 'start_unreachable' | 'end_unreachable' | 'both_unreachable' | 'via_constrained' | 'via_skipped' | 'start_connecting' | 'end_connecting';
   message: string;
   from?: { latitude: number; longitude: number };
   to?: { latitude: number; longitude: number };
@@ -78,6 +80,8 @@ export interface RouteResult {
         maxAirDraft: number; // meters
         isFairway: boolean;
         directionPenalty: number;
+        isOneWay?: boolean;
+        trafficDir?: number;
       }>;
     };
   }>;

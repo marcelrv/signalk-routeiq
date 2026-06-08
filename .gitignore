@@ -37,4 +37,5 @@ output_geojson/
 
 # Test fixtures
 test/fixtures/*.sqlite
-sandbox/repomix-output.xml
+**/repomix-output.xml
+**/*.pyc

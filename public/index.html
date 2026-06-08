@@ -353,6 +353,21 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   margin-bottom: 2px;
 }
 
+/* connecting-leg info (start/end off-route) */
+.route-connecting-info {
+  background: rgba(79, 148, 212, 0.1);
+  border: 1px solid rgba(79, 148, 212, 0.25);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: #b8d4f0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.route-connecting-info .conn-icon { color: #7ab8f0; font-size: 13px; }
+
 /* ---------- status toast ---------- */
 #toast {
   position: absolute;
@@ -1404,10 +1419,18 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     warningsEl.innerHTML = '';
     const overallWarnings = geoJson.warnings || [];
     for (const w of overallWarnings) {
-      const div = document.createElement('div');
-      div.className = 'route-overall-warn';
-      div.innerHTML = '<div class="warn-title">' + w.type.replace(/_/g, ' ') + '</div>' + w.message;
-      warningsEl.appendChild(div);
+      if (w.type === 'start_connecting' || w.type === 'end_connecting') {
+        const div = document.createElement('div');
+        div.className = 'route-connecting-info';
+        const icon = w.type === 'start_connecting' ? '\u21e2' : '\u21e0';
+        div.innerHTML = '<span class="conn-icon">' + icon + '</span> ' + w.message;
+        warningsEl.appendChild(div);
+      } else {
+        const div = document.createElement('div');
+        div.className = 'route-overall-warn';
+        div.innerHTML = '<div class="warn-title">' + w.type.replace(/_/g, ' ') + '</div>' + w.message;
+        warningsEl.appendChild(div);
+      }
     }
 
     // Total distance summary
