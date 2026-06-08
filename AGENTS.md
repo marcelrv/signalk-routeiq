@@ -14,25 +14,55 @@
   ```
   docker run --rm -v "$(pwd):/work" -w /work node:22 <command>
   ```
+- **Always pass `-u "$(id -u):$(id -g)"`** so build output is owned by your user, not root.
+- **Always set `-e HOME=/tmp`** so npm cache (`/.npm`) doesn't cause EACCES (root-owned in node:22 image).
 - Package manager: `npm` (not yarn, pnpm) — runs via Docker.
-- Build: `docker run --rm -v "$(pwd):/work" -w /work node:22 npm run build`
-- Dev: `docker run --rm -v "$(pwd):/work" -w /work node:22 npm run dev`
-- Lint: `docker run --rm -v "$(pwd):/work" -w /work node:22 npm run lint`
-- Format: `docker run --rm -v "$(pwd):/work" -w /work node:22 npm run format`
-- Tests: `docker run --rm -v "$(pwd):/work" -w /work node:22 npm test`
+- Build: `docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/work" -w /work node:22 npm run build`
+- Dev: `docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/work" -w /work node:22 npm run dev`
+- Lint: `docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/work" -w /work node:22 npm run lint`
+- Format: `docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/work" -w /work node:22 npm run format`
+- Tests: `docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/work" -w /work node:22 npm test`
   (for now: `node --test --test-force-exit dist-test/routing.test.js`)
-- Multi-step (build + test): `docker run --rm -v "$(pwd):/work" -w /work node:22 sh -c "npm run build && npm test"`
+- Multi-step (build + test): `docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/work" -w /work node:22 sh -c "npm run build && npm test"`
 - All source in `src/`, compiled to `dist/`.
 - ES modules (`"type": "module"` in package.json).
 
 ## Signal K Server Plugin Deployment
 - Container name: `signalk-server` (runs `signalk/signalk-server:latest`)
-- Plugin is a **standard Node.js module** installed as a dependency — NOT a symlink.
-- Plugin installed at: `/home/node/.signalk/node_modules/signalk-autoroute/`
+- The dev directory is **bind-mounted** at `/home/node/.signalk/autoroute-dev` via `docker-compose.yml`.
+  This path is OUTSIDE `node_modules/` so npm doesn't treat the bind-mount as a managed package.
+- npm manages a `file:` symlink via `.signalk/package.json`:
+  ```
+  "signalk-autoroute": "file:autoroute-dev"
+  ```
+  which creates `node_modules/signalk-autoroute → ../autoroute-dev`.
+- npm preserves `file:` symlinks during its install-tree operations for other packages.
+- Build output in `dist/` is instantly visible to the SK server via the symlink.
 - Plugin config stored at: `/home/node/.signalk/plugin-config-data/signalk-autoroute.json`
-- Plugin config file owned by uid 1001 (not `node` user); use `docker cp` to overwrite it (not `docker exec`).
 - Server data dir: `/home/node/.signalk/` (bind-mounted).
 - Signal K server restarts via `docker restart signalk-server`.
+
+### Deployment workflow (after code changes)
+One command: `bash deploy.sh`
+  — builds via Docker, then restarts the SK container.
+
+The container must be running first. If it isn't:
+```bash
+docker compose -f /home/node/signalkdev/autoroute/docker-compose.yml up -d
+```
+
+### First-time setup (fresh container)
+After `docker compose up -d`, run `npm install` once to create the `file:` symlink:
+```bash
+docker exec signalk-server sh -c "cd /home/node/.signalk && npm install"
+```
+Then `bash deploy.sh` to build and start using the plugin.
+
+### If the container ever needs to be recreated
+```bash
+docker compose -f /home/node/signalkdev/autoroute/docker-compose.yml up -d
+```
+Then follow the first-time setup above.
 
 ### Required `package.json` settings
 1. `"keywords": ["signalk-node-server-plugin"]` — **essential** for SK server to discover the plugin via `modulesWithKeyword()`.
