@@ -39,6 +39,121 @@ def _coarse_scan_worker(columns_x, y_coords):
                     break
     return results
 
+# --- Module-level workers for edge attribute multiprocessing ---
+_EDGE_ATTR_GEOD = None
+_EDGE_ATTR_GDFS = {}
+
+def _edge_attr_init(geod, gdfs):
+    global _EDGE_ATTR_GEOD, _EDGE_ATTR_GDFS
+    _EDGE_ATTR_GEOD = geod
+    _EDGE_ATTR_GDFS = gdfs
+
+def _candidates_by_bounds_static(gdf, geom, margin=0.0):
+    bounds = geom.bounds
+    if margin:
+        bounds = (bounds[0] - margin, bounds[1] - margin, bounds[2] + margin, bounds[3] + margin)
+    candidates = list(gdf.sindex.intersection(bounds))
+    if candidates:
+        return gdf.iloc[candidates]
+    return gpd.GeoDataFrame()
+
+def _edge_attr_worker(edge_chunk):
+    """Process a chunk of edges. Returns dict {(u, v): {attr: value}}."""
+    geod = _EDGE_ATTR_GEOD
+    gdfs = _EDGE_ATTR_GDFS
+    CRS_WGS84 = "EPSG:4326"
+    CRS_METRIC = "EPSG:3857"
+    COARSE_THRESHOLD = 0.004
+
+    land_metric = gdfs.get('land_metric', gpd.GeoDataFrame())
+    depare_gdf = gdfs.get('depth_areas', gpd.GeoDataFrame())
+    bridges_gdf = gdfs.get('bridges', gpd.GeoDataFrame())
+    fairways_gdf = gdfs.get('fairways', gpd.GeoDataFrame())
+    locks_gdf = gdfs.get('locks', gpd.GeoDataFrame())
+
+    results = {}
+    for u, v, u_lon, u_lat, v_lon, v_lat, edge_type, u_res, v_res in edge_chunk:
+        attrs = {}
+        _, _, distance = geod.inv(u_lon, u_lat, v_lon, v_lat)
+        attrs['distance'] = round(distance, 2)
+
+        is_fine = edge_type == 'coastal' and (u_res < COARSE_THRESHOLD or v_res < COARSE_THRESHOLD)
+
+        if is_fine:
+            attrs['min_depth'] = 99.0
+            attrs['max_air_draft'] = 999.0
+            attrs['min_width'] = 999.0
+            attrs['is_fairway'] = False
+            attrs['is_one_way'] = False
+            attrs['traffic_dir'] = 1
+            attrs['direction_penalty'] = 1.0
+            attrs['distance_to_land'] = 9999.0
+        else:
+            edge_geom = LineString([(u_lon, u_lat), (v_lon, v_lat)])
+
+            # Depth
+            attrs['min_depth'] = 99.0
+            if not depare_gdf.empty:
+                depare_candidates = _candidates_by_bounds_static(depare_gdf, edge_geom)
+                if not depare_candidates.empty:
+                    intersecting = depare_candidates[depare_candidates.intersects(edge_geom)]
+                    if not intersecting.empty and 'DRVAL1' in intersecting.columns:
+                        attrs['min_depth'] = float(intersecting['DRVAL1'].min())
+
+            # Bridges
+            attrs['max_air_draft'] = 999.0
+            if not bridges_gdf.empty:
+                bridge_candidates = _candidates_by_bounds_static(bridges_gdf, edge_geom)
+                if not bridge_candidates.empty:
+                    intersecting = bridge_candidates[bridge_candidates.intersects(edge_geom)]
+                    if not intersecting.empty and 'VERCLR' in intersecting.columns:
+                        attrs['max_air_draft'] = float(intersecting['VERCLR'].min())
+
+            # Locks
+            attrs['min_width'] = 999.0
+            if not locks_gdf.empty:
+                lock_candidates = _candidates_by_bounds_static(locks_gdf, edge_geom)
+                if not lock_candidates.empty:
+                    intersecting = lock_candidates[lock_candidates.intersects(edge_geom)]
+                    if not intersecting.empty and 'HORCLR' in intersecting.columns:
+                        attrs['min_width'] = float(intersecting['HORCLR'].min())
+
+            # Fairway + one-way (TRAFIC)
+            attrs['is_fairway'] = False
+            attrs['is_one_way'] = False
+            attrs['traffic_dir'] = 1
+            if not fairways_gdf.empty:
+                fw_candidates = _candidates_by_bounds_static(fairways_gdf, edge_geom)
+                if not fw_candidates.empty:
+                    intersecting = fw_candidates[fw_candidates.intersects(edge_geom)]
+                    if not intersecting.empty:
+                        attrs['is_fairway'] = True
+                        if 'TRAFIC' in intersecting.columns:
+                            trafic_vals = intersecting['TRAFIC'].dropna().unique()
+                            if len(trafic_vals) == 1:
+                                tv = int(trafic_vals[0])
+                                if abs(tv) in (1, 3):
+                                    attrs['is_one_way'] = True
+                                    attrs['traffic_dir'] = 1 if tv in (1, 3) else -1
+
+            # Direction penalty
+            attrs['direction_penalty'] = 1.0
+            if attrs['is_fairway'] and edge_type == 'inland' and u > v:
+                attrs['direction_penalty'] = 5.0
+
+            # Distance to land
+            attrs['distance_to_land'] = 9999.0
+            if not land_metric.empty:
+                edge_geom_metric = gpd.GeoSeries([edge_geom], crs=CRS_WGS84).to_crs(CRS_METRIC).iloc[0]
+                possible_matches = land_metric.sindex.nearest(edge_geom_metric)
+                if len(possible_matches[1]) > 0:
+                    closest_idx = possible_matches[1][0]
+                    closest_geom = land_metric.iloc[closest_idx].geometry
+                    attrs['distance_to_land'] = round(edge_geom_metric.distance(closest_geom), 2)
+
+        results[(u, v)] = attrs
+    return results
+
 class NauticalRoutingPipeline:
     def __init__(self, data_paths: Dict[str, str], db_path: str):
         """
@@ -413,9 +528,10 @@ class NauticalRoutingPipeline:
         logger.info(f"  Fine-to-fine: {ff_edge_count} edges")
 
         # 5c. Cross-resolution: fine → nearest coarse in 3×3 MAX_RES block
+        coarse_node_ids = set(coarse_pos.values())  # O(1) lookup set
         cr_edge_count = 0
         for (fc, fr), nid in fine_pos.items():
-            if nid in coarse_pos.values():
+            if nid in coarse_node_ids:
                 continue  # already connected via coarse-coarse
 
             parent_cc = int(fc * MIN_RES / MAX_RES)
@@ -500,124 +616,63 @@ class NauticalRoutingPipeline:
         return gpd.GeoDataFrame()
 
     def calculate_edge_attributes(self):
-        """Calculates distance and optional advanced attributes.
+        """Calculates edge attributes using multiprocessing.
 
         Expensive spatial queries (depth, bridges, locks, fairways,
-        distance_to_land) are skipped for fine coastal edges where both
-        endpoints have resolution < 0.002° (short ~100-200m edges).
+        distance_to_land) are skipped for fine coastal edges where
+        either endpoint has resolution < 0.004°.
         """
-        logger.info("Calculating advanced edge attributes...")
-
-        land_metric = self.gdfs_metric.get('land', gpd.GeoDataFrame())
-        depare_gdf = self.gdfs.get('depth_areas', gpd.GeoDataFrame())
-        bridges_gdf = self.gdfs.get('bridges', gpd.GeoDataFrame())
-        fairways_gdf = self.gdfs.get('fairways', gpd.GeoDataFrame())
-        locks_gdf = self.gdfs.get('locks', gpd.GeoDataFrame())
-
-        COARSE_THRESHOLD = 0.002  # degrees; edges below this skip advanced attributes
+        logger.info("Calculating advanced edge attributes (multiprocessing)...")
 
         total_edges = self.graph.number_of_edges()
-        for ei, (u, v, data) in enumerate(self.graph.edges(data=True)):
-            if (ei + 1) % 5000 == 0:
-                logger.info(f"  Edge attributes: {ei + 1}/{total_edges} processed")
+        num_workers = min(8, max(1, (total_edges + 999) // 1000))
+
+        # Collect all edges into a flat list for chunking
+        edge_tuples = []
+        for u, v, data in self.graph.edges(data=True):
             u_node = self.graph.nodes[u]
             v_node = self.graph.nodes[v]
+            edge_tuples.append((
+                u, v,
+                u_node['lon'], u_node['lat'],
+                v_node['lon'], v_node['lat'],
+                data.get('edge_type', 'coastal'),
+                u_node.get('resolution', 0.005),
+                v_node.get('resolution', 0.005),
+            ))
 
-            # Distance (always computed)
-            _, _, distance = self.geod.inv(u_node['lon'], u_node['lat'],
-                                           v_node['lon'], v_node['lat'])
-            data['distance'] = round(distance, 2)
+        # Interleave chunks for balanced coarse-edge distribution
+        chunks = [[] for _ in range(num_workers)]
+        for i, et in enumerate(edge_tuples):
+            chunks[i % num_workers].append(et)
+        del edge_tuples  # free memory
 
-            # Determine if this is a fine coastal edge (skip expensive queries)
-            u_res = u_node.get('resolution', 0.005)
-            v_res = v_node.get('resolution', 0.005)
-            is_fine_coastal = (
-                data.get('edge_type', 'coastal') == 'coastal'
-                and u_res < COARSE_THRESHOLD
-                and v_res < COARSE_THRESHOLD
-            )
+        # Prepare GDF dict for workers (trigger lazy sindex before fork)
+        worker_gdfs = {
+            'land_metric': self.gdfs_metric.get('land', gpd.GeoDataFrame()),
+            'depth_areas': self.gdfs.get('depth_areas', gpd.GeoDataFrame()),
+            'bridges': self.gdfs.get('bridges', gpd.GeoDataFrame()),
+            'fairways': self.gdfs.get('fairways', gpd.GeoDataFrame()),
+            'locks': self.gdfs.get('locks', gpd.GeoDataFrame()),
+        }
+        for gdf in worker_gdfs.values():
+            if not gdf.empty:
+                _ = gdf.sindex  # build R-tree before fork
 
-            if is_fine_coastal:
-                data['min_depth'] = 99.0
-                data['max_air_draft'] = 999.0
-                data['min_width'] = 999.0
-                data['is_fairway'] = False
-                data['direction_penalty'] = 1.0
-                data['distance_to_land'] = 9999.0
-                data['is_one_way'] = False
-                data['traffic_dir'] = 1
-                continue
+        logger.info(f"  Spawning {num_workers} workers for {total_edges} edges...")
+        with mp.Pool(num_workers, initializer=_edge_attr_init,
+                     initargs=(self.geod, worker_gdfs)) as pool:
+            chunk_results = pool.map(_edge_attr_worker, chunks)
 
-            edge_geom = LineString([(u_node['lon'], u_node['lat']),
-                                    (v_node['lon'], v_node['lat'])])
+        # Merge results back into the graph
+        merged = 0
+        for results in chunk_results:
+            for (u, v), attrs in results.items():
+                for key, value in attrs.items():
+                    self.graph.edges[u, v][key] = value
+                merged += 1
 
-            # 2. Min Depth (DEPARE overlap)
-            data['min_depth'] = 99.0
-            if not depare_gdf.empty:
-                depare_candidates = self._candidates_by_bounds(depare_gdf, edge_geom)
-                if not depare_candidates.empty:
-                    intersecting = depare_candidates[depare_candidates.intersects(edge_geom)]
-                    if not intersecting.empty and 'DRVAL1' in intersecting.columns:
-                        data['min_depth'] = float(intersecting['DRVAL1'].min())
-
-            # 3. Max Air Draft (Bridges)
-            data['max_air_draft'] = 999.0
-            if not bridges_gdf.empty:
-                bridge_candidates = self._candidates_by_bounds(bridges_gdf, edge_geom)
-                if not bridge_candidates.empty:
-                    intersecting = bridge_candidates[bridge_candidates.intersects(edge_geom)]
-                    if not intersecting.empty and 'VERCLR' in intersecting.columns:
-                        data['max_air_draft'] = float(intersecting['VERCLR'].min())
-
-            # 4. Min Width (Locks)
-            data['min_width'] = 999.0
-            if not locks_gdf.empty:
-                lock_candidates = self._candidates_by_bounds(locks_gdf, edge_geom)
-                if not lock_candidates.empty:
-                    intersecting = lock_candidates[lock_candidates.intersects(edge_geom)]
-                    if not intersecting.empty and 'HORCLR' in intersecting.columns:
-                        data['min_width'] = float(intersecting['HORCLR'].min())
-
-            # 5. Fairway Status + One-Way (TRAFIC)
-            data['is_fairway'] = False
-            data['is_one_way'] = False
-            data['traffic_dir'] = 1
-            if not fairways_gdf.empty:
-                fw_candidates = self._candidates_by_bounds(fairways_gdf, edge_geom)
-                if not fw_candidates.empty:
-                    intersecting = fw_candidates[fw_candidates.intersects(edge_geom)]
-                    if not intersecting.empty:
-                        data['is_fairway'] = True
-                        # Parse TRAFIC (S-57 traffic flow attribute)
-                        # 1=with digitisation, 2=two-way, 3=against digitisation
-                        if 'TRAFIC' in intersecting.columns:
-                            trafic_vals = intersecting['TRAFIC'].dropna().unique()
-                            if len(trafic_vals) == 1:
-                                tv = int(trafic_vals[0])
-                                if abs(tv) == 1:
-                                    data['is_one_way'] = True
-                                    # tv=1 → with digitisation (source→target if u<v)
-                                    # tv=-1 or 3 → against digitisation
-                                    data['traffic_dir'] = 1 if tv == 1 else -1
-                                elif abs(tv) == 3:
-                                    data['is_one_way'] = True
-                                    data['traffic_dir'] = 1 if tv == 3 else -1
-
-            # 6. Direction Penalty (Asymmetric Traffic Modeling)
-            data['direction_penalty'] = 1.0
-            if data['is_fairway'] and data.get('edge_type') == 'inland':
-                if u > v:
-                    data['direction_penalty'] = 5.0
-
-            # 7. Distance to Land
-            data['distance_to_land'] = 9999.0
-            if not land_metric.empty:
-                edge_geom_metric = gpd.GeoSeries([edge_geom], crs=self.CRS_WGS84).to_crs(self.CRS_METRIC).iloc[0]
-                possible_matches = land_metric.sindex.nearest(edge_geom_metric)
-                if len(possible_matches[1]) > 0:
-                    closest_idx = possible_matches[1][0]
-                    closest_geom = land_metric.iloc[closest_idx].geometry
-                    data['distance_to_land'] = round(edge_geom_metric.distance(closest_geom), 2)
+        logger.info(f"  Edge attributes merged: {merged}/{total_edges}")
 
     def export_to_sqlite(self):
         """Exports the nodes, edges, and POIs to a highly compressed SQLite Database."""

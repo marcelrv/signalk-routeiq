@@ -259,7 +259,7 @@ export class RoutingDatabase {
             if (!s || !t) continue;
 
             const { fraction, point, distance } = this.projectOnEdge(
-              s.lat, s.lon, t.lat, t.lon, latitude, longitude,
+              s.lon, s.lat, t.lon, t.lat, longitude, latitude,
             );
 
             if (distance < bestDist) {
