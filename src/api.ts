@@ -3,6 +3,7 @@
  * Express middleware for all router API endpoints
  */
 
+import crypto from 'crypto';
 import { ServerAPI } from '@signalk/server-api';
 import { Request, Response, Router } from 'express';
 import { RoutingDatabase } from './database.js';
@@ -208,26 +209,18 @@ export class ApiHandler {
         return;
       }
 
-      // Convert to Signal K Route specification with a unique ID
-      const routeId = `autoroute-${Date.now()}`;
-      const skRoute = GpxExporter.toSignalKRoute(route, name, routeId);
-      const path = `vessels.self.resources.routes.${routeId}`;
+      // Generate a UUID and convert to v2 Route format
+      const uuid = crypto.randomUUID();
+      const skRoute = GpxExporter.toSignalKRoute(route, name, uuid);
 
-      // Push route via delta message (the standard plugin data injection path)
-      (this.app as any).handleMessage('signalk-autoroute', {
-        context: 'vessels.self',
-        updates: [{
-          source: { label: 'signalk-autoroute', type: 'plugin' },
-          timestamp: new Date().toISOString(),
-          values: [{ path: `resources.routes.${routeId}`, value: skRoute }],
-        }],
-      });
+      // Persist via the Resource API (goes through resources-provider plugin)
+      await (this.app as any).resourcesApi.setResource('routes', uuid, skRoute);
 
       res.json({
         success: true,
         message: 'Route pushed to Signal K resources',
-        routeId,
-        path,
+        routeId: uuid,
+        path: `resources.routes.${uuid}`,
       });
     } catch (error) {
       const err = error as any;

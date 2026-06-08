@@ -3,6 +3,7 @@
  * Converts route GeoJSON to GPX format for navigation software
  */
 
+import crypto from 'crypto';
 import { RouteResult } from './types.js';
 
 export class GpxExporter {
@@ -51,41 +52,29 @@ export class GpxExporter {
   }
 
   /**
-   * Convert route to Signal K Route specification
-   * See: https://signalk.org/specification/1.4.0/doc/object_route.html
+   * Convert route to Signal K v2 Route specification
    */
   static toSignalKRoute(route: RouteResult, name: string = 'Autoroute Route', routeId?: string): any {
     const feature = route.features[0];
     const coords = feature.geometry.coordinates;
-    const id = routeId || `autoroute-${Date.now()}`;
-
-    const waypoints = coords.map((coord, index) => {
-      const [lon, lat] = coord;
-      return {
-        type: 'signalk#Waypoint',
-        waypointId: `WP${index + 1}`,
-        name: `WP${index + 1}`,
-        position: {
-          type: 'signalk#Position',
-          latitude: lat,
-          longitude: lon,
-        },
-      };
-    });
+    const id = routeId || crypto.randomUUID();
 
     return {
-      type: 'signalk#Route',
-      routeId: id,
-      name: name,
+      name,
       description: `Route calculated by SignalK Autoroute - Distance: ${feature.properties.totalDistance.toFixed(0)}m`,
-      active: false,
-      originTimestamp: new Date().toISOString(),
-      waypoints: waypoints,
-      _metadata: {
-        totalDistance: feature.properties.totalDistance,
-        totalCost: feature.properties.totalCost,
-        segments: feature.properties.segments,
+      distance: feature.properties.totalDistance,
+      feature: {
+        type: 'Feature',
+        geometry: {
+          type: 'LineString',
+          coordinates: coords as [number, number][],
+        },
+        properties: {
+          totalCost: feature.properties.totalCost,
+          segments: feature.properties.segments,
+        },
       },
+      timestamp: new Date().toISOString(),
     };
   }
 

@@ -36,7 +36,8 @@ describe('RoutingEngine', () => {
     run(`CREATE TABLE edges (
       source INTEGER, target INTEGER, distance REAL,
       min_depth REAL, max_air_draft REAL, min_width REAL,
-      is_fairway INTEGER, direction_penalty REAL, distance_to_land REAL
+      is_fairway INTEGER, direction_penalty REAL, distance_to_land REAL,
+      edge_type TEXT DEFAULT 'coastal'
     )`);
     run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type TEXT, lat REAL, lon REAL)`);
 
@@ -115,8 +116,8 @@ describe('RoutingEngine', () => {
 
       assert.strictEqual(route.type, 'FeatureCollection');
       assert.ok(route.warnings, 'Expected warnings when constraints block the route');
-      assert.strictEqual(route.warnings!.length, 1);
-      assert.strictEqual(route.warnings![0].type, 'end_unreachable');
+      const constraintWarning = route.warnings!.find(w => w.type === 'via_constrained');
+      assert.ok(constraintWarning, 'Expected a via_constrained warning for draft constraint violation');
     });
   });
 

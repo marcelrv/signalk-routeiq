@@ -635,6 +635,7 @@ export class RoutingDatabase {
     let isFairway = false;
     let dirPenalty = 1;
     let crossesLand = 0;
+    let edgeType: string | undefined;
 
     for (let i = startIdx; i < endIdx; i++) {
       const edge = this.getEdgeSync(originalPath[i], originalPath[i + 1]);
@@ -646,6 +647,7 @@ export class RoutingDatabase {
         if (edge.is_fairway) isFairway = true;
         dirPenalty = Math.min(dirPenalty, edge.direction_penalty);
         if (edge.crosses_land === 1) crossesLand = 1;
+        edgeType = edgeType || edge.edge_type;
       }
     }
 
@@ -660,6 +662,7 @@ export class RoutingDatabase {
       direction_penalty: dirPenalty,
       distance_to_land: 0,
       crosses_land: crossesLand,
+      edge_type: edgeType,
       lat: this.nodes.get(toNode)?.lat || 0,
       lon: this.nodes.get(toNode)?.lon || 0,
     };

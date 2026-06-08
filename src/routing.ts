@@ -184,10 +184,17 @@ export class RoutingEngine {
           await this.connectUserPoint(start, result, 'start');
           await this.connectUserPoint(end, result, 'end');
 
-          // Attach any expansion warnings
-          if (bboxWarnings.length > 0) {
-            result.warnings = [...(result.warnings || []), ...bboxWarnings];
-          }
+          // Check for constraint violations (draft, beam, air draft) on the found path
+          const violationWarnings: RouteWarning[] = [];
+          this.addViolationWarnings(result, violationWarnings, 'destination', start, end);
+
+          // Attach any warning types
+          result.warnings = [
+            ...(result.warnings || []),
+            ...bboxWarnings,
+            ...violationWarnings,
+          ];
+          if (result.warnings.length === 0) delete result.warnings;
           return result;
         } catch {
           // Expand bounding box and retry
