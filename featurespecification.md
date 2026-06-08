@@ -76,6 +76,22 @@ This heuristic avoids selecting isolated nodes in tiny disconnected components a
 
 ---
 
+## 2e. Path Smoothing (String Pulling)
+Grid-based A* routing produces a staircase or zig-zag pattern in open water because the algorithm can only move in 45°/90° increments through the graph nodes. To eliminate this blockiness, the router applies a **greedy string-pulling algorithm** as a post-processing step after A* finds the path.
+
+**How it works:**
+1. After A* reconstructs the raw node path, `smoothPath()` iterates through the nodes with a greedy lookahead.
+2. For each anchor node, it checks the furthest reachable node ahead to see if a direct straight line has clear **line-of-sight** — meaning the straight line doesn't cross any land or unmapped area.
+3. Line-of-sight is verified by sampling points along the great-circle line at ~500m intervals and checking each sample has a graph node within 500m radius via an in-memory spatial grid index. If a sample has no nearby node, the line would cross land — the shortcut is rejected.
+4. When a clear line-of-sight is found, all intermediate nodes between anchor and lookahead are removed from the final path.
+5. Segment metadata (min depth, max air draft, width) for shortcut edges is aggregated from all original edges along the skipped sub-path, preserving conservative safety values.
+
+**Result:** The output GeoJSON contains far fewer coordinates in open-water sections, with smooth straight lines across open water while maintaining constraint-safety along official fairway channels.
+
+**Spatial index:** The `RoutingDatabase` builds a grid-based spatial index (0.01° cells ≈ 1km) over all graph nodes after `loadGraph()` completes, enabling fast O(1) nearest-node lookups for line-of-sight checking without SQL queries.
+
+---
+
 ## 2d. Per-Request Vessel Dimensions
 Users can override vessel dimensions per route request via `draft`, `beam`, and `airDraft` fields in the POST body. These overrides:
 - Are applied only for that single request
@@ -104,10 +120,10 @@ Users can override vessel dimensions per route request via `draft`, `beam`, and 
 ## Part 2: The Signal K Backend Plugin (The Router)
 **Purpose:** A Node.js plugin running on the vessel's Signal K server. It holds the SQLite database in memory and provides the API for the frontend.
 
-*   **Technology Stack:** Node.js, TypeScript, `sqlite3`, customized A* pathfinding algorithm, `togpx` (for GPX conversion).
+*   **Technology Stack:** Node.js (22+), TypeScript, `node:sqlite` (Node's built-in SQLite — no external dependencies), customized A* pathfinding algorithm with string-pulling path smoothing.
 *   **Core Responsibilities:**
     1.  **Vessel Parameters:** On initialization, read the vessel's dimensions from the plugin configuration (`defaultDraft`, `defaultBeam`, `defaultAirDraft`) and subscribe to live updates from the Signal K delta tree (`vessels.self.design.draft`, `design.beam`, `design.airDraft`).
-    2.  **Execute Pathfinding:** Listen for requests, apply the Cost Function (detailed in Section 2), attempt fallback routing if no path is found (Section 2b), and return GeoJSON with optional warnings.
+    2.  **Execute Pathfinding:** Listen for requests, apply the Cost Function (detailed in Section 2), apply string-pulling path smoothing (Section 2e), attempt fallback routing if no path is found (Section 2b), and return smooth GeoJSON with optional warnings.
     3.  **Config Persistence:** The `ApiHandler` and its Express routes survive stop/start cycles. On config save (Admin UI), only the `RoutingEngine` is recreated with the new config values — routes stay registered.
 
 *   **Plugin Configuration (Admin UI):**

@@ -28,35 +28,30 @@ describe('RoutingEngine', () => {
 
     // Create tables and insert test data before init (init validates schema)
     const run = (sql: string, params: any[] = []) => {
-      return new Promise<void>((resolve, reject) => {
-        db['db'].run(sql, params, (err: Error | null) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
+      db['db'].prepare(sql).run(...params);
     };
 
     // Create tables
-    await run(`CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL, lon REAL)`);
-    await run(`CREATE TABLE edges (
+    run(`CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL, lon REAL)`);
+    run(`CREATE TABLE edges (
       source INTEGER, target INTEGER, distance REAL,
       min_depth REAL, max_air_draft REAL, min_width REAL,
       is_fairway INTEGER, direction_penalty REAL, distance_to_land REAL
     )`);
-    await run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type TEXT, lat REAL, lon REAL)`);
+    run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type TEXT, lat REAL, lon REAL)`);
 
     // Now init will pass since tables exist
     await db.init();
 
     // Insert test data
-    await run(`INSERT INTO nodes (id, lat, lon) VALUES 
+    run(`INSERT INTO nodes (id, lat, lon) VALUES 
       (1, 52.0, 5.0),
       (2, 52.01, 5.01),
       (3, 52.02, 5.02),
       (4, 52.03, 5.03),
       (5, 52.04, 5.04)`);
 
-    await run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, direction_penalty, distance_to_land) VALUES
+    run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, direction_penalty, distance_to_land) VALUES
       (1, 2, 1500, 5.0, 20.0, 10.0, 1, 1.0, 500),
       (2, 1, 1500, 5.0, 20.0, 10.0, 1, 1.0, 500),
       (2, 3, 1500, 5.0, 20.0, 10.0, 1, 1.0, 500),
@@ -66,7 +61,7 @@ describe('RoutingEngine', () => {
       (4, 5, 1500, 5.0, 20.0, 10.0, 1, 1.0, 500),
       (5, 4, 1500, 5.0, 20.0, 10.0, 1, 1.0, 500)`);
 
-    await run(`INSERT INTO pois (id, name, type, lat, lon) VALUES
+    run(`INSERT INTO pois (id, name, type, lat, lon) VALUES
       (1, 'Port of Rotterdam', 'port', 51.9244, 4.4777),
       (2, 'Marina Amsterdam', 'marina', 52.3676, 4.9041),
       (3, 'Lock Merwede', 'lock', 51.8833, 5.0333)`);
