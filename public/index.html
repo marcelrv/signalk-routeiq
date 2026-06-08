@@ -295,6 +295,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   color: #6d96c0;
   margin-top: 1px;
 }
+.route-node .node-poi {
+  font-size: 10px;
+  color: #f59e0b;
+  margin-top: 1px;
+  font-style: italic;
+}
 
 /* leg segment details (expandable) */
 .route-leg {
@@ -1053,6 +1059,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
     return {
       name: '',
+      coordinates: latLngs,
       waypoints: waypoints,
       instructions: instructions,
       summary: { totalDistance: totalDist, totalTime: totalDist / 5 },
@@ -1573,11 +1580,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     const dists = [0];
     for (let i = 1; i < coords.length; i++) {
       const p1 = coords[i - 1], p2 = coords[i];
-      const dLat = (p2[1] - p1[1]) * Math.PI / 180;
-      const dLng = (p2[0] - p1[0]) * Math.PI / 180;
-      const a = Math.sin(dLat / 2) ** 2 + Math.cos(p1[1] * Math.PI / 180) * Math.cos(p2[1] * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      dists.push(dists[i - 1] + 6371000 * c);
+      dists.push(dists[i - 1] + haversineDist(p1[1], p1[0], p2[1], p2[0]));
     }
     return dists;
   }
@@ -1828,6 +1831,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     const firstWarnLeg = nodesEl.querySelector('.route-node.has-warn + .route-leg');
     if (firstWarnLeg) firstWarnLeg.classList.add('expanded');
 
+    enrichRoutePaneWithPoiNames(nodes, nodesEl);
     updateRouteTitle();
   }
 
@@ -1849,6 +1853,67 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       state.routeName = '';
       titleEl.textContent = 'Route';
     }
+  }
+
+  function haversineDist(lat1, lng1, lat2, lng2) {
+    const R = 6371000;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  function enrichRoutePaneWithPoiNames(nodes, nodesEl) {
+    if (!nodes || nodes.length < 2 || !nodesEl) return;
+    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+    for (const n of nodes) {
+      if (n.lat < minLat) minLat = n.lat;
+      if (n.lat > maxLat) maxLat = n.lat;
+      if (n.lng < minLon) minLon = n.lng;
+      if (n.lng > maxLon) maxLon = n.lng;
+    }
+    const buf = 0.02;
+    const bboxStr = (minLon - buf).toFixed(4) + ',' + (minLat - buf).toFixed(4) + ',' + (maxLon + buf).toFixed(4) + ',' + (maxLat + buf).toFixed(4);
+    fetch(getApiBase() + '/signalk/v1/api/router/pois?bbox=' + bboxStr + '&limit=500')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || !data.pois) return;
+        var pois = data.pois;
+        var nodeEls = nodesEl.querySelectorAll('.route-node');
+        for (var i = 0; i < nodeEls.length; i++) {
+          var el = nodeEls[i];
+          var existing = el.querySelectorAll('.node-poi');
+          for (var k = 0; k < existing.length; k++) existing[k].remove();
+          if (i >= nodes.length) continue;
+          var node = nodes[i];
+          var bestDist = Infinity, bestPoi = null;
+          for (var j = 0; j < pois.length; j++) {
+            var p = pois[j];
+            var d = haversineDist(node.lat, node.lng, p.lat, p.lon);
+            if (d < bestDist && d <= 250) {
+              bestDist = d;
+              bestPoi = p;
+            }
+          }
+          if (bestPoi) {
+            var poiLine = document.createElement('div');
+            poiLine.className = 'node-poi';
+            poiLine.textContent = 'near ' + bestPoi.name;
+            el.appendChild(poiLine);
+            if (el.classList.contains('start') && !state.startPoiName) {
+              state.startPoiName = bestPoi.name;
+              updateRouteTitle();
+              updateInfo();
+            }
+            if (el.classList.contains('dest') && !state.destPoiName) {
+              state.destPoiName = bestPoi.name;
+              updateRouteTitle();
+              updateInfo();
+            }
+          }
+        }
+      })
+      .catch(function () {});
   }
 
   function clearRoutePane() {
