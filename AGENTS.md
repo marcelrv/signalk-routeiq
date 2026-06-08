@@ -9,6 +9,25 @@
 - Dependencies in `requirements.txt`. Install via `pip3 install --user --break-system-packages -r backend/requirements.txt`
 - No system `sudo` available in dev environment; use `--user` + `--break-system-packages` for pip installs.
 
+## Adaptive Quadtree Grid (coastal navmesh)
+- `nautical_routing_pipeline.py` uses adaptive quadtree subdivision (replacing the old fixed 0.01° grid).
+- Resolution: 0.005° (~500m) in open sea → 0.0002° (~20m) in narrow channels.
+- Subdivision criteria: narrowness (distance to nearest land), presence of centerlines, land/water boundary.
+- Nodes store `resolution` and `node_type` metadata in the SQLite DB.
+- Edges store `edge_type` ('coastal' or 'inland').
+
+## Bounding-Box A* Search (runtime)
+- `routing.ts:astarSearch()` accepts an optional `bbox` parameter that prunes nodes outside the box.
+- On failure, the margin doubles (`routingBBoxMargin` → `routingBBoxMaxExtent`).
+- BBox expansion adds warnings to the route result.
+- Via points each get their own per-segment bounding box.
+
+## Config (new fields)
+- `routingBBoxMargin` (deg, default 0.1): initial bounding box margin
+- `routingBBoxMaxExtent` (deg, default 10.0): max bbox before full-graph fallback
+- `lineOfSightSampleInterval` (m, default 500): LOS sample spacing
+- `lineOfSightSearchRadius` (m, default 800): LOS node search radius
+
 ## Node.js / TypeScript (root, src/)
 - **No local node/npm** — use Docker for all Node.js commands:
   ```

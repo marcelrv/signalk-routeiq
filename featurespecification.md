@@ -82,13 +82,53 @@ Grid-based A* routing produces a staircase or zig-zag pattern in open water beca
 **How it works:**
 1. After A* reconstructs the raw node path, `smoothPath()` iterates through the nodes with a greedy lookahead.
 2. For each anchor node, it checks the furthest reachable node ahead to see if a direct straight line has clear **line-of-sight** — meaning the straight line doesn't cross any land or unmapped area.
-3. Line-of-sight is verified by sampling points along the great-circle line at ~500m intervals and checking each sample has a graph node within 500m radius via an in-memory spatial grid index. If a sample has no nearby node, the line would cross land — the shortcut is rejected.
+3. Line-of-sight is verified by sampling points along the great-circle line at configurable intervals (default ~500m) and checking each sample has a graph node within the search radius (default 800m) via an in-memory spatial grid index. If a sample has no nearby node, the line would cross land — the shortcut is rejected.
 4. When a clear line-of-sight is found, all intermediate nodes between anchor and lookahead are removed from the final path.
 5. Segment metadata (min depth, max air draft, width) for shortcut edges is aggregated from all original edges along the skipped sub-path, preserving conservative safety values.
 
 **Result:** The output GeoJSON contains far fewer coordinates in open-water sections, with smooth straight lines across open water while maintaining constraint-safety along official fairway channels.
 
 **Spatial index:** The `RoutingDatabase` builds a grid-based spatial index (0.01° cells ≈ 1km) over all graph nodes after `loadGraph()` completes, enabling fast O(1) nearest-node lookups for line-of-sight checking without SQL queries.
+
+---
+
+## 2f. Adaptive Grid Resolution (Quadtree)
+
+Instead of a fixed 0.01° grid, the coastal navmesh uses **recursive quadtree subdivision** to create variable-density nodes that adapt to local water body narrowness.
+
+**Resolution tiers:**
+
+| Narrowness (free-water radius) | Grid resolution | Approx spacing |
+|-------------------------------|----------------|----------------|
+| > 5 km (open sea) | 0.005° | ~500 m |
+| 2 – 5 km | 0.0025° | ~250 m |
+| 1 – 2 km | 0.001° | ~100 m |
+| 0.2 – 1 km | 0.0005° | ~50 m |
+| < 0.2 km (narrow channel) | 0.0002° | ~20 m |
+
+**Subdivision criteria:**
+A quadtree cell is subdivided (up to 12 levels deep) if any of:
+- It contains an inland waterway centerline → subdivide to min resolution
+- The cell center is on land but the cell has water → subdivide to follow coastline
+- Narrowness (minimum distance to nearest land) < 5× the cell width → channel is too tight for this cell size
+- Cell spans a land/water boundary → subdivide to capture the geometry
+
+**Node connection:** All coastal nodes are connected to neighbors within `1.5 × local_resolution` using a spatial grid index, creating a smooth mesh that bridges resolution boundaries. Inland and coastal networks are cross-connected where they overlap.
+
+---
+
+## 2g. Bounding-Box Search Pruning
+
+To keep A* fast despite the denser graph, each route search is constrained to a **bounding box** around the start and end points.
+
+**Strategy:**
+1. Compute initial bounding box with a configurable margin (default 0.1° ≈ 11km)
+2. During A* expansion, skip any edge whose target node falls outside the box
+3. If A* fails to reach the destination, **double the margin** and retry
+4. Continue doubling up to the configured maximum extent (default 10°)
+5. If all bbox attempts fail, fall back to the unconstrained full-graph A* (for disconnected components)
+
+Results include a `warnings` entry if the box had to expand significantly, informing the user.
 
 ---
 
@@ -131,6 +171,10 @@ Users can override vessel dimensions per route request via `draft`, `beam`, and 
     - `defaultDraft` (m), `defaultBeam` (m), `defaultAirDraft` (m): Vessel defaults
     - `defaultCoastDistance` (NM): Default minimum distance from shore
     - `fairwayMultiplier`, `openWaterMultiplier`, `wrongWayPenalty`: Cost function coefficients
+    - `routingBBoxMargin` (degrees): Initial A* bounding-box margin (0.1 ≈ 11km)
+    - `routingBBoxMaxExtent` (degrees): Max bounding-box extent before full-graph fallback
+    - `lineOfSightSampleInterval` (m): Sample spacing for string-pulling line-of-sight check
+    - `lineOfSightSearchRadius` (m): Node search radius for line-of-sight verification
     - All dimension fields use `multipleOf: 0.1` for fine-grained control
 
 *   **API Endpoints:**
@@ -167,20 +211,40 @@ Users can override vessel dimensions per route request via `draft`, `beam`, and 
     5.  **Warning Display:** When the route response contains a `warnings` array, the UI should display each warning to the user (e.g., as a notification or route instruction overlay). Warnings guide the user to manually navigate teleported sections or verify constraint compliance.
     6.  **Export Controls:**
         *   `[ Download GPX ]`: Saves the route locally to the user's tablet/PC.
-        *   `[ Activate Route in Signal K ]`: Pushes the route to the Signal K resources API so standard navigation software (OpenCPN, WilhelmSK, plotters) can steer the autopilot.
+                 *   `[ Activate Route in Signal K ]`: Pushes the route to the Signal K resources API so standard navigation software (OpenCPN, WilhelmSK, plotters) can steer the autopilot.
+
+### 7. Route Details Pane (Collapsible Right Sidebar)
+A collapsible route information panel sits on the right side of the screen, positioned between the Settings panel and Export panel.
+
+**Collapse/Expand:** A small tab on the left edge of the pane toggles between collapsed (tab only) and expanded (full 300px panel). The pane auto-expands when a new route is calculated.
+
+**Smart Node Culling:** Rather than showing every coordinate, the pane uses a **bearing-change threshold** algorithm to extract only major waypoints:
+- For each point, the bearing change between incoming and outgoing segments is computed.
+- Points with a bearing change above a **dynamic threshold** are kept as major nodes.
+- Threshold adapts to route length: ~21° for short routes (2 km), up to 50° for long routes (50+ km).
+- Hard cap of 15 nodes; when exceeded, the weakest turns are dropped first.
+- Start and destination are always included.
+
+**Per-Node Display:** Each major node shows a label (Start, Turn N, or Destination), turn angle badge (e.g. `34° R`), coordinates in decimal degrees, and cumulative distance from start with heading arrow.
+
+**Expandable Leg Details:** Clicking a node row expands/collapses the leg segment below it, showing distance (m), minimum depth (m), minimum width (m), and maximum air draft (m) — aggregated from the backend segment data. Legs with shallow (< 2.5m) or narrow (< 6m) conditions are flagged inline with warning icons.
+
+**Warning Display:** Overall backend warnings appear at the top in a red-tinted section. Per-leg warnings (shallow, narrow) appear inline when the leg is expanded. Nodes with warned legs show a warning indicator (⚠). The first warned leg auto-expands on route load.
 
 ***
 
 ## Appendix: Known Graph Data Limitations
 
 ### Graph Connectivity
-The routing graph is built from ENC data and may contain disconnected components. The main component covers the Netherlands coastal area (~51.33-51.85°N, 3.14-4.55°E, 3166 nodes). A second large component covers the northern Wadden area (~52.34-53.09°N, 4.96-5.83°E, 2496 nodes). Many smaller components (255 total) exist for harbors, inland cuts, and isolated water bodies.
+The routing graph is built from ENC data and may contain disconnected components. Smaller disconnected components exist for harbors, inland cuts, and isolated water bodies.
 
 The `findNearestNode` out-degree heuristic (Section 2c) and the fallback routing (Section 2b) mitigate this, but the fundamental fix requires improving the ENC preprocessing pipeline to bridge component gaps.
 
+### Graph Size (Adaptive Grid)
+With adaptive quadtree resolution (Section 2f), the coastal navmesh produces 50k–150k nodes (vs ~7,700 with the old fixed 0.01° grid). Nodes are concentrated in narrow channels and along coastlines where high resolution is needed, while open sea remains sparse. The graph loads once at plugin startup and fits comfortably in memory (25–80 MB).
+
 ### Constraint Data Quality
-- 3046 edges have negative `min_depth` values (sentinels for unknown data) — handled via Section 2a
-- `distance_to_land` distribution is heavily skewed toward 0 (3264 edges at exactly 0) — coastal routing with high `minCoastDistance` values may struggle to find paths
-- 12969 of 45587 edges have `distance_to_land >= 1000m`
+- Edges with negative `min_depth` values are treated as unknown data (Section 2a) — passable by default
+- `distance_to_land` is computed per edge — coastal routing with high `minCoastDistance` values may struggle to find paths near shore
 
 ***
