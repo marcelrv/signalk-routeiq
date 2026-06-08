@@ -774,6 +774,11 @@ export class RoutingEngine {
         if (!this.isEdgeSafe(edge)) {
           continue;
         }
+        // CRITICAL FIX: Only apply coastline distance constraints to open sea/coastal grids.
+        // Inland waterways and locks are inherently safe from a coastline perspective.
+        if (edge.edge_type === 'coastal' && edge.distance_to_land < minCoastDistanceMeters) {
+          continue;
+        }
 
         // Check coast distance constraint for coastal routing
         if (edge.distance_to_land < minCoastDistanceMeters) {
@@ -836,27 +841,68 @@ export class RoutingEngine {
    */
   private isEdgeSafe(edge: EdgeRow & { lat: number; lon: number }): boolean {
     // Reject edges flagged as crossing land (post-pipeline validation)
-    // crosses_land is 0 for all safe edges; undefined for pre-schema-v2 databases
     if (edge.crosses_land === 1) {
       return false;
     }
 
-    // Negative constraint values = unknown data gap; treat as passable
-    if (edge.min_depth >= 0 && edge.min_depth < (this.vesselDimensions.draft || 0)) {
-      return false;
-    }
-
-    if (edge.min_width >= 0 && edge.min_width < (this.vesselDimensions.beam || 0)) {
-      return false;
-    }
-
+    // Air draft applies to ALL edges (bridges are hard physical stops)
     if (edge.max_air_draft >= 0 && edge.max_air_draft < (this.vesselDimensions.airDraft || 0)) {
       return false;
     }
 
+    // Coastal edges: Enforce strict depth and width checks
+    if (edge.edge_type === 'coastal') {
+      if (edge.min_depth >= 0 && edge.min_depth < (this.vesselDimensions.draft || 0)) return false;
+      if (edge.min_width >= 0 && edge.min_width < (this.vesselDimensions.beam || 0)) return false;
+    }
+    
+    // Inland edges (official fairways/centerlines) bypass depth/width checks 
+    // because the Python spatial join often grazes shallow riverbanks.
     return true;
   }
 
+
+  /**
+   * Check if a straight line between two coordinates stays within navigable water.
+   *
+   * Primary check: sample points along the line and verify each lies inside a
+   * water polygon (coastal_water_polygons.geojson).  This correctly rejects
+   * shortcuts that cross land without depending on node density, which was the
+   * root cause of staircase routes on the open Markermeer where the coarse
+   * 0.005° grid leaves gaps larger than the node-proximity search radius.
+   *
+   * If the water polygon data is unavailable the check falls back to the
+   * original node-proximity heuristic so the smoother still works on graphs
+   * built without coastal water polygons.
+   */
+  private hasLineOfSight(
+    lat1: number, lon1: number,
+    lat2: number, lon2: number,
+  ): boolean {
+    const dist = this.haversineDistance(lat1, lon1, lat2, lon2);
+
+    // CRITICAL: Force a dense 50m sampling interval so it cannot jump over land
+    const numSamples = Math.max(3, Math.ceil(dist / 50));
+
+    // Primary check: Does the line intersect Land polygons?
+    // If it crosses land, it's NOT a clear line of sight.
+    if ((this.db as any).isLineCrossingLand && (this.db as any).isLineCrossingLand(lat1, lon1, lat2, lon2, numSamples)) {
+        return false; 
+    }
+
+    // Secondary fallback: Make sure the path stays near navigable graph nodes
+    const searchRadius = this.config.lineOfSightSearchRadius; // config default is 50m
+    for (let i = 1; i < numSamples; i++) {
+      const t = i / numSamples;
+      const lat = lat1 + (lat2 - lat1) * t;
+      const lon = lon1 + (lon2 - lon1) * t;
+      if (!this.db.hasNodeWithinRadius(lat, lon, searchRadius)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  
   /**
    * Calculate the cost for an edge using the multi-layered cost function
    * Cost = Distance × FairwayMultiplier × DirectionalPenalty × OneWayPenalty
@@ -1070,21 +1116,39 @@ export class RoutingEngine {
    * that has a clear line-of-sight (no land or constraint gaps), and skip
    * the intermediate grid nodes.
    */
-  private async smoothPath(path: number[]): Promise<number[]> {
+private async smoothPath(path: number[]): Promise<number[]> {
     if (path.length <= 2) return path;
 
     const smoothed: number[] = [path[0]];
     let i = 0;
 
+    // Pre-fetch all nodes to check their type
+    const nodeMap = new Map<number, any>();
+    for (const id of path) {
+      const n = await this.db.getNodeById(id);
+      nodeMap.set(id, n);
+    }
+
     while (i < path.length - 1) {
       let j = path.length - 1;
       while (j > i + 1) {
-        const coordsI = await this.db.getNodeById(path[i]);
-        const coordsJ = await this.db.getNodeById(path[j]);
-        if (!coordsI || !coordsJ) { j--; continue; }
+        // CRITICAL FIX: Do not shortcut if any intermediate node is an official inland centerline.
+        // This forces the route to perfectly track river curves and fairways.
+        let skippingInland = false;
+        for (let k = i + 1; k < j; k++) {
+          const n = nodeMap.get(path[k]);
+          if (n && n.node_type === 'inland') {
+            skippingInland = true;
+            break;
+          }
+        }
 
-        if (this.hasLineOfSight(coordsI.lat, coordsI.lon, coordsJ.lat, coordsJ.lon)) {
-          break;
+        if (!skippingInland) {
+          const coordsI = nodeMap.get(path[i]);
+          const coordsJ = nodeMap.get(path[j]);
+          if (coordsI && coordsJ && this.hasLineOfSight(coordsI.lat, coordsI.lon, coordsJ.lat, coordsJ.lon)) {
+            break;
+          }
         }
         j--;
       }
@@ -1096,50 +1160,5 @@ export class RoutingEngine {
     return smoothed;
   }
 
-  /**
-   * Check if a straight line between two coordinates stays within navigable water.
-   *
-   * Primary check: sample points along the line and verify each lies inside a
-   * water polygon (coastal_water_polygons.geojson).  This correctly rejects
-   * shortcuts that cross land without depending on node density, which was the
-   * root cause of staircase routes on the open Markermeer where the coarse
-   * 0.005° grid leaves gaps larger than the node-proximity search radius.
-   *
-   * If the water polygon data is unavailable the check falls back to the
-   * original node-proximity heuristic so the smoother still works on graphs
-   * built without coastal water polygons.
-   */
-  private hasLineOfSight(
-    lat1: number, lon1: number,
-    lat2: number, lon2: number,
-  ): boolean {
-    const dist = this.haversineDistance(lat1, lon1, lat2, lon2);
 
-    // One sample per 500 m is sufficient to detect land crossings at the
-    // coarse navmesh resolution (~556 m grid).  Minimum 3 samples.
-    const numSamples = Math.max(3, Math.ceil(dist / 500));
-
-    // Primary: polygon-based water check
-    if (this.db.isLineOverWater(lat1, lon1, lat2, lon2, numSamples)) {
-      return true;
-    }
-
-    // Secondary fallback: node proximity (in case water polygons are absent)
-    const sampleInterval = Math.min(
-      this.config.lineOfSightSampleInterval,
-      Math.max(100, dist / 20),
-    );
-    const searchRadius = this.config.lineOfSightSearchRadius;
-    const numNodeSamples = Math.max(3, Math.ceil(dist / sampleInterval));
-
-    for (let i = 1; i < numNodeSamples; i++) {
-      const t = i / numNodeSamples;
-      const lat = lat1 + (lat2 - lat1) * t;
-      const lon = lon1 + (lon2 - lon1) * t;
-      if (!this.db.hasNodeWithinRadius(lat, lon, searchRadius)) {
-        return false;
-      }
-    }
-    return true;
-  }
 }

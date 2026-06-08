@@ -426,7 +426,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       .then(data => {
         if (!data || !data.nodes) return;
         for (const n of data.nodes) {
-          const color = n.node_type === 'inland' ? '#22c55e' : '#3b8fd4';
+          const color = n.min_depth > 2 ? '#3b8fd4' : n.min_depth >= 1.2 ? '#eab308' : n.min_depth >= 0 ? '#ef4444' : '#888888';
           const radius = n.resolution > 0 ? Math.max(1.5, Math.min(5, n.resolution * 1000)) : 2;
           L.circleMarker([n.lat, n.lon], {
             radius, color, fillColor: color, fillOpacity: 0.5, weight: 0.5, opacity: 0.4,

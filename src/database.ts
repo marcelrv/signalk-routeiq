@@ -411,16 +411,22 @@ export class RoutingDatabase {
     minLat: number, minLon: number,
     maxLat: number, maxLon: number,
     limit: number = 5000,
-  ): Promise<Array<{ id: number; lat: number; lon: number; resolution: number; node_type: string }>> {
-    const cols = this.checkNodeMetaColumns() ? 'id, lat, lon, resolution, node_type' : 'id, lat, lon';
+  ): Promise<Array<{ id: number; lat: number; lon: number; resolution: number; node_type: string; min_depth: number }>> {
+    const cols = this.checkNodeMetaColumns() ? 'n.id, n.lat, n.lon, n.resolution, n.node_type' : 'n.id, n.lat, n.lon';
     const rows = this.db.prepare(
-      `SELECT ${cols}
-       FROM nodes
-       WHERE lat >= ? AND lat <= ? AND lon >= ? AND lon <= ?
-       ORDER BY id
+      `SELECT ${cols},
+              COALESCE((SELECT MIN(e.min_depth) FROM edges e WHERE e.source = n.id OR e.target = n.id), -1) AS min_depth
+       FROM nodes n
+       WHERE n.lat >= ? AND n.lat <= ? AND n.lon >= ? AND n.lon <= ?
+       ORDER BY n.id
        LIMIT ?`
-    ).all(minLat, maxLat, minLon, maxLon, limit) as unknown as NodeRow[];
-    return rows.map((r: any) => ({ id: r.id, lat: r.lat, lon: r.lon, resolution: r.resolution ?? 0, node_type: r.node_type ?? 'coastal' }));
+    ).all(minLat, maxLat, minLon, maxLon, limit) as unknown as (NodeRow & { min_depth: number })[];
+    return rows.map((r: any) => ({
+      id: r.id, lat: r.lat, lon: r.lon,
+      resolution: r.resolution ?? 0,
+      node_type: r.node_type ?? 'coastal',
+      min_depth: r.min_depth ?? -1,
+    }));
   }
 
   async getPoisInBBox(
@@ -626,67 +632,60 @@ export class RoutingDatabase {
     return Promise.resolve();
   }
 
+
+
+   
+  private landGeoJson: any = null;
+  private landGeojsonPath: string | null = null;
+  private landBBoxIndex: Float64Array | null = null;
+
   /**
-   * Check whether all sampled points along a straight line (lat1,lon1)→(lat2,lon2)
-   * fall inside a water polygon.  Used by the LOS path smoother.
-   *
-   * Loads and caches the water GeoJSON on first call (synchronous).
-   * Returns true if the water polygon data is unavailable (fail-open so that
-   * the smoother degrades gracefully to node-proximity checks).
-   *
-   * numSamples: number of interior sample points (endpoints are not checked
-   * because they are known graph nodes already inside water).
+   * Check whether any sampled points along a straight line fall inside a LAND polygon.
    */
-  isLineOverWater(lat1: number, lon1: number, lat2: number, lon2: number, numSamples: number): boolean {
-    // Ensure water GeoJSON and its bbox index are loaded
-    if (!this.waterGeojsonPath) {
+  isLineCrossingLand(lat1: number, lon1: number, lat2: number, lon2: number, numSamples: number): boolean {
+    if (!this.landGeojsonPath) {
       const dir = dirname(this.dbPath);
-      this.waterGeojsonPath = join(dir, 'coastal_water_polygons.geojson');
+      this.landGeojsonPath = join(dir, 'land_polygons.geojson');
     }
-    if (!this.waterGeoJson) {
-      if (!existsSync(this.waterGeojsonPath)) {
-        this.waterGeoJson = { type: 'FeatureCollection', features: [] };
+    if (!this.landGeoJson) {
+      if (!existsSync(this.landGeojsonPath)) {
+        this.landGeoJson = { type: 'FeatureCollection', features: [] };
       } else {
         try {
-          this.waterGeoJson = JSON.parse(readFileSync(this.waterGeojsonPath, 'utf-8'));
+          this.landGeoJson = JSON.parse(readFileSync(this.landGeojsonPath, 'utf-8'));
         } catch {
-          this.waterGeoJson = { type: 'FeatureCollection', features: [] };
+          this.landGeoJson = { type: 'FeatureCollection', features: [] };
         }
       }
     }
 
-    const features: any[] = this.waterGeoJson.features ?? [];
+    const features: any[] = this.landGeoJson.features ?? [];
     if (features.length === 0) {
-      // No polygon data — fail-open so node-proximity fallback handles it
-      return true;
+      return false; // If no land data, fail-open to rely on node-proximity
     }
 
-    // Build bbox index once (5 floats per feature: minLon, minLat, maxLon, maxLat, idx)
-    if (!this.waterBBoxIndex) {
-      this.waterBBoxIndex = buildWaterBBoxIndex(features);
+    if (!this.landBBoxIndex) {
+      // Re-use the bbox index builder for land features
+      this.landBBoxIndex = buildBBoxIndex(features);
     }
 
     for (let i = 1; i < numSamples; i++) {
       const t = i / numSamples;
       const lat = lat1 + (lat2 - lat1) * t;
       const lon = lon1 + (lon2 - lon1) * t;
-      if (!this.isPointInAnyPolygon(lat, lon, features)) return false;
+      // If ANY point hits a land polygon, the line crosses land!
+      if (this.isPointInAnyPolygon(lat, lon, features, this.landBBoxIndex)) return true;
     }
-    return true;
+    return false;
   }
 
-  /**
-   * Ray-casting point-in-polygon test against indexed water features.
-   * Uses the pre-built bbox index to skip features that can't contain the point.
-   */
-  private isPointInAnyPolygon(lat: number, lon: number, features: any[]): boolean {
-    const idx = this.waterBBoxIndex;
-    const STRIDE = 5; // minLon, minLat, maxLon, maxLat, featureIndex
+  private isPointInAnyPolygon(lat: number, lon: number, features: any[], bboxIndex: Float64Array | null): boolean {
+    const idx = bboxIndex;
+    const STRIDE = 5; 
     if (idx) {
       const n = idx.length / STRIDE;
       for (let i = 0; i < n; i++) {
         const base = i * STRIDE;
-        // Quick bbox rejection
         if (lon < idx[base] || lon > idx[base + 2] ||
             lat < idx[base + 1] || lat > idx[base + 3]) continue;
         const fi = idx[base + 4];
@@ -702,7 +701,7 @@ export class RoutingDatabase {
       }
       return false;
     }
-    // Fallback (index not built yet)
+    // Fallback if index isn't available
     for (const f of features) {
       const geom = f.geometry;
       if (!geom) continue;
@@ -750,7 +749,7 @@ export class RoutingDatabase {
  * Layout per feature: [minLon, minLat, maxLon, maxLat, featureIndex] (5 values).
  * Only Polygon and MultiPolygon features are indexed.
  */
-function buildWaterBBoxIndex(features: any[]): Float64Array {
+function buildBBoxIndex(features: any[]): Float64Array {
   const STRIDE = 5;
   const buf = new Float64Array(features.length * STRIDE);
   let count = 0;
