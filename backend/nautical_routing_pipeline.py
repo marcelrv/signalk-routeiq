@@ -187,6 +187,7 @@ class NauticalRoutingPipeline:
         """Executes the end-to-end data pipeline."""
         self.parse_shapefiles()
         self.build_network()
+        self._validate_edges_against_land()
         self.calculate_edge_attributes()
         self.export_to_sqlite()
         logger.info("Pipeline execution completed successfully.")
@@ -613,6 +614,117 @@ class NauticalRoutingPipeline:
         logger.info(f"Coastal navmesh complete: {self.graph.number_of_nodes()} nodes, "
                     f"{self.graph.number_of_edges()} edges ({total_new_edges} new)")
 
+    def _validate_edges_against_land(self):
+        """
+        Remove coastal graph edges that cross land polygons.
+
+        For each undirected coastal edge, validates:
+        1. The midpoint lies within a coastal water polygon (batch spatial join)
+        2. The edge segment does not cross any land polygon (R-tree filter + crosses test)
+
+        This mirrors rx.autoroute's createSuperMesh() two-part validation:
+        doesIntersect() + isPointInArea(midpoint).
+        Only edges that pass BOTH checks are kept in the graph.
+        """
+        land_gdf = self.gdfs.get('land', gpd.GeoDataFrame())
+        coastal_gdf = self.gdfs.get('coastal_water', gpd.GeoDataFrame())
+
+        if coastal_gdf.empty:
+            logger.info("No coastal water data — skipping land-crossing validation")
+            return
+
+        logger.info("Validating coastal edges against land polygons...")
+
+        # Collect unique (undirected) coastal edges with their endpoint coords
+        edge_endpoints = {}
+        for u, v, data in self.graph.edges(data=True):
+            if data.get('edge_type') != 'coastal':
+                continue
+            a, b = (u, v) if u < v else (v, u)
+            if (a, b) not in edge_endpoints:
+                edge_endpoints[(a, b)] = (
+                    self.graph.nodes[u]['lon'],
+                    self.graph.nodes[u]['lat'],
+                    self.graph.nodes[v]['lon'],
+                    self.graph.nodes[v]['lat'],
+                )
+
+        if not edge_endpoints:
+            return
+
+        logger.info(f"  Checking {len(edge_endpoints)} unique coastal edges")
+
+        # Ensure R-trees are built before any spatial ops
+        _ = coastal_gdf.sindex
+        if not land_gdf.empty:
+            _ = land_gdf.sindex
+
+        edges_to_remove = set()
+
+        # ---- Step 1: Midpoint water check (batch spatial join) ----
+        edge_list = list(edge_endpoints.items())
+        mp_data = []
+        for (a, b), (u_lon, u_lat, v_lon, v_lat) in edge_list:
+            mp_data.append({
+                'edge_key': (a, b),
+                'geometry': Point((u_lon + v_lon) * 0.5, (u_lat + v_lat) * 0.5),
+            })
+
+        mp_gdf = gpd.GeoDataFrame(mp_data, geometry='geometry', crs=self.CRS_WGS84)
+        water_for_join = coastal_gdf[['geometry']].copy()
+        # 'within' predicate: midpoint must be strictly inside water polygon
+        water_join = gpd.sjoin(mp_gdf, water_for_join, predicate='within', how='inner')
+        valid_midpoints = set(water_join['edge_key'].values)
+
+        for key in edge_endpoints:
+            if key not in valid_midpoints:
+                edges_to_remove.add(key)
+
+        logger.info(f"  Midpoint water check: {len(valid_midpoints)}/{len(edge_endpoints)} pass")
+
+        # ---- Step 2: Land-crossing check for remaining edges ----
+        if not land_gdf.empty:
+            land_check_count = 0
+            land_remove_count = 0
+            for (a, b), (u_lon, u_lat, v_lon, v_lat) in edge_endpoints.items():
+                if (a, b) in edges_to_remove:
+                    continue
+                land_check_count += 1
+
+                line = LineString([(u_lon, u_lat), (v_lon, v_lat)])
+                # R-tree filter: only test land polygons whose bbox overlaps the edge
+                candidates = list(land_gdf.sindex.intersection(line.bounds))
+                for idx in candidates:
+                    land_geom = land_gdf.iloc[idx].geometry
+                    # crosses = interior intersection (endpoint touches on boundary are OK)
+                    if line.crosses(land_geom):
+                        edges_to_remove.add((a, b))
+                        land_remove_count += 1
+                        break
+
+            logger.info(f"  Land-crossing check: tested {land_check_count}, removed {land_remove_count}")
+
+        # ---- Step 3: Remove invalid edges (both directions) ----
+        removed_count = 0
+        for a, b in edges_to_remove:
+            if self.graph.has_edge(a, b):
+                self.graph.remove_edge(a, b)
+                removed_count += 1
+            if self.graph.has_edge(b, a):
+                self.graph.remove_edge(b, a)
+                removed_count += 1
+
+        # Also set a crosses_land attribute on surviving edges (=0) for DB export
+        for u, v, data in self.graph.edges(data=True):
+            if data.get('edge_type') == 'coastal':
+                self.graph.edges[u, v]['crosses_land'] = 0
+
+        logger.info(
+            f"Land-crossing validation complete: removed {removed_count} directed edges "
+            f"({len(edges_to_remove)} undirected), "
+            f"{self.graph.number_of_edges()} edges remaining"
+        )
+
     def _candidates_by_bounds(self, gdf: gpd.GeoDataFrame, geom, margin: float = 0.0) -> gpd.GeoDataFrame:
         """Use spatial index to find candidate features intersecting the geometry's bounding box."""
         bounds = geom.bounds
@@ -715,6 +827,7 @@ class NauticalRoutingPipeline:
                     edge_type TEXT DEFAULT 'coastal',
                     is_one_way INTEGER DEFAULT 0,
                     traffic_dir INTEGER DEFAULT 1,
+                    crosses_land INTEGER DEFAULT 0,
                     FOREIGN KEY(source) REFERENCES nodes(id),
                     FOREIGN KEY(target) REFERENCES nodes(id)
                 );
@@ -751,12 +864,13 @@ class NauticalRoutingPipeline:
                 data.get('distance_to_land', 9999.0),
                 data.get('edge_type', 'coastal'),
                 int(data.get('is_one_way', False)),
-                data.get('traffic_dir', 1)
+                data.get('traffic_dir', 1),
+                int(data.get('crosses_land', 0))
             ) for u, v, data in self.graph.edges(data=True)]
             cursor.executemany("""
                 INSERT INTO edges 
-                (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, direction_penalty, distance_to_land, edge_type, is_one_way, traffic_dir)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, direction_penalty, distance_to_land, edge_type, is_one_way, traffic_dir, crosses_land)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, edges_data)
             
             # Insert POIs — harvest named locations from multiple layers

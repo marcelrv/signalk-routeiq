@@ -996,7 +996,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           }
           try {
             callback.call(context, null, [result]);
-          } catch (_e) { /* LRM internal rendering errors are non-fatal */ }
+          } catch (_e) { console.warn('[MarineRouter] LRM callback error:', _e); }
+          renderCustomRoute(state.lastGeoJson);
+          renderRoutePane(state.lastGeoJson);
           showToast('Route updated', 'success');
         })
         .catch(err => {

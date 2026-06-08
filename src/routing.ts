@@ -835,6 +835,12 @@ export class RoutingEngine {
    * Apply hard safety constraints to an edge
    */
   private isEdgeSafe(edge: EdgeRow & { lat: number; lon: number }): boolean {
+    // Reject edges flagged as crossing land (post-pipeline validation)
+    // crosses_land is 0 for all safe edges; undefined for pre-schema-v2 databases
+    if (edge.crosses_land === 1) {
+      return false;
+    }
+
     // Negative constraint values = unknown data gap; treat as passable
     if (edge.min_depth >= 0 && edge.min_depth < (this.vesselDimensions.draft || 0)) {
       return false;
@@ -1109,8 +1115,9 @@ export class RoutingEngine {
   ): boolean {
     const dist = this.haversineDistance(lat1, lon1, lat2, lon2);
 
-    // Adaptive sample count: at least 5 samples, one per ~200m
-    const numSamples = Math.max(5, Math.ceil(dist / 200));
+    // One sample per 500 m is sufficient to detect land crossings at the
+    // coarse navmesh resolution (~556 m grid).  Minimum 3 samples.
+    const numSamples = Math.max(3, Math.ceil(dist / 500));
 
     // Primary: polygon-based water check
     if (this.db.isLineOverWater(lat1, lon1, lat2, lon2, numSamples)) {

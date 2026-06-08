@@ -24,6 +24,7 @@ export interface EdgeRow {
   edge_type?: string;
   is_one_way?: number;
   traffic_dir?: number;
+  crosses_land?: number; // 1 = edge crosses land (always 0 for post-pipeline graphs)
   // Target node coordinates (always populated by loading or queries)
   lat: number;
   lon: number;
@@ -57,6 +58,9 @@ export class RoutingDatabase {
   private edgesBySource: Map<number, Array<EdgeRow & { lat: number; lon: number }>> = new Map();
   private graphLoaded: boolean = false;
   private spatialGrid: Map<string, number[]> = new Map();
+  // Flat bbox index for water polygons: [minLon, minLat, maxLon, maxLat, featureIndex]
+  private waterBBoxIndex: Float64Array | null = null;
+  private hasCrossesLand: boolean = false;
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;
@@ -69,9 +73,19 @@ export class RoutingDatabase {
       if (!row) {
         throw new Error('nodes table not found');
       }
+      // Check for crosses_land column (added in schema v2 for land-crossing validation)
+      const edgeCols = this.db.prepare("PRAGMA table_info('edges')").all() as Array<{ name: string }>;
+      this.hasCrossesLand = edgeCols.some(c => c.name === 'crosses_land');
     } catch (error: any) {
       throw new Error(`Failed to connect to routing database: ${error.message}`);
     }
+  }
+
+  private crossesLandCol(): string {
+    // Only include the column when it exists in the DB schema.
+    // When absent (pre-schema-v2 databases), the field stays undefined in EdgeRow,
+    // and isEdgeSafe() safely treats undefined === 1 as false (no false positives).
+    return this.hasCrossesLand ? ', e.crosses_land' : '';
   }
 
   async loadGraph(): Promise<void> {
@@ -82,7 +96,7 @@ export class RoutingDatabase {
     this.buildSpatialIndex();
 
     const edges = this.db.prepare(
-      `SELECT e.*,
+      `SELECT e.*${this.crossesLandCol()},
               s.lat AS source_lat, s.lon AS source_lon,
               t.lat AS target_lat, t.lon AS target_lon
        FROM edges e
@@ -131,7 +145,7 @@ export class RoutingDatabase {
       return this.edgesBySource.get(nodeId) || [];
     }
     return this.db.prepare(
-      `SELECT e.*, n.lat, n.lon
+      `SELECT e.*${this.crossesLandCol()}, n.lat, n.lon
        FROM edges e
        JOIN nodes n ON e.target = n.id
        WHERE e.source = ?`
@@ -147,7 +161,7 @@ export class RoutingDatabase {
       }
     }
     const row = this.db.prepare(
-      `SELECT e.*, n.lat, n.lon
+      `SELECT e.*${this.crossesLandCol()}, n.lat, n.lon
        FROM edges e
        JOIN nodes n ON e.target = n.id
        WHERE e.source = ? AND e.target = ?`
@@ -162,7 +176,7 @@ export class RoutingDatabase {
     }
     const placeholders = nodeIds.map(() => '?').join(', ');
     const rows = this.db.prepare(
-      `SELECT * FROM edges WHERE source IN (${placeholders})`
+      `SELECT e.*${this.crossesLandCol()} FROM edges AS e WHERE e.source IN (${placeholders})`
     ).all(...nodeIds) as unknown as EdgeRow[];
     for (const row of rows) {
       if (!result.has(row.source)) {
@@ -174,10 +188,33 @@ export class RoutingDatabase {
   }
 
   async findNearestNode(latitude: number, longitude: number, maxDistanceMeters: number = 50000): Promise<number | null> {
-    // Sort purely by geographic distance so A* starts from the geometrically
-    // closest node. The previous out_degree-first sort caused the router to
-    // pick well-connected hub nodes many hundreds of metres away, resulting in
-    // the start/end connecting leg crossing land.
+    // Fast path: use the in-memory node map when the graph is loaded.
+    // A single O(N) scan over the flat map is much faster than a SQLite
+    // haversine sort on 100k+ rows with no index, and keeps the correct
+    // "closest geometry" behaviour from the previous fix.
+    if (this.graphLoaded) {
+      let bestId: number | null = null;
+      let bestDist = maxDistanceMeters;
+      const latRad = latitude * Math.PI / 180;
+      const cosLat = Math.cos(latRad);
+      // Cheap equirectangular pre-filter: skip nodes outside a degree bounding box
+      const marginDeg = maxDistanceMeters / 111320;
+      for (const [id, c] of this.nodes) {
+        if (Math.abs(c.lat - latitude) > marginDeg) continue;
+        if (Math.abs(c.lon - longitude) > marginDeg / cosLat) continue;
+        // Full haversine only for bbox candidates
+        const dLat = (c.lat - latitude) * Math.PI / 180;
+        const dLon = (c.lon - longitude) * Math.PI / 180;
+        const a = Math.sin(dLat / 2) ** 2 + cosLat * Math.cos(c.lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+        const d = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        if (d < bestDist) { bestDist = d; bestId = id; }
+      }
+      return bestId;
+    }
+
+    // Slow path (graph not yet loaded): use SQLite with a bounding-box pre-filter
+    // so the query uses lat/lon range scans instead of a full-table haversine sort.
+    const marginDeg = maxDistanceMeters / 111320;
     const query = `
       SELECT id,
         (6371000 * acos(
@@ -186,12 +223,17 @@ export class RoutingDatabase {
           sin(radians(?)) * sin(radians(lat))
         )) as distance
       FROM nodes
+      WHERE lat BETWEEN ? AND ?
+        AND lon BETWEEN ? AND ?
       ORDER BY distance ASC
       LIMIT 1
     `;
-    const row = this.db.prepare(query).get(latitude, longitude, latitude) as any | undefined;
+    const row = this.db.prepare(query).get(
+      latitude, longitude, latitude,
+      latitude - marginDeg, latitude + marginDeg,
+      longitude - marginDeg, longitude + marginDeg,
+    ) as any | undefined;
     if (!row) return null;
-    // Reject if the nearest node is still too far (open ocean beyond graph extent)
     return row.distance <= maxDistanceMeters ? row.id : null;
   }
 
@@ -548,6 +590,7 @@ export class RoutingDatabase {
     let minWidth = Infinity;
     let isFairway = false;
     let dirPenalty = 1;
+    let crossesLand = 0;
 
     for (let i = startIdx; i < endIdx; i++) {
       const edge = this.getEdgeSync(originalPath[i], originalPath[i + 1]);
@@ -558,6 +601,7 @@ export class RoutingDatabase {
         if (edge.min_width >= 0) minWidth = Math.min(minWidth, edge.min_width);
         if (edge.is_fairway) isFairway = true;
         dirPenalty = Math.min(dirPenalty, edge.direction_penalty);
+        if (edge.crosses_land === 1) crossesLand = 1;
       }
     }
 
@@ -571,6 +615,7 @@ export class RoutingDatabase {
       is_fairway: isFairway ? 1 : 0,
       direction_penalty: dirPenalty,
       distance_to_land: 0,
+      crosses_land: crossesLand,
       lat: this.nodes.get(toNode)?.lat || 0,
       lon: this.nodes.get(toNode)?.lon || 0,
     };
@@ -593,7 +638,7 @@ export class RoutingDatabase {
    * because they are known graph nodes already inside water).
    */
   isLineOverWater(lat1: number, lon1: number, lat2: number, lon2: number, numSamples: number): boolean {
-    // Ensure water GeoJSON is loaded (reuse the lazy-load path)
+    // Ensure water GeoJSON and its bbox index are loaded
     if (!this.waterGeojsonPath) {
       const dir = dirname(this.dbPath);
       this.waterGeojsonPath = join(dir, 'coastal_water_polygons.geojson');
@@ -612,8 +657,13 @@ export class RoutingDatabase {
 
     const features: any[] = this.waterGeoJson.features ?? [];
     if (features.length === 0) {
-      // No polygon data — fall back to permissive (let node-proximity decide)
+      // No polygon data — fail-open so node-proximity fallback handles it
       return true;
+    }
+
+    // Build bbox index once (5 floats per feature: minLon, minLat, maxLon, maxLat, idx)
+    if (!this.waterBBoxIndex) {
+      this.waterBBoxIndex = buildWaterBBoxIndex(features);
     }
 
     for (let i = 1; i < numSamples; i++) {
@@ -626,10 +676,33 @@ export class RoutingDatabase {
   }
 
   /**
-   * Ray-casting point-in-polygon test for a GeoJSON feature array.
-   * Handles Polygon and MultiPolygon feature types.
+   * Ray-casting point-in-polygon test against indexed water features.
+   * Uses the pre-built bbox index to skip features that can't contain the point.
    */
   private isPointInAnyPolygon(lat: number, lon: number, features: any[]): boolean {
+    const idx = this.waterBBoxIndex;
+    const STRIDE = 5; // minLon, minLat, maxLon, maxLat, featureIndex
+    if (idx) {
+      const n = idx.length / STRIDE;
+      for (let i = 0; i < n; i++) {
+        const base = i * STRIDE;
+        // Quick bbox rejection
+        if (lon < idx[base] || lon > idx[base + 2] ||
+            lat < idx[base + 1] || lat > idx[base + 3]) continue;
+        const fi = idx[base + 4];
+        const geom = features[fi]?.geometry;
+        if (!geom) continue;
+        if (geom.type === 'Polygon') {
+          if (this.raycastPolygon(lon, lat, geom.coordinates)) return true;
+        } else if (geom.type === 'MultiPolygon') {
+          for (const poly of geom.coordinates) {
+            if (this.raycastPolygon(lon, lat, poly)) return true;
+          }
+        }
+      }
+      return false;
+    }
+    // Fallback (index not built yet)
     for (const f of features) {
       const geom = f.geometry;
       if (!geom) continue;
@@ -673,6 +746,39 @@ export class RoutingDatabase {
 } // end class RoutingDatabase
 
 /**
+ * Build a flat Float64Array bbox index over GeoJSON features for fast spatial rejection.
+ * Layout per feature: [minLon, minLat, maxLon, maxLat, featureIndex] (5 values).
+ * Only Polygon and MultiPolygon features are indexed.
+ */
+function buildWaterBBoxIndex(features: any[]): Float64Array {
+  const STRIDE = 5;
+  const buf = new Float64Array(features.length * STRIDE);
+  let count = 0;
+  for (let fi = 0; fi < features.length; fi++) {
+    const geom = features[fi]?.geometry;
+    if (!geom) continue;
+    const type = geom.type;
+    if (type !== 'Polygon' && type !== 'MultiPolygon') continue;
+    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
+    const polys: number[][][] = type === 'MultiPolygon' ? geom.coordinates.map((p: number[][][]) => p[0]) : [geom.coordinates[0]];
+    for (const ring of polys) {
+      for (const pt of ring) {
+        if (pt[0] < minLon) minLon = pt[0];
+        if (pt[0] > maxLon) maxLon = pt[0];
+        if (pt[1] < minLat) minLat = pt[1];
+        if (pt[1] > maxLat) maxLat = pt[1];
+      }
+    }
+    const base = count * STRIDE;
+    buf[base] = minLon; buf[base + 1] = minLat;
+    buf[base + 2] = maxLon; buf[base + 3] = maxLat;
+    buf[base + 4] = fi;
+    count++;
+  }
+  return buf.subarray(0, count * STRIDE);
+}
+
+/**
  * Check whether a GeoJSON feature's bounding box overlaps a query bounding box.
  */
 function featureIntersectsBBox(
@@ -686,15 +792,35 @@ function featureIntersectsBBox(
   let fMinLat = Infinity, fMaxLat = -Infinity;
   let fMinLon = Infinity, fMaxLon = -Infinity;
 
-  // Polygon -> [ring, ...]; MultiPolygon -> [[ring, ...], ...]
-  const rings = feature.geometry.type === 'MultiPolygon' ? coords.flat() : coords;
-  for (const ring of rings) {
-    for (const pt of ring) {
+  const type = feature.geometry.type;
+  if (type === 'LineString') {
+    for (const pt of coords) {
       const lon = pt[0], lat = pt[1];
       if (lat < fMinLat) fMinLat = lat;
       if (lat > fMaxLat) fMaxLat = lat;
       if (lon < fMinLon) fMinLon = lon;
       if (lon > fMaxLon) fMaxLon = lon;
+    }
+  } else if (type === 'MultiLineString') {
+    for (const line of coords) {
+      for (const pt of line) {
+        const lon = pt[0], lat = pt[1];
+        if (lat < fMinLat) fMinLat = lat;
+        if (lat > fMaxLat) fMaxLat = lat;
+        if (lon < fMinLon) fMinLon = lon;
+        if (lon > fMaxLon) fMaxLon = lon;
+      }
+    }
+  } else {
+    const rings = type === 'MultiPolygon' ? coords.flat() : coords;
+    for (const ring of rings) {
+      for (const pt of ring) {
+        const lon = pt[0], lat = pt[1];
+        if (lat < fMinLat) fMinLat = lat;
+        if (lat > fMaxLat) fMaxLat = lat;
+        if (lon < fMinLon) fMinLon = lon;
+        if (lon > fMaxLon) fMaxLon = lon;
+      }
     }
   }
 

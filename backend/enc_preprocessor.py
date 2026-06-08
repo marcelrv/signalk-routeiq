@@ -28,9 +28,11 @@ class ENCToGeoJSONPreprocessor:
             'LOKBSN': 'locks_polygons.geojson',
             'FAIRWY': 'fairways_polygons.geojson',
             'HRBFAC': 'pois_points.geojson',
-            # We will merge RECTRC and NAVLNE together for inland waterways
-            'RECTRC': 'inland_waterways_lines.geojson', 
-            'NAVLNE': 'inland_waterways_lines.geojson' 
+            # We will merge RECTRC, NAVLNE and WTWAXS (IENC Waterway Axis) together
+            # for inland waterways centerlines
+            'RECTRC': 'inland_waterways_lines.geojson',
+            'NAVLNE': 'inland_waterways_lines.geojson',
+            'WTWAXS': 'inland_waterways_lines.geojson'
         }
 
         # Dictionary to store lists of GeoDataFrames for each output file
