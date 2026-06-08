@@ -93,6 +93,14 @@ export interface PoiResult {
   distance?: number; // meters from search point
 }
 
+// Bounding box for spatial filtering
+export interface BBox {
+  minLat: number;
+  maxLat: number;
+  minLon: number;
+  maxLon: number;
+}
+
 // Plugin configuration
 export interface PluginConfig {
   routingDatabase: string;
@@ -103,6 +111,11 @@ export interface PluginConfig {
   fairwayMultiplier: number;
   openWaterMultiplier: number;
   wrongWayPenalty: number;
+  routingBBoxMargin: number;        // degrees, default 0.1 (~11km)
+  routingBBoxMaxExtent: number;     // degrees, default 10.0
+  lineOfSightSampleInterval: number; // meters, default 500
+  lineOfSightSearchRadius: number;   // meters, default 800
+  averageSpeedKnots: number;        // knots, default 6.0
 }
 
 // Default plugin configuration
@@ -115,4 +128,9 @@ export const DEFAULT_CONFIG: PluginConfig = {
   fairwayMultiplier: 0.8,
   openWaterMultiplier: 1.2,
   wrongWayPenalty: 5.0,
+  routingBBoxMargin: 0.1,
+  routingBBoxMaxExtent: 10.0,
+  lineOfSightSampleInterval: 500,
+  lineOfSightSearchRadius: 800,
+  averageSpeedKnots: 6.0,
 };

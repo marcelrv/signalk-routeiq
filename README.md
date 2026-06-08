@@ -25,13 +25,15 @@ Python pipeline that processes S-57 ENCs and generates a navigable routing graph
 
 **Location**: `backend/`
 
-**Technology**: Python, GDAL/OGR, NetworkX, SQLite
+**Technology**: Python, GDAL/OGR, NetworkX, SQLite, Shapely
 
 **Process**:
 1. Parse S-57 ENC vector data (depth areas, bridges, locks, fairways)
-2. Generate directed graph topology (inland centerlines + coastal navmesh)
+2. Generate directed graph topology (inland centerlines + adaptive-resolution coastal navmesh via quadtree)
 3. Calculate edge attributes (depth, clearance, penalties)
 4. Export to compressed SQLite database
+
+**Key improvement:** The coastal navmesh uses adaptive quadtree subdivision (0.005° in open sea → 0.0002° in narrow channels) so routes follow channels precisely while keeping open-water nodes sparse.
 
 ### Part 2: Signal K Backend Plugin
 Node.js plugin running on the vessel's Signal K server.
@@ -125,6 +127,10 @@ npm start
 | `fairwayMultiplier` | 0.8 | Cost multiplier for fairways |
 | `openWaterMultiplier` | 1.2 | Cost multiplier for open water |
 | `wrongWayPenalty` | 5.0 | Penalty for wrong-way travel |
+| `routingBBoxMargin` | 0.1 | A* bounding-box margin (degrees, ~11km) |
+| `routingBBoxMaxExtent` | 10.0 | Max bounding box before full-graph fallback |
+| `lineOfSightSampleInterval` | 500 | Line-of-sight sample spacing (meters) |
+| `lineOfSightSearchRadius` | 800 | Line-of-sight node search radius (meters) |
 
 ## Routing Algorithm
 
@@ -149,15 +155,15 @@ Cost = Distance × FairwayMultiplier × DirectionalPenalty
 autoroute/
 ├── backend/                 # Part 1: Python data pipeline
 │   ├── enc_preprocessor.py  # S-57 to GeoJSON converter
-│   └── nautical_routing_pipeline.py  # Graph generator
+│   └── nautical_routing_pipeline.py  # Adaptive quadtree graph generator
 ├── public/                  # Part 3: WebApp frontend
 │   ├── index.html
 │   ├── styles.css
 │   └── app.js
 ├── src/                     # Part 2: SignalK plugin
 │   ├── index.ts             # Plugin entry point
-│   ├── database.ts          # SQLite database layer
-│   ├── routing.ts           # A* routing engine
+│   ├── database.ts          # SQLite database layer (spatial grid index)
+│   ├── routing.ts           # A* routing engine with bbox pruning + string-pulling
 │   ├── api.ts               # Express API handlers
 │   ├── gpx-export.ts        # GPX export utilities
 │   └── types.ts             # TypeScript definitions

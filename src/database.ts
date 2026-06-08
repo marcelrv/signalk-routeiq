@@ -5,6 +5,8 @@ interface NodeRow {
   id: number;
   lat: number;
   lon: number;
+  resolution?: number;
+  node_type?: string;
 }
 
 export interface EdgeRow {
@@ -17,6 +19,7 @@ export interface EdgeRow {
   is_fairway: number;
   direction_penalty: number;
   distance_to_land: number;
+  edge_type?: string;
 }
 
 interface PoiRow {
@@ -59,9 +62,7 @@ export class RoutingDatabase {
     this.buildSpatialIndex();
 
     const edges = this.db.prepare(
-      `SELECT e.source, e.target, e.distance, e.min_depth, e.max_air_draft,
-              e.min_width, e.is_fairway, e.direction_penalty, e.distance_to_land,
-              n.lat, n.lon
+      `SELECT e.*, n.lat, n.lon
        FROM edges e
        JOIN nodes n ON e.target = n.id`
     ).all() as unknown as Array<EdgeRow & { lat: number; lon: number }>;

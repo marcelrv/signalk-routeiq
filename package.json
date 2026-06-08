@@ -95,6 +95,37 @@
           "title": "Wrong Way Penalty",
           "description": "Penalty multiplier for traveling against traffic flow",
           "default": 5
+        },
+        "routingBBoxMargin": {
+          "type": "number",
+          "title": "Routing BBox Margin (degrees)",
+          "description": "Initial search bounding-box margin around start/end",
+          "default": 0.1
+        },
+        "routingBBoxMaxExtent": {
+          "type": "number",
+          "title": "Routing BBox Max Extent (degrees)",
+          "description": "Maximum bounding-box size before full graph fallback",
+          "default": 10
+        },
+        "lineOfSightSampleInterval": {
+          "type": "number",
+          "title": "Line-of-Sight Sample Interval (m)",
+          "description": "Spacing between samples when checking line-of-sight for smoothing",
+          "default": 500
+        },
+        "lineOfSightSearchRadius": {
+          "type": "number",
+          "title": "Line-of-Sight Search Radius (m)",
+          "description": "Radius to search for graph nodes when verifying line-of-sight",
+          "default": 800
+        },
+        "averageSpeedKnots": {
+          "type": "number",
+          "title": "Average Speed (knots)",
+          "description": "Average vessel speed used to estimate travel time",
+          "default": 6,
+          "multipleOf": 0.1
         }
       }
     }

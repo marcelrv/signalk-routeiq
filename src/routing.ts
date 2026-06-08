@@ -5,12 +5,31 @@
 
 import { EdgeRow, RoutingDatabase } from './database.js';
 import {
+    BBox,
     PluginConfig,
     RouteResult,
     RouteWarning,
     RoutingRequest,
     VesselDimensions,
 } from './types.js';
+
+function isInsideBBox(lat: number, lon: number, bbox: BBox): boolean {
+  return lat >= bbox.minLat && lat <= bbox.maxLat &&
+         lon >= bbox.minLon && lon <= bbox.maxLon;
+}
+
+function bboxFromPoints(
+  start: { latitude: number; longitude: number },
+  end: { latitude: number; longitude: number },
+  marginDeg: number,
+): BBox {
+  return {
+    minLat: Math.min(start.latitude, end.latitude) - marginDeg,
+    maxLat: Math.max(start.latitude, end.latitude) + marginDeg,
+    minLon: Math.min(start.longitude, end.longitude) - marginDeg,
+    maxLon: Math.max(start.longitude, end.longitude) + marginDeg,
+  };
+}
 
 // A* search state
 interface SearchState {
@@ -105,10 +124,13 @@ export class RoutingEngine {
   }
 
   /**
-   * Calculate a route using directed A* algorithm
+   * Calculate a route using directed A* algorithm with bounding-box pruning.
    * Falls back to partial routing when the route cannot be completed
    * (disconnected components or unreachable due to constraints),
    * returning warnings for teleported segments.
+   *
+   * The bounding box starts tight around start+end (plus margin) and expands
+   * on failure, so short routes are very fast.
    */
   async calculateRoute(request: RoutingRequest): Promise<RouteResult> {
     const { start, end, via = [], minCoastDistance, draft, beam, airDraft } = request;
@@ -135,22 +157,57 @@ export class RoutingEngine {
       if (!startNode) throw new Error(`No routing nodes found near start point`);
       if (!endNode) throw new Error(`No routing nodes found near end point`);
 
-      // Try normal A* routing first
-      try {
-        if (via.length > 0) {
-          return await this.routeViaPoints(start, end, via, coastDistanceMeters);
-        }
-        return await this.astarSearch(
-          start.latitude, start.longitude,
-          end.latitude, end.longitude,
-          coastDistanceMeters
-        );
-      } catch (_aStarErr) {
-        // A* failed — attempt fallback routing
-        return await this.fallbackRoute(
-          startNode, endNode, start, end, coastDistanceMeters, via
-        );
+      // Build bounding box with initial margin, try A* with expansion on failure
+      const bboxWarnings: RouteWarning[] = [];
+
+      if (via.length > 0) {
+        return await this.routeViaPoints(start, end, via, coastDistanceMeters, bboxWarnings);
       }
+      // Fall through for non-via routes (bbox search below)
+
+      // Try A* with expanding bounding box
+      let currentMargin = this.config.routingBBoxMargin;
+      const maxMargin = this.config.routingBBoxMaxExtent;
+
+      while (currentMargin <= maxMargin) {
+        const bbox = bboxFromPoints(start, end, currentMargin);
+
+        try {
+          const result = await this.astarSearch(
+            start.latitude, start.longitude,
+            end.latitude, end.longitude,
+            coastDistanceMeters,
+            bbox,
+          );
+
+          // Success — attach any expansion warnings
+          if (bboxWarnings.length > 0) {
+            result.warnings = [...(result.warnings || []), ...bboxWarnings];
+          }
+          return result;
+        } catch {
+          // Expand bounding box and retry
+          if (currentMargin < maxMargin) {
+            const newMargin = Math.min(currentMargin * 2, maxMargin);
+            if (newMargin > currentMargin) {
+              bboxWarnings.push({
+                type: 'via_constrained',
+                message: `Route search expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box to find a path.`,
+                from: { latitude: start.latitude, longitude: start.longitude },
+                to: { latitude: end.latitude, longitude: end.longitude },
+              });
+            }
+            currentMargin = newMargin;
+          } else {
+            break;
+          }
+        }
+      }
+
+      // All bbox attempts failed — try fallback routing (unconstrained graph)
+      return await this.fallbackRoute(
+        startNode, endNode, start, end, coastDistanceMeters, via,
+      );
     } finally {
       this.vesselDimensions = savedDims;
     }
@@ -166,7 +223,7 @@ export class RoutingEngine {
     start: { latitude: number; longitude: number },
     end: { latitude: number; longitude: number },
     coastDistanceMeters: number,
-    via: Array<{ latitude: number; longitude: number }>
+    _via: Array<{ latitude: number; longitude: number }>
   ): Promise<RouteResult> {
     const warnings: RouteWarning[] = [];
     const reachableFromStart = this.db.getReachableNodes(startNode);
@@ -274,7 +331,8 @@ export class RoutingEngine {
     start: { latitude: number; longitude: number },
     end: { latitude: number; longitude: number },
     via: Array<{ latitude: number; longitude: number }>,
-    coastDistanceMeters: number
+    coastDistanceMeters: number,
+    globalWarnings?: RouteWarning[],
   ): Promise<RouteResult> {
     let currentStart = start;
     const allSegments: RouteResult['features'][0]['properties']['segments'] = [];
@@ -283,11 +341,16 @@ export class RoutingEngine {
 
     for (let i = 0; i < via.length; i++) {
       const nextPoint = via[i];
+      const segmentBbox = bboxFromPoints(
+        currentStart, nextPoint,
+        this.config.routingBBoxMargin,
+      );
       const segmentResult = await this.tryRouteSegment(
         currentStart.latitude, currentStart.longitude,
         nextPoint.latitude, nextPoint.longitude,
         coastDistanceMeters,
-        i, warnings
+        i, warnings,
+        segmentBbox,
       );
       if (!segmentResult) {
         // via point completely unreachable — skip it
@@ -310,11 +373,16 @@ export class RoutingEngine {
       currentStart = nextPoint;
     }
 
+    const finalBbox = bboxFromPoints(
+      currentStart, end,
+      this.config.routingBBoxMargin,
+    );
     const finalResult = await this.tryRouteSegment(
       currentStart.latitude, currentStart.longitude,
       end.latitude, end.longitude,
       coastDistanceMeters,
-      -1, warnings
+      -1, warnings,
+      finalBbox,
     );
 
     if (!finalResult) {
@@ -323,6 +391,8 @@ export class RoutingEngine {
 
     allCoordinates.push(...finalResult.features[0].geometry.coordinates.slice(1));
     allSegments.push(...finalResult.features[0].properties.segments);
+
+    const allWarnings = [...warnings, ...(globalWarnings || [])];
 
     return {
       type: 'FeatureCollection',
@@ -335,30 +405,31 @@ export class RoutingEngine {
           segments: allSegments,
         },
       }],
-      warnings: warnings.length > 0 ? warnings : undefined,
+      warnings: allWarnings.length > 0 ? allWarnings : undefined,
     };
   }
 
   /**
-   * Try routing a segment with full constraints; on failure fall back to
-   * relaxed constraints (zero vessel dimensions, zero coast distance).
-   * Returns null if both attempts fail.
+   * Try routing a segment with full constraints and optional bounding box;
+   * on failure fall back to relaxed constraints (zero vessel dimensions, 
+   * zero coast distance). Returns null if both attempts fail.
    */
   private async tryRouteSegment(
     startLat: number, startLon: number,
     endLat: number, endLon: number,
     coastDistanceMeters: number,
     viaIndex: number,
-    warnings: RouteWarning[]
+    warnings: RouteWarning[],
+    bbox?: BBox,
   ): Promise<RouteResult | null> {
     try {
-      return await this.astarSearch(startLat, startLon, endLat, endLon, coastDistanceMeters);
+      return await this.astarSearch(startLat, startLon, endLat, endLon, coastDistanceMeters, bbox);
     } catch {
       // First attempt failed — try with relaxed constraints
       const savedDims = { ...this.vesselDimensions };
       this.vesselDimensions = { draft: 0, beam: 0, airDraft: 0 };
       try {
-        const relaxed = await this.astarSearch(startLat, startLon, endLat, endLon, 0);
+        const relaxed = await this.astarSearch(startLat, startLon, endLat, endLon, 0, bbox);
         const label = viaIndex >= 0 ? `Via point ${viaIndex + 1}` : 'Destination';
         warnings.push({
           type: 'via_constrained',
@@ -394,14 +465,16 @@ export class RoutingEngine {
   }
 
   /**
-   * Core A* search algorithm with nautical cost function
+   * Core A* search algorithm with nautical cost function.
+   * Optionally constrains search to a bounding box for performance.
    */
   private async astarSearch(
     startLat: number,
     startLon: number,
     endLat: number,
     endLon: number,
-    minCoastDistanceMeters: number
+    minCoastDistanceMeters: number,
+    bbox?: BBox,
   ): Promise<RouteResult> {
     const startNode = await this.db.findNearestNode(startLat, startLon);
     const endNode = await this.db.findNearestNode(endLat, endLon);
@@ -429,6 +502,16 @@ export class RoutingEngine {
     let iterations = 0;
     const maxIterations = 100000; // Safety limit
 
+    // Pre-fetch start node coords for boundary checks
+    const startCoords = await this.db.getNodeById(startNode);
+
+    // Ensure start is inside the bounding box
+    if (bbox && startCoords) {
+      if (!isInsideBBox(startCoords.lat, startCoords.lon, bbox)) {
+        throw new Error('Start node is outside the routing bounding box');
+      }
+    }
+
     while (!openSet.isEmpty() && iterations < maxIterations) {
       iterations++;
       const current = openSet.pop()!;
@@ -452,6 +535,11 @@ export class RoutingEngine {
           continue;
         }
 
+        // Bounding box check — skip nodes outside the box
+        if (bbox && !isInsideBBox(edge.lat, edge.lon, bbox)) {
+          continue;
+        }
+
         // Apply hard safety constraints
         if (!this.isEdgeSafe(edge)) {
           continue;
@@ -471,10 +559,9 @@ export class RoutingEngine {
           gScore.set(edge.target, tentativeG);
           parent.set(edge.target, current.nodeId);
 
-          const edgeCoords = await this.db.getNodeById(edge.target);
           const h = this.haversineDistance(
-            edgeCoords?.lat || 0,
-            edgeCoords?.lon || 0,
+            edge.lat,
+            edge.lon,
             endLat,
             endLon
           );
@@ -695,20 +782,29 @@ export class RoutingEngine {
    * Samples points along the great-circle line and verifies each has a graph node
    * within the search radius. If any sample point has no nearby node, the line
    * likely crosses land or an unmapped area — reject the shortcut.
+   *
+   * Uses configurable sample interval and search radius that adapt to the
+   * local grid resolution.
    */
   private hasLineOfSight(
     lat1: number, lon1: number,
     lat2: number, lon2: number,
-    sampleIntervalMeters: number = 500
   ): boolean {
     const dist = this.haversineDistance(lat1, lon1, lat2, lon2);
-    const numSamples = Math.max(3, Math.ceil(dist / sampleIntervalMeters));
+
+    // Adaptive sample interval: use 20+ samples for short lines, capped at config
+    const sampleInterval = Math.min(
+      this.config.lineOfSightSampleInterval,
+      Math.max(100, dist / 20),
+    );
+    const searchRadius = this.config.lineOfSightSearchRadius;
+    const numSamples = Math.max(3, Math.ceil(dist / sampleInterval));
 
     for (let i = 1; i < numSamples; i++) {
       const t = i / numSamples;
       const lat = lat1 + (lat2 - lat1) * t;
       const lon = lon1 + (lon2 - lon1) * t;
-      if (!this.db.hasNodeWithinRadius(lat, lon, sampleIntervalMeters)) {
+      if (!this.db.hasNodeWithinRadius(lat, lon, searchRadius)) {
         return false;
       }
     }

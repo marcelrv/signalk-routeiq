@@ -149,6 +149,30 @@ export function pluginConstructor(app: ServerAPI) {
             description: 'Penalty multiplier for traveling against traffic flow',
             default: DEFAULT_CONFIG.wrongWayPenalty,
           },
+          routingBBoxMargin: {
+            type: 'number',
+            title: 'Routing BBox Margin (degrees)',
+            description: 'Initial search bounding-box margin around start/end (default 0.1 ≈ 11km)',
+            default: DEFAULT_CONFIG.routingBBoxMargin,
+          },
+          routingBBoxMaxExtent: {
+            type: 'number',
+            title: 'Routing BBox Max Extent (degrees)',
+            description: 'Maximum bounding-box size before falling back to full graph',
+            default: DEFAULT_CONFIG.routingBBoxMaxExtent,
+          },
+          lineOfSightSampleInterval: {
+            type: 'number',
+            title: 'Line-of-Sight Sample Interval (m)',
+            description: 'Spacing between samples when checking line-of-sight for smoothing',
+            default: DEFAULT_CONFIG.lineOfSightSampleInterval,
+          },
+          lineOfSightSearchRadius: {
+            type: 'number',
+            title: 'Line-of-Sight Search Radius (m)',
+            description: 'Radius to search for graph nodes when verifying line-of-sight',
+            default: DEFAULT_CONFIG.lineOfSightSearchRadius,
+          },
         },
       };
     },

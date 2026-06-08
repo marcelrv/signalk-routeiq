@@ -47,8 +47,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   outline: none;
 }
 
-/* ---------- search (top-left) ---------- */
-#search-panel { top: 20px; left: 70px; }
+/* ---------- search (top-center) ---------- */
+#search-panel { top: 20px; left: 50%; transform: translateX(-50%); z-index: 1002; }
 #search-row { display: flex; gap: 6px; }
 #search-input {
   flex: 1;
@@ -87,9 +87,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 }
 .search-result-item:hover { background: rgba(79,148,212,0.25); }
 
-/* ---------- info (below search) ---------- */
-#info-panel { top: 100px; left: 70px; min-width: 240px; }
-#info-panel .info-line {
+/* ---------- route info (inside route pane) ---------- */
+#route-pane-inner .info-line {
   font-size: 12px;
   padding: 3px 0;
   color: #c8dcee;
@@ -97,10 +96,11 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   align-items: center;
   gap: 6px;
 }
-#info-panel .info-line .label { color: #6d96c0; min-width: 48px; }
-#info-panel .info-line .coords { color: #b8d4f0; font-family: 'SF Mono', 'Cascadia Code', monospace; font-size: 11px; }
+#route-pane-inner .info-line .label { color: #6d96c0; min-width: 48px; }
+#route-pane-inner .info-line .coords { color: #b8d4f0; font-family: 'SF Mono', 'Cascadia Code', monospace; font-size: 11px; }
 #clear-btn {
   margin-top: 8px;
+  margin-bottom: 4px;
   background: transparent;
   border: 1px solid rgba(200,70,70,0.55);
   border-radius: 6px;
@@ -190,6 +190,169 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 .export-btn.push-btn { background: #1d7a4a; }
 .export-btn.push-btn:hover { background: #26975b; }
 
+/* ---------- route pane (left side) ---------- */
+#route-pane {
+  top: 20px; left: 70px;
+  width: 300px;
+  bottom: 20px;
+  padding: 14px;
+  transition: width 0.25s ease, padding 0.25s ease, opacity 0.25s ease, border-color 0.25s ease;
+  overflow: visible;
+  display: flex;
+  flex-direction: column;
+  z-index: 999;
+}
+#route-pane.collapsed {
+  width: 0;
+  padding: 14px 0;
+  opacity: 0;
+  border-color: transparent;
+}
+#route-pane.collapsed #route-pane-tab {
+  opacity: 1;
+  pointer-events: auto;
+}
+#route-pane-tab {
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-left: -1px;
+  width: 28px;
+  height: 48px;
+  background: rgba(11, 26, 43, 0.92);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(79, 148, 212, 0.35);
+  border-left: none;
+  border-radius: 0 8px 8px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #5c9bd5;
+  font-size: 12px;
+  user-select: none;
+  transition: background 0.15s, color 0.15s;
+  z-index: 1001;
+}
+#route-pane-tab:hover {
+  background: rgba(31, 99, 145, 0.5);
+  color: #7ab8f0;
+}
+#route-pane-inner {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* route node items */
+.route-node {
+  border-left: 2px solid rgba(79, 148, 212, 0.3);
+  padding: 6px 0 6px 12px;
+  margin: 2px 0;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.12s;
+  border-radius: 0 4px 4px 0;
+}
+.route-node:hover { background: rgba(79, 148, 212, 0.1); }
+.route-node::before {
+  content: '';
+  position: absolute;
+  left: -5px;
+  top: 12px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3b8fd4;
+  border: 2px solid #0b1a2b;
+}
+.route-node.start::before { background: #22c55e; }
+.route-node.dest::before { background: #ef4444; }
+.route-node .node-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #9bb8da;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.route-node .node-label .turn-badge {
+  font-size: 10px;
+  color: #f59e0b;
+  font-weight: 700;
+}
+.route-node .node-coords {
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 11px;
+  color: #b8d4f0;
+  margin-top: 2px;
+}
+.route-node .node-dist {
+  font-size: 11px;
+  color: #6d96c0;
+  margin-top: 1px;
+}
+
+/* leg segment details (expandable) */
+.route-leg {
+  margin: 0 0 2px 14px;
+  font-size: 11px;
+  overflow: hidden;
+  max-height: 0;
+  transition: max-height 0.2s ease, padding 0.2s ease;
+  padding: 0 8px 0 12px;
+  border-left: 1px dashed rgba(79, 148, 212, 0.2);
+}
+.route-leg.expanded {
+  max-height: 200px;
+  padding: 4px 8px 6px 12px;
+}
+.route-leg .leg-stat {
+  display: flex;
+  justify-content: space-between;
+  color: #9bb8da;
+  padding: 1px 0;
+}
+.route-leg .leg-stat .leg-val {
+  color: #b8d4f0;
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+}
+.route-leg .leg-warn {
+  color: #f59e0b;
+  padding: 2px 0;
+  font-style: italic;
+}
+
+/* per-leg warning indicator */
+.route-node.has-warn .node-label::after {
+  content: '⚠';
+  color: #f59e0b;
+  font-size: 12px;
+  margin-left: auto;
+}
+
+/* overall warnings */
+.route-overall-warn {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #f0a0a0;
+}
+.route-overall-warn .warn-title {
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #f07070;
+  margin-bottom: 2px;
+}
+
 /* ---------- status toast ---------- */
 #toast {
   position: absolute;
@@ -219,6 +382,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 }
 .leaflet-touch .leaflet-control-layers, .leaflet-touch .leaflet-bar { border: 0 !important; }
 
+/* route summary travel time */
+#route-summary .time-line { color: #7ab8f0; font-weight: 600; }
+#route-summary .speed-label { color: #5f7a9a; font-size: 10px; }
+
 /* scrollbar */
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -239,18 +406,6 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   <div id="search-results"></div>
 </div>
 
-<!-- Info -->
-<div id="info-panel" class="panel">
-  <div class="panel-title">Route</div>
-  <div id="hint-line" class="info-line" style="color:#9bb8da;font-size:11px;padding-bottom:4px;border-bottom:1px solid rgba(79,148,212,0.2);margin-bottom:4px">
-    Right-click map to set <span id="hint-action" style="color:#7ab8f0;font-weight:600">START</span>
-  </div>
-  <div id="start-info" class="info-line"><span class="label">START</span><span class="coords">—</span></div>
-  <div id="dest-info" class="info-line"><span class="label">DEST</span><span class="coords">—</span></div>
-  <div id="via-info" class="info-line vias"><span class="label">VIAS</span><span class="coords">—</span></div>
-  <button id="clear-btn">Clear Route</button>
-</div>
-
 <!-- Settings -->
 <div id="settings-panel" class="panel">
   <div class="panel-title">Settings</div>
@@ -263,6 +418,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   <div id="url-history-list"></div>
   <label for="min-coast" style="margin-top:10px">Min Coastline Distance (m)</label>
   <input id="min-coast" type="number" value="1000" min="0" step="500" />
+  <label for="avg-speed" style="margin-top:10px">Average Speed (kn)</label>
+  <input id="avg-speed" type="number" value="6" min="0.5" max="60" step="0.5" />
+  <div id="tt-legend" style="font-size:10px;color:#5f7a9a;margin-top:2px">Used to estimate travel time</div>
 
   <label class="debug-toggle" style="margin-top:10px;display:flex;align-items:center;gap:8px;cursor:pointer">
     <input id="debug-cb" type="checkbox" />
@@ -285,6 +443,25 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   <div class="panel-title">Export</div>
   <button class="export-btn" id="gpx-btn">Download GPX</button>
   <button class="export-btn push-btn" id="push-btn">Save to Signal K</button>
+</div>
+
+    <!-- Route Pane (left side, integrated) -->
+<div id="route-pane" class="panel collapsed">
+  <div id="route-pane-tab">▶</div>
+  <div id="route-pane-inner">
+    <div class="panel-title">Route</div>
+    <div id="hint-line" class="info-line" style="color:#9bb8da;font-size:11px;padding-bottom:4px;border-bottom:1px solid rgba(79,148,212,0.2);margin-bottom:4px">
+      Right-click map to set <span id="hint-action" style="color:#7ab8f0;font-weight:600">START</span>
+    </div>
+    <div id="start-info" class="info-line"><span class="label">START</span><span class="coords">—</span></div>
+    <div id="dest-info" class="info-line"><span class="label">DEST</span><span class="coords">—</span></div>
+    <div id="via-info" class="info-line vias"><span class="label">VIAS</span><span class="coords">—</span></div>
+    <button id="clear-btn">Clear Route</button>
+    <div id="route-summary" style="display:none;padding:6px 0 4px;border-top:1px solid rgba(79,148,212,0.15);margin-top:4px;font-size:12px;color:#9bb8da"></div>
+    <div id="route-warnings"></div>
+    <div id="route-nodes"></div>
+    <div id="route-pane-empty" style="color:#6d96c0;font-size:12px;padding:8px 0;text-align:center;display:none">No route loaded.</div>
+  </div>
 </div>
 
 <!-- Toast -->
@@ -347,6 +524,17 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); } catch {}
     return list;
   }
+
+  // ---- persistence ----
+  const SPEED_STORAGE_KEY = 'autoroute_avg_speed';
+  function loadAvgSpeed() {
+    try { const v = localStorage.getItem(SPEED_STORAGE_KEY); if (v) document.getElementById('avg-speed').value = v; } catch {}
+  }
+  function saveAvgSpeed() {
+    try { localStorage.setItem(SPEED_STORAGE_KEY, document.getElementById('avg-speed').value); } catch {}
+  }
+  loadAvgSpeed();
+  document.getElementById('avg-speed').addEventListener('change', saveAvgSpeed);
 
   // ---- state ----
   const state = {
@@ -805,6 +993,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     try {
       renderCustomRoute(state.lastGeoJson);
     } catch (_r) { /* ignore rendering errors */ }
+    renderRoutePane(state.lastGeoJson);
   });
 
   // ---- update info panel ----
@@ -909,6 +1098,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     state.lastGeoJson = null;
     routingControl.setWaypoints([]);
     updateInfo();
+    clearRoutePane();
   });
 
   // ---- synchronise state when LRM waypoints change externally ----
@@ -921,6 +1111,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       state.waypointNext = 'start';
       state.routeLayers.clearLayers();
       state.lastGeoJson = null;
+      clearRoutePane();
     } else {
       if (wpts[0] && wpts[0].latLng)  state.startLatLng = wpts[0].latLng;
       if (wpts.length > 1 && wpts[wpts.length - 1].latLng) state.destLatLng = wpts[wpts.length - 1].latLng;
@@ -1067,6 +1258,282 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       .catch(err => {
         showToast('Push failed: ' + err.message, 'error');
       });
+  });
+
+  // ---- route pane (right sidebar) ----
+  function bearing(lat1, lng1, lat2, lng2) {
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const lat1r = lat1 * Math.PI / 180;
+    const lat2r = lat2 * Math.PI / 180;
+    const y = Math.sin(dLng) * Math.cos(lat2r);
+    const x = Math.cos(lat1r) * Math.sin(lat2r) - Math.sin(lat1r) * Math.cos(lat2r) * Math.cos(dLng);
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  }
+
+  function fmtCoord(lat, lng) {
+    const ns = lat >= 0 ? 'N' : 'S';
+    const ew = lng >= 0 ? 'E' : 'W';
+    return Math.abs(lat).toFixed(4) + '\u00b0' + ns + ', ' + Math.abs(lng).toFixed(4) + '\u00b0' + ew;
+  }
+
+  function computeCumulativeDistances(coords) {
+    const dists = [0];
+    for (let i = 1; i < coords.length; i++) {
+      const p1 = coords[i - 1], p2 = coords[i];
+      const dLat = (p2[1] - p1[1]) * Math.PI / 180;
+      const dLng = (p2[0] - p1[0]) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(p1[1] * Math.PI / 180) * Math.cos(p2[1] * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      dists.push(dists[i - 1] + 6371000 * c);
+    }
+    return dists;
+  }
+
+  function extractMajorNodes(coords) {
+    const cumDist = computeCumulativeDistances(coords);
+    const totalDistKm = cumDist[cumDist.length - 1] / 1000;
+    const threshold = Math.max(15, Math.min(50, 20 + totalDistKm * 0.5));
+
+    if (coords.length < 3) {
+      return coords.map((c, i) => ({
+        index: i, lat: c[1], lng: c[0],
+        cumDistKm: cumDist[i] / 1000, heading: 0, bearingChange: 0, signedChange: 0,
+        isStart: i === 0, isEnd: i === coords.length - 1,
+      }));
+    }
+
+    // Compute bearing + signed change at each inner point
+    const candidates = [];
+    for (let i = 1; i < coords.length - 1; i++) {
+      const prev = coords[i - 1], curr = coords[i], next = coords[i + 1];
+      const b1 = bearing(prev[1], prev[0], curr[1], curr[0]);
+      const b2 = bearing(curr[1], curr[0], next[1], next[0]);
+      let signed = b2 - b1;
+      if (signed > 180) signed -= 360;
+      if (signed <= -180) signed += 360;
+      candidates.push({ index: i, bearingChange: Math.abs(signed), signedChange: signed, lat: curr[1], lng: curr[0] });
+    }
+
+    // Keep nodes with bearing change above threshold
+    const keptIdx = [0];
+    for (const c of candidates) {
+      if (c.bearingChange > threshold) keptIdx.push(c.index);
+    }
+    keptIdx.push(coords.length - 1);
+
+    // Enforce max 15 nodes by removing weakest turns (protect start/end)
+    const MAX_NODES = 15;
+    if (keptIdx.length > MAX_NODES) {
+      const removable = keptIdx.slice(1, -1).map(idx => {
+        const c = candidates.find(c => c.index === idx);
+        return { index: idx, score: c ? c.bearingChange : 0 };
+      });
+      removable.sort((a, b) => a.score - b.score);
+      const toRemove = new Set(removable.slice(0, keptIdx.length - MAX_NODES).map(r => r.index));
+      const filtered = [0];
+      for (let i = 1; i < keptIdx.length - 1; i++) {
+        if (!toRemove.has(keptIdx[i])) filtered.push(keptIdx[i]);
+      }
+      filtered.push(coords.length - 1);
+      keptIdx.length = 0;
+      keptIdx.push(...filtered);
+    }
+
+    // Build result
+    return keptIdx.map((idx, i) => {
+      const prevIdx = i > 0 ? keptIdx[i - 1] : null;
+      let hdg = 0;
+      if (prevIdx !== null) {
+        hdg = bearing(coords[prevIdx][1], coords[prevIdx][0], coords[idx][1], coords[idx][0]);
+      }
+      const c = candidates.find(c => c.index === idx);
+      return {
+        index: idx, lat: coords[idx][1], lng: coords[idx][0],
+        cumDistKm: cumDist[idx] / 1000, heading: hdg,
+        bearingChange: c ? c.bearingChange : 0,
+        signedChange: c ? c.signedChange : 0,
+        isStart: idx === 0, isEnd: idx === coords.length - 1,
+      };
+    });
+  }
+
+  function mapSegmentsToCoordRanges(segments) {
+    // Each segment corresponds to exactly one coordinate interval:
+    // segment[i] connects coordinates[i] → coordinates[i+1]
+    return segments.map((seg, i) => ({
+      startIdx: i,
+      endIdx: i + 1,
+      distance: seg.distance,
+      minDepth: seg.minDepth,
+      maxAirDraft: seg.maxAirDraft,
+      minWidth: seg.minWidth,
+      isFairway: seg.isFairway,
+    }));
+  }
+
+  function getSegmentsForLeg(segRanges, fromIdx, toIdx) {
+    return segRanges.filter(sr => sr.startIdx <= toIdx && sr.endIdx >= fromIdx);
+  }
+
+  function renderRoutePane(geoJson) {
+    const pane = document.getElementById('route-pane');
+    const emptyEl = document.getElementById('route-pane-empty');
+    const warningsEl = document.getElementById('route-warnings');
+    const nodesEl = document.getElementById('route-nodes');
+
+    if (!geoJson) { clearRoutePane(); return; }
+
+    let coords = [];
+    if (geoJson.type === 'FeatureCollection' && Array.isArray(geoJson.features)) {
+      for (const f of geoJson.features) coords = coords.concat(extractCoords(f.geometry));
+    } else if (geoJson.type === 'Feature') {
+      coords = extractCoords(geoJson.geometry);
+    } else {
+      coords = extractCoords(geoJson);
+    }
+    if (coords.length < 2) { clearRoutePane(); return; }
+
+    const feature = geoJson.features && geoJson.features[0];
+    const props = feature && feature.properties;
+    const segments = (props && props.segments) || [];
+    const totalDistM = props ? props.totalDistance : 0;
+    const nodes = extractMajorNodes(coords);
+    const segRanges = mapSegmentsToCoordRanges(segments);
+
+    // Overall warnings
+    warningsEl.innerHTML = '';
+    const overallWarnings = geoJson.warnings || [];
+    for (const w of overallWarnings) {
+      const div = document.createElement('div');
+      div.className = 'route-overall-warn';
+      div.innerHTML = '<div class="warn-title">' + w.type.replace(/_/g, ' ') + '</div>' + w.message;
+      warningsEl.appendChild(div);
+    }
+
+    // Total distance summary
+    const summaryEl = document.getElementById('route-summary');
+    if (summaryEl && totalDistM > 0) {
+      const totalKm = totalDistM / 1000;
+      const totalNm = totalKm / 1.852;
+      const speedKn = parseFloat(document.getElementById('avg-speed').value) || 6;
+      const timeH = speedKn > 0 ? totalNm / speedKn : 0;
+      const hours = Math.floor(timeH);
+      const mins = Math.round((timeH - hours) * 60);
+      let timeStr = '';
+      if (hours > 0) timeStr += hours + ' hr ';
+      timeStr += mins + ' min';
+
+      summaryEl.style.display = 'block';
+      const distStr = totalKm >= 100
+        ? totalNm.toFixed(1) + ' NM  (' + totalKm.toFixed(0) + ' km)'
+        : totalKm.toFixed(1) + ' km  (' + totalDistM.toFixed(0) + ' m)';
+      summaryEl.innerHTML = 'Total: ' + distStr + '<br><span class="time-line">\u23f1 ' + timeStr + '</span> <span class="speed-label">@ ' + speedKn.toFixed(1) + ' kn</span>';
+    } else if (summaryEl) {
+      summaryEl.style.display = 'none';
+    }
+
+    // Nodes + legs
+    nodesEl.innerHTML = '';
+    if (emptyEl) emptyEl.style.display = 'none';
+
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      const isLast = i === nodes.length - 1;
+
+      const nodeDiv = document.createElement('div');
+      nodeDiv.className = 'route-node';
+      if (node.isStart) nodeDiv.classList.add('start');
+      if (node.isEnd) nodeDiv.classList.add('dest');
+
+      let label = '';
+      if (node.isStart) label = 'Start';
+      else if (node.isEnd) label = 'Destination';
+      else label = 'Turn ' + i;
+
+      let badgeHtml = '';
+      if (!node.isStart && !node.isEnd && node.bearingChange > 0) {
+        const dir = node.signedChange >= 0 ? 'R' : 'L';
+        badgeHtml = ' <span class="turn-badge">' + Math.round(node.bearingChange) + '\u00b0 ' + dir + '</span>';
+      }
+
+      nodeDiv.innerHTML =
+        '<div class="node-label">' + label + badgeHtml + '</div>' +
+        '<div class="node-coords">' + fmtCoord(node.lat, node.lng) + '</div>' +
+        '<div class="node-dist">\u25b8 ' + node.cumDistKm.toFixed(1) + ' km' +
+          (node.heading ? ' \u2192 ' + Math.round(node.heading) + '\u00b0' : '') +
+        '</div>';
+
+      nodesEl.appendChild(nodeDiv);
+
+      // Leg between this node and next
+      if (!isLast) {
+        const nextNode = nodes[i + 1];
+        const legSegs = getSegmentsForLeg(segRanges, node.index, nextNode.index);
+        const legDiv = document.createElement('div');
+        legDiv.className = 'route-leg';
+        legDiv.dataset.nodeFrom = i;
+
+        const legWarnings = [];
+
+        if (legSegs.length > 0) {
+          let minDepth = Infinity, minWidth = Infinity, maxAirDraft = Infinity;
+          let legDist = 0;
+          for (const s of legSegs) {
+            if (s.minDepth !== null && s.minDepth !== undefined && s.minDepth >= 0) minDepth = Math.min(minDepth, s.minDepth);
+            if (s.minWidth !== null && s.minWidth !== undefined && s.minWidth >= 0) minWidth = Math.min(minWidth, s.minWidth);
+            if (s.maxAirDraft !== null && s.maxAirDraft !== undefined && s.maxAirDraft >= 0) maxAirDraft = Math.min(maxAirDraft, s.maxAirDraft);
+            legDist += s.distance;
+            if (s.minDepth >= 0 && s.minDepth < 2.5) legWarnings.push('Shallow (' + s.minDepth.toFixed(1) + 'm)');
+            if (s.minWidth >= 0 && s.minWidth < 6) legWarnings.push('Narrow (' + s.minWidth.toFixed(1) + 'm)');
+          }
+
+          let html = '<div class="leg-stat"><span>Distance</span><span class="leg-val">' + legDist.toFixed(0) + ' m</span></div>';
+          if (minDepth !== Infinity) html += '<div class="leg-stat"><span>Min Depth</span><span class="leg-val">' + minDepth.toFixed(1) + ' m</span></div>';
+          if (minWidth !== Infinity) html += '<div class="leg-stat"><span>Min Width</span><span class="leg-val">' + minWidth.toFixed(1) + ' m</span></div>';
+          if (maxAirDraft !== Infinity) html += '<div class="leg-stat"><span>Max Air Draft</span><span class="leg-val">' + maxAirDraft.toFixed(1) + ' m</span></div>';
+
+          const unique = [...new Set(legWarnings)];
+          for (const w of unique) html += '<div class="leg-warn">\u26a0 ' + w + '</div>';
+
+          legDiv.innerHTML = html;
+        } else {
+          legDiv.innerHTML = '<div class="leg-stat" style="color:#6d96c0">— no segment data —</div>';
+        }
+        nodesEl.appendChild(legDiv);
+
+        if (legWarnings.length > 0) nodeDiv.classList.add('has-warn');
+      }
+    }
+
+    // Expand pane + auto-expand first warned leg
+    pane.classList.remove('collapsed');
+    document.getElementById('route-pane-tab').textContent = '\u25c0';
+    const firstWarnLeg = nodesEl.querySelector('.route-node.has-warn + .route-leg');
+    if (firstWarnLeg) firstWarnLeg.classList.add('expanded');
+  }
+
+  function clearRoutePane() {
+    document.getElementById('route-warnings').innerHTML = '';
+    document.getElementById('route-nodes').innerHTML = '';
+    const emptyEl = document.getElementById('route-pane-empty');
+    if (emptyEl) emptyEl.style.display = '';
+  }
+
+  // ---- click node to expand/collapse leg details ----
+  document.getElementById('route-nodes').addEventListener('click', function (e) {
+    const nodeEl = e.target.closest('.route-node');
+    if (!nodeEl) return;
+    const nextEl = nodeEl.nextElementSibling;
+    if (nextEl && nextEl.classList.contains('route-leg')) {
+      nextEl.classList.toggle('expanded');
+    }
+  });
+
+  // ---- collapse toggle ----
+  document.getElementById('route-pane-tab').addEventListener('click', function () {
+    const pane = document.getElementById('route-pane');
+    pane.classList.toggle('collapsed');
+    this.textContent = pane.classList.contains('collapsed') ? '\u25b6' : '\u25c0';
   });
 
   // ---- expose state for debugging ----
