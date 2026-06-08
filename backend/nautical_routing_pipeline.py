@@ -337,7 +337,7 @@ class NauticalRoutingPipeline:
         # Trigger lazy R-tree build before forking (COW share)
         _ = coastal_gdf.sindex
 
-        num_workers = min(8, len(x_coarse))
+        num_workers = max(1, min(int(mp.cpu_count() * 0.8), len(x_coarse)))
         cols_per_worker = max(1, len(x_coarse) // num_workers)
 
         with mp.Pool(num_workers, initializer=_coarse_scan_init,
@@ -625,7 +625,7 @@ class NauticalRoutingPipeline:
         logger.info("Calculating advanced edge attributes (multiprocessing)...")
 
         total_edges = self.graph.number_of_edges()
-        num_workers = min(8, max(1, (total_edges + 999) // 1000))
+        num_workers = max(1, min(int(mp.cpu_count() * 0.8), (total_edges + 999) // 1000))
 
         # Collect all edges into a flat list for chunking
         edge_tuples = []
