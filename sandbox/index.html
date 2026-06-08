@@ -247,6 +247,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   </div>
   <div id="start-info" class="info-line"><span class="label">START</span><span class="coords">—</span></div>
   <div id="dest-info" class="info-line"><span class="label">DEST</span><span class="coords">—</span></div>
+  <div id="via-info" class="info-line vias"><span class="label">VIAS</span><span class="coords">—</span></div>
   <button id="clear-btn">Clear Route</button>
 </div>
 
@@ -356,8 +357,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     latestRoute:  null,       // stored from LRM 'routesfound' event
     startMarker:  null,
     destMarker:   null,
+    viaMarkers:   [],
     routeLayers:  null,
     lastGeoJson:  null,
+    viaPoints:    [],
   };
 
   const map = L.map('map', {
@@ -372,8 +375,15 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   }).addTo(map);
 
   // ---- custom markers layer ----
-  const routeLayers = L.layerGroup().addTo(map);
+  const routeLayers = L.featureGroup().addTo(map);
   state.routeLayers = routeLayers;
+
+  routeLayers.on('click', function (e) {
+    if (state.startLatLng && state.destLatLng) {
+      state.viaPoints.push(e.latlng);
+      applyWaypoints();
+    }
+  });
 
   const startIcon = L.divIcon({
     className: '',
@@ -387,6 +397,14 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     iconSize: [32, 32],
     iconAnchor: [16, 16],
   });
+  function makeViaIcon(n) {
+    return L.divIcon({
+      className: '',
+      html: '<div style="width:28px;height:28px;background:#8b5cf6;border:3px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;color:#fff;box-shadow:0 2px 6px rgba(0,0,0,.4)">' + n + '</div>',
+      iconSize: [28, 28],
+      iconAnchor: [14, 14],
+    });
+  }
 
   // ---- URL history dropdown ----
   const urlInput = document.getElementById('api-url');
@@ -793,6 +811,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       state.startLatLng ? fmtLatLng(state.startLatLng) : '—';
     document.getElementById('dest-info').querySelector('.coords').textContent =
       state.destLatLng ? fmtLatLng(state.destLatLng) : '—';
+    document.getElementById('via-info').querySelector('.coords').textContent =
+      state.viaPoints.length ? state.viaPoints.length + ' via point(s)' : '—';
     document.getElementById('hint-action').textContent =
       state.waypointNext === 'start' ? 'START' : 'DESTINATION';
   }
@@ -805,13 +825,43 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   function updateMarkers() {
     if (state.startMarker) { map.removeLayer(state.startMarker); state.startMarker = null; }
     if (state.destMarker) { map.removeLayer(state.destMarker); state.destMarker = null; }
-    if (state.startLatLng) state.startMarker = L.marker(state.startLatLng, { icon: startIcon }).addTo(map);
-    if (state.destLatLng) state.destMarker = L.marker(state.destLatLng, { icon: destIcon }).addTo(map);
+    for (const m of state.viaMarkers) map.removeLayer(m);
+    state.viaMarkers = [];
+
+    if (state.startLatLng) {
+      state.startMarker = L.marker(state.startLatLng, { icon: startIcon, draggable: true }).addTo(map);
+      state.startMarker.on('dragend', function () {
+        state.startLatLng = this.getLatLng();
+        applyWaypoints();
+      });
+    }
+    if (state.destLatLng) {
+      state.destMarker = L.marker(state.destLatLng, { icon: destIcon, draggable: true }).addTo(map);
+      state.destMarker.on('dragend', function () {
+        state.destLatLng = this.getLatLng();
+        applyWaypoints();
+      });
+    }
+    state.viaPoints.forEach(function (ll, i) {
+      const m = L.marker(ll, { icon: makeViaIcon(i + 1), draggable: true }).addTo(map);
+      m.on('dragend', function () {
+        state.viaPoints[state.viaMarkers.indexOf(this)] = this.getLatLng();
+        applyWaypoints();
+      });
+      m.on('contextmenu', function (e) {
+        L.DomEvent.stopPropagation(e);
+        const idx = state.viaMarkers.indexOf(this);
+        if (idx !== -1) state.viaPoints.splice(idx, 1);
+        applyWaypoints();
+      });
+      state.viaMarkers.push(m);
+    });
   }
 
   function applyWaypoints() {
     const pts = [];
     if (state.startLatLng) pts.push(state.startLatLng);
+    for (const v of state.viaPoints) pts.push(v);
     if (state.destLatLng)  pts.push(state.destLatLng);
     if (pts.length >= 2) {
       routingControl.setWaypoints(pts);
@@ -847,9 +897,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   document.getElementById('clear-btn').addEventListener('click', function () {
     state.startLatLng = null;
     state.destLatLng  = null;
+    state.viaPoints = [];
     state.waypointNext = 'start';
     if (state.startMarker) { map.removeLayer(state.startMarker); state.startMarker = null; }
     if (state.destMarker) { map.removeLayer(state.destMarker); state.destMarker = null; }
+    for (const m of state.viaMarkers) map.removeLayer(m);
+    state.viaMarkers = [];
     state.routeLayers.clearLayers();
     state.lastGeoJson = null;
     routingControl.setWaypoints([]);
@@ -862,6 +915,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     if (wpts.length === 0) {
       state.startLatLng = null;
       state.destLatLng  = null;
+      state.viaPoints = [];
       state.waypointNext = 'start';
       state.routeLayers.clearLayers();
       state.lastGeoJson = null;
