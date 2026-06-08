@@ -326,6 +326,16 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   font-style: italic;
 }
 
+/* highlighted leg/node (bidirectional hover) */
+.route-node.highlighted {
+  background: rgba(59, 143, 212, 0.2);
+  border-left-color: #3b8fd4;
+}
+.route-leg.highlighted {
+  background: rgba(59, 143, 212, 0.08);
+  border-left-color: #5c9bd5;
+}
+
 /* per-leg warning indicator */
 .route-node.has-warn .node-label::after {
   content: '⚠';
@@ -591,6 +601,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     routeLayers:  null,
     lastGeoJson:  null,
     viaPoints:    [],
+    routeSegments: [],        // { polyline, startIdx, endIdx, isWarning, originalStyle }
+    startPoiName: '',         // POI name when start was set via search
+    destPoiName: '',          // POI name when destination was set via search
+    routeName:    '',         // computed route name for display/export
   };
 
   const map = L.map('map', {
@@ -867,6 +881,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       state.startLatLng = L.latLng(lat, lng);
       state.waypointNext = 'dest';
       map.setView([lat, lng], map.getZoom());
+      lookupNearestPoi(lat, lng, 'start');
       applyWaypoints();
       showToast('Start set to vessel position', 'success');
     }
@@ -1066,8 +1081,55 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     return minI;
   }
 
+  function highlightMapByCoordRange(fromIdx, toIdx) {
+    clearMapHighlight();
+    for (const seg of state.routeSegments) {
+      if (seg.startIdx <= toIdx && seg.endIdx >= fromIdx) {
+        seg.polyline.setStyle({ weight: 7, opacity: 1.0 });
+      }
+    }
+  }
+
+  function clearMapHighlight() {
+    for (const seg of state.routeSegments) {
+      seg.polyline.setStyle(seg.originalStyle);
+    }
+  }
+
+  function highlightPaneByCoordRange(fromIdx, toIdx) {
+    clearPaneHighlight();
+    document.querySelectorAll('#route-nodes .route-leg').forEach(function (el) {
+      const f = parseInt(el.dataset.coordFrom, 10);
+      const t = parseInt(el.dataset.coordTo, 10);
+      if (f <= toIdx && t >= fromIdx) {
+        el.classList.add('highlighted');
+        const prev = el.previousElementSibling;
+        if (prev && prev.classList.contains('route-node')) prev.classList.add('highlighted');
+      }
+    });
+  }
+
+  function clearPaneHighlight() {
+    document.querySelectorAll('#route-nodes .route-leg.highlighted').forEach(function (el) { el.classList.remove('highlighted'); });
+    document.querySelectorAll('#route-nodes .route-node.highlighted').forEach(function (el) { el.classList.remove('highlighted'); });
+  }
+
+  function clearBothHighlights() {
+    clearMapHighlight();
+    clearPaneHighlight();
+  }
+
+  function addPolylineHoverHandlers(polyline, fromIdx, toIdx) {
+    polyline.on('mouseover', function () {
+      highlightMapByCoordRange(fromIdx, toIdx);
+      highlightPaneByCoordRange(fromIdx, toIdx);
+    });
+    polyline.on('mouseout', clearBothHighlights);
+  }
+
   function renderCustomRoute(geoJson) {
     state.routeLayers.clearLayers();
+    state.routeSegments = [];
     if (!geoJson) return;
 
     const warnings = geoJson.warnings || [];
@@ -1084,9 +1146,21 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     if (coords.length < 2) return;
 
     const latLngs = coords.map(c => L.latLng(c[1], c[0]));
+    const totalLen = coords.length;
 
     if (warnings.length === 0) {
-      L.polyline(latLngs, { color: '#3b8fd4', opacity: 0.9, weight: 4 }).addTo(state.routeLayers);
+      const nodes = extractMajorNodes(coords);
+      const style = { color: '#3b8fd4', opacity: 0.9, weight: 4 };
+      for (let i = 0; i < nodes.length - 1; i++) {
+        const fromIdx = nodes[i].index;
+        const toIdx = nodes[i + 1].index;
+        const seg = latLngs.slice(fromIdx, toIdx + 1);
+        if (seg.length < 2) continue;
+        const polyline = L.polyline(seg, style).addTo(state.routeLayers);
+        state.routeSegments.push({ polyline, startIdx: fromIdx, endIdx: toIdx, isWarning: false, originalStyle: style });
+        addPolylineHoverHandlers(polyline, fromIdx, toIdx);
+      }
+      state.routeLayers.bringToFront();
       return;
     }
 
@@ -1106,10 +1180,13 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       if (w !== inWarn) {
         const seg = latLngs.slice(segStart, i + 1);
         if (seg.length >= 2) {
-          L.polyline(seg, inWarn
+          const isWarn = inWarn;
+          const style = isWarn
             ? { color: '#f59e0b', opacity: 0.9, weight: 4, dashArray: '8, 6' }
-            : { color: '#3b8fd4', opacity: 0.9, weight: 4 }
-          ).addTo(state.routeLayers);
+            : { color: '#3b8fd4', opacity: 0.9, weight: 4 };
+          const polyline = L.polyline(seg, style).addTo(state.routeLayers);
+          state.routeSegments.push({ polyline, startIdx: segStart, endIdx: i, isWarning: isWarn, originalStyle: style });
+          addPolylineHoverHandlers(polyline, segStart, i);
         }
         segStart = i;
         inWarn = w;
@@ -1117,11 +1194,15 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     }
     const seg = latLngs.slice(segStart);
     if (seg.length >= 2) {
-      L.polyline(seg, inWarn
+      const isWarn = inWarn;
+      const style = isWarn
         ? { color: '#f59e0b', opacity: 0.9, weight: 4, dashArray: '8, 6' }
-        : { color: '#3b8fd4', opacity: 0.9, weight: 4 }
-      ).addTo(state.routeLayers);
+        : { color: '#3b8fd4', opacity: 0.9, weight: 4 };
+      const polyline = L.polyline(seg, style).addTo(state.routeLayers);
+      state.routeSegments.push({ polyline, startIdx: segStart, endIdx: totalLen - 1, isWarning: isWarn, originalStyle: style });
+      addPolylineHoverHandlers(polyline, segStart, totalLen - 1);
     }
+    state.routeLayers.bringToFront();
   }
 
   function makeSimpleInstructions(latLngs, originalWpts) {
@@ -1163,14 +1244,19 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       renderCustomRoute(state.lastGeoJson);
     } catch (_r) { /* ignore rendering errors */ }
     renderRoutePane(state.lastGeoJson);
+    updateInfo();
   });
 
   // ---- update info panel ----
   function updateInfo() {
-    document.getElementById('start-info').querySelector('.coords').textContent =
-      state.startLatLng ? fmtLatLng(state.startLatLng) : '—';
-    document.getElementById('dest-info').querySelector('.coords').textContent =
-      state.destLatLng ? fmtLatLng(state.destLatLng) : '—';
+    const fmtStart = state.startLatLng
+      ? (state.startPoiName ? state.startPoiName + '  ·  ' : '') + fmtLatLng(state.startLatLng)
+      : '—';
+    const fmtDest = state.destLatLng
+      ? (state.destPoiName ? state.destPoiName + '  ·  ' : '') + fmtLatLng(state.destLatLng)
+      : '—';
+    document.getElementById('start-info').querySelector('.coords').textContent = fmtStart;
+    document.getElementById('dest-info').querySelector('.coords').textContent = fmtDest;
     document.getElementById('via-info').querySelector('.coords').textContent =
       state.viaPoints.length ? state.viaPoints.length + ' via point(s)' : '—';
     document.getElementById('hint-action').textContent =
@@ -1192,6 +1278,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       state.startMarker = L.marker(state.startLatLng, { icon: startIcon, draggable: true }).addTo(map);
       state.startMarker.on('dragend', function () {
         state.startLatLng = this.getLatLng();
+        state.startPoiName = '';
         applyWaypoints();
       });
     }
@@ -1199,6 +1286,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       state.destMarker = L.marker(state.destLatLng, { icon: destIcon, draggable: true }).addTo(map);
       state.destMarker.on('dragend', function () {
         state.destLatLng = this.getLatLng();
+        state.destPoiName = '';
         applyWaypoints();
       });
     }
@@ -1232,6 +1320,25 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     updateInfo();
   }
 
+  // ---- look up nearest POI for naming ----
+  function lookupNearestPoi(lat, lng, endpoint) {
+    const url = getApiBase() + '/signalk/v1/api/router/poi/nearest?lat=' + lat.toFixed(6) + '&lon=' + lng.toFixed(6) + '&radius=250';
+    fetch(url)
+      .then(function (r) {
+        if (r.status === 404) console.warn('[POI] endpoint not found');
+        return r.ok ? r.json() : null;
+      })
+      .then(function (data) {
+        if (data && data.poi) {
+          if (endpoint === 'start') state.startPoiName = data.poi.name;
+          else state.destPoiName = data.poi.name;
+          updateRouteTitle();
+          updateInfo();
+        }
+      })
+      .catch(function (err) { console.warn('[POI] lookup error:', err); });
+  }
+
   // ---- right-click: set start / dest ----
   map.on('contextmenu', function (e) {
     if (e.originalEvent) e.originalEvent.preventDefault();
@@ -1239,10 +1346,14 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
     if (state.waypointNext === 'start') {
       state.startLatLng = ll;
+      state.startPoiName = '';
       state.waypointNext = 'dest';
+      lookupNearestPoi(ll.lat, ll.lng, 'start');
     } else {
       state.destLatLng = ll;
+      state.destPoiName = '';
       state.waypointNext = 'start';
+      lookupNearestPoi(ll.lat, ll.lng, 'dest');
     }
 
     applyWaypoints();
@@ -1257,6 +1368,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   document.getElementById('clear-btn').addEventListener('click', function () {
     state.startLatLng = null;
     state.destLatLng  = null;
+    state.startPoiName = '';
+    state.destPoiName = '';
+    state.routeName = '';
     state.viaPoints = [];
     state.waypointNext = 'start';
     if (state.startMarker) { map.removeLayer(state.startMarker); state.startMarker = null; }
@@ -1333,8 +1447,16 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           div.addEventListener('click', function () {
             if (pos) {
               map.setView([pos.lat, pos.lng], 12);
-              state.destLatLng = L.latLng(pos.lat, pos.lng);
-              state.waypointNext = 'start';
+              const ll = L.latLng(pos.lat, pos.lng);
+              if (state.waypointNext === 'start') {
+                state.startLatLng = ll;
+                state.startPoiName = name;
+                state.waypointNext = 'dest';
+              } else {
+                state.destLatLng = ll;
+                state.destPoiName = name;
+                state.waypointNext = 'start';
+              }
               applyWaypoints();
             }
             resultsEl.style.display = 'none';
@@ -1380,8 +1502,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       showToast('No route to export — calculate a route first', 'error');
       return;
     }
+    const routeName = state.routeName || 'Autoroute';
     showToast('Downloading GPX…', '');
-    const body = { route: lrmRouteToGeoJson(state.latestRoute, 'Autoroute'), name: 'Autoroute' };
+    const body = { route: lrmRouteToGeoJson(state.latestRoute, routeName), name: routeName };
     logDebug('GPX', gpxUrl(), body);
     fetch(gpxUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(r => {
@@ -1394,7 +1517,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         const url  = URL.createObjectURL(blob);
         const a    = document.createElement('a');
         a.href     = url;
-        a.download = 'route.gpx';
+        a.download = routeName.replace(/[^a-z0-9\-_ ]/gi, '_') + '.gpx';
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -1412,8 +1535,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       showToast('No route to save — calculate a route first', 'error');
       return;
     }
+    const routeName = state.routeName || 'Autoroute Route';
     showToast('Saving route to Signal K…', '');
-    const body = { route: lrmRouteToGeoJson(state.latestRoute, 'Autoroute Route'), name: 'Autoroute Route' };
+    const body = { route: lrmRouteToGeoJson(state.latestRoute, routeName), name: routeName };
     logDebug('PUSH', pushUrl(), body);
     fetch(pushUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(r => {
@@ -1640,6 +1764,13 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           (node.heading ? ' \u2192 ' + Math.round(node.heading) + '\u00b0' : '') +
         '</div>';
 
+      // For hover highlighting: store the coord range of the following leg
+      if (!isLast) {
+        const nextNode = nodes[i + 1];
+        nodeDiv.dataset.coordFrom = node.index;
+        nodeDiv.dataset.coordTo = nextNode.index;
+      }
+
       nodesEl.appendChild(nodeDiv);
 
       // Leg between this node and next
@@ -1648,19 +1779,28 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         const legSegs = getSegmentsForLeg(segRanges, node.index, nextNode.index);
         const legDiv = document.createElement('div');
         legDiv.className = 'route-leg';
-        legDiv.dataset.nodeFrom = i;
+        legDiv.dataset.coordFrom = node.index;
+        legDiv.dataset.coordTo = nextNode.index;
 
         const legWarnings = [];
 
         if (legSegs.length > 0) {
-          let minDepth = Infinity, minWidth = Infinity, maxAirDraft = Infinity;
+    let minDepth = Infinity, minWidth = Infinity, maxAirDraft = Infinity;
           let legDist = 0;
+          
+          // Get the current vessel draft from the UI panel, fallback to 2.0m
+          const draftStr = document.getElementById('boat-draft').querySelector('.value').textContent;
+          const vesselDraft = parseFloat(draftStr) || 2.0;
+          const shallowThreshold = vesselDraft + 0.3; // Warn if clearance is less than 30cm
+
           for (const s of legSegs) {
             if (s.minDepth !== null && s.minDepth !== undefined && s.minDepth >= 0) minDepth = Math.min(minDepth, s.minDepth);
             if (s.minWidth !== null && s.minWidth !== undefined && s.minWidth >= 0) minWidth = Math.min(minWidth, s.minWidth);
             if (s.maxAirDraft !== null && s.maxAirDraft !== undefined && s.maxAirDraft >= 0) maxAirDraft = Math.min(maxAirDraft, s.maxAirDraft);
             legDist += s.distance;
-            if (s.minDepth >= 0 && s.minDepth < 2.5) legWarnings.push('Shallow (' + s.minDepth.toFixed(1) + 'm)');
+            
+            // CRITICAL FIX: Only warn if the depth is actually dangerous for THIS vessel
+            if (s.minDepth >= 0 && s.minDepth < shallowThreshold) legWarnings.push('Shallow (' + s.minDepth.toFixed(1) + 'm)');
             if (s.minWidth >= 0 && s.minWidth < 6) legWarnings.push('Narrow (' + s.minWidth.toFixed(1) + 'm)');
           }
 
@@ -1687,6 +1827,28 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     document.getElementById('route-pane-tab').textContent = '\u25c0';
     const firstWarnLeg = nodesEl.querySelector('.route-node.has-warn + .route-leg');
     if (firstWarnLeg) firstWarnLeg.classList.add('expanded');
+
+    updateRouteTitle();
+  }
+
+  function updateRouteTitle() {
+    const titleEl = document.querySelector('#route-pane-inner .panel-title');
+    if (!titleEl) return;
+    const sn = state.startPoiName;
+    const dn = state.destPoiName;
+    if (sn && dn) {
+      state.routeName = sn + ' → ' + dn;
+      titleEl.textContent = sn + ' → ' + dn;
+    } else if (dn) {
+      state.routeName = 'Route to ' + dn;
+      titleEl.textContent = 'Route to ' + dn;
+    } else if (sn) {
+      state.routeName = 'From ' + sn;
+      titleEl.textContent = 'From ' + sn;
+    } else {
+      state.routeName = '';
+      titleEl.textContent = 'Route';
+    }
   }
 
   function clearRoutePane() {
@@ -1694,10 +1856,13 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     document.getElementById('route-nodes').innerHTML = '';
     const emptyEl = document.getElementById('route-pane-empty');
     if (emptyEl) emptyEl.style.display = '';
+    state.routeSegments = [];
+    updateRouteTitle();
   }
 
   // ---- click node to expand/collapse leg details ----
-  document.getElementById('route-nodes').addEventListener('click', function (e) {
+  const routeNodesEl = document.getElementById('route-nodes');
+  routeNodesEl.addEventListener('click', function (e) {
     const nodeEl = e.target.closest('.route-node');
     if (!nodeEl) return;
     const nextEl = nodeEl.nextElementSibling;
@@ -1705,6 +1870,23 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       nextEl.classList.toggle('expanded');
     }
   });
+
+  // ---- hover: route pane node/leg ↔ map segments ----
+  routeNodesEl.addEventListener('mouseenter', function (e) {
+    const target = e.target.closest('.route-node, .route-leg');
+    if (!target) return;
+    const fromIdx = parseInt(target.dataset.coordFrom, 10);
+    const toIdx = parseInt(target.dataset.coordTo, 10);
+    if (isNaN(fromIdx) || isNaN(toIdx)) return;
+    highlightMapByCoordRange(fromIdx, toIdx);
+    highlightPaneByCoordRange(fromIdx, toIdx);
+  }, true);
+
+  routeNodesEl.addEventListener('mouseleave', function (e) {
+    const target = e.target.closest('.route-node, .route-leg');
+    if (!target) return;
+    clearBothHighlights();
+  }, true);
 
   // ---- collapse toggle ----
   document.getElementById('route-pane-tab').addEventListener('click', function () {

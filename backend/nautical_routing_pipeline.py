@@ -114,8 +114,27 @@ def _edge_attr_worker(edge_chunk):
                 bridge_candidates = _candidates_by_bounds_static(bridges_gdf, edge_geom)
                 if not bridge_candidates.empty:
                     intersecting = bridge_candidates[bridge_candidates.intersects(edge_geom)]
-                    if not intersecting.empty and 'VERCLR' in intersecting.columns:
-                        attrs['max_air_draft'] = float(intersecting['VERCLR'].min())
+                    if not intersecting.empty:
+                        min_clearance = 999.0
+                        for _, row in intersecting.iterrows():
+                            # Check if bridge is movable (CATAQA 3: opening, 4: lifting, 5: bascule, 6: draw)
+                            is_movable = False
+                            if 'CATAQA' in row and pd.notnull(row['CATAQA']):
+                                cataqa = str(row['CATAQA'])
+                                if any(c in cataqa for c in ['3', '4', '5', '6']):
+                                    is_movable = True
+
+                            if is_movable:
+                                clearance = 999.0
+                            elif 'VERCLR' in row and pd.notnull(row['VERCLR']):
+                                clearance = float(row['VERCLR'])
+                            else:
+                                clearance = 999.0
+
+                            if clearance < min_clearance:
+                                min_clearance = clearance
+
+                        attrs['max_air_draft'] = min_clearance
 
             # Locks
             attrs['min_width'] = 999.0
@@ -189,6 +208,7 @@ class NauticalRoutingPipeline:
         self.build_network()
         self._validate_edges_against_land()
         self.calculate_edge_attributes()
+        self._compute_node_depths()
         self.export_to_sqlite()
         logger.info("Pipeline execution completed successfully.")
 
@@ -725,6 +745,64 @@ class NauticalRoutingPipeline:
             f"{self.graph.number_of_edges()} edges remaining"
         )
 
+    def _compute_node_depths(self):
+        """
+        Compute the depth at each node's exact point from DEPARE polygons.
+
+        For every node in the graph, finds the DEPARE (depth area) polygon whose
+        interior contains the node's point and stores its DRVAL1 (>0) as the
+        node's `node_depth` attribute.  Nodes outside any DEPARE polygon (or in
+        a polygon with DRVAL1 <= 0) get node_depth = -1 (unknown).
+
+        Unlike computing depth from incident edges (which picks up the minimum
+        depth along the *whole edge* — up to ~500 m long for coarse grid nodes),
+        this gives the *exact* depth at the node's coordinate, which is what we
+        need for colour-coded map display.
+        """
+        depare_gdf = self.gdfs.get('depth_areas', gpd.GeoDataFrame())
+        if depare_gdf.empty:
+            logger.info("No depth-area data — node_depth will be -1 for all nodes")
+            for _, data in self.graph.nodes(data=True):
+                data['node_depth'] = -1
+            return
+
+        logger.info("Computing node depths from DEPARE polygons...")
+        _ = depare_gdf.sindex  # ensure R-tree built
+
+        # Pre-filter DEPARE polygons to those with DRVAL1 > 0
+        if 'DRVAL1' in depare_gdf.columns:
+            positive = depare_gdf[depare_gdf['DRVAL1'] > 0].copy()
+        else:
+            positive = gpd.GeoDataFrame()
+        if positive.empty:
+            logger.info("  No DEPARE polygons with DRVAL1 > 0 — all nodes unknown")
+            for _, data in self.graph.nodes(data=True):
+                data['node_depth'] = -1
+            return
+
+        total = self.graph.number_of_nodes()
+        found = 0
+        for i, (nid, data) in enumerate(self.graph.nodes(data=True)):
+            if (i + 1) % max(1, total // 20) == 0:
+                logger.info(f"  Node depths: {i + 1}/{total} ({found} found so far)")
+
+            pt = Point(data['lon'], data['lat'])
+            candidates = list(positive.sindex.intersection(pt.bounds))
+            if not candidates:
+                data['node_depth'] = -1
+                continue
+
+            depth = -1
+            for idx in candidates:
+                row = positive.iloc[idx]
+                if row.geometry.contains(pt):
+                    depth = float(row['DRVAL1'])
+                    found += 1
+                    break
+            data['node_depth'] = depth
+
+        logger.info(f"Node depth computation complete: {found}/{total} nodes inside DEPARE polygons")
+
     def _candidates_by_bounds(self, gdf: gpd.GeoDataFrame, geom, margin: float = 0.0) -> gpd.GeoDataFrame:
         """Use spatial index to find candidate features intersecting the geometry's bounding box."""
         bounds = geom.bounds
@@ -811,7 +889,8 @@ class NauticalRoutingPipeline:
                     lat REAL,
                     lon REAL,
                     resolution REAL DEFAULT 0.0,
-                    node_type TEXT DEFAULT 'coastal'
+                    node_type TEXT DEFAULT 'coastal',
+                    node_depth REAL DEFAULT -1
                 );
                 
                 CREATE TABLE edges (
@@ -848,9 +927,10 @@ class NauticalRoutingPipeline:
             # Insert Nodes
             nodes_data = [(n, data['lat'], data['lon'],
                            data.get('resolution', 0.0),
-                           data.get('node_type', 'coastal'))
+                           data.get('node_type', 'coastal'),
+                           data.get('node_depth', -1))
                           for n, data in self.graph.nodes(data=True)]
-            cursor.executemany("INSERT INTO nodes (id, lat, lon, resolution, node_type) VALUES (?, ?, ?, ?, ?)", nodes_data)
+            cursor.executemany("INSERT INTO nodes (id, lat, lon, resolution, node_type, node_depth) VALUES (?, ?, ?, ?, ?, ?)", nodes_data)
             
             # Insert Edges
             edges_data = [(

@@ -77,6 +77,9 @@ export class ApiHandler {
     // GET /signalk/v1/api/router/pois?bbox=minLon,minLat,maxLon,maxLat
     this.router.get('/pois', this.handlePois.bind(this));
 
+    // GET /signalk/v1/api/router/poi/nearest?lat=X&lon=Y&radius=250
+    this.router.get('/poi/nearest', this.handleNearestPoi.bind(this));
+
     // GET /signalk/v1/api/router/water?bbox=minLon,minLat,maxLon,maxLat
     this.router.get('/water', this.handleWater.bind(this));
 
@@ -205,18 +208,19 @@ export class ApiHandler {
         return;
       }
 
-      // Convert to Signal K Route specification
-      const skRoute = GpxExporter.toSignalKRoute(route, name);
-      const routeId = skRoute.routeId || `autoroute-${Date.now()}`;
+      // Convert to Signal K Route specification with a unique ID
+      const routeId = `autoroute-${Date.now()}`;
+      const skRoute = GpxExporter.toSignalKRoute(route, name, routeId);
       const path = `vessels.self.resources.routes.${routeId}`;
 
-      // Push route to Signal K resources via putSelfPath (callback-based API)
-      const relPath = `resources.routes.${routeId}`;
-      await new Promise<void>((resolve, reject) => {
-        (this.app as any).putSelfPath(relPath, skRoute, (err: Error | null) => {
-          if (err) reject(err);
-          else resolve();
-        });
+      // Push route via delta message (the standard plugin data injection path)
+      (this.app as any).handleMessage('signalk-autoroute', {
+        context: 'vessels.self',
+        updates: [{
+          source: { label: 'signalk-autoroute', type: 'plugin' },
+          timestamp: new Date().toISOString(),
+          values: [{ path: `resources.routes.${routeId}`, value: skRoute }],
+        }],
       });
 
       res.json({
@@ -343,6 +347,31 @@ export class ApiHandler {
       const [minLon, minLat, maxLon, maxLat] = parts;
       const pois = await this.db!.getPoisInBBox(minLat, minLon, maxLat, maxLon, limit);
       res.json({ count: pois.length, pois });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: message });
+    }
+  }
+
+  /**
+   * Handle nearest POI query
+   * GET /signalk/v1/api/router/poi/nearest?lat=X&lon=Y&radius=250
+   */
+  private async handleNearestPoi(req: Request, res: Response): Promise<void> {
+    if (!this.db) {
+      res.status(503).json({ error: 'Database not ready' });
+      return;
+    }
+    try {
+      const lat = parseFloat(req.query.lat as string);
+      const lon = parseFloat(req.query.lon as string);
+      const radius = parseFloat(req.query.radius as string) || 250;
+      if (isNaN(lat) || isNaN(lon)) {
+        res.status(400).json({ error: 'Missing or invalid lat/lon parameters' });
+        return;
+      }
+      const poi = await this.db!.getNearestPoi(lat, lon, radius);
+      res.json({ poi });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: message });

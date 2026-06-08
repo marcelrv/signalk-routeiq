@@ -54,9 +54,10 @@ export class GpxExporter {
    * Convert route to Signal K Route specification
    * See: https://signalk.org/specification/1.4.0/doc/object_route.html
    */
-  static toSignalKRoute(route: RouteResult, name: string = 'Autoroute Route'): any {
+  static toSignalKRoute(route: RouteResult, name: string = 'Autoroute Route', routeId?: string): any {
     const feature = route.features[0];
     const coords = feature.geometry.coordinates;
+    const id = routeId || `autoroute-${Date.now()}`;
 
     const waypoints = coords.map((coord, index) => {
       const [lon, lat] = coord;
@@ -74,7 +75,7 @@ export class GpxExporter {
 
     return {
       type: 'signalk#Route',
-      routeId: 'autoroute-route',
+      routeId: id,
       name: name,
       description: `Route calculated by SignalK Autoroute - Distance: ${feature.properties.totalDistance.toFixed(0)}m`,
       active: false,

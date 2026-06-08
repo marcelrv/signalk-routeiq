@@ -72,17 +72,18 @@ export interface RouteResult {
     properties: {
       totalDistance: number; // meters
       totalCost: number;
-      segments: Array<{
-        from: number; // node id
-        to: number; // node id
-        distance: number; // meters
-        minDepth: number; // meters
-        maxAirDraft: number; // meters
-        isFairway: boolean;
-        directionPenalty: number;
-        isOneWay?: boolean;
-        trafficDir?: number;
-      }>;
+        segments: Array<{
+          from: number; // node id
+          to: number; // node id
+          distance: number; // meters
+          minDepth: number; // meters
+          maxAirDraft: number; // meters
+          isFairway: boolean;
+          directionPenalty: number;
+          isOneWay?: boolean;
+          trafficDir?: number;
+          edgeType?: string;
+        }>;
     };
   }>;
 }

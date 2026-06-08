@@ -300,37 +300,10 @@ export class RoutingEngine {
       return mainRoute;
     }
 
-    // Nodes are in the same component but constraints block all paths
-    // — try routing without constraint filtering (raw graph)
-    // by temporarily setting vessel dimensions to 0
-    const savedFallbackDims = { ...this.vesselDimensions };
-    this.vesselDimensions = { draft: 0, beam: 0, airDraft: 0 };
-    try {
-      const relaxedResult = await this.astarSearch(
-        start.latitude, start.longitude,
-        end.latitude, end.longitude,
-        0  // also zero out coast distance
-      );
-
-      // Connect user start/end coordinates to the route
-      await this.connectUserPoint(start, relaxedResult, 'start');
-      await this.connectUserPoint(end, relaxedResult, 'end');
-
-      warnings.push({
-        type: 'end_unreachable',
-        message: `Route constrained by vessel dimensions (draft=${savedFallbackDims.draft}m, ` +
-          `beam=${savedFallbackDims.beam}m) or coast distance. The route shown ignores some ` +
-          `constraints — verify each segment is safe for your vessel.`,
-        from: { latitude: start.latitude, longitude: start.longitude },
-        to: { latitude: end.latitude, longitude: end.longitude },
-        distanceMeters: Math.round(relaxedResult.features[0].properties.totalDistance),
-      });
-
-      relaxedResult.warnings = warnings;
-      return relaxedResult;
-    } finally {
-      this.vesselDimensions = savedFallbackDims;
-    }
+    throw new Error(
+      `No route found — graph is connected but A* could not find a path. ` +
+      `This should not happen with soft constraints enabled.`
+    );
   }
 
   /**
@@ -453,18 +426,17 @@ export class RoutingEngine {
     const startPt = { latitude: startLat, longitude: startLon };
     const endPt = { latitude: endLat, longitude: endLon };
 
-    // Try full-constraint A* with expanding bounding box.
-    // Cap at 4 doublings (≤ ~180 km) to avoid exploring the whole graph for
-    // a short via-segment. The main start→end route uses routingBBoxMaxExtent.
     let currentMargin = this.config.routingBBoxMargin;
     const segmentMaxMargin = Math.min(this.config.routingBBoxMaxExtent, this.config.routingBBoxMargin * 16);
 
     while (currentMargin <= segmentMaxMargin) {
       const segmentBbox = bbox ?? bboxFromPoints(startPt, endPt, currentMargin);
       try {
-        return await this.astarSearch(startLat, startLon, endLat, endLon, coastDistanceMeters, segmentBbox);
+        const result = await this.astarSearch(startLat, startLon, endLat, endLon, coastDistanceMeters, segmentBbox);
+        this.addViolationWarnings(result, warnings, label, startPt, endPt);
+        return result;
       } catch {
-        bbox = undefined; // force recompute next iteration
+        bbox = undefined;
         if (currentMargin >= segmentMaxMargin) break;
         const newMargin = Math.min(currentMargin * 2, segmentMaxMargin);
         if (newMargin > currentMargin) {
@@ -479,48 +451,28 @@ export class RoutingEngine {
       }
     }
 
-    // All full-constraint attempts failed — try relaxed (zero vessel, zero coast)
-    const savedDims = { ...this.vesselDimensions };
-    this.vesselDimensions = { draft: 0, beam: 0, airDraft: 0 };
-    try {
-      const relaxedBbox = bboxFromPoints(startPt, endPt, currentMargin);
-      const relaxed = await this.astarSearch(startLat, startLon, endLat, endLon, 0, relaxedBbox);
+    // A* failed entirely — graph is physically disconnected. Bridge the gap.
+    const startNode = await this.db.findNearestNode(startLat, startLon);
+    const endNode = await this.db.findNearestNode(endLat, endLon);
+    if (startNode && endNode) {
       warnings.push({
         type: 'via_constrained',
-        message: `${label} unreachable under vessel constraints — routed with relaxed constraints.`,
+        message: `${label} is disconnected in the waterway network — bridged via nearest reachable node.`,
         from: startPt,
         to: endPt,
       });
-      return relaxed;
-    } catch {
-      // Both full-constraint and relaxed A* failed — graph is likely
-      // disconnected. Bridge the gap via fallbackRoute (straight line to
-      // nearest reachable node) so the via point is preserved.
-      const startNode = await this.db.findNearestNode(startLat, startLon);
-      const endNode = await this.db.findNearestNode(endLat, endLon);
-      if (startNode && endNode) {
-        warnings.push({
-          type: 'via_constrained',
-          message: `${label} is disconnected in the waterway network — bridged via nearest reachable node.`,
-          from: startPt,
-          to: endPt,
-        });
-        try {
-          const fallback = await this.fallbackRoute(startNode, endNode, startPt, endPt, 0, []);
-          if (fallback.warnings) {
-            warnings.push(...fallback.warnings);
-            // Remove from result so routeViaPoints doesn't double-append
-            fallback.warnings = undefined;
-          }
-          return fallback;
-        } catch {
-          return null;
+      try {
+        const fallback = await this.fallbackRoute(startNode, endNode, startPt, endPt, coastDistanceMeters, []);
+        if (fallback.warnings) {
+          warnings.push(...fallback.warnings);
+          fallback.warnings = undefined;
         }
+        return fallback;
+      } catch {
+        return null;
       }
-      return null;
-    } finally {
-      this.vesselDimensions = savedDims;
     }
+    return null;
   }
 
   /**
@@ -770,23 +722,14 @@ export class RoutingEngine {
           continue;
         }
 
-        // Apply hard safety constraints
-        if (!this.isEdgeSafe(edge)) {
-          continue;
-        }
-        // CRITICAL FIX: Only apply coastline distance constraints to open sea/coastal grids.
-        // Inland waterways and locks are inherently safe from a coastline perspective.
-        if (edge.edge_type === 'coastal' && edge.distance_to_land < minCoastDistanceMeters) {
+        // Apply soft safety constraints
+        const penalty = this.getEdgePenalty(edge, minCoastDistanceMeters);
+        if (penalty === -1) {
           continue;
         }
 
-        // Check coast distance constraint for coastal routing
-        if (edge.distance_to_land < minCoastDistanceMeters) {
-          continue;
-        }
-
-        // Calculate edge cost using multi-layered cost function
-        const edgeCost = this.calculateEdgeCost(edge);
+        const baseCost = this.calculateEdgeCost(edge);
+        const edgeCost = baseCost + (penalty * Math.max(1, edge.distance));
 
         const tentativeG = gScore.get(current.nodeId)! + edgeCost;
 
@@ -836,29 +779,22 @@ export class RoutingEngine {
     return await this.buildRouteResult(smoothedPath, path, gScore.get(endNode) || 0);
   }
 
-  /**
-   * Apply hard safety constraints to an edge
-   */
-  private isEdgeSafe(edge: EdgeRow & { lat: number; lon: number }): boolean {
-    // Reject edges flagged as crossing land (post-pipeline validation)
-    if (edge.crosses_land === 1) {
-      return false;
-    }
+  private getEdgePenalty(edge: EdgeRow & { lat: number; lon: number }, minCoastDistanceMeters: number): number {
+    if (edge.crosses_land === 1) return -1;
 
-    // Air draft applies to ALL edges (bridges are hard physical stops)
+    let penalty = 0;
+
     if (edge.max_air_draft >= 0 && edge.max_air_draft < (this.vesselDimensions.airDraft || 0)) {
-      return false;
+      penalty += 1000000;
     }
 
-    // Coastal edges: Enforce strict depth and width checks
     if (edge.edge_type === 'coastal') {
-      if (edge.min_depth >= 0 && edge.min_depth < (this.vesselDimensions.draft || 0)) return false;
-      if (edge.min_width >= 0 && edge.min_width < (this.vesselDimensions.beam || 0)) return false;
+      if (edge.min_depth >= 0 && edge.min_depth < (this.vesselDimensions.draft || 0)) penalty += 1000000;
+      if (edge.min_width >= 0 && edge.min_width < (this.vesselDimensions.beam || 0)) penalty += 1000000;
+      if (edge.distance_to_land < minCoastDistanceMeters) penalty += 50000;
     }
-    
-    // Inland edges (official fairways/centerlines) bypass depth/width checks 
-    // because the Python spatial join often grazes shallow riverbanks.
-    return true;
+
+    return penalty;
   }
 
 
@@ -1004,6 +940,7 @@ export class RoutingEngine {
             directionPenalty: edge.direction_penalty,
             isOneWay: edge.is_one_way === 1,
             trafficDir: edge.traffic_dir,
+            edgeType: edge.edge_type,
           });
         } else {
           const fromNode = await this.db.getNodeById(prevNode);
@@ -1045,6 +982,41 @@ export class RoutingEngine {
         },
       ],
     };
+  }
+
+  private addViolationWarnings(
+    result: RouteResult,
+    warnings: RouteWarning[],
+    label: string,
+    startPt: { latitude: number; longitude: number },
+    endPt: { latitude: number; longitude: number }
+  ) {
+    if (!result.features[0] || !result.features[0].properties.segments) return;
+
+    let hasAirDraftViolation = false;
+    let hasDepthViolation = false;
+
+    for (const seg of result.features[0].properties.segments) {
+      if (seg.maxAirDraft >= 0 && seg.maxAirDraft < (this.vesselDimensions.airDraft || 0)) {
+        hasAirDraftViolation = true;
+      }
+      if (seg.edgeType === 'coastal' && seg.minDepth >= 0 && seg.minDepth < (this.vesselDimensions.draft || 0)) {
+        hasDepthViolation = true;
+      }
+    }
+
+    if (hasAirDraftViolation || hasDepthViolation) {
+      const violations = [];
+      if (hasAirDraftViolation) violations.push('air draft');
+      if (hasDepthViolation) violations.push('depth/beam');
+
+      warnings.push({
+        type: 'via_constrained',
+        message: `Route to ${label} violates vessel constraints (${violations.join(', ')}). The shortest violating path was used for the unroutable section. Verify safety.`,
+        from: startPt,
+        to: endPt,
+      });
+    }
   }
 
   /**

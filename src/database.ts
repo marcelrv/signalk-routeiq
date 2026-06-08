@@ -61,6 +61,7 @@ export class RoutingDatabase {
   // Flat bbox index for water polygons: [minLon, minLat, maxLon, maxLat, featureIndex]
   private waterBBoxIndex: Float64Array | null = null;
   private hasCrossesLand: boolean = false;
+  private hasNodeDepth: boolean = false;
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;
@@ -76,6 +77,9 @@ export class RoutingDatabase {
       // Check for crosses_land column (added in schema v2 for land-crossing validation)
       const edgeCols = this.db.prepare("PRAGMA table_info('edges')").all() as Array<{ name: string }>;
       this.hasCrossesLand = edgeCols.some(c => c.name === 'crosses_land');
+      // Check for node_depth column (pre-computed depth at node point)
+      const nodeCols = this.db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>;
+      this.hasNodeDepth = nodeCols.some(c => c.name === 'node_depth');
     } catch (error: any) {
       throw new Error(`Failed to connect to routing database: ${error.message}`);
     }
@@ -413,9 +417,14 @@ export class RoutingDatabase {
     limit: number = 5000,
   ): Promise<Array<{ id: number; lat: number; lon: number; resolution: number; node_type: string; min_depth: number }>> {
     const cols = this.checkNodeMetaColumns() ? 'n.id, n.lat, n.lon, n.resolution, n.node_type' : 'n.id, n.lat, n.lon';
+    // Use pre-computed node_depth when available (pipeline schema v2+).
+    // Fall back to MIN over incident edges for backward compat with old DBs.
+    const depthExpr = this.hasNodeDepth
+      ? 'n.node_depth'
+      : 'COALESCE((SELECT MIN(e.min_depth) FROM edges e WHERE e.source = n.id OR e.target = n.id), -1)';
     const rows = this.db.prepare(
       `SELECT ${cols},
-              COALESCE((SELECT MIN(e.min_depth) FROM edges e WHERE e.source = n.id OR e.target = n.id), -1) AS min_depth
+              ${depthExpr} AS min_depth
        FROM nodes n
        WHERE n.lat >= ? AND n.lat <= ? AND n.lon >= ? AND n.lon <= ?
        ORDER BY n.id
@@ -442,6 +451,35 @@ export class RoutingDatabase {
        LIMIT ?`
     ).all(minLat, maxLat, minLon, maxLon, limit) as unknown as PoiRow[];
     return rows.map(r => ({ id: r.id, name: r.name, type: r.type, lat: r.lat, lon: r.lon }));
+  }
+
+  async getNearestPoi(lat: number, lon: number, maxDistanceMeters: number = 250): Promise<{ id: number; name: string; type: string; latitude: number; longitude: number; distance: number } | null> {
+    const latDeg = maxDistanceMeters / 111320;
+    const lonDeg = maxDistanceMeters / (111320 * Math.cos(lat * Math.PI / 180));
+    const rows = this.db.prepare(
+      `SELECT id, name, type, lat, lon
+       FROM pois
+       WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?`
+    ).all(lat - latDeg, lat + latDeg, lon - lonDeg, lon + lonDeg) as unknown as PoiRow[];
+    let best: PoiRow | null = null;
+    let bestDist = Infinity;
+    for (const row of rows) {
+      const d = this.haversineMeters(lat, lon, row.lat, row.lon);
+      if (d < bestDist && d <= maxDistanceMeters) {
+        bestDist = d;
+        best = row;
+      }
+    }
+    if (!best) return null;
+    return { id: best.id, name: best.name, type: best.type, latitude: best.lat, longitude: best.lon, distance: Math.round(bestDist) };
+  }
+
+  private haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+    const R = 6371000;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
   private waterGeoJson: any = null;
