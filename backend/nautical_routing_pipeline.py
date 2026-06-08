@@ -92,13 +92,21 @@ def _edge_attr_worker(edge_chunk):
             edge_geom = LineString([(u_lon, u_lat), (v_lon, v_lat)])
 
             # Depth
+            # Only use DRVAL1 as a hard minimum when it is strictly positive.
+            # A value of 0 means the DEPARE polygon is a general-coverage zone
+            # (e.g., "tidal flat", "open sea coverage polygon") and carries no
+            # meaningful navigable-minimum constraint.  Using DRVAL1=0 as
+            # min_depth blocks routing through deep open water because many
+            # broad DEPARE polygons start at 0.
             attrs['min_depth'] = 99.0
             if not depare_gdf.empty:
                 depare_candidates = _candidates_by_bounds_static(depare_gdf, edge_geom)
                 if not depare_candidates.empty:
                     intersecting = depare_candidates[depare_candidates.intersects(edge_geom)]
                     if not intersecting.empty and 'DRVAL1' in intersecting.columns:
-                        attrs['min_depth'] = float(intersecting['DRVAL1'].min())
+                        positive = intersecting[intersecting['DRVAL1'] > 0]
+                        if not positive.empty:
+                            attrs['min_depth'] = float(positive['DRVAL1'].min())
 
             # Bridges
             attrs['max_air_draft'] = 999.0

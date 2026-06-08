@@ -374,6 +374,10 @@ export class RoutingEngine {
         continue;
       }
 
+      // Snap the start of this segment to the user's currentStart coordinate
+      // (important for the first segment and for each via point)
+      await this.connectUserPoint(currentStart, segmentResult, 'start');
+
       if (allCoordinates.length === 0) {
         allCoordinates.push(...segmentResult.features[0].geometry.coordinates);
       } else {
@@ -400,6 +404,9 @@ export class RoutingEngine {
       throw new Error('No route found to destination');
     }
 
+    // Snap the final segment's start to currentStart (last via point or start if no vias)
+    await this.connectUserPoint(currentStart, finalResult, 'start');
+
     if (allCoordinates.length === 0) {
       allCoordinates.push(...finalResult.features[0].geometry.coordinates);
     } else {
@@ -423,8 +430,7 @@ export class RoutingEngine {
       warnings: allWarnings.length > 0 ? allWarnings : undefined,
     };
 
-    // Connect start and end user coordinates to the route
-    await this.connectUserPoint(start, result, 'start');
+    // Connect only the overall end coordinate (start is handled per-segment above)
     await this.connectUserPoint(end, result, 'end');
 
     return result;
@@ -447,18 +453,20 @@ export class RoutingEngine {
     const startPt = { latitude: startLat, longitude: startLon };
     const endPt = { latitude: endLat, longitude: endLon };
 
-    // Try full-constraint A* with expanding bounding box
+    // Try full-constraint A* with expanding bounding box.
+    // Cap at 4 doublings (≤ ~180 km) to avoid exploring the whole graph for
+    // a short via-segment. The main start→end route uses routingBBoxMaxExtent.
     let currentMargin = this.config.routingBBoxMargin;
-    const maxMargin = this.config.routingBBoxMaxExtent;
+    const segmentMaxMargin = Math.min(this.config.routingBBoxMaxExtent, this.config.routingBBoxMargin * 16);
 
-    while (currentMargin <= maxMargin) {
+    while (currentMargin <= segmentMaxMargin) {
       const segmentBbox = bbox ?? bboxFromPoints(startPt, endPt, currentMargin);
       try {
         return await this.astarSearch(startLat, startLon, endLat, endLon, coastDistanceMeters, segmentBbox);
       } catch {
         bbox = undefined; // force recompute next iteration
-        if (currentMargin >= maxMargin) break;
-        const newMargin = Math.min(currentMargin * 2, maxMargin);
+        if (currentMargin >= segmentMaxMargin) break;
+        const newMargin = Math.min(currentMargin * 2, segmentMaxMargin);
         if (newMargin > currentMargin) {
           warnings.push({
             type: 'via_constrained',
@@ -536,7 +544,7 @@ export class RoutingEngine {
       const directDist = this.haversineDistance(userPoint.latitude, userPoint.longitude, firstCoord[1], firstCoord[0]);
       if (directDist <= 1) return;
 
-      if (edgeSnap && edgeSnap.distance < directDist * 0.5 && edgeSnap.fraction > 0.01 && edgeSnap.fraction < 0.99) {
+      if (edgeSnap && edgeSnap.distance < directDist && edgeSnap.fraction > 0.01 && edgeSnap.fraction < 0.99) {
         // Use edge projection: user → projected → graph_node
         const snapToNode = this.haversineDistance(
           edgeSnap.point.lat, edgeSnap.point.lon,
@@ -603,7 +611,7 @@ export class RoutingEngine {
       const directDist = this.haversineDistance(userPoint.latitude, userPoint.longitude, lastCoord[1], lastCoord[0]);
       if (directDist <= 1) return;
 
-      if (edgeSnap && edgeSnap.distance < directDist * 0.5 && edgeSnap.fraction > 0.01 && edgeSnap.fraction < 0.99) {
+      if (edgeSnap && edgeSnap.distance < directDist && edgeSnap.fraction > 0.01 && edgeSnap.fraction < 0.99) {
         // Use edge projection: graph_node → projected → user
         const nodeToSnap = this.haversineDistance(
           lastCoord[1], lastCoord[0],
@@ -1084,12 +1092,16 @@ export class RoutingEngine {
 
   /**
    * Check if a straight line between two coordinates stays within navigable water.
-   * Samples points along the great-circle line and verifies each has a graph node
-   * within the search radius. If any sample point has no nearby node, the line
-   * likely crosses land or an unmapped area — reject the shortcut.
    *
-   * Uses configurable sample interval and search radius that adapt to the
-   * local grid resolution.
+   * Primary check: sample points along the line and verify each lies inside a
+   * water polygon (coastal_water_polygons.geojson).  This correctly rejects
+   * shortcuts that cross land without depending on node density, which was the
+   * root cause of staircase routes on the open Markermeer where the coarse
+   * 0.005° grid leaves gaps larger than the node-proximity search radius.
+   *
+   * If the water polygon data is unavailable the check falls back to the
+   * original node-proximity heuristic so the smoother still works on graphs
+   * built without coastal water polygons.
    */
   private hasLineOfSight(
     lat1: number, lon1: number,
@@ -1097,16 +1109,24 @@ export class RoutingEngine {
   ): boolean {
     const dist = this.haversineDistance(lat1, lon1, lat2, lon2);
 
-    // Adaptive sample interval: use 20+ samples for short lines, capped at config
+    // Adaptive sample count: at least 5 samples, one per ~200m
+    const numSamples = Math.max(5, Math.ceil(dist / 200));
+
+    // Primary: polygon-based water check
+    if (this.db.isLineOverWater(lat1, lon1, lat2, lon2, numSamples)) {
+      return true;
+    }
+
+    // Secondary fallback: node proximity (in case water polygons are absent)
     const sampleInterval = Math.min(
       this.config.lineOfSightSampleInterval,
       Math.max(100, dist / 20),
     );
     const searchRadius = this.config.lineOfSightSearchRadius;
-    const numSamples = Math.max(3, Math.ceil(dist / sampleInterval));
+    const numNodeSamples = Math.max(3, Math.ceil(dist / sampleInterval));
 
-    for (let i = 1; i < numSamples; i++) {
-      const t = i / numSamples;
+    for (let i = 1; i < numNodeSamples; i++) {
+      const t = i / numNodeSamples;
       const lat = lat1 + (lat2 - lat1) * t;
       const lon = lon1 + (lon2 - lon1) * t;
       if (!this.db.hasNodeWithinRadius(lat, lon, searchRadius)) {

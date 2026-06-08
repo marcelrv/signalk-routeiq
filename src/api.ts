@@ -124,7 +124,9 @@ export class ApiHandler {
       res.json(route);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      res.status(404).json({ error: message, code: 'ROUTE_NOT_FOUND' });
+      // Use 422 (Unprocessable Entity) so clients can distinguish a routing
+      // failure (constraint/graph issue) from a server error (500).
+      res.status(422).json({ error: message, code: 'ROUTE_NOT_FOUND' });
     }
   }
 

@@ -1,6 +1,6 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
 import { PoiResult } from './types.js';
 
 interface NodeRow {
@@ -173,30 +173,26 @@ export class RoutingDatabase {
     return result;
   }
 
-  async findNearestNode(latitude: number, longitude: number, maxDistanceMeters: number = 5000): Promise<number | null> {
+  async findNearestNode(latitude: number, longitude: number, maxDistanceMeters: number = 50000): Promise<number | null> {
+    // Sort purely by geographic distance so A* starts from the geometrically
+    // closest node. The previous out_degree-first sort caused the router to
+    // pick well-connected hub nodes many hundreds of metres away, resulting in
+    // the start/end connecting leg crossing land.
     const query = `
-      WITH candidates AS (
-        SELECT id, lat, lon, distance FROM (
-          SELECT id, lat, lon,
-            (6371000 * acos(
-              cos(radians(?)) * cos(radians(lat)) *
-              cos(radians(lon) - radians(?)) +
-              sin(radians(?)) * sin(radians(lat))
-            )) as distance
-          FROM nodes
-        )
-        WHERE distance <= ?
-        ORDER BY distance ASC
-        LIMIT 50
-      )
-      SELECT c.id,
-        (SELECT COUNT(*) FROM edges WHERE source = c.id) as out_degree
-      FROM candidates c
-      ORDER BY out_degree DESC, c.distance ASC
+      SELECT id,
+        (6371000 * acos(
+          cos(radians(?)) * cos(radians(lat)) *
+          cos(radians(lon) - radians(?)) +
+          sin(radians(?)) * sin(radians(lat))
+        )) as distance
+      FROM nodes
+      ORDER BY distance ASC
       LIMIT 1
     `;
-    const row = this.db.prepare(query).get(latitude, longitude, latitude, maxDistanceMeters) as any | undefined;
-    return row ? row.id : null;
+    const row = this.db.prepare(query).get(latitude, longitude, latitude) as any | undefined;
+    if (!row) return null;
+    // Reject if the nearest node is still too far (open ocean beyond graph extent)
+    return row.distance <= maxDistanceMeters ? row.id : null;
   }
 
   async findNearestNodeInSet(latitude: number, longitude: number, candidates: Set<number>, maxDistanceMeters: number = 5000): Promise<{ id: number; lat: number; lon: number; distance: number } | null> {
@@ -584,7 +580,97 @@ export class RoutingDatabase {
     this.db.close();
     return Promise.resolve();
   }
-}
+
+  /**
+   * Check whether all sampled points along a straight line (lat1,lon1)→(lat2,lon2)
+   * fall inside a water polygon.  Used by the LOS path smoother.
+   *
+   * Loads and caches the water GeoJSON on first call (synchronous).
+   * Returns true if the water polygon data is unavailable (fail-open so that
+   * the smoother degrades gracefully to node-proximity checks).
+   *
+   * numSamples: number of interior sample points (endpoints are not checked
+   * because they are known graph nodes already inside water).
+   */
+  isLineOverWater(lat1: number, lon1: number, lat2: number, lon2: number, numSamples: number): boolean {
+    // Ensure water GeoJSON is loaded (reuse the lazy-load path)
+    if (!this.waterGeojsonPath) {
+      const dir = dirname(this.dbPath);
+      this.waterGeojsonPath = join(dir, 'coastal_water_polygons.geojson');
+    }
+    if (!this.waterGeoJson) {
+      if (!existsSync(this.waterGeojsonPath)) {
+        this.waterGeoJson = { type: 'FeatureCollection', features: [] };
+      } else {
+        try {
+          this.waterGeoJson = JSON.parse(readFileSync(this.waterGeojsonPath, 'utf-8'));
+        } catch {
+          this.waterGeoJson = { type: 'FeatureCollection', features: [] };
+        }
+      }
+    }
+
+    const features: any[] = this.waterGeoJson.features ?? [];
+    if (features.length === 0) {
+      // No polygon data — fall back to permissive (let node-proximity decide)
+      return true;
+    }
+
+    for (let i = 1; i < numSamples; i++) {
+      const t = i / numSamples;
+      const lat = lat1 + (lat2 - lat1) * t;
+      const lon = lon1 + (lon2 - lon1) * t;
+      if (!this.isPointInAnyPolygon(lat, lon, features)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Ray-casting point-in-polygon test for a GeoJSON feature array.
+   * Handles Polygon and MultiPolygon feature types.
+   */
+  private isPointInAnyPolygon(lat: number, lon: number, features: any[]): boolean {
+    for (const f of features) {
+      const geom = f.geometry;
+      if (!geom) continue;
+      if (geom.type === 'Polygon') {
+        if (this.raycastPolygon(lon, lat, geom.coordinates)) return true;
+      } else if (geom.type === 'MultiPolygon') {
+        for (const poly of geom.coordinates) {
+          if (this.raycastPolygon(lon, lat, poly)) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Ray-casting inside/outside test for a GeoJSON polygon ring array.
+   * rings[0] = outer ring, rings[1..] = holes.
+   */
+  private raycastPolygon(x: number, y: number, rings: number[][][]): boolean {
+    // Test outer ring
+    if (!this.raycastRing(x, y, rings[0])) return false;
+    // Subtract holes
+    for (let h = 1; h < rings.length; h++) {
+      if (this.raycastRing(x, y, rings[h])) return false;
+    }
+    return true;
+  }
+
+  private raycastRing(x: number, y: number, ring: number[][]): boolean {
+    let inside = false;
+    const n = ring.length;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = ring[i][0], yi = ring[i][1];
+      const xj = ring[j][0], yj = ring[j][1];
+      if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+} // end class RoutingDatabase
 
 /**
  * Check whether a GeoJSON feature's bounding box overlaps a query bounding box.
