@@ -51,7 +51,7 @@ export interface SearchNode {
 
 // Route result
 export interface RouteWarning {
-  type: 'start_unreachable' | 'end_unreachable' | 'both_unreachable';
+  type: 'start_unreachable' | 'end_unreachable' | 'both_unreachable' | 'via_constrained' | 'via_skipped';
   message: string;
   from?: { latitude: number; longitude: number };
   to?: { latitude: number; longitude: number };

@@ -97,8 +97,13 @@ class NauticalRoutingPipeline:
     def _build_inland_network(self):
         """Extracts nodes and edges from inland waterway LineStrings."""
         inland_gdf = self.gdfs['inland_waterways']
+        total_features = len(inland_gdf)
+        logger.info(f"  Processing {total_features} inland waterway features...")
         
-        for _, row in inland_gdf.iterrows():
+        for fi, (_, row) in enumerate(inland_gdf.iterrows()):
+            if (fi + 1) % max(1, total_features // 20) == 0:
+                pct = (fi + 1) / total_features * 100
+                logger.info(f"  Inland waterways: {fi + 1}/{total_features} ({pct:.0f}%), {self.graph.number_of_nodes()} nodes so far")
             geom = row.geometry
             if isinstance(geom, LineString):
                 coords = list(geom.coords)
@@ -310,22 +315,51 @@ class NauticalRoutingPipeline:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, edges_data)
             
-            # Insert POIs (Ports, Marinas, Anchorages)
-            poi_gdf = self.gdfs.get('pois', gpd.GeoDataFrame())
-            if not poi_gdf.empty:
-                poi_data = []
-                for idx, row in poi_gdf.iterrows():
-                    geom = row.geometry
-                    # Assumes point geometry
-                    if isinstance(geom, Point):
-                        poi_data.append((
-                            idx, 
-                            row.get('name', 'Unknown'), 
-                            row.get('type', 'General'), 
-                            geom.y, 
-                            geom.x
-                        ))
+            # Insert POIs — harvest named locations from multiple layers
+            def _poi_name(row) -> str:
+                for col in ('OBJNAM', 'NOBJNM', 'name'):
+                    val = row.get(col)
+                    if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                        return str(val)
+                return ''
+
+            def _poi_point(geom):
+                if isinstance(geom, Point):
+                    return (geom.y, geom.x)
+                elif isinstance(geom, Polygon):
+                    c = geom.centroid
+                    return (c.y, c.x)
+                elif isinstance(geom, LineString):
+                    c = geom.interpolate(0.5, normalized=True)
+                    return (c.y, c.x)
+                return None
+
+            poi_layers = [
+                ('pois', 'harbour'),
+                ('locks', 'lock'),
+                ('bridges', 'bridge'),
+                ('fairways', 'fairway'),
+                ('inland_waterways', 'waterway'),
+            ]
+            poi_id_gen = iter(range(1, 10_000_000))
+            poi_data = []
+            for layer_key, default_type in poi_layers:
+                gdf = self.gdfs.get(layer_key, gpd.GeoDataFrame())
+                if gdf.empty:
+                    continue
+                for _, row in gdf.iterrows():
+                    name = _poi_name(row)
+                    if not name:
+                        continue
+                    pt = _poi_point(row.geometry)
+                    if pt is None:
+                        continue
+                    poi_data.append((next(poi_id_gen), name, default_type, pt[0], pt[1]))
+            if poi_data:
                 cursor.executemany("INSERT INTO pois (id, name, type, lat, lon) VALUES (?, ?, ?, ?, ?)", poi_data)
+                logger.info(f"Inserted {len(poi_data)} named POIs from {len(poi_layers)} layers")
+            else:
+                logger.warning("No named POIs found in any layer")
                 
             conn.commit()
             

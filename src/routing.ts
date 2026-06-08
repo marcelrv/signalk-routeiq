@@ -266,7 +266,9 @@ export class RoutingEngine {
   }
 
   /**
-   * Route through a list of via points sequentially
+   * Route through a list of via points sequentially.
+   * Handles individual segment failures by trying relaxed constraints
+   * (zero draft, beam, airDraft, coast distance) instead of failing entirely.
    */
   private async routeViaPoints(
     start: { latitude: number; longitude: number },
@@ -277,14 +279,26 @@ export class RoutingEngine {
     let currentStart = start;
     const allSegments: RouteResult['features'][0]['properties']['segments'] = [];
     const allCoordinates: [number, number][] = [];
+    const warnings: RouteWarning[] = [];
 
     for (let i = 0; i < via.length; i++) {
       const nextPoint = via[i];
-      const segmentResult = await this.astarSearch(
+      const segmentResult = await this.tryRouteSegment(
         currentStart.latitude, currentStart.longitude,
         nextPoint.latitude, nextPoint.longitude,
-        coastDistanceMeters
+        coastDistanceMeters,
+        i, warnings
       );
+      if (!segmentResult) {
+        // via point completely unreachable — skip it
+        warnings.push({
+          type: 'via_skipped',
+          message: `Via point ${i + 1} is unreachable via any route — skipped.`,
+          from: { latitude: currentStart.latitude, longitude: currentStart.longitude },
+          to: { latitude: nextPoint.latitude, longitude: nextPoint.longitude },
+        });
+        continue;
+      }
 
       if (i === 0) {
         allCoordinates.push(...segmentResult.features[0].geometry.coordinates);
@@ -296,11 +310,16 @@ export class RoutingEngine {
       currentStart = nextPoint;
     }
 
-    const finalResult = await this.astarSearch(
+    const finalResult = await this.tryRouteSegment(
       currentStart.latitude, currentStart.longitude,
       end.latitude, end.longitude,
-      coastDistanceMeters
+      coastDistanceMeters,
+      -1, warnings
     );
+
+    if (!finalResult) {
+      throw new Error('No route found to destination');
+    }
 
     allCoordinates.push(...finalResult.features[0].geometry.coordinates.slice(1));
     allSegments.push(...finalResult.features[0].properties.segments);
@@ -316,7 +335,44 @@ export class RoutingEngine {
           segments: allSegments,
         },
       }],
+      warnings: warnings.length > 0 ? warnings : undefined,
     };
+  }
+
+  /**
+   * Try routing a segment with full constraints; on failure fall back to
+   * relaxed constraints (zero vessel dimensions, zero coast distance).
+   * Returns null if both attempts fail.
+   */
+  private async tryRouteSegment(
+    startLat: number, startLon: number,
+    endLat: number, endLon: number,
+    coastDistanceMeters: number,
+    viaIndex: number,
+    warnings: RouteWarning[]
+  ): Promise<RouteResult | null> {
+    try {
+      return await this.astarSearch(startLat, startLon, endLat, endLon, coastDistanceMeters);
+    } catch {
+      // First attempt failed — try with relaxed constraints
+      const savedDims = { ...this.vesselDimensions };
+      this.vesselDimensions = { draft: 0, beam: 0, airDraft: 0 };
+      try {
+        const relaxed = await this.astarSearch(startLat, startLon, endLat, endLon, 0);
+        const label = viaIndex >= 0 ? `Via point ${viaIndex + 1}` : 'Destination';
+        warnings.push({
+          type: 'via_constrained',
+          message: `${label} unreachable under vessel constraints — routed with relaxed constraints.`,
+          from: { latitude: startLat, longitude: startLon },
+          to: { latitude: endLat, longitude: endLon },
+        });
+        return relaxed;
+      } catch {
+        return null;
+      } finally {
+        this.vesselDimensions = savedDims;
+      }
+    }
   }
 
   /**

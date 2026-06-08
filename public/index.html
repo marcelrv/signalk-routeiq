@@ -598,6 +598,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       }
 
       const wpts = waypoints.map(w => w.latLng);
+      console.log('[MarineRouter] waypoints count:', waypoints.length, 'via count:', waypoints.length > 2 ? waypoints.length - 2 : 0);
       const toPos = ll => ({ latitude: ll.lat, longitude: ll.lng });
       const start = toPos(wpts[0]);
       const end   = toPos(wpts[wpts.length - 1]);
@@ -613,6 +614,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         minCoastDistance: minCoastNauticalMiles,
       };
 
+      console.log('[MarineRouter] via payload:', JSON.stringify(via));
       state.routing = true;
       showToast('Routing…', '');
       logDebug('ROUTE', routeUrl(), payload);
@@ -950,7 +952,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         return r.json();
       })
       .then(data => {
-        const items = Array.isArray(data) ? data : (data.features || []);
+        const items = Array.isArray(data) ? data : (data.results || data.features || []);
         if (items.length === 0) {
           showToast('No results found', 'error');
           return;
@@ -960,7 +962,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           const coords = item.geometry &&
             (item.geometry.coordinates || (item.geometry.type === 'Point' ? null : null));
           const pos = coords ? { lat: coords[1], lng: coords[0] } :
-            (item.position || item.latlng || item.center);
+            (item.position || item.latlng || item.center ||
+             (item.latitude != null && item.longitude != null ? { lat: item.latitude, lng: item.longitude } : null));
           const name = item.properties?.name || item.name || item.label || 'POI';
           const div = document.createElement('div');
           div.className = 'search-result-item';
