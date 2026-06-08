@@ -241,10 +241,13 @@ class NauticalRoutingPipeline:
         logger.info(f"Coarse scan: {len(coarse_positions)} water nodes at {MAX_RES}°")
 
         # ==============================================================
-        # STEP 2: Refinement planning (narrowness + skip centreline cells)
+        # STEP 2: Refinement planning (narrowness + centreline handling)
         # ==============================================================
-        logger.info("Planning refinement (narrowness + centreline skip)...")
-        refinement_cells = []  # (x, y, local_res)
+        logger.info("Planning refinement (narrowness)...")
+        refinement_cells = []          # (x, y, local_res) for grid refinement
+        centreline_positions = []      # (lon, lat) — coastal nodes on centreline
+        seen_centreline_coords = set()  # dedup
+
         for idx, (x, y) in enumerate(coarse_positions):
             if (idx + 1) % 5000 == 0:
                 logger.info(f"  Refinement planning: {idx + 1}/{len(coarse_positions)}")
@@ -266,11 +269,26 @@ class NauticalRoutingPipeline:
             cell_bbox = (x - MAX_RES / 2, y - MAX_RES / 2,
                          x + MAX_RES / 2, y + MAX_RES / 2)
             if _has_centerline(cell_bbox):
-                continue  # prefer waterway centreline; skip refinement
+                # Plant a coastal node at each centreline vertex in this cell
+                # so even very narrow channels have a coastal connection point.
+                cl_candidates = list(inland_ww.sindex.intersection(cell_bbox))
+                for cl_idx in cl_candidates:
+                    cl_geom = inland_ww.iloc[cl_idx].geometry
+                    if not isinstance(cl_geom, LineString):
+                        continue
+                    for clon, clat in cl_geom.coords:
+                        if (cell_bbox[0] - 1e-8 <= clon <= cell_bbox[2] + 1e-8
+                                and cell_bbox[1] - 1e-8 <= clat <= cell_bbox[3] + 1e-8):
+                            key = (round(clon, 5), round(clat, 5))
+                            if key not in seen_centreline_coords:
+                                seen_centreline_coords.add(key)
+                                centreline_positions.append((clon, clat))
+                continue  # skip grid refinement; centreline provides navigation
 
             refinement_cells.append((x, y, local_res))
 
-        logger.info(f"Refinement planning: {len(refinement_cells)} cells need refinement")
+        logger.info(f"Refinement planning: {len(refinement_cells)} cells need refinement, "
+                    f"{len(centreline_positions)} centreline-anchored coastal positions")
 
         # ==============================================================
         # STEP 3: Batch spatial join for fine-grid candidate points
@@ -313,7 +331,7 @@ class NauticalRoutingPipeline:
                     f"points out of {len(fine_candidates)} candidates")
 
         # ==============================================================
-        # STEP 4: Create graph nodes
+        # STEP 4: Create graph nodes (grid + centreline-anchored)
         # ==============================================================
         logger.info("Creating graph nodes...")
         for cx, cy in coarse_positions:
@@ -325,6 +343,14 @@ class NauticalRoutingPipeline:
             nid = self._get_or_create_node(cx, cy)
             self.graph.nodes[nid]['resolution'] = res
             self.graph.nodes[nid]['node_type'] = 'coastal'
+
+        # Centreline-anchored coastal nodes (fallback for narrow channels)
+        for clon, clat in centreline_positions:
+            nid = self._get_or_create_node(clon, clat)
+            # Don't overwrite if this coordinate already hosts an 'inland' node
+            if self.graph.nodes[nid].get('node_type') != 'coastal':
+                self.graph.nodes[nid]['resolution'] = MAX_RES
+                self.graph.nodes[nid]['node_type'] = 'coastal'
 
         coastal_node_data = [
             (nid, data['lon'], data['lat'], data.get('resolution', MAX_RES))
