@@ -332,6 +332,25 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   font-style: italic;
 }
 
+.route-leg .leg-crossing {
+  color: #b8d4f0;
+  padding: 2px 0;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.route-leg .leg-crossing .crossing-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.route-leg .leg-crossing .crossing-type {
+  color: #5f7a9a;
+  font-size: 10px;
+}
+
 /* highlighted leg/node (bidirectional hover) */
 .route-node.highlighted {
   background: rgba(59, 143, 212, 0.2);
@@ -595,6 +614,31 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   document.getElementById('min-coast').addEventListener('change', saveMinCoast);
 
   // ---- state ----
+  const unitsConfig = { distance: {}, depth: {}, length: {}, speed: {}, temperature: {} };
+
+  function evalFormula(formula, value) {
+    if (!formula) return value;
+    try {
+      return Function('"use strict"; return (' + formula.replace(/value/g, value) + ')')();
+    } catch { return value; }
+  }
+
+  function fetchUnits() {
+    fetch(getApiBase() + '/signalk/v1/unitpreferences/active')
+      .then(r => r.ok ? r.json() : null)
+      .then(config => {
+        if (config && config.categories) {
+          const cats = config.categories;
+          if (cats.distance) unitsConfig.distance = cats.distance;
+          if (cats.depth) unitsConfig.depth = cats.depth;
+          if (cats.length) unitsConfig.length = cats.length;
+          if (cats.speed) unitsConfig.speed = cats.speed;
+          if (cats.temperature) unitsConfig.temperature = cats.temperature;
+        }
+      })
+      .catch(() => {});
+  }
+
   const state = {
     startLatLng:  null,
     destLatLng:   null,
@@ -972,6 +1016,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
   // auto-connect on load
   setTimeout(doConnect, 500);
+  fetchUnits();
 
   // ---- toast helper ----
   let toastTimer = null;
@@ -1091,6 +1136,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     return {
       name: '',
       coordinates: latLngs,
+      inputWaypoints: originalWpts,
       waypoints: waypoints,
       instructions: instructions,
       summary: { totalDistance: totalDist, totalTime: totalDist / 5 },
@@ -1702,6 +1748,76 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     return segRanges.filter(sr => sr.startIdx <= toIdx && sr.endIdx >= fromIdx);
   }
 
+  function mapCrossingsToLegs(crossings, coords, nodes) {
+    const result = {};
+    if (!crossings || !coords || !nodes) return result;
+    for (const c of crossings) {
+      const cLat = c.position.latitude;
+      const cLon = c.position.longitude;
+      let bestLeg = -1;
+      let bestDist = Infinity;
+      for (let i = 0; i < nodes.length - 1; i++) {
+        const fromIdx = nodes[i].index;
+        const toIdx = nodes[i + 1].index;
+        for (let ci = fromIdx; ci <= toIdx && ci < coords.length; ci++) {
+          const d = haversineDist(cLat, cLon, coords[ci][1], coords[ci][0]);
+          if (d < bestDist) { bestDist = d; bestLeg = i; }
+        }
+      }
+      if (bestLeg >= 0 && bestDist < 500) {
+        if (!result[bestLeg]) result[bestLeg] = [];
+        result[bestLeg].push(c);
+      }
+    }
+    return result;
+  }
+
+  function escapeHtml(str) {
+    if (!str) return '';
+    const div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+  }
+
+  function formatTime(totalHours) {
+    if (totalHours <= 0 || !isFinite(totalHours)) return '';
+    const hours = Math.floor(totalHours);
+    const mins = Math.round((totalHours - hours) * 60);
+    if (hours > 0) return hours + 'h ' + mins + 'm';
+    return mins + 'm';
+  }
+
+  function fmtDist(meters) {
+    if (meters == null || !isFinite(meters)) return '';
+    const cat = unitsConfig.distance;
+    const formula = cat && cat.formula;
+    const symbol = cat && cat.symbol ? cat.symbol : 'NM';
+    const v = formula ? evalFormula(formula, meters) : meters / 1852;
+    return v.toFixed(1) + ' ' + symbol;
+  }
+
+  function fmtDepth(m) {
+    if (m == null || !isFinite(m)) return '';
+    const cat = unitsConfig.depth;
+    if (cat && cat.formula) {
+      const v = evalFormula(cat.formula, m);
+      const sym = cat.symbol || cat.targetUnit || 'm';
+      return v.toFixed(1) + ' ' + sym;
+    }
+    return m.toFixed(1) + ' m';
+  }
+
+  function fmtHeight(m) {
+    if (m == null || !isFinite(m)) return '';
+    const cat = unitsConfig.length;
+    if (cat && cat.formula) {
+      const v = evalFormula(cat.formula, m);
+      const sym = cat.symbol || cat.targetUnit || 'm';
+      return v.toFixed(1) + ' ' + sym;
+    }
+    return m.toFixed(1) + ' m';
+  }
+
   function renderRoutePane(geoJson) {
     const pane = document.getElementById('route-pane');
     const emptyEl = document.getElementById('route-pane-empty');
@@ -1727,16 +1843,16 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     const nodes = extractMajorNodes(coords);
     const segRanges = mapSegmentsToCoordRanges(segments);
 
-    // Overall warnings
+    // Overall warnings (extract start/end connecting for inline display)
     warningsEl.innerHTML = '';
     const overallWarnings = geoJson.warnings || [];
+    let startConnectingMsg = null;
+    let endConnectingMsg = null;
     for (const w of overallWarnings) {
-      if (w.type === 'start_connecting' || w.type === 'end_connecting') {
-        const div = document.createElement('div');
-        div.className = 'route-connecting-info';
-        const icon = w.type === 'start_connecting' ? '\u21e2' : '\u21e0';
-        div.innerHTML = '<span class="conn-icon">' + icon + '</span> ' + w.message;
-        warningsEl.appendChild(div);
+      if (w.type === 'start_connecting') {
+        startConnectingMsg = w.message;
+      } else if (w.type === 'end_connecting') {
+        endConnectingMsg = w.message;
       } else {
         const div = document.createElement('div');
         div.className = 'route-overall-warn';
@@ -1767,6 +1883,34 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       summaryEl.style.display = 'none';
     }
 
+    // Crossings overview (cleared on re-render)
+    const crossings = (props && props.crossings) || [];
+    const crossingLegMap = mapCrossingsToLegs(crossings, coords, nodes);
+    let crossingsContainer = document.getElementById('route-crossings');
+    if (!crossingsContainer) {
+      crossingsContainer = document.createElement('div');
+      crossingsContainer.id = 'route-crossings';
+      nodesEl.parentNode.insertBefore(crossingsContainer, nodesEl);
+    }
+    if (crossings.length > 0) {
+      crossingsContainer.style.cssText = 'padding:4px 10px;border-top:1px solid rgba(79,148,212,0.15);font-size:11px';
+      let html = '<div style="color:#5f7a9a;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Crossings</div>';
+      for (const c of crossings) {
+        const dotColor = c.subtype === 'opening' ? '#22c55e' : c.subtype === 'fixed' ? '#ef4444' : '#f59e0b';
+        const heightInfo = c.subtype === 'fixed' && c.height ? ' (' + c.height + 'm / ' + (c.height * 3.28084).toFixed(0) + ' ft)' : c.subtype ? ' (' + c.subtype + ')' : '';
+        html += '<div style="display:flex;align-items:center;gap:5px;padding:1px 0;color:#b8d4f0">' +
+          '<span style="width:7px;height:7px;border-radius:50%;background:' + dotColor + ';flex-shrink:0"></span>' +
+          escapeHtml(c.name) + '<span style="color:#5f7a9a;font-size:10px">' + heightInfo + '</span></div>';
+      }
+      crossingsContainer.innerHTML = html;
+      crossingsContainer.style.display = 'block';
+    } else {
+      crossingsContainer.style.display = 'none';
+    }
+
+    // Via points for labeling
+    const viaPoints = state.viaPoints || [];
+
     // Nodes + legs
     nodesEl.innerHTML = '';
     if (emptyEl) emptyEl.style.display = 'none';
@@ -1783,7 +1927,11 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       let label = '';
       if (node.isStart) label = 'Start';
       else if (node.isEnd) label = 'Destination';
-      else label = 'Turn ' + i;
+      else {
+        const viaIdx = viaPoints.findIndex(vp => haversineDist(node.lat, node.lng, vp.lat, vp.lng) < 200);
+        if (viaIdx >= 0) label = 'Via ' + (viaIdx + 1);
+        else label = 'Turn ' + i;
+      }
 
       let badgeHtml = '';
       if (!node.isStart && !node.isEnd && node.bearingChange > 0) {
@@ -1791,12 +1939,25 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         badgeHtml = ' <span class="turn-badge">' + Math.round(node.bearingChange) + '\u00b0 ' + dir + '</span>';
       }
 
+      const speedKn = parseFloat(document.getElementById('avg-speed').value) || 6;
+      const cumDistNm = node.cumDistKm / 1.852;
+      const cumTimeH = speedKn > 0 ? cumDistNm / speedKn : 0;
+      const cumTimeStr = formatTime(cumTimeH);
+
+      let connHtml = '';
+      if (node.isStart && startConnectingMsg) {
+        connHtml = '<div class="route-connecting-info"><span class="conn-icon">\u21e2</span> ' + escapeHtml(startConnectingMsg) + '</div>';
+      } else if (node.isEnd && endConnectingMsg) {
+        connHtml = '<div class="route-connecting-info"><span class="conn-icon">\u21e0</span> ' + escapeHtml(endConnectingMsg) + '</div>';
+      }
+
       nodeDiv.innerHTML =
         '<div class="node-label">' + label + badgeHtml + '</div>' +
         '<div class="node-coords">' + fmtCoord(node.lat, node.lng) + '</div>' +
-        '<div class="node-dist">\u25b8 ' + node.cumDistKm.toFixed(1) + ' km' +
+        '<div class="node-dist">\u25b8 ' + fmtDist(node.cumDistKm * 1000) +
+          (cumTimeStr ? ' \u23f1 ' + cumTimeStr : '') +
           (node.heading ? ' \u2192 ' + Math.round(node.heading) + '\u00b0' : '') +
-        '</div>';
+        '</div>' + connHtml;
 
       // For hover highlighting: store the coord range of the following leg
       if (!isLast) {
@@ -1838,10 +1999,24 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
             if (s.minWidth >= 0 && s.minWidth < 6) legWarnings.push('Narrow (' + s.minWidth.toFixed(1) + 'm)');
           }
 
-          let html = '<div class="leg-stat"><span>Distance</span><span class="leg-val">' + legDist.toFixed(0) + ' m</span></div>';
-          if (minDepth !== Infinity) html += '<div class="leg-stat"><span>Min Depth</span><span class="leg-val">' + minDepth.toFixed(1) + ' m</span></div>';
+          const legKm = legDist / 1000;
+          const legNm = legKm / 1.852;
+          const legTimeH = speedKn > 0 ? legNm / speedKn : 0;
+          const legTimeStr = formatTime(legTimeH);
+
+          let html = '<div class="leg-stat"><span>Distance</span><span class="leg-val">' + fmtDist(legDist) + '</span></div>';
+          if (legTimeStr) html += '<div class="leg-stat"><span>Time</span><span class="leg-val">' + legTimeStr + '</span></div>';
+          if (minDepth !== Infinity) html += '<div class="leg-stat"><span>Min Depth</span><span class="leg-val">' + fmtDepth(minDepth) + '</span></div>';
           if (minWidth !== Infinity) html += '<div class="leg-stat"><span>Min Width</span><span class="leg-val">' + minWidth.toFixed(1) + ' m</span></div>';
-          if (maxAirDraft !== Infinity) html += '<div class="leg-stat"><span>Max Air Draft</span><span class="leg-val">' + maxAirDraft.toFixed(1) + ' m</span></div>';
+          if (maxAirDraft !== Infinity) html += '<div class="leg-stat"><span>Max Air Draft</span><span class="leg-val">' + fmtHeight(maxAirDraft) + '</span></div>';
+
+          // Crossings on this leg
+          const legCrossings = crossingLegMap[i] || [];
+          for (const c of legCrossings) {
+            const iconColor = c.subtype === 'opening' ? '#22c55e' : c.subtype === 'fixed' ? '#ef4444' : '#f59e0b';
+            const heightInfo = c.subtype === 'fixed' && c.height ? ' (' + fmtHeight(c.height) + ')' : c.subtype ? ' (' + c.subtype + ')' : '';
+            html += '<div class="leg-crossing"><span class="crossing-dot" style="background:' + iconColor + '"></span>' + escapeHtml(c.name) + '<span class="crossing-type">' + heightInfo + '</span></div>';
+          }
 
           const unique = [...new Set(legWarnings)];
           for (const w of unique) html += '<div class="leg-warn">\u26a0 ' + w + '</div>';

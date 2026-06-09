@@ -29,6 +29,19 @@ def _s57_col(attrs, *candidates):
             return attrs[match]
     return None
 
+def _parse_catbrg(catbrg):
+    """Normalize catbrg to a list of string category values."""
+    if isinstance(catbrg, (list, tuple, np.ndarray)):
+        return [str(v) for v in catbrg]
+    if isinstance(catbrg, str):
+        # Handle stringified numpy arrays like "['9' '7']"
+        import re
+        vals = re.findall(r"(\d+)", catbrg)
+        if vals:
+            return vals
+        return [catbrg]
+    return [str(catbrg)]
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -78,8 +91,6 @@ def _edge_attr_worker(edge_chunk):
     gdfs = _EDGE_ATTR_GDFS
     CRS_WGS84 = "EPSG:4326"
     CRS_METRIC = "EPSG:3857"
-    COARSE_THRESHOLD = 0.004
-
     land_metric = gdfs.get('land_metric', gpd.GeoDataFrame())
     depare_gdf = gdfs.get('depth_areas', gpd.GeoDataFrame())
     bridges_gdf = gdfs.get('bridges', gpd.GeoDataFrame())
@@ -92,113 +103,93 @@ def _edge_attr_worker(edge_chunk):
         _, _, distance = geod.inv(u_lon, u_lat, v_lon, v_lat)
         attrs['distance'] = round(distance, 2)
 
-        is_fine = edge_type == 'coastal' and (u_res < COARSE_THRESHOLD or v_res < COARSE_THRESHOLD)
+        edge_geom = LineString([(u_lon, u_lat), (v_lon, v_lat)])
 
-        if is_fine:
-            attrs['min_depth'] = 99.0
-            attrs['max_air_draft'] = 999.0
-            attrs['min_width'] = 999.0
-            attrs['is_fairway'] = False
-            attrs['is_one_way'] = False
-            attrs['traffic_dir'] = 1
-            attrs['direction_penalty'] = 1.0
-            attrs['distance_to_land'] = 9999.0
-        else:
-            edge_geom = LineString([(u_lon, u_lat), (v_lon, v_lat)])
+        # Depth
+        attrs['min_depth'] = 99.0
+        if not depare_gdf.empty:
+            depare_candidates = _candidates_by_bounds_static(depare_gdf, edge_geom)
+            if not depare_candidates.empty:
+                intersecting = depare_candidates[depare_candidates.intersects(edge_geom)]
+                if not intersecting.empty:
+                    if 'DRVAL1' in intersecting.columns:
+                        positive = intersecting[intersecting['DRVAL1'] > 0]
+                        if not positive.empty:
+                            attrs['min_depth'] = float(positive['DRVAL1'].min())
 
-            # Depth
-            # Only use DRVAL1 as a hard minimum when it is strictly positive.
-            # A value of 0 means the DEPARE polygon is a general-coverage zone
-            # (e.g., "tidal flat", "open sea coverage polygon") and carries no
-            # meaningful navigable-minimum constraint.  Using DRVAL1=0 as
-            # min_depth blocks routing through deep open water because many
-            # broad DEPARE polygons start at 0.
-            attrs['min_depth'] = 99.0
-            if not depare_gdf.empty:
-                depare_candidates = _candidates_by_bounds_static(depare_gdf, edge_geom)
-                if not depare_candidates.empty:
-                    intersecting = depare_candidates[depare_candidates.intersects(edge_geom)]
-                    if not intersecting.empty:
-                        if 'DRVAL1' in intersecting.columns:
-                            positive = intersecting[intersecting['DRVAL1'] > 0]
-                            if not positive.empty:
-                                attrs['min_depth'] = float(positive['DRVAL1'].min())
+        # Bridges
+        attrs['max_air_draft'] = 999.0
+        if not bridges_gdf.empty:
+            bridge_candidates = _candidates_by_bounds_static(bridges_gdf, edge_geom)
+            if not bridge_candidates.empty:
+                intersecting = bridge_candidates[bridge_candidates.intersects(edge_geom)]
+                if not intersecting.empty:
+                    min_clearance = 999.0
+                    for _, row in intersecting.iterrows():
+                        is_movable = False
+                        catbrg = _s57_col(row, 'catbrg', 'CATAQA', 'CatBrg')
+                        if catbrg is not None and pd.notnull(catbrg):
+                            vals = _parse_catbrg(catbrg)
+                            if any(v in ('3', '4', '5', '6', '7') for v in vals):
+                                is_movable = True
+                        if not is_movable:
+                            vercop = _s57_col(row, 'vercop', 'VERCOP', 'VerCop')
+                            if vercop is not None and pd.notnull(vercop):
+                                is_movable = True
+
+                        if is_movable:
+                            clearance = 999.0
                         else:
-                            attrs['min_depth'] = 99.0
-
-            # Bridges
-            attrs['max_air_draft'] = 999.0
-            if not bridges_gdf.empty:
-                bridge_candidates = _candidates_by_bounds_static(bridges_gdf, edge_geom)
-                if not bridge_candidates.empty:
-                    intersecting = bridge_candidates[bridge_candidates.intersects(edge_geom)]
-                    if not intersecting.empty:
-                        min_clearance = 999.0
-                        for _, row in intersecting.iterrows():
-                            # Check if bridge is movable (catbrg: 3=opening, 4=lifting, 5=bascule, 6=draw, 7=swing)
-                            is_movable = False
-                            catbrg = _s57_col(row, 'catbrg', 'CATAQA', 'CatBrg')
-                            if catbrg is not None and pd.notnull(catbrg):
-                                if isinstance(catbrg, (list, tuple, np.ndarray)):
-                                    vals = [str(v) for v in catbrg]
-                                else:
-                                    vals = [str(catbrg)]
-                                if any(v in ('3', '4', '5', '6', '7') for v in vals):
-                                    is_movable = True
-
-                            if is_movable:
-                                clearance = 999.0
+                            verclr = _s57_col(row, 'verclr', 'VERCLR', 'VerClr')
+                            if verclr is not None and pd.notnull(verclr):
+                                clearance = float(verclr)
                             else:
-                                verclr = _s57_col(row, 'verclr', 'VERCLR', 'VerClr')
-                                if verclr is not None and pd.notnull(verclr):
-                                    clearance = float(verclr)
-                                else:
-                                    clearance = 999.0
+                                clearance = 999.0
 
-                            if clearance < min_clearance:
-                                min_clearance = clearance
+                        if clearance < min_clearance:
+                            min_clearance = clearance
 
-                        attrs['max_air_draft'] = min_clearance
+                    attrs['max_air_draft'] = min_clearance
 
-            # Locks
-            attrs['min_width'] = 999.0
-            if not locks_gdf.empty:
-                lock_candidates = _candidates_by_bounds_static(locks_gdf, edge_geom)
-                if not lock_candidates.empty:
-                    intersecting = lock_candidates[lock_candidates.intersects(edge_geom)]
-                    if not intersecting.empty and 'HORCLR' in intersecting.columns:
-                        attrs['min_width'] = float(intersecting['HORCLR'].min())
+        # Locks
+        attrs['min_width'] = 999.0
+        if not locks_gdf.empty:
+            lock_candidates = _candidates_by_bounds_static(locks_gdf, edge_geom)
+            if not lock_candidates.empty:
+                intersecting = lock_candidates[lock_candidates.intersects(edge_geom)]
+                if not intersecting.empty and 'HORCLR' in intersecting.columns:
+                    attrs['min_width'] = float(intersecting['HORCLR'].min())
 
-            # Fairway + one-way (TRAFIC)
-            attrs['is_fairway'] = False
-            attrs['is_one_way'] = False
-            attrs['traffic_dir'] = 1
-            if not fairways_gdf.empty:
-                fw_candidates = _candidates_by_bounds_static(fairways_gdf, edge_geom)
-                if not fw_candidates.empty:
-                    intersecting = fw_candidates[fw_candidates.intersects(edge_geom)]
-                    if not intersecting.empty:
-                        attrs['is_fairway'] = True
-                        if 'TRAFIC' in intersecting.columns:
-                            trafic_vals = intersecting['TRAFIC'].dropna().unique()
-                            if len(trafic_vals) == 1:
-                                tv = int(trafic_vals[0])
-                                if abs(tv) in (1, 3):
-                                    attrs['is_one_way'] = True
-                                    attrs['traffic_dir'] = 1 if tv in (1, 3) else -1
+        # Fairway + one-way (TRAFIC)
+        attrs['is_fairway'] = False
+        attrs['is_one_way'] = False
+        attrs['traffic_dir'] = 1
+        if not fairways_gdf.empty:
+            fw_candidates = _candidates_by_bounds_static(fairways_gdf, edge_geom)
+            if not fw_candidates.empty:
+                intersecting = fw_candidates[fw_candidates.intersects(edge_geom)]
+                if not intersecting.empty:
+                    attrs['is_fairway'] = True
+                    if 'TRAFIC' in intersecting.columns:
+                        trafic_vals = intersecting['TRAFIC'].dropna().unique()
+                        if len(trafic_vals) == 1:
+                            tv = int(trafic_vals[0])
+                            if abs(tv) in (1, 3):
+                                attrs['is_one_way'] = True
+                                attrs['traffic_dir'] = 1 if tv in (1, 3) else -1
 
-            # Direction penalty
-            attrs['direction_penalty'] = 1.0
+        # Direction penalty
+        attrs['direction_penalty'] = 1.0
 
-            # Distance to land
-            attrs['distance_to_land'] = 9999.0
-            if not land_metric.empty:
-                edge_geom_metric = gpd.GeoSeries([edge_geom], crs=CRS_WGS84).to_crs(CRS_METRIC).iloc[0]
-                possible_matches = land_metric.sindex.nearest(edge_geom_metric)
-                if len(possible_matches[1]) > 0:
-                    closest_idx = possible_matches[1][0]
-                    closest_geom = land_metric.iloc[closest_idx].geometry
-                    attrs['distance_to_land'] = round(edge_geom_metric.distance(closest_geom), 2)
+        # Distance to land
+        attrs['distance_to_land'] = 9999.0
+        if not land_metric.empty:
+            edge_geom_metric = gpd.GeoSeries([edge_geom], crs=CRS_WGS84).to_crs(CRS_METRIC).iloc[0]
+            possible_matches = land_metric.sindex.nearest(edge_geom_metric)
+            if len(possible_matches[1]) > 0:
+                closest_idx = possible_matches[1][0]
+                closest_geom = land_metric.iloc[closest_idx].geometry
+                attrs['distance_to_land'] = round(edge_geom_metric.distance(closest_geom), 2)
 
         results[(u, v)] = attrs
     return results
@@ -229,7 +220,12 @@ class NauticalRoutingPipeline:
         self.parse_shapefiles()
         self.build_network()
         self._validate_edges_against_land()
+        self._add_opening_bridge_edges()
         self.calculate_edge_attributes()
+        # Override air draft for edges created through opening bridges
+        for u, v, data in self.graph.edges(data=True):
+            if data.get('is_opening_bridge_edge'):
+                data['max_air_draft'] = 999.0
         self._compute_node_depths()
         self.export_to_sqlite()
         logger.info("Pipeline execution completed successfully.")
@@ -767,6 +763,111 @@ class NauticalRoutingPipeline:
             f"{self.graph.number_of_edges()} edges remaining"
         )
 
+    def _add_opening_bridge_edges(self):
+        """
+        Create coastal edges through opening/movable bridge polygons.
+
+        For each opening bridge (CATBRG 3-7 or VERCOP present), this method:
+        1. Identifies the nearest coastal node on the west and east sides
+        2. Creates a new graph node at the bridge centroid
+        3. Connects the bridge node to both side-nodes with max_air_draft=999
+
+        This ensures A* can route through opening bridges even when the
+        coarse grid's horizontal edges pass through fixed bridge sections.
+        """
+        bridges_gdf = self.gdfs.get('bridges', gpd.GeoDataFrame())
+        if bridges_gdf.empty:
+            logger.info("No bridge data — skipping opening bridge edge creation")
+            return
+
+        depare_gdf = self.gdfs.get('depth_areas', gpd.GeoDataFrame())
+        logger.info("Adding opening bridge crossing edges...")
+        added = 0
+
+        for _, row in bridges_gdf.iterrows():
+            # Check if bridge is opening/movable
+            is_movable = False
+            catbrg = _s57_col(row, 'catbrg', 'CATAQA', 'CatBrg')
+            if catbrg is not None and pd.notnull(catbrg):
+                vals = _parse_catbrg(catbrg)
+                if any(v in ('3', '4', '5', '6', '7') for v in vals):
+                    is_movable = True
+            if not is_movable:
+                vercop = _s57_col(row, 'vercop', 'VERCOP', 'VerCop')
+                if vercop is not None and pd.notnull(vercop):
+                    is_movable = True
+            if not is_movable:
+                continue
+
+            bridge_geom = row.geometry
+            centroid = bridge_geom.centroid
+            bbox = bridge_geom.bounds
+            minx, miny, maxx, maxy = bbox
+
+            SEARCH_MARGIN = 0.01
+
+            west_nodes = []
+            east_nodes = []
+            for nid, data in self.graph.nodes(data=True):
+                if data.get('node_type') != 'coastal':
+                    continue
+                lon, lat = data['lon'], data['lat']
+                if not (minx - SEARCH_MARGIN <= lon <= maxx + SEARCH_MARGIN and
+                        miny - SEARCH_MARGIN <= lat <= maxy + SEARCH_MARGIN):
+                    continue
+                if lon < minx:
+                    west_nodes.append((nid, lon, lat))
+                elif lon > maxx:
+                    east_nodes.append((nid, lon, lat))
+
+            if not west_nodes or not east_nodes:
+                continue
+
+            # Sort by distance to bridge centroid
+            c_lon, c_lat = centroid.x, centroid.y
+            def _dist(lon, lat):
+                dx = (lon - c_lon) * 111320 * math.cos(math.radians((lat + c_lat) / 2))
+                dy = (lat - c_lat) * 111320
+                return math.sqrt(dx * dx + dy * dy)
+
+            west_nodes.sort(key=lambda x: _dist(x[1], x[2]))
+            east_nodes.sort(key=lambda x: _dist(x[1], x[2]))
+
+            wn, wl, wlt = west_nodes[0]
+            en, el, elt = east_nodes[0]
+
+            # Create bridge node at centroid
+            b_id = self._get_or_create_node(c_lon, c_lat, node_type='coastal')
+            self.graph.nodes[b_id]['resolution'] = 0.001
+            self.graph.nodes[b_id]['node_type'] = 'coastal'
+
+            # Compute depth at bridge node from DEPARE
+            node_depth = -1
+            if not depare_gdf.empty:
+                pt = Point(c_lon, c_lat)
+                candidates = list(depare_gdf.sindex.intersection(pt.bounds))
+                for idx in candidates:
+                    dr = depare_gdf.iloc[idx]
+                    if dr.geometry.contains(pt):
+                        if 'DRVAL1' in dr and pd.notnull(dr['DRVAL1']):
+                            node_depth = float(dr['DRVAL1'])
+                        else:
+                            node_depth = 99.0
+                        break
+            self.graph.nodes[b_id]['node_depth'] = node_depth
+
+            # Create edges with air draft override tag
+            if not self.graph.has_edge(b_id, wn):
+                self.graph.add_edge(b_id, wn, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
+                self.graph.add_edge(wn, b_id, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
+                added += 2
+            if not self.graph.has_edge(b_id, en):
+                self.graph.add_edge(b_id, en, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
+                self.graph.add_edge(en, b_id, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
+                added += 2
+
+        logger.info(f"Added {added} opening bridge crossing edges")
+
     def _compute_node_depths(self):
         """
         Compute the depth at each node's exact point from DEPARE polygons.
@@ -837,12 +938,7 @@ class NauticalRoutingPipeline:
         return gpd.GeoDataFrame()
 
     def calculate_edge_attributes(self):
-        """Calculates edge attributes using multiprocessing.
-
-        Expensive spatial queries (depth, bridges, locks, fairways,
-        distance_to_land) are skipped for fine coastal edges where
-        either endpoint has resolution < 0.004°.
-        """
+        """Calculates edge attributes using multiprocessing for all edges."""
         logger.info("Calculating advanced edge attributes (multiprocessing)...")
 
         total_edges = self.graph.number_of_edges()
@@ -1000,19 +1096,24 @@ class NauticalRoutingPipeline:
                 """Build JSON properties blob for a POI based on its type."""
                 props = {}
                 if default_type == 'bridge':
+                    is_opening = False
                     catbrg = _s57_col(row, 'catbrg', 'CATAQA', 'CatBrg')
                     if catbrg is not None and pd.notnull(catbrg):
-                        if isinstance(catbrg, (list, tuple, np.ndarray)):
-                            vals = [str(v) for v in catbrg]
-                        else:
-                            vals = [str(catbrg)]
+                        vals = _parse_catbrg(catbrg)
                         if any(v in ('3', '4', '5', '6', '7') for v in vals):
-                            props['subtype'] = 'opening'
-                        else:
-                            props['subtype'] = 'fixed'
-                            verclr = _s57_col(row, 'verclr', 'VERCLR', 'VerClr')
-                            if verclr is not None and pd.notnull(verclr):
-                                props['height'] = float(verclr)
+                            is_opening = True
+                    # Fallback: VERCOP present means bridge opens
+                    if not is_opening:
+                        vercop = _s57_col(row, 'vercop', 'VERCOP', 'VerCop')
+                        if vercop is not None and pd.notnull(vercop):
+                            is_opening = True
+                    if is_opening:
+                        props['subtype'] = 'opening'
+                    else:
+                        props['subtype'] = 'fixed'
+                        verclr = _s57_col(row, 'verclr', 'VERCLR', 'VerClr')
+                        if verclr is not None and pd.notnull(verclr):
+                            props['height'] = float(verclr)
                 return json.dumps(props)
 
             poi_layers = [

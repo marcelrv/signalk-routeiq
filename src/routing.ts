@@ -7,6 +7,7 @@ import { EdgeRow, RoutingDatabase } from './database.js';
 import {
     BBox,
     PluginConfig,
+    RouteCrossing,
     RouteResult,
     RouteWarning,
     RoutingRequest,
@@ -952,6 +953,8 @@ export class RoutingEngine {
       }
     }
 
+    const crossings = await this.detectCrossings(coordinates);
+
     return {
       type: 'FeatureCollection',
       features: [
@@ -965,10 +968,63 @@ export class RoutingEngine {
             totalDistance,
             totalCost,
             segments,
+            crossings,
           },
         },
       ],
     };
+  }
+
+  private async detectCrossings(coordinates: [number, number][]): Promise<RouteCrossing[]> {
+    if (coordinates.length === 0) return [];
+
+    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+    for (const [lon, lat] of coordinates) {
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+      if (lon < minLon) minLon = lon;
+      if (lon > maxLon) maxLon = lon;
+    }
+    const MARGIN = 0.002;
+    const pois = await this.db.getPoisInBBox(
+      minLat - MARGIN, minLon - MARGIN,
+      maxLat + MARGIN, maxLon + MARGIN,
+    );
+
+    const bridgePois = pois.filter(p => p.type === 'bridge');
+    const lockPois = pois.filter(p => p.type === 'lock');
+    const crossings: RouteCrossing[] = [];
+    const seenIds = new Set<number>();
+    const MAX_DIST = 150;
+
+    for (const [lon, lat] of coordinates) {
+      for (const poi of bridgePois) {
+        if (seenIds.has(poi.id)) continue;
+        if (this.haversineDistance(lat, lon, poi.lat, poi.lon) <= MAX_DIST) {
+          seenIds.add(poi.id);
+          crossings.push({
+            type: 'bridge',
+            name: poi.name,
+            subtype: (poi.properties as Record<string, unknown>)?.subtype as string | undefined,
+            height: (poi.properties as Record<string, unknown>)?.height as number | undefined,
+            position: { latitude: poi.lat, longitude: poi.lon },
+          });
+        }
+      }
+      for (const poi of lockPois) {
+        if (seenIds.has(poi.id)) continue;
+        if (this.haversineDistance(lat, lon, poi.lat, poi.lon) <= MAX_DIST) {
+          seenIds.add(poi.id);
+          crossings.push({
+            type: 'lock',
+            name: poi.name,
+            position: { latitude: poi.lat, longitude: poi.lon },
+          });
+        }
+      }
+    }
+
+    return crossings;
   }
 
   private addViolationWarnings(

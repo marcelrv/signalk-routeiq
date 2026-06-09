@@ -51,6 +51,15 @@ export interface SearchNode {
   parent: SearchNode | null;
 }
 
+// Crossing annotation (bridge or lock encountered on the route)
+export interface RouteCrossing {
+  type: 'bridge' | 'lock';
+  name: string;
+  subtype?: string; // 'opening' or 'fixed' for bridges
+  height?: number;  // vertical clearance (m) for fixed bridges
+  position: { latitude: number; longitude: number };
+}
+
 // Route result
 export interface RouteWarning {
   type: 'start_unreachable' | 'end_unreachable' | 'both_unreachable' | 'via_constrained' | 'via_skipped' | 'bbox_expanded' | 'start_connecting' | 'end_connecting';
@@ -84,6 +93,7 @@ export interface RouteResult {
           trafficDir?: number;
           edgeType?: string;
         }>;
+        crossings?: RouteCrossing[];
     };
   }>;
 }
