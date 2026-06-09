@@ -241,70 +241,50 @@ export class RoutingEngine {
     const endReachable = reachableFromStart.has(endNode);
 
     if (!endReachable) {
-      // Disconnected components — find bridge node in start's component nearest to end
-      const bridge = await this.db.findNearestNodeInSet(
-        end.latitude, end.longitude, reachableFromStart
+      // Disconnected components — pick the larger component as the primary routing network
+      const reachableFromEnd = this.db.getReachableNodes(endNode);
+      const useEndAsPrimary = reachableFromEnd.size >= reachableFromStart.size;
+      const primaryComponent = useEndAsPrimary ? reachableFromEnd : reachableFromStart;
+
+      // Find connection points in the primary component nearest to each user point
+      const entry = await this.db.findNearestNodeInSet(
+        start.latitude, start.longitude, primaryComponent, 50000
+      );
+      const exit = await this.db.findNearestNodeInSet(
+        end.latitude, end.longitude, primaryComponent, 50000
       );
 
-      if (!bridge) {
+      if (!entry || !exit) {
         throw new Error(
-          `No route found — neither the start nor the end point can be connected ` +
-          `to the navigable waterway network within range.`
+          'No route found — the start and end are in disconnected parts of the waterway ' +
+          'network (e.g. separated by a lock or unconnected water body) and no bridging ' +
+          'point could be found at either end.'
         );
       }
 
-      warnings.push({
-        type: 'end_unreachable',
-        message: `End destination is in a disconnected part of the waterway network. ` +
-          `Route ends ${bridge.distance.toFixed(0)}m from the requested destination, ` +
-          `at the nearest reachable point.`,
-        from: { latitude: bridge.lat, longitude: bridge.lon },
-        to: { latitude: end.latitude, longitude: end.longitude },
-        distanceMeters: Math.round(bridge.distance),
-      });
-
-      // Check if start node itself is in a tiny component
-      const startReachable = this.db.getReachableNodes(startNode);
-      if (startReachable.size < 10) {
-        const nearestMain = await this.db.findNearestNodeInSet(
-          start.latitude, start.longitude, reachableFromStart
-        );
-        if (nearestMain && nearestMain.id !== startNode) {
-          warnings.unshift({
-            type: 'start_unreachable',
-            message: `Start location is outside the main navigable waterway network. ` +
-              `Navigating ${nearestMain.distance.toFixed(0)}m to the nearest channel.`,
-            from: { latitude: start.latitude, longitude: start.longitude },
-            to: { latitude: nearestMain.lat, longitude: nearestMain.lon },
-            distanceMeters: Math.round(nearestMain.distance),
-          });
+      // Route through the primary component from entry to exit
+      let route: RouteResult;
+      if (entry.id === exit.id) {
+        route = await this.buildEmptyRoute(entry.id);
+      } else {
+        try {
+          route = await this.astarSearch(
+            entry.lat, entry.lon,
+            exit.lat, exit.lon,
+            coastDistanceMeters
+          );
+        } catch {
+          throw new Error(
+            'No route found through the primary waterway network between the connection points.'
+          );
         }
       }
 
-      // Route from start node to bridge node
-      const mainRoute = await this.astarSearch(
-        start.latitude, start.longitude,
-        bridge.lat, bridge.lon,
-        coastDistanceMeters
-      );
+      // Connect user points to the primary network entry/exit
+      await this.connectUserPoint(start, route, 'start');
+      await this.connectUserPoint(end, route, 'end');
 
-      // Connect start user coordinate to the route
-      await this.connectUserPoint(start, mainRoute, 'start');
-
-      // Append the remaining leg as a straight-line segment with warning
-      mainRoute.features[0].geometry.coordinates.push([end.longitude, end.latitude]);
-      mainRoute.features[0].properties.totalDistance += bridge.distance;
-      mainRoute.features[0].properties.segments.push({
-        from: bridge.id,
-        to: endNode,
-        distance: Math.round(bridge.distance),
-        minDepth: 0,
-        maxAirDraft: 0,
-        isFairway: false,
-        directionPenalty: 1,
-      });
-      mainRoute.warnings = warnings;
-      return mainRoute;
+      return route;
     }
 
     throw new Error(

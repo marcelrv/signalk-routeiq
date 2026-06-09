@@ -103,10 +103,13 @@ def _edge_attr_worker(edge_chunk):
                 depare_candidates = _candidates_by_bounds_static(depare_gdf, edge_geom)
                 if not depare_candidates.empty:
                     intersecting = depare_candidates[depare_candidates.intersects(edge_geom)]
-                    if not intersecting.empty and 'DRVAL1' in intersecting.columns:
-                        positive = intersecting[intersecting['DRVAL1'] > 0]
-                        if not positive.empty:
-                            attrs['min_depth'] = float(positive['DRVAL1'].min())
+                    if not intersecting.empty:
+                        if 'DRVAL1' in intersecting.columns:
+                            positive = intersecting[intersecting['DRVAL1'] > 0]
+                            if not positive.empty:
+                                attrs['min_depth'] = float(positive['DRVAL1'].min())
+                        else:
+                            attrs['min_depth'] = 99.0
 
             # Bridges
             attrs['max_air_draft'] = 999.0
@@ -165,8 +168,6 @@ def _edge_attr_worker(edge_chunk):
 
             # Direction penalty
             attrs['direction_penalty'] = 1.0
-            if attrs['is_fairway'] and edge_type == 'inland' and u > v:
-                attrs['direction_penalty'] = 5.0
 
             # Distance to land
             attrs['distance_to_land'] = 9999.0
@@ -769,13 +770,10 @@ class NauticalRoutingPipeline:
         logger.info("Computing node depths from DEPARE polygons...")
         _ = depare_gdf.sindex  # ensure R-tree built
 
-        # Pre-filter DEPARE polygons to those with DRVAL1 > 0
-        if 'DRVAL1' in depare_gdf.columns:
-            positive = depare_gdf[depare_gdf['DRVAL1'] > 0].copy()
-        else:
-            positive = gpd.GeoDataFrame()
+        # CRITICAL FIX: Do not filter by DRVAL1 > 0. Keep all depth areas.
+        positive = depare_gdf.copy()
         if positive.empty:
-            logger.info("  No DEPARE polygons with DRVAL1 > 0 — all nodes unknown")
+            logger.info("  No DEPARE polygons found — all nodes unknown")
             for _, data in self.graph.nodes(data=True):
                 data['node_depth'] = -1
             return
@@ -796,7 +794,11 @@ class NauticalRoutingPipeline:
             for idx in candidates:
                 row = positive.iloc[idx]
                 if row.geometry.contains(pt):
-                    depth = float(row['DRVAL1'])
+                    # CRITICAL FIX: If DRVAL1 is NaN, assume general deep water (99.0)
+                    if 'DRVAL1' in row and pd.notnull(row['DRVAL1']):
+                        depth = float(row['DRVAL1'])
+                    else:
+                        depth = 99.0
                     found += 1
                     break
             data['node_depth'] = depth
