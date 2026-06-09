@@ -682,6 +682,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     lastGeoJson:  null,
     viaPoints:    [],
     routeSegments: [],        // { polyline, startIdx, endIdx, isWarning, originalStyle }
+    junctionMarkers: null,    // L.layerGroup for hover junction markers
     startPoiName: '',         // POI name when start was set via search
     destPoiName: '',          // POI name when destination was set via search
     routeName:    '',         // computed route name for display/export
@@ -1200,7 +1201,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   function highlightMapByCoordRange(fromIdx, toIdx) {
     clearMapHighlight();
     for (const seg of state.routeSegments) {
-      if (seg.startIdx <= toIdx && seg.endIdx >= fromIdx) {
+      if (seg.startIdx >= fromIdx && seg.endIdx <= toIdx) {
         seg.polyline.setStyle({ weight: 7, opacity: 1.0 });
       }
     }
@@ -1233,6 +1234,22 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   function clearBothHighlights() {
     clearMapHighlight();
     clearPaneHighlight();
+    clearJunctionMarkers();
+  }
+
+  function clearJunctionMarkers() {
+    if (state.junctionMarkers) state.junctionMarkers.clearLayers();
+  }
+
+  function showJunctionMarker(latlng, label) {
+    clearJunctionMarkers();
+    const icon = L.divIcon({
+      className: '',
+      html: '<div style="font-size:11px;line-height:18px;text-align:center;color:#fff;background:#3b8fd4;width:20px;height:20px;border-radius:10px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);font-weight:600;font-family:sans-serif">' + label + '</div>',
+      iconSize: [20, 20],
+      iconAnchor: [10, 10],
+    });
+    L.marker(latlng, { icon }).addTo(state.junctionMarkers);
   }
 
   function addPolylineHoverHandlers(polyline, fromIdx, toIdx) {
@@ -1246,6 +1263,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   function renderCustomRoute(geoJson) {
     state.routeLayers.clearLayers();
     state.routeSegments = [];
+    state.junctionMarkers = L.layerGroup().addTo(state.routeLayers);
     if (!geoJson) return;
 
     const warnings = geoJson.warnings || [];
@@ -1262,24 +1280,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     if (coords.length < 2) return;
 
     const latLngs = coords.map(c => L.latLng(c[1], c[0]));
-    const totalLen = coords.length;
 
-    if (warnings.length === 0) {
-      const nodes = extractMajorNodes(coords);
-      const style = { color: '#3b8fd4', opacity: 0.9, weight: 4 };
-      for (let i = 0; i < nodes.length - 1; i++) {
-        const fromIdx = nodes[i].index;
-        const toIdx = nodes[i + 1].index;
-        const seg = latLngs.slice(fromIdx, toIdx + 1);
-        if (seg.length < 2) continue;
-        const polyline = L.polyline(seg, style).addTo(state.routeLayers);
-        state.routeSegments.push({ polyline, startIdx: fromIdx, endIdx: toIdx, isWarning: false, originalStyle: style });
-        addPolylineHoverHandlers(polyline, fromIdx, toIdx);
-      }
-      state.routeLayers.bringToFront();
-      return;
-    }
-
+    // Build warned-coordinate set
     const warnIdx = new Set();
     for (const w of warnings) {
       if (w.from && w.to) {
@@ -1289,34 +1291,32 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       }
     }
 
-    let segStart = 0;
-    let inWarn = warnIdx.has(0);
-    for (let i = 1; i < latLngs.length; i++) {
-      const w = warnIdx.has(i);
-      if (w !== inWarn) {
-        const seg = latLngs.slice(segStart, i + 1);
-        if (seg.length >= 2) {
-          const isWarn = inWarn;
-          const style = isWarn
-            ? { color: '#f59e0b', opacity: 0.9, weight: 4, dashArray: '8, 6' }
-            : { color: '#3b8fd4', opacity: 0.9, weight: 4 };
-          const polyline = L.polyline(seg, style).addTo(state.routeLayers);
-          state.routeSegments.push({ polyline, startIdx: segStart, endIdx: i, isWarning: isWarn, originalStyle: style });
-          addPolylineHoverHandlers(polyline, segStart, i);
-        }
-        segStart = i;
-        inWarn = w;
-      }
+    // Split at BOTH major node boundaries AND warn/no-warn transitions.
+    // This keeps segments aligned with pane legs and only colors warned coords orange.
+    const nodes = extractMajorNodes(coords);
+    const splitSet = new Set([0]);
+    for (const n of nodes) splitSet.add(n.index);
+    let prevWarn = warnIdx.has(0);
+    for (let i = 1; i < coords.length; i++) {
+      const curWarn = warnIdx.has(i);
+      if (curWarn !== prevWarn) { splitSet.add(i); prevWarn = curWarn; }
     }
-    const seg = latLngs.slice(segStart);
-    if (seg.length >= 2) {
-      const isWarn = inWarn;
+    splitSet.add(coords.length - 1);
+
+    const splitPoints = [...splitSet].sort((a, b) => a - b);
+    for (let i = 0; i < splitPoints.length - 1; i++) {
+      const s = splitPoints[i];
+      const e = splitPoints[i + 1];
+      if (e - s < 1) continue;
+      const seg = latLngs.slice(s, e + 1);
+      if (seg.length < 2) continue;
+      const isWarn = warnIdx.has(s);
       const style = isWarn
         ? { color: '#f59e0b', opacity: 0.9, weight: 4, dashArray: '8, 6' }
         : { color: '#3b8fd4', opacity: 0.9, weight: 4 };
       const polyline = L.polyline(seg, style).addTo(state.routeLayers);
-      state.routeSegments.push({ polyline, startIdx: segStart, endIdx: totalLen - 1, isWarning: isWarn, originalStyle: style });
-      addPolylineHoverHandlers(polyline, segStart, totalLen - 1);
+      state.routeSegments.push({ polyline, startIdx: s, endIdx: e, isWarning: isWarn, originalStyle: style });
+      addPolylineHoverHandlers(polyline, s, e);
     }
     state.routeLayers.bringToFront();
   }
@@ -1907,9 +1907,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       timeStr += mins + ' min';
 
       summaryEl.style.display = 'block';
-      const distStr = totalKm >= 100
-        ? totalNm.toFixed(1) + ' NM  (' + totalKm.toFixed(0) + ' km)'
-        : totalKm.toFixed(1) + ' km  (' + totalDistM.toFixed(0) + ' m)';
+      const distStr = fmtDist(totalDistM);
       summaryEl.innerHTML = 'Total: ' + distStr + '<br><span class="time-line">\u23f1 ' + timeStr + '</span> <span class="speed-label">@ ' + speedKn.toFixed(1) + ' kn</span>';
     } else if (summaryEl) {
       summaryEl.style.display = 'none';
@@ -1945,10 +1943,6 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       }
 
       let badgeHtml = '';
-      if (!node.isStart && !node.isEnd && node.bearingChange > 0) {
-        const dir = node.signedChange >= 0 ? 'R' : 'L';
-        badgeHtml = ' <span class="turn-badge">' + Math.round(node.bearingChange) + '\u00b0 ' + dir + '</span>';
-      }
 
       const speedKn = parseFloat(document.getElementById('avg-speed').value) || 6;
       const cumDistNm = node.cumDistKm / 1.852;
@@ -2010,6 +2004,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         nodeDiv.dataset.coordFrom = node.index;
         nodeDiv.dataset.coordTo = nextNode.index;
       }
+      nodeDiv.dataset.lat = node.lat;
+      nodeDiv.dataset.lng = node.lng;
 
       nodesEl.appendChild(nodeDiv);
 
@@ -2220,6 +2216,20 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     if (isNaN(fromIdx) || isNaN(toIdx)) return;
     highlightMapByCoordRange(fromIdx, toIdx);
     highlightPaneByCoordRange(fromIdx, toIdx);
+
+    // Show junction marker at the hovered node (or start node of the leg)
+    const nodeEl = target.classList.contains('route-node') ? target : target.previousElementSibling;
+    if (nodeEl && nodeEl.classList.contains('route-node')) {
+      const labelEl = nodeEl.querySelector('.node-label');
+      const raw = labelEl ? labelEl.textContent.trim() : '';
+      // Just the number; keep "Start"/"Destination" as-is
+      const label = raw === 'Start' || raw === 'Destination' ? raw : raw.replace(/^Turn\s*/, '');
+      const lat = parseFloat(nodeEl.dataset.lat);
+      const lng = parseFloat(nodeEl.dataset.lng);
+      if (!isNaN(lat) && !isNaN(lng) && label) {
+        showJunctionMarker(L.latLng(lat, lng), label);
+      }
+    }
   }, true);
 
   routeNodesEl.addEventListener('mouseleave', function (e) {
