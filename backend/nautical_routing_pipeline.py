@@ -530,13 +530,13 @@ class NauticalRoutingPipeline:
         fine_pos = {}    # (col, row) at MIN_RES → node_id
 
         for nid, lon, lat, res in coastal_node_data:
-            fc = round(lon / MIN_RES)
-            fr = round(lat / MIN_RES)
+            fc = int(lon / MIN_RES + 0.5)
+            fr = int(lat / MIN_RES + 0.5)
             fine_pos[(fc, fr)] = nid
 
             if res >= MAX_RES * 0.9:
-                cc = round(lon / MAX_RES)
-                cr = round(lat / MAX_RES)
+                cc = int(lon / MAX_RES + 0.5)
+                cr = int(lat / MAX_RES + 0.5)
                 coarse_pos[(cc, cr)] = nid
 
         total_new_edges = 0
@@ -621,8 +621,8 @@ class NauticalRoutingPipeline:
 
         ic_edge_count = 0
         for nid, lon, lat in inland_nodes:
-            fc = round(lon / MIN_RES)
-            fr = round(lat / MIN_RES)
+            fc = int(lon / MIN_RES + 0.5)
+            fr = int(lat / MIN_RES + 0.5)
             best_cnid = None
             best_dist = float('inf')
             for dr in range(-inland_search_radius, inland_search_radius + 1):

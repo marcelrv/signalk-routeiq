@@ -1281,10 +1281,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
     const latLngs = coords.map(c => L.latLng(c[1], c[0]));
 
-    // Build warned-coordinate set
+    // Build warned-coordinate set (only via_constrained marks route orange)
     const warnIdx = new Set();
     for (const w of warnings) {
-      if (w.from && w.to) {
+      if (w.type === 'via_constrained' && w.from && w.to) {
         const fi = closestCoordIndex(coords, w.from.latitude, w.from.longitude);
         const ti = closestCoordIndex(coords, w.to.latitude, w.to.longitude);
         for (let i = Math.min(fi, ti); i <= Math.max(fi, ti); i++) warnIdx.add(i);
