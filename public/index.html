@@ -301,6 +301,24 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   margin-top: 1px;
   font-style: italic;
 }
+.route-node .node-crossings {
+  font-size: 10px;
+  margin-top: 2px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.route-node .node-crossings .node-crossing-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  border: 1.5px solid #fff;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  line-height: 1;
+}
 
 /* leg segment details (expandable) */
 .route-leg {
@@ -345,6 +363,18 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
+}
+.route-leg .leg-crossing .leg-crossing-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 10px;
+  border: 1.5px solid #fff;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  flex-shrink: 0;
+  line-height: 1;
 }
 .route-leg .leg-crossing .crossing-type {
   color: #5f7a9a;
@@ -711,6 +741,20 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       .catch(() => {});
   }
 
+  function poiIcon(type, props, size) {
+    size = size || 22;
+    if (type === 'bridge') {
+      if (props.subtype === 'opening') {
+        return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 22 22"><line x1="3" y1="11" x2="7" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="9.7" y2="3.5" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="19" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="7" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="15" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>';
+      }
+      return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 22 22"><line x1="3" y1="11" x2="19" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="7" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="15" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>';
+    }
+    if (type === 'lock') {
+      return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 22 22"><line x1="3" y1="8" x2="3" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="3" y1="18" x2="19" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="19" y1="8" x2="19" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><polyline points="8,14 11,16 14,14" stroke="white" stroke-width="1.5" fill="none" stroke-linejoin="round"/><line x1="11" y1="14" x2="11" y2="10" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>';
+    }
+    return ({ harbour: '⚓', fairway: '⛵', waterway: '💧' }[type] || '📍');
+  }
+
   function fetchPois() {
     if (!poiVisible) return;
     poiLayer.clearLayers();
@@ -719,18 +763,6 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       .then(r => { logDebug('POIS', poisUrl(), undefined, r); return r.ok ? r.json() : null; })
       .then(data => {
         if (!data || !data.pois) return;
-        function poiIcon(type, props) {
-          if (type === 'bridge') {
-            if (props.subtype === 'opening') {
-              return '<svg width="22" height="22" viewBox="0 0 22 22"><line x1="3" y1="11" x2="7" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="9.7" y2="3.5" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="19" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="7" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="15" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>';
-            }
-            return '<svg width="22" height="22" viewBox="0 0 22 22"><line x1="3" y1="11" x2="19" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="7" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="15" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>';
-          }
-          if (type === 'lock') {
-            return '<svg width="22" height="22" viewBox="0 0 22 22"><line x1="3" y1="8" x2="3" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="3" y1="18" x2="19" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="19" y1="8" x2="19" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><polyline points="8,14 11,16 14,14" stroke="white" stroke-width="1.5" fill="none" stroke-linejoin="round"/><line x1="11" y1="14" x2="11" y2="10" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>';
-          }
-          return ({ harbour: '⚓', fairway: '⛵', waterway: '💧' }[type] || '📍');
-        }
         const subtypeColor = {
           bridge: { opening: '#22c55e', fixed: '#ef4444' }
         };
@@ -1883,30 +1915,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       summaryEl.style.display = 'none';
     }
 
-    // Crossings overview (cleared on re-render)
+    // Crossings mapped to legs (used in both collapsed node icons and expanded leg details)
     const crossings = (props && props.crossings) || [];
     const crossingLegMap = mapCrossingsToLegs(crossings, coords, nodes);
-    let crossingsContainer = document.getElementById('route-crossings');
-    if (!crossingsContainer) {
-      crossingsContainer = document.createElement('div');
-      crossingsContainer.id = 'route-crossings';
-      nodesEl.parentNode.insertBefore(crossingsContainer, nodesEl);
-    }
-    if (crossings.length > 0) {
-      crossingsContainer.style.cssText = 'padding:4px 10px;border-top:1px solid rgba(79,148,212,0.15);font-size:11px';
-      let html = '<div style="color:#5f7a9a;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Crossings</div>';
-      for (const c of crossings) {
-        const dotColor = c.subtype === 'opening' ? '#22c55e' : c.subtype === 'fixed' ? '#ef4444' : '#f59e0b';
-        const heightInfo = c.subtype === 'fixed' && c.height ? ' (' + c.height + 'm / ' + (c.height * 3.28084).toFixed(0) + ' ft)' : c.subtype ? ' (' + c.subtype + ')' : '';
-        html += '<div style="display:flex;align-items:center;gap:5px;padding:1px 0;color:#b8d4f0">' +
-          '<span style="width:7px;height:7px;border-radius:50%;background:' + dotColor + ';flex-shrink:0"></span>' +
-          escapeHtml(c.name) + '<span style="color:#5f7a9a;font-size:10px">' + heightInfo + '</span></div>';
-      }
-      crossingsContainer.innerHTML = html;
-      crossingsContainer.style.display = 'block';
-    } else {
-      crossingsContainer.style.display = 'none';
-    }
 
     // Via points for labeling
     const viaPoints = state.viaPoints || [];
@@ -1951,13 +1962,47 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         connHtml = '<div class="route-connecting-info"><span class="conn-icon">\u21e0</span> ' + escapeHtml(endConnectingMsg) + '</div>';
       }
 
+      // Build collapsed crossing icons for the following leg
+      let crossingHtml = '';
+      if (!isLast) {
+        const legCrossings = crossingLegMap[i] || [];
+        if (legCrossings.length > 0) {
+          // Merge crossings with the same name (fixed + opening)
+          const grouped = new Map();
+          for (const c of legCrossings) {
+            const key = c.name;
+            if (!grouped.has(key)) grouped.set(key, []);
+            grouped.get(key).push(c);
+          }
+          const icons = [];
+          for (const [, entries] of grouped) {
+            const e0 = entries[0];
+            const color = e0.type === 'lock' ? '#f59e0b' : entries.some(e => e.subtype === 'fixed') ? '#ef4444' : '#22c55e';
+            icons.push(
+              '<span class="node-crossing-icon" style="background:' + color + '">' +
+              poiIcon(e0.type, { subtype: e0.subtype }, 14) +
+              '</span>'
+            );
+            // If both fixed and opening exist, show the opening icon too
+            if (entries.some(e => e.subtype === 'fixed') && entries.some(e => e.subtype === 'opening')) {
+              icons.push(
+                '<span class="node-crossing-icon" style="background:#22c55e">' +
+                poiIcon('bridge', { subtype: 'opening' }, 14) +
+                '</span>'
+              );
+            }
+          }
+          crossingHtml = '<div class="node-crossings">' + icons.join('') + '</div>';
+        }
+      }
+
       nodeDiv.innerHTML =
         '<div class="node-label">' + label + badgeHtml + '</div>' +
         '<div class="node-coords">' + fmtCoord(node.lat, node.lng) + '</div>' +
         '<div class="node-dist">\u25b8 ' + fmtDist(node.cumDistKm * 1000) +
           (cumTimeStr ? ' \u23f1 ' + cumTimeStr : '') +
           (node.heading ? ' \u2192 ' + Math.round(node.heading) + '\u00b0' : '') +
-        '</div>' + connHtml;
+        '</div>' + crossingHtml + connHtml;
 
       // For hover highlighting: store the coord range of the following leg
       if (!isLast) {
@@ -2010,12 +2055,36 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           if (minWidth !== Infinity) html += '<div class="leg-stat"><span>Min Width</span><span class="leg-val">' + minWidth.toFixed(1) + ' m</span></div>';
           if (maxAirDraft !== Infinity) html += '<div class="leg-stat"><span>Max Air Draft</span><span class="leg-val">' + fmtHeight(maxAirDraft) + '</span></div>';
 
-          // Crossings on this leg
+          // Crossings on this leg (grouped by name)
           const legCrossings = crossingLegMap[i] || [];
-          for (const c of legCrossings) {
-            const iconColor = c.subtype === 'opening' ? '#22c55e' : c.subtype === 'fixed' ? '#ef4444' : '#f59e0b';
-            const heightInfo = c.subtype === 'fixed' && c.height ? ' (' + fmtHeight(c.height) + ')' : c.subtype ? ' (' + c.subtype + ')' : '';
-            html += '<div class="leg-crossing"><span class="crossing-dot" style="background:' + iconColor + '"></span>' + escapeHtml(c.name) + '<span class="crossing-type">' + heightInfo + '</span></div>';
+          if (legCrossings.length > 0) {
+            const grouped = new Map();
+            for (const c of legCrossings) {
+              const key = c.name;
+              if (!grouped.has(key)) grouped.set(key, []);
+              grouped.get(key).push(c);
+            }
+            for (const [, entries] of grouped) {
+              const e0 = entries[0];
+              // Color: fixed bridge = red, lock = yellow, opening = green
+              const color = e0.type === 'lock' ? '#f59e0b' : entries.some(e => e.subtype === 'fixed') ? '#ef4444' : '#22c55e';
+              let info = '';
+              if (e0.type === 'bridge') {
+                const fixedEntry = entries.find(e => e.subtype === 'fixed');
+                const hasOpening = entries.some(e => e.subtype === 'opening');
+                if (fixedEntry && fixedEntry.height) {
+                  info = fmtHeight(fixedEntry.height);
+                  if (hasOpening) info += ' / opening';
+                } else if (hasOpening) {
+                  info = 'opening';
+                }
+              }
+              html += '<div class="leg-crossing">' +
+                '<span class="leg-crossing-icon" style="background:' + color + '">' + poiIcon(e0.type, { subtype: e0.subtype }, 16) + '</span>' +
+                escapeHtml(e0.name) +
+                (info ? '<span class="crossing-type"> ' + info + '</span>' : '') +
+                '</div>';
+            }
           }
 
           const unique = [...new Set(legWarnings)];

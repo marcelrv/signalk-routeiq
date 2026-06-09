@@ -263,6 +263,29 @@ export class RoutingDatabase {
   }
 
   /**
+   * Return all node IDs within `radiusMeters` of the given point, sorted by distance ascending.
+   * Uses a fast in-memory scan when the graph is loaded.
+   */
+  async getNodesInRadius(latitude: number, longitude: number, radiusMeters: number): Promise<Array<{ id: number; lat: number; lon: number; distance: number }>> {
+    const results: Array<{ id: number; lat: number; lon: number; distance: number }> = [];
+    if (!this.graphLoaded) return results;
+    const latRad = latitude * Math.PI / 180;
+    const cosLat = Math.cos(latRad);
+    const marginDeg = radiusMeters / 111320;
+    for (const [id, c] of this.nodes) {
+      if (Math.abs(c.lat - latitude) > marginDeg) continue;
+      if (Math.abs(c.lon - longitude) > marginDeg / cosLat) continue;
+      const dLat = (c.lat - latitude) * Math.PI / 180;
+      const dLon = (c.lon - longitude) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 + cosLat * Math.cos(c.lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+      const d = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      if (d <= radiusMeters) results.push({ id, lat: c.lat, lon: c.lon, distance: d });
+    }
+    results.sort((a, b) => a.distance - b.distance);
+    return results;
+  }
+
+  /**
    * Find the nearest graph edge to a point, with perpendicular projection.
    * Searches edges incident to nodes within ~2km via the spatial grid.
    * Returns null if no edge is found within maxDistMeters.
@@ -328,7 +351,7 @@ export class RoutingDatabase {
    * Uses Euclidean approximation (valid for short distances <2km).
    * Returns the projection fraction (0-1), projected point, and perpendicular distance in meters.
    */
-  private projectOnEdge(
+  public projectOnEdge(
     ax: number, ay: number,
     bx: number, by: number,
     px: number, py: number,

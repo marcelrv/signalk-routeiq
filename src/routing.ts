@@ -551,8 +551,67 @@ export class RoutingEngine {
       const directDist = this.haversineDistance(userPoint.latitude, userPoint.longitude, lastCoord[1], lastCoord[0]);
       if (directDist <= 1) return;
 
-      if (edgeSnap && edgeSnap.distance < directDist && edgeSnap.fraction > 0.01 && edgeSnap.fraction < 0.99) {
-        // Use edge projection: graph_node → projected → user
+      // ── Try truncation: project end point onto the last graph edge ─────
+      // If the last route segment's edge passes close to the end point, we
+      // can truncate that edge at the projection and avoid overshooting.
+      const lastSegIdx = segments.length - 1;
+      let didTruncate = false;
+
+      if (lastSegIdx >= 0) {
+        const lastSeg = segments[lastSegIdx];
+        if (lastSeg.from >= 0 && lastSeg.to >= 0) {
+          const segFrom = this.db.getNodeSync(lastSeg.from);
+          const segTo = this.db.getNodeSync(lastSeg.to);
+          if (segFrom && segTo) {
+            const proj = this.db.projectOnEdge(
+              segFrom.lon, segFrom.lat, segTo.lon, segTo.lat,
+              userPoint.longitude, userPoint.latitude,
+            );
+            if (proj.fraction > 0.02 && proj.fraction < 0.98 && proj.distance < directDist * 0.7) {
+              const truncatedDist = Math.round(lastSeg.distance * proj.fraction);
+
+              // Replace last coord with the projection, then add the real end
+              coords[coords.length - 1] = [proj.point.lon, proj.point.lat];
+              coords.push([userPoint.longitude, userPoint.latitude]);
+
+              segments[lastSegIdx] = {
+                from: lastSeg.from,
+                to: -1,
+                distance: truncatedDist,
+                minDepth: lastSeg.minDepth,
+                maxAirDraft: lastSeg.maxAirDraft,
+                isFairway: lastSeg.isFairway,
+                directionPenalty: lastSeg.directionPenalty,
+                isOneWay: lastSeg.isOneWay,
+                trafficDir: lastSeg.trafficDir,
+              };
+
+              segments.push({
+                from: -1, to: -1,
+                distance: Math.round(proj.distance),
+                minDepth: -1, maxAirDraft: -1,
+                isFairway: false,
+                directionPenalty: 1,
+              });
+
+              route.features[0].properties.totalDistance += Math.round(truncatedDist + proj.distance - lastSeg.distance);
+
+              if (!route.warnings) route.warnings = [];
+              route.warnings.push({
+                type: 'end_connecting',
+                message: `${Math.round(proj.distance)}m from nearest waterway edge to destination.`,
+                from: { latitude: proj.point.lat, longitude: proj.point.lon },
+                to: { latitude: userPoint.latitude, longitude: userPoint.longitude },
+                distanceMeters: Math.round(proj.distance),
+              });
+              didTruncate = true;
+            }
+          }
+        }
+      }
+
+      if (!didTruncate && edgeSnap && edgeSnap.distance < directDist && edgeSnap.fraction > 0.01 && edgeSnap.fraction < 0.99) {
+        // ── Append path (existing fallback) ──────────────────────────────
         const nodeToSnap = this.haversineDistance(
           lastCoord[1], lastCoord[0],
           edgeSnap.point.lat, edgeSnap.point.lon,
@@ -593,7 +652,7 @@ export class RoutingEngine {
           to: { latitude: userPoint.latitude, longitude: userPoint.longitude },
           distanceMeters: Math.round(nodeToSnap + edgePortion),
         });
-      } else {
+      } else if (!didTruncate) {
         // Fall back to straight line
         coords.push([userPoint.longitude, userPoint.latitude]);
         segments.push({
@@ -646,11 +705,45 @@ export class RoutingEngine {
     minCoastDistanceMeters: number,
     bbox?: BBox,
   ): Promise<RouteResult> {
-    const startNode = await this.db.findNearestNode(startLat, startLon);
-    const endNode = await this.db.findNearestNode(endLat, endLon);
+    let startNode = await this.db.findNearestNode(startLat, startLon);
+    let endNode = await this.db.findNearestNode(endLat, endLon);
 
     if (!startNode || !endNode) {
       throw new Error('Could not find routing nodes near start or end point');
+    }
+
+    // If the nearest start/end node is only reachable via shallow edges,
+    // pick a nearby node with adequate depth so A* isn't forced into shallow terrain.
+    const draft = this.vesselDimensions.draft || 2.0;
+    const improveNode = async (node: number, lat: number, lon: number, label: string): Promise<number> => {
+      const edges = await this.db.getOutgoingEdges(node);
+      const allShallow = edges.length > 0 && edges.every(e => e.min_depth >= 0 && e.min_depth < draft);
+      if (!allShallow) return node;
+      const candidates = await this.db.getNodesInRadius(lat, lon, 1000);
+      let best = node;
+      let bestDist = Infinity;
+      for (const c of candidates) {
+        if (c.id === node) continue;
+        const cEdges = await this.db.getOutgoingEdges(c.id);
+        const hasDeep = cEdges.some(e => e.min_depth < 0 || e.min_depth >= draft);
+        if (hasDeep && c.distance < bestDist) {
+          bestDist = c.distance;
+          best = c.id;
+        }
+      }
+      if (best !== node) {
+        console.log(`[autoroute] ${label} node ${node} is shallow-only — using ${best} instead`);
+      }
+      return best;
+    };
+
+    const improvedEnd = await improveNode(endNode, endLat, endLon, 'End');
+    if (improvedEnd !== endNode) {
+      endNode = improvedEnd;
+    }
+    const improvedStart = await improveNode(startNode, startLat, startLon, 'Start');
+    if (improvedStart !== startNode) {
+      startNode = improvedStart;
     }
 
     // A* data structures
@@ -995,13 +1088,21 @@ export class RoutingEngine {
     const lockPois = pois.filter(p => p.type === 'lock');
     const crossings: RouteCrossing[] = [];
     const seenIds = new Set<number>();
+    const seenCrossingKeys = new Set<string>();
     const MAX_DIST = 150;
+    const crossingKey = (poi: typeof bridgePois[0]): string => {
+      const subtype = (poi.properties as Record<string, unknown>)?.subtype as string | undefined;
+      return `${poi.name}|${poi.type}|${subtype || ''}`;
+    };
 
     for (const [lon, lat] of coordinates) {
       for (const poi of bridgePois) {
         if (seenIds.has(poi.id)) continue;
         if (this.haversineDistance(lat, lon, poi.lat, poi.lon) <= MAX_DIST) {
           seenIds.add(poi.id);
+          const key = crossingKey(poi);
+          if (seenCrossingKeys.has(key)) continue;
+          seenCrossingKeys.add(key);
           crossings.push({
             type: 'bridge',
             name: poi.name,
@@ -1015,6 +1116,9 @@ export class RoutingEngine {
         if (seenIds.has(poi.id)) continue;
         if (this.haversineDistance(lat, lon, poi.lat, poi.lon) <= MAX_DIST) {
           seenIds.add(poi.id);
+          const key = crossingKey(poi);
+          if (seenCrossingKeys.has(key)) continue;
+          seenCrossingKeys.add(key);
           crossings.push({
             type: 'lock',
             name: poi.name,
@@ -1035,30 +1139,29 @@ export class RoutingEngine {
     endPt: { latitude: number; longitude: number }
   ) {
     if (!result.features[0] || !result.features[0].properties.segments) return;
+    const coords = result.features[0].geometry.coordinates;
+    const segments = result.features[0].properties.segments;
+    const draft = this.vesselDimensions.draft || 2.0;
+    const airDraft = this.vesselDimensions.airDraft || 20;
 
-    let hasAirDraftViolation = false;
-    let hasDepthViolation = false;
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const isViolation =
+        (seg.maxAirDraft >= 0 && seg.maxAirDraft < airDraft) ||
+        (seg.edgeType === 'coastal' && seg.minDepth >= 0 && seg.minDepth < draft);
 
-    for (const seg of result.features[0].properties.segments) {
-      if (seg.maxAirDraft >= 0 && seg.maxAirDraft < (this.vesselDimensions.airDraft || 0)) {
-        hasAirDraftViolation = true;
+      if (isViolation) {
+        // Use exact coordinates for this segment: seg[i] connects coords[i] → coords[i+1]
+        const fromCoord = coords[i];
+        const toCoord = coords[i + 1];
+        if (!fromCoord || !toCoord) continue;
+        warnings.push({
+          type: 'via_constrained',
+          message: `Route to ${label} includes a segment where vessel dimensions exceed charted depths or clearances. Verify safety.`,
+          from: { latitude: fromCoord[1], longitude: fromCoord[0] },
+          to: { latitude: toCoord[1], longitude: toCoord[0] },
+        });
       }
-      if (seg.edgeType === 'coastal' && seg.minDepth >= 0 && seg.minDepth < (this.vesselDimensions.draft || 0)) {
-        hasDepthViolation = true;
-      }
-    }
-
-    if (hasAirDraftViolation || hasDepthViolation) {
-      const violations = [];
-      if (hasAirDraftViolation) violations.push('air draft');
-      if (hasDepthViolation) violations.push('depth/beam');
-
-      warnings.push({
-        type: 'via_constrained',
-        message: `Route to ${label} includes segments where vessel dimensions exceed charted depths or clearances (${violations.join(', ')}). Verify safety — the pathfinder has applied penalties but could not avoid these edges.`,
-        from: startPt,
-        to: endPt,
-      });
     }
   }
 
