@@ -202,7 +202,7 @@ export class RoutingEngine {
             const newMargin = Math.min(currentMargin * 2, maxMargin);
             if (newMargin > currentMargin) {
               bboxWarnings.push({
-                type: 'via_constrained',
+                type: 'bbox_expanded',
                 message: `Route search expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box to find a path.`,
                 from: { latitude: start.latitude, longitude: start.longitude },
                 to: { latitude: end.latitude, longitude: end.longitude },
@@ -428,7 +428,7 @@ export class RoutingEngine {
         const newMargin = Math.min(currentMargin * 2, segmentMaxMargin);
         if (newMargin > currentMargin) {
           warnings.push({
-            type: 'via_constrained',
+            type: 'bbox_expanded',
             message: `Route search for ${label} expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box.`,
             from: startPt,
             to: endPt,
@@ -999,7 +999,7 @@ export class RoutingEngine {
 
       warnings.push({
         type: 'via_constrained',
-        message: `Route to ${label} violates vessel constraints (${violations.join(', ')}). The shortest violating path was used for the unroutable section. Verify safety.`,
+        message: `Route to ${label} includes segments where vessel dimensions exceed charted depths or clearances (${violations.join(', ')}). Verify safety — the pathfinder has applied penalties but could not avoid these edges.`,
         from: startPt,
         to: endPt,
       });

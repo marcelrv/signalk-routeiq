@@ -40,3 +40,4 @@ test/fixtures/*.sqlite
 **/repomix-output.xml
 **/*.pyc
 backend/__pycache__/nautical_routing_pipeline.cpython-312.pyc
+backend/__pycache__/nautical_routing_pipeline.cpython-312.pyc
