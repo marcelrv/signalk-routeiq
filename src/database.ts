@@ -36,6 +36,7 @@ interface PoiRow {
   id: number;
   name: string;
   type: string;
+  properties: string | null;
   lat: number;
   lon: number;
 }
@@ -376,7 +377,7 @@ export class RoutingDatabase {
   async searchPois(query: string, maxResults: number = 20): Promise<PoiResult[]> {
     const searchPattern = `%${query}%`;
     const rows = this.db.prepare(
-      `SELECT id, name, type, lat, lon
+      `SELECT id, name, type, properties, lat, lon
        FROM pois
        WHERE name LIKE ?
        ORDER BY name
@@ -386,6 +387,7 @@ export class RoutingDatabase {
       id: row.id,
       name: row.name,
       type: row.type,
+      properties: row.properties ? JSON.parse(row.properties) : {},
       latitude: row.lat,
       longitude: row.lon,
     }));
@@ -442,22 +444,22 @@ export class RoutingDatabase {
     minLat: number, minLon: number,
     maxLat: number, maxLon: number,
     limit: number = 2000,
-  ): Promise<Array<{ id: number; name: string; type: string; lat: number; lon: number }>> {
+  ): Promise<Array<{ id: number; name: string; type: string; properties: Record<string, unknown>; lat: number; lon: number }>> {
     const rows = this.db.prepare(
-      `SELECT id, name, type, lat, lon
+      `SELECT id, name, type, properties, lat, lon
        FROM pois
        WHERE lat >= ? AND lat <= ? AND lon >= ? AND lon <= ?
        ORDER BY name
        LIMIT ?`
     ).all(minLat, maxLat, minLon, maxLon, limit) as unknown as PoiRow[];
-    return rows.map(r => ({ id: r.id, name: r.name, type: r.type, lat: r.lat, lon: r.lon }));
+    return rows.map(r => ({ id: r.id, name: r.name, type: r.type, properties: r.properties ? JSON.parse(r.properties) : {}, lat: r.lat, lon: r.lon }));
   }
 
-  async getNearestPoi(lat: number, lon: number, maxDistanceMeters: number = 250): Promise<{ id: number; name: string; type: string; latitude: number; longitude: number; distance: number } | null> {
+  async getNearestPoi(lat: number, lon: number, maxDistanceMeters: number = 250): Promise<{ id: number; name: string; type: string; properties: Record<string, unknown>; latitude: number; longitude: number; distance: number } | null> {
     const latDeg = maxDistanceMeters / 111320;
     const lonDeg = maxDistanceMeters / (111320 * Math.cos(lat * Math.PI / 180));
     const rows = this.db.prepare(
-      `SELECT id, name, type, lat, lon
+      `SELECT id, name, type, properties, lat, lon
        FROM pois
        WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?`
     ).all(lat - latDeg, lat + latDeg, lon - lonDeg, lon + lonDeg) as unknown as PoiRow[];
@@ -471,7 +473,7 @@ export class RoutingDatabase {
       }
     }
     if (!best) return null;
-    return { id: best.id, name: best.name, type: best.type, latitude: best.lat, longitude: best.lon, distance: Math.round(bestDist) };
+    return { id: best.id, name: best.name, type: best.type, properties: best.properties ? JSON.parse(best.properties) : {}, latitude: best.lat, longitude: best.lon, distance: Math.round(bestDist) };
   }
 
   private haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {

@@ -1,5 +1,6 @@
 import os
 import math
+import json
 import sqlite3
 import logging
 import argparse
@@ -13,6 +14,20 @@ import geopandas as gpd
 import networkx as nx
 from shapely.geometry import Point, LineString, Polygon
 from pyproj import Geod
+
+def _s57_col(attrs, *candidates):
+    """Case-insensitive lookup for an S-57 attribute in a row/dict."""
+    if isinstance(attrs, dict):
+        keys = attrs.keys()
+    else:
+        # pandas Series
+        keys = attrs.index if hasattr(attrs, 'index') else attrs
+    lower_map = {str(k).lower(): k for k in keys}
+    for c in candidates:
+        match = lower_map.get(c.lower())
+        if match is not None:
+            return attrs[match]
+    return None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -120,19 +135,25 @@ def _edge_attr_worker(edge_chunk):
                     if not intersecting.empty:
                         min_clearance = 999.0
                         for _, row in intersecting.iterrows():
-                            # Check if bridge is movable (CATAQA 3: opening, 4: lifting, 5: bascule, 6: draw)
+                            # Check if bridge is movable (catbrg: 3=opening, 4=lifting, 5=bascule, 6=draw, 7=swing)
                             is_movable = False
-                            if 'CATAQA' in row and pd.notnull(row['CATAQA']):
-                                cataqa = str(row['CATAQA'])
-                                if any(c in cataqa for c in ['3', '4', '5', '6']):
+                            catbrg = _s57_col(row, 'catbrg', 'CATAQA', 'CatBrg')
+                            if catbrg is not None and pd.notnull(catbrg):
+                                if isinstance(catbrg, (list, tuple, np.ndarray)):
+                                    vals = [str(v) for v in catbrg]
+                                else:
+                                    vals = [str(catbrg)]
+                                if any(v in ('3', '4', '5', '6', '7') for v in vals):
                                     is_movable = True
 
                             if is_movable:
                                 clearance = 999.0
-                            elif 'VERCLR' in row and pd.notnull(row['VERCLR']):
-                                clearance = float(row['VERCLR'])
                             else:
-                                clearance = 999.0
+                                verclr = _s57_col(row, 'verclr', 'VERCLR', 'VerClr')
+                                if verclr is not None and pd.notnull(verclr):
+                                    clearance = float(verclr)
+                                else:
+                                    clearance = 999.0
 
                             if clearance < min_clearance:
                                 min_clearance = clearance
@@ -917,6 +938,7 @@ class NauticalRoutingPipeline:
                     id INTEGER PRIMARY KEY,
                     name TEXT,
                     type TEXT,
+                    properties TEXT,
                     lat REAL,
                     lon REAL
                 );
@@ -974,6 +996,25 @@ class NauticalRoutingPipeline:
                     return (c.y, c.x)
                 return None
 
+            def _poi_properties(row, default_type) -> str:
+                """Build JSON properties blob for a POI based on its type."""
+                props = {}
+                if default_type == 'bridge':
+                    catbrg = _s57_col(row, 'catbrg', 'CATAQA', 'CatBrg')
+                    if catbrg is not None and pd.notnull(catbrg):
+                        if isinstance(catbrg, (list, tuple, np.ndarray)):
+                            vals = [str(v) for v in catbrg]
+                        else:
+                            vals = [str(catbrg)]
+                        if any(v in ('3', '4', '5', '6', '7') for v in vals):
+                            props['subtype'] = 'opening'
+                        else:
+                            props['subtype'] = 'fixed'
+                            verclr = _s57_col(row, 'verclr', 'VERCLR', 'VerClr')
+                            if verclr is not None and pd.notnull(verclr):
+                                props['height'] = float(verclr)
+                return json.dumps(props)
+
             poi_layers = [
                 ('pois', 'harbour'),
                 ('locks', 'lock'),
@@ -994,9 +1035,9 @@ class NauticalRoutingPipeline:
                     pt = _poi_point(row.geometry)
                     if pt is None:
                         continue
-                    poi_data.append((next(poi_id_gen), name, default_type, pt[0], pt[1]))
+                    poi_data.append((next(poi_id_gen), name, default_type, _poi_properties(row, default_type), pt[0], pt[1]))
             if poi_data:
-                cursor.executemany("INSERT INTO pois (id, name, type, lat, lon) VALUES (?, ?, ?, ?, ?)", poi_data)
+                cursor.executemany("INSERT INTO pois (id, name, type, properties, lat, lon) VALUES (?, ?, ?, ?, ?, ?)", poi_data)
                 logger.info(f"Inserted {len(poi_data)} named POIs from {len(poi_layers)} layers")
             else:
                 logger.warning("No named POIs found in any layer")

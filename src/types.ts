@@ -93,6 +93,7 @@ export interface PoiResult {
   id: number;
   name: string;
   type: string;
+  properties: Record<string, unknown>;
   latitude: number;
   longitude: number;
   distance?: number; // meters from search point
