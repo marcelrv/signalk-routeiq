@@ -231,6 +231,18 @@ A collapsible route information panel sits on the right side of the screen, posi
 
 **Warning Display:** Overall backend warnings appear at the top in a red-tinted section. Per-leg warnings (shallow, narrow) appear inline when the leg is expanded. Nodes with warned legs show a warning indicator (⚠). The first warned leg auto-expands on route load.
 
+### Bridge Crossing Path Quality
+When a route passes through a bridge opening (e.g., Zeelandbrug), the A* path may exhibit a **zigzag pattern** — coordinates repeatedly reverse direction (north→south→north) across adjacent latitude rows.
+
+**Root cause:** The coastal grid has nodes on both sides of the bridge structure (pillars, opening span). The A* path goes through the opening span nodes, but no direct long-spanning edge exists across the bridge because the fixed bridge pillar blocks line-of-sight. The `smoothPath` function cannot collapse these intermediate nodes since the pillar falls within the line-of-sight sampling corridor, causing the check to fail.
+
+**Impact:** The resulting route geometry appears physically spurious — the bearing reverses sharply within a few hundred meters — and the segment edges may have misleading `minDepth`/`maxAirDraft` values when reconstructed via `aggregateSegmentEdges`.
+
+**Possible fixes (not yet implemented):**
+1. **Post-processing spike filter:** Detect bearing reversals >90° within short distances and collapse them if the cross-track line stays in water.
+2. **Bridge-aware graph edges:** During navmesh generation, insert dedicated "bridge crossing" edges with realistic geometry that skip the pillar nodes entirely.
+3. **Smoothing land-buffer:** Enlarge the line-of-sight sampling radius at known bridge crossings, or skip the land-intersection check for edges that cross a bridge POI.
+
 ***
 
 ## Appendix: Known Graph Data Limitations

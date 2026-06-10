@@ -111,9 +111,9 @@ export class RoutingEngine {
     this.db = db;
     this.config = config;
     this.vesselDimensions = vesselDimensions || {
-      draft: config.defaultDraft,
-      beam: config.defaultBeam,
-      airDraft: config.defaultAirDraft,
+      draft: 0,   // unknown until SignalK provides it
+      beam: 4,    // reaseonable default until SignalK provides it
+      airDraft: 10, // reasonable default until SignalK provides it
     };
   }
 
@@ -712,27 +712,62 @@ export class RoutingEngine {
       throw new Error('Could not find routing nodes near start or end point');
     }
 
-    // If the nearest start/end node is only reachable via shallow edges,
-    // pick a nearby node with adequate depth so A* isn't forced into shallow terrain.
-    const draft = this.vesselDimensions.draft || 2.0;
-    const improveNode = async (node: number, lat: number, lon: number, label: string): Promise<number> => {
+    const minDepth = (this.vesselDimensions.draft || 2.0) + this.config.safetyMarginDraft;
+
+    const bearingDeg = (fromLat: number, fromLon: number, toLat: number, toLon: number): number => {
+      const dLon = (toLon - fromLon) * Math.PI / 180;
+      const lat1 = fromLat * Math.PI / 180;
+      const lat2 = toLat * Math.PI / 180;
+      const y = Math.sin(dLon) * Math.cos(lat2);
+      const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+      return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    };
+
+    const improveNode = async (node: number, nodeLat: number, nodeLon: number, label: string): Promise<number> => {
+      const nodePos = this.db.getNodeSync(node);
+      if (!nodePos) return node;
       const edges = await this.db.getOutgoingEdges(node);
-      const allShallow = edges.length > 0 && edges.every(e => e.min_depth >= 0 && e.min_depth < draft);
-      if (!allShallow) return node;
-      const candidates = await this.db.getNodesInRadius(lat, lon, 1000);
+      if (edges.length === 0) return node;
+
+      if (label === 'Start') {
+        // For start nodes: check if all edges leading toward the destination are shallow.
+        // Compute bearing from start point to destination; then for each edge to its target,
+        // if the edge direction is within 90° of the destination bearing and is deep, keep the node.
+        const destBearing = bearingDeg(nodePos.lat, nodePos.lon, endLat, endLon);
+        let anyTowardDeep = false;
+        for (const e of edges) {
+          const edgeBearing = bearingDeg(nodePos.lat, nodePos.lon, e.lat, e.lon);
+          const bearingDiff = Math.abs(edgeBearing - destBearing);
+          const towardDest = Math.min(bearingDiff, 360 - bearingDiff) < 90;
+          const isDeep = e.min_depth < 0 || e.min_depth >= minDepth;
+          if (towardDest && isDeep) {
+            anyTowardDeep = true;
+            break;
+          }
+        }
+        if (anyTowardDeep) return node;
+      } else {
+        // For end nodes: keep the original logic — if all outgoing edges are shallow, improve.
+        const allShallow = edges.every(e => e.min_depth >= 0 && e.min_depth < minDepth);
+        if (!allShallow) return node;
+      }
+
+      // Search radius: 2000m for start (need to find a fundamentally better entry), 1000m for end
+      const radius = label === 'Start' ? 2000 : 1000;
+      const candidates = await this.db.getNodesInRadius(nodeLat, nodeLon, radius);
       let best = node;
       let bestDist = Infinity;
       for (const c of candidates) {
         if (c.id === node) continue;
         const cEdges = await this.db.getOutgoingEdges(c.id);
-        const hasDeep = cEdges.some(e => e.min_depth < 0 || e.min_depth >= draft);
+        const hasDeep = cEdges.some(e => e.min_depth < 0 || e.min_depth >= minDepth);
         if (hasDeep && c.distance < bestDist) {
           bestDist = c.distance;
           best = c.id;
         }
       }
       if (best !== node) {
-        console.log(`[autoroute] ${label} node ${node} is shallow-only — using ${best} instead`);
+        console.log(`[autoroute] ${label} node ${node} → ${best} (better depth, ${Math.round(bestDist)}m away)`);
       }
       return best;
     };
@@ -865,15 +900,14 @@ export class RoutingEngine {
 
     let penalty = 0;
 
-    if (edge.max_air_draft >= 0 && edge.max_air_draft < (this.vesselDimensions.airDraft || 0)) {
+    if (edge.max_air_draft >= 0 && edge.max_air_draft < (this.vesselDimensions.airDraft || 0) + this.config.safetyMarginAirDraft) {
       penalty += 1000000;
     }
 
-    if (edge.edge_type === 'coastal') {
-      if (edge.min_depth >= 0 && edge.min_depth < (this.vesselDimensions.draft || 0)) penalty += 1000000;
-      if (edge.min_width >= 0 && edge.min_width < (this.vesselDimensions.beam || 0)) penalty += 1000000;
-      if (edge.distance_to_land < minCoastDistanceMeters) penalty += 50000;
-    }
+    const minDepth = (this.vesselDimensions.draft || 2.0) + this.config.safetyMarginDraft;
+    if (edge.min_depth >= 0 && edge.min_depth < minDepth) penalty += 1000000;
+    if (edge.min_width >= 0 && edge.min_width < (this.vesselDimensions.beam || 4.0) + this.config.safetyMarginBeam) penalty += 1000000;
+    if (edge.edge_type === 'coastal' && edge.distance_to_land < minCoastDistanceMeters) penalty += 50000;
 
     return penalty;
   }
@@ -1141,23 +1175,24 @@ export class RoutingEngine {
     if (!result.features[0] || !result.features[0].properties.segments) return;
     const coords = result.features[0].geometry.coordinates;
     const segments = result.features[0].properties.segments;
-    const draft = this.vesselDimensions.draft || 2.0;
-    const airDraft = this.vesselDimensions.airDraft || 20;
+    const minDepth = (this.vesselDimensions.draft || 2.0) + this.config.safetyMarginDraft;
+    const airDraft = (this.vesselDimensions.airDraft || 10.0) + this.config.safetyMarginAirDraft;
 
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
-      const isViolation =
-        (seg.maxAirDraft >= 0 && seg.maxAirDraft < airDraft) ||
-        (seg.edgeType === 'coastal' && seg.minDepth >= 0 && seg.minDepth < draft);
+      const depthViolation = seg.minDepth >= 0 && seg.minDepth < minDepth;
+      const airDraftViolation = seg.maxAirDraft >= 0 && seg.maxAirDraft < airDraft;
 
-      if (isViolation) {
-        // Use exact coordinates for this segment: seg[i] connects coords[i] → coords[i+1]
+      if (depthViolation || airDraftViolation) {
+        const reasons: string[] = [];
+        if (depthViolation) reasons.push(`depth ${seg.minDepth}m < required ${minDepth}m`);
+        if (airDraftViolation) reasons.push(`air draft ${seg.maxAirDraft}m < required ${airDraft}m`);
         const fromCoord = coords[i];
         const toCoord = coords[i + 1];
         if (!fromCoord || !toCoord) continue;
         warnings.push({
           type: 'via_constrained',
-          message: `Route to ${label} includes a segment where vessel dimensions exceed charted depths or clearances. Verify safety.`,
+          message: `Route to ${label}: ${reasons.join('; ')}`,
           from: { latitude: fromCoord[1], longitude: fromCoord[0] },
           to: { latitude: toCoord[1], longitude: toCoord[0] },
         });

@@ -113,7 +113,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 #clear-btn:hover { background: rgba(200,70,70,0.18); }
 
 /* ---------- settings (top-right) ---------- */
-#settings-panel { top: 20px; right: 20px; }
+#settings-panel { top: 20px; right: 28px; }
 #settings-panel input[type="number"] {
   width: 100%;
   background: rgba(255,255,255,0.07);
@@ -192,11 +192,11 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
 /* ---------- route pane (left side) ---------- */
 #route-pane {
-  top: 20px; left: 70px;
+  top: 20px; left: 28px;
   width: 300px;
   bottom: 20px;
   padding: 14px;
-  transition: width 0.25s ease, padding 0.25s ease, opacity 0.25s ease, border-color 0.25s ease;
+  transition: width 0.25s ease, padding 0.25s ease, border-color 0.25s ease;
   overflow: visible;
   display: flex;
   flex-direction: column;
@@ -204,20 +204,23 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 }
 #route-pane.collapsed {
   width: 0;
-  padding: 14px 0;
-  opacity: 0;
-  border-color: transparent;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  overflow: hidden;
 }
 #route-pane.collapsed #route-pane-tab {
-  opacity: 1;
   pointer-events: auto;
 }
+#route-pane.collapsed #route-pane-inner {
+  display: none;
+}
 #route-pane-tab {
-  position: absolute;
-  left: 100%;
+  position: fixed;
+  left: 0;
   top: 50%;
   transform: translateY(-50%);
-  margin-left: -1px;
   width: 28px;
   height: 48px;
   background: rgba(11, 26, 43, 0.92);
@@ -236,6 +239,50 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   z-index: 1001;
 }
 #route-pane-tab:hover {
+  background: rgba(31, 99, 145, 0.5);
+  color: #7ab8f0;
+}
+
+/* settings pane collapse */
+#settings-panel.collapsed #settings-pane-inner,
+#settings-panel.collapsed .panel-title,
+#settings-panel.collapsed label,
+#settings-panel.collapsed input,
+#settings-panel.collapsed .conn-dot,
+#settings-panel.collapsed .debug-toggle,
+#settings-panel.collapsed .boat-info {
+  display: none;
+}
+#settings-panel.collapsed {
+  width: 0;
+  height: 0;
+  padding: 0;
+  border: none;
+  overflow: hidden;
+}
+#settings-pane-tab {
+  position: fixed;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 48px;
+  background: rgba(11, 26, 43, 0.92);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(79, 148, 212, 0.35);
+  border-right: none;
+  border-radius: 8px 0 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #5c9bd5;
+  font-size: 12px;
+  user-select: none;
+  transition: background 0.15s, color 0.15s;
+  z-index: 1001;
+}
+#settings-pane-tab:hover {
   background: rgba(31, 99, 145, 0.5);
   color: #7ab8f0;
 }
@@ -486,9 +533,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   <div id="search-results"></div>
 </div>
 
+<!-- Settings tab (outside panel to avoid overflow clipping) -->
+<div id="settings-pane-tab">◀</div>
 <!-- Settings -->
-<div id="settings-panel" class="panel">
-  <div class="panel-title">Settings</div>
+<div id="settings-panel" class="panel collapsed">
+  <div id="settings-pane-inner">
+    <div class="panel-title">Settings</div>
   <label for="api-url">Backend URL</label>
   <div id="url-row">
     <span id="conn-dot" class="conn-dot conn-offline"></span>
@@ -526,24 +576,17 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   <div id="boat-info" class="boat-info" style="display:none">
     <div class="panel-title" style="margin-top:12px">Vessel</div>
     <div id="boat-pos" class="info-line"><span class="label">POS</span><span class="value">—</span></div>
-    <div id="boat-sog" class="info-line"><span class="label">SOG</span><span class="value">—</span></div>
-    <div id="boat-cog" class="info-line"><span class="label">COG</span><span class="value">—</span></div>
-    <div id="boat-draft" class="info-line"><span class="label">DRAFT</span><span class="value">—</span></div>
-    <div id="boat-beam" class="info-line"><span class="label">BEAM</span><span class="value">—</span></div>
-    <div id="boat-airdraft" class="info-line"><span class="label">AIR</span><span class="value">—</span></div>
+    <div id="boat-draft" class="info-line"><span class="label">ROUTING DRAFT</span><span class="value">—</span></div>
+    <div id="boat-beam" class="info-line"><span class="label">ROUTING BEAM</span><span class="value">—</span></div>
+    <div id="boat-airdraft" class="info-line"><span class="label">ROUTING AIR</span><span class="value">—</span></div>
+  </div>
   </div>
 </div>
 
-<!-- Export -->
-<div id="export-panel" class="panel">
-  <div class="panel-title">Export</div>
-  <button class="export-btn" id="gpx-btn">Download GPX</button>
-  <button class="export-btn push-btn" id="push-btn">Save to Signal K</button>
-</div>
-
-    <!-- Route Pane (left side, integrated) -->
+<!-- Route pane tab (outside pane to avoid overflow clipping) -->
+<div id="route-pane-tab">▶</div>
+<!-- Route Pane (left side, integrated) -->
 <div id="route-pane" class="panel collapsed">
-  <div id="route-pane-tab">▶</div>
   <div id="route-pane-inner">
     <div class="panel-title">Route</div>
     <div id="hint-line" class="info-line" style="color:#9bb8da;font-size:11px;padding-bottom:4px;border-bottom:1px solid rgba(79,148,212,0.2);margin-bottom:4px">
@@ -556,6 +599,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     <div id="route-summary" style="display:none;padding:6px 0 4px;border-top:1px solid rgba(79,148,212,0.15);margin-top:4px;font-size:12px;color:#9bb8da"></div>
     <div id="route-warnings"></div>
     <div id="route-nodes"></div>
+    <div id="route-export" style="padding:6px 0;border-top:1px solid rgba(79,148,212,0.15);margin-top:4px">
+      <button class="export-btn" id="gpx-btn">Download GPX</button>
+      <button class="export-btn push-btn" id="push-btn" style="margin-left:6px">Save to Signal K</button>
+    </div>
     <div id="route-pane-empty" style="color:#6d96c0;font-size:12px;padding:8px 0;text-align:center;display:none">No route loaded.</div>
   </div>
 </div>
@@ -790,6 +837,40 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
             }),
           });
           m.bindTooltip(label, { direction: 'top', offset: [0, -12] });
+          m.on('click', function () {
+            const name = p.name || 'POI';
+            const lat = p.lat, lng = p.lon;
+            const html =
+              '<div style="font-size:12px;color:#ccc;padding:0 0 6px;border-bottom:1px solid rgba(79,148,212,0.2);margin-bottom:6px;text-align:center">' +
+                name +
+              '</div>' +
+              '<div style="display:flex;gap:6px;justify-content:center">' +
+                '<button class="poi-route-btn" data-action="from" style="font-size:11px;padding:3px 10px;background:#3b8fd4;color:#fff;border:none;border-radius:4px;cursor:pointer">Route from</button>' +
+                '<button class="poi-route-btn" data-action="to" style="font-size:11px;padding:3px 10px;background:#22c55e;color:#fff;border:none;border-radius:4px;cursor:pointer">Route to</button>' +
+              '</div>';
+            const popup = L.popup({ closeButton: true, className: 'poi-popup', offset: [0, -10] })
+              .setLatLng([lat, lng])
+              .setContent(html)
+              .openOn(map);
+            // Delegate click on buttons
+            L.DomEvent.on(popup.getElement(), 'click', function (e) {
+              const btn = e.target.closest('.poi-route-btn');
+              if (!btn) return;
+              const action = btn.getAttribute('data-action');
+              const ll = L.latLng(lat, lng);
+              if (action === 'from') {
+                state.startLatLng = ll;
+                state.startPoiName = name;
+                state.waypointNext = 'dest';
+              } else {
+                state.destLatLng = ll;
+                state.destPoiName = name;
+                state.waypointNext = 'start';
+              }
+              applyWaypoints();
+              map.closePopup();
+            });
+          });
           m.addTo(poiLayer);
         }
       })
@@ -967,6 +1048,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         draft = vr.value.draft;
         beam = vr.value.beam;
         airDraft = vr.value.airDraft;
+        var effectiveDraft = vr.value.effectiveDraft;
+        var effectiveBeam = vr.value.effectiveBeam;
+        var effectiveAirDraft = vr.value.effectiveAirDraft;
       }
       if (sr.status === 'fulfilled') {
         const nav = sr.value?.navigation;
@@ -981,14 +1065,14 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         beam = beam || sr.value?.design?.beam?.value;
         airDraft = airDraft || sr.value?.design?.airDraft?.value;
       }
-      showBoatData(lat, lng, sog, cog, draft, beam, airDraft);
+      showBoatData(lat, lng, sog, cog, draft, beam, airDraft, effectiveDraft, effectiveBeam, effectiveAirDraft);
     });
   }
 
   let lastBoat = {};
   let boatStartSet = false;
-  function showBoatData(lat, lng, sog, cog, draft, beam, airDraft) {
-    lastBoat = { lat, lng, sog, cog, draft, beam, airDraft };
+  function showBoatData(lat, lng, sog, cog, draft, beam, airDraft, effectiveDraft, effectiveBeam, effectiveAirDraft) {
+    lastBoat = { lat, lng, sog, cog, draft, beam, airDraft, effectiveDraft, effectiveBeam, effectiveAirDraft };
     // auto-set start from boat position on first successful fetch
     if (!boatStartSet && lat != null && lng != null) {
       boatStartSet = true;
@@ -1002,11 +1086,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     const fmt = (v, u) => v != null ? v + (u ? ' ' + u : '') : '—';
     document.getElementById('boat-pos').querySelector('.value').textContent =
       (lat != null && lng != null) ? lat.toFixed(4) + ', ' + lng.toFixed(4) : '—';
-    document.getElementById('boat-sog').querySelector('.value').textContent = fmt(sog, 'kn');
-    document.getElementById('boat-cog').querySelector('.value').textContent = fmt(cog, '°');
-    document.getElementById('boat-draft').querySelector('.value').textContent = fmt(draft, 'm');
-    document.getElementById('boat-beam').querySelector('.value').textContent = fmt(beam, 'm');
-    document.getElementById('boat-airdraft').querySelector('.value').textContent = fmt(airDraft, 'm');
+    document.getElementById('boat-draft').querySelector('.value').textContent = fmt(effectiveDraft ?? draft, 'm');
+    document.getElementById('boat-beam').querySelector('.value').textContent = fmt(effectiveBeam ?? beam, 'm');
+    document.getElementById('boat-airdraft').querySelector('.value').textContent = fmt(effectiveAirDraft ?? airDraft, 'm');
     boatInfo.style.display = 'block';
   }
 
@@ -1116,6 +1198,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           return r.json();
         })
         .then(geoJson => {
+          if (isDebug()) console.log('[autoroute] Route response:', JSON.stringify(geoJson, null, 2));
           state.lastGeoJson = geoJson;
           state.routing = false;
           const result = geoJsonToLRM(geoJson, waypoints);
@@ -2238,11 +2321,16 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     clearBothHighlights();
   }, true);
 
-  // ---- collapse toggle ----
+  // ---- collapse toggles ----
   document.getElementById('route-pane-tab').addEventListener('click', function () {
     const pane = document.getElementById('route-pane');
     pane.classList.toggle('collapsed');
     this.textContent = pane.classList.contains('collapsed') ? '\u25b6' : '\u25c0';
+  });
+  document.getElementById('settings-pane-tab').addEventListener('click', function () {
+    const pane = document.getElementById('settings-panel');
+    pane.classList.toggle('collapsed');
+    this.textContent = pane.classList.contains('collapsed') ? '\u25c0' : '\u25b6';
   });
 
   // ---- expose state for debugging ----

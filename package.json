@@ -51,25 +51,25 @@
           "description": "Path to the routing_graph.sqlite database",
           "default": "./data/routing_graph.sqlite"
         },
-        "defaultDraft": {
+        "safetyMarginDraft": {
           "type": "number",
-          "title": "Default Draft (m)",
-          "description": "Default vessel draft in meters",
-          "default": 2,
+          "title": "Draft Safety Margin (m)",
+          "description": "Under-keel clearance added to design draft.",
+          "default": 0.3,
           "multipleOf": 0.1
         },
-        "defaultBeam": {
+        "safetyMarginAirDraft": {
           "type": "number",
-          "title": "Default Beam (m)",
-          "description": "Default vessel beam in meters",
-          "default": 4,
+          "title": "Air Draft Safety Margin (m)",
+          "description": "Mast clearance added to design air draft.",
+          "default": 1.5,
           "multipleOf": 0.1
         },
-        "defaultAirDraft": {
+        "safetyMarginBeam": {
           "type": "number",
-          "title": "Default Air Draft (m)",
-          "description": "Default vessel air draft in meters",
-          "default": 10,
+          "title": "Beam Safety Margin (m)",
+          "description": "Width clearance added to design beam.",
+          "default": 2.0,
           "multipleOf": 0.1
         },
         "defaultCoastDistance": {

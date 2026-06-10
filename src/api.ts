@@ -125,6 +125,8 @@ export class ApiHandler {
 
       const route: RouteResult = await this.routingEngine!.calculateRoute(request);
 
+      console.log(`[autoroute] Route response: ${JSON.stringify(route)}`);
+
       res.json(route);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -258,8 +260,13 @@ export class ApiHandler {
       return;
     }
     try {
-      const vessel = this.routingEngine!['vesselDimensions'];
-      res.json(vessel);
+      const engine = this.routingEngine! as any;
+      const vessel = engine.vesselDimensions as any;
+      const cfg = engine.config as any;
+      const effectiveDraft = Math.round(((vessel.draft || 2.0) + (cfg.safetyMarginDraft || 0.3)) * 10) / 10;
+      const effectiveBeam = Math.round(((vessel.beam || 4.0) + (cfg.safetyMarginBeam || 2.0)) * 10) / 10;
+      const effectiveAirDraft = Math.round(((vessel.airDraft || 10.0) + (cfg.safetyMarginAirDraft || 1.5)) * 10) / 10;
+      res.json({ ...vessel, effectiveDraft, effectiveBeam, effectiveAirDraft });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: message });

@@ -25,7 +25,7 @@ let apiHandler: ApiHandler | null = null;
  */
 export function pluginConstructor(app: ServerAPI) {
   let config: PluginConfig = { ...DEFAULT_CONFIG };
-  let vesselDimensions = { draft: 0, beam: 0, airDraft: 0 };
+  let vesselDimensions = { draft: 0, beam: 4, airDraft: 10 };
   let subscriptionCancelled: (() => void) | null = null;
 
   const pluginId = 'signalk-autoroute';
@@ -44,6 +44,8 @@ export function pluginConstructor(app: ServerAPI) {
 
       // Merge received configuration with defaults
       config = { ...DEFAULT_CONFIG, ...options };
+
+      // Safety margins are configured in the schema; no legacy migration needed before first public release
 
       // Resolve database path relative to plugin directory
       if (config.routingDatabase && !path.isAbsolute(config.routingDatabase)) {
@@ -104,25 +106,28 @@ export function pluginConstructor(app: ServerAPI) {
             description: 'Path to the routing_graph.sqlite database',
             default: DEFAULT_CONFIG.routingDatabase,
           },
-          defaultDraft: {
+          safetyMarginDraft: {
             type: 'number',
-            title: 'Default Draft (m)',
-            description: 'Default vessel draft in meters',
-            default: DEFAULT_CONFIG.defaultDraft,
+            title: 'Draft Safety Margin (m)',
+            description: 'Under-keel clearance added to design draft',
+            default: DEFAULT_CONFIG.safetyMarginDraft,
+            minimum: 0,
             multipleOf: 0.1,
           },
-          defaultBeam: {
+          safetyMarginAirDraft: {
             type: 'number',
-            title: 'Default Beam (m)',
-            description: 'Default vessel beam in meters',
-            default: DEFAULT_CONFIG.defaultBeam,
+            title: 'Air Draft Safety Margin (m)',
+            description: 'Mast clearance added to design air draft',
+            default: DEFAULT_CONFIG.safetyMarginAirDraft,
+            minimum: 0,
             multipleOf: 0.1,
           },
-          defaultAirDraft: {
+          safetyMarginBeam: {
             type: 'number',
-            title: 'Default Air Draft (m)',
-            description: 'Default vessel air draft in meters',
-            default: DEFAULT_CONFIG.defaultAirDraft,
+            title: 'Beam Safety Margin (m)',
+            description: 'Width clearance added to design beam',
+            default: DEFAULT_CONFIG.safetyMarginBeam,
+            minimum: 0,
             multipleOf: 0.1,
           },
           defaultCoastDistance: {
@@ -228,6 +233,10 @@ export function pluginConstructor(app: ServerAPI) {
       apiHandler!.setComponents(database, routingEngine);
       console.log('[autoroute] API handler ready');
 
+      // Fetch initial vessel dimensions synchronously (subscription may not fire for static values)
+      await fetchInitialVesselDimensions(app);
+
+      // Subscribe to future vessel dimension changes
       await subscribeToVesselDimensions(app);
       console.log('[autoroute] Plugin started successfully');
     } catch (error) {
@@ -237,27 +246,58 @@ export function pluginConstructor(app: ServerAPI) {
   }
 
   /**
-   * Load configuration from Signal K app
+   * Fetch initial vessel dimensions from Signal K path API
    */
-  async function loadConfig(app: ServerAPI): Promise<PluginConfig> {
-    const loadedConfig = { ...DEFAULT_CONFIG };
-
+  async function fetchInitialVesselDimensions(app: ServerAPI) {
     try {
-      // Try to get config from app.settings or app.config
       const appAny = app as any;
-      if (appAny.settings && appAny.settings['signalk-autoroute']) {
-        const pluginSettings = appAny.settings['signalk-autoroute'];
-        Object.keys(DEFAULT_CONFIG).forEach((key) => {
-          if (pluginSettings[key] !== undefined) {
-            (loadedConfig as any)[key] = pluginSettings[key];
-          }
-        });
-      }
-    } catch {
-      console.warn('[autoroute] Failed to load config from Signal K, using defaults');
-    }
+      let draft: number | undefined;
+      let beam: number | undefined;
+      let airDraft: number | undefined;
 
-    return loadedConfig;
+      // Try getSelfPath (preferred)
+      if (typeof appAny.getSelfPath === 'function') {
+        const draftPath = appAny.getSelfPath('design.draft');
+        draft = extractNumberValue(draftPath);
+        const beamPath = appAny.getSelfPath('design.beam');
+        beam = extractNumberValue(beamPath);
+        const airDraftPath = appAny.getSelfPath('design.airHeight');
+        airDraft = extractNumberValue(airDraftPath);
+      } else if (typeof appAny.getPath === 'function') {
+        // Fallback: full path
+        const draftPath = appAny.getPath('vessels.self.design.draft');
+        draft = extractNumberValue(draftPath);
+        const beamPath = appAny.getPath('vessels.self.design.beam');
+        beam = extractNumberValue(beamPath);
+        const airDraftPath = appAny.getPath('vessels.self.design.airHeight');
+        airDraft = extractNumberValue(airDraftPath);
+      }
+
+      if (draft !== undefined || beam !== undefined || airDraft !== undefined) {
+        const newDimensions: Partial<typeof vesselDimensions> = {};
+        if (draft !== undefined) newDimensions.draft = draft;
+        if (beam !== undefined) newDimensions.beam = beam;
+        if (airDraft !== undefined) newDimensions.airDraft = airDraft;
+        vesselDimensions = { ...vesselDimensions, ...newDimensions };
+        routingEngine!.setVesselDimensions(vesselDimensions);
+        console.log(`[autoroute] Vessel dimensions (from path API): ${JSON.stringify(vesselDimensions)}`);
+      }
+    } catch (error) {
+      console.warn('[autoroute] Failed to fetch initial vessel dimensions:', error);
+    }
+  }
+
+  /**
+   * Extract a numeric value from a Signal K path value (handles nested formats)
+   */
+  function extractNumberValue(v: any): number | undefined {
+    if (v === undefined || v === null) return undefined;
+    if (typeof v === 'number') return v;
+    if (typeof v.value === 'number') return v.value;
+    if (v.value && typeof v.value.maximum === 'number') return v.value.maximum;
+    if (typeof v.maximum === 'number') return v.maximum;
+    if (typeof v.current === 'number') return v.current;
+    return undefined;
   }
 
   /**
@@ -272,7 +312,7 @@ export function pluginConstructor(app: ServerAPI) {
           subscribe: [
             { path: 'design.draft', period: 1000, format: 'delta' },
             { path: 'design.beam', period: 1000, format: 'delta' },
-            { path: 'design.airDraft', period: 1000, format: 'delta' },
+            { path: 'design.airHeight', period: 1000, format: 'delta' },
           ],
         };
         const unsubscribeFns: (() => void)[] = [];
@@ -292,7 +332,7 @@ export function pluginConstructor(app: ServerAPI) {
         const subscription = { context: 'vessels.self', subscribe: [
           { path: 'design.draft' },
           { path: 'design.beam' },
-          { path: 'design.airDraft' },
+          { path: 'design.airHeight' },
         ]};
         subscriptionCancelled = appAny.subscribe(subscription, (update: any) => {
           handleVesselUpdate(update);
@@ -308,7 +348,6 @@ export function pluginConstructor(app: ServerAPI) {
    */
   function handleVesselUpdate(delta: any) {
     if (!routingEngine) return;
-
     const newDimensions: Partial<typeof vesselDimensions> = {};
 
     // Extract values from delta updates array
@@ -318,15 +357,13 @@ export function pluginConstructor(app: ServerAPI) {
       for (const entry of values) {
         const p = entry.path || '';
         const value = entry.value;
-        const numValue = typeof value === 'number' ? value : value?.value ?? value;
-        if (p === 'design.draft' || p === 'design.draft.value') {
-          newDimensions.draft = numValue;
-        }
-        if (p === 'design.beam' || p === 'design.beam.value') {
-          newDimensions.beam = numValue;
-        }
-        if (p === 'design.airDraft' || p === 'design.airDraft.value') {
-          newDimensions.airDraft = numValue;
+        const numValue = typeof value === 'number' ? value 
+          : typeof value?.value === 'number' ? value.value
+          : value?.value?.maximum ?? value?.maximum ?? value?.current ?? value;
+        if (typeof numValue === 'number') {
+          if (p === 'design.draft' || p === 'design.draft.value') newDimensions.draft = numValue;
+          if (p === 'design.beam' || p === 'design.beam.value') newDimensions.beam = numValue;
+          if (p === 'design.airHeight' || p === 'design.airHeight.value') newDimensions.airDraft = numValue;
         }
       }
     }
@@ -336,10 +373,18 @@ export function pluginConstructor(app: ServerAPI) {
       const vessels = delta.vessels || {};
       for (const vessel of Object.values(vessels) as any[]) {
         const design = vessel.design || {};
-        const extractValue = (v: any) => typeof v === 'number' ? v : v?.value ?? v;
-        if (design.draft !== undefined) newDimensions.draft = extractValue(design.draft);
-        if (design.beam !== undefined) newDimensions.beam = extractValue(design.beam);
-        if (design.airDraft !== undefined) newDimensions.airDraft = extractValue(design.airDraft);
+        if (design.draft !== undefined && typeof design.draft !== 'string') {
+          const extracted = extractNumberValue(design.draft);
+          if (extracted !== undefined) newDimensions.draft = extracted;
+        }
+        if (design.beam !== undefined && typeof design.beam !== 'string') {
+          const extracted = extractNumberValue(design.beam);
+          if (extracted !== undefined) newDimensions.beam = extracted;
+        }
+        if (design.airHeight !== undefined && typeof design.airHeight !== 'string') {
+          const extracted = extractNumberValue(design.airHeight);
+          if (extracted !== undefined) newDimensions.airDraft = extracted;
+        }
       }
     }
 

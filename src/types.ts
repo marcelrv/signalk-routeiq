@@ -120,9 +120,9 @@ export interface BBox {
 // Plugin configuration
 export interface PluginConfig {
   routingDatabase: string;
-  defaultDraft: number;
-  defaultBeam: number;
-  defaultAirDraft: number;
+  safetyMarginDraft: number;     // meters, added to design draft
+  safetyMarginAirDraft: number;  // meters, added to design air draft
+  safetyMarginBeam: number;      // meters, added to design beam
   defaultCoastDistance: number;
   fairwayMultiplier: number;
   openWaterMultiplier: number;
@@ -137,9 +137,9 @@ export interface PluginConfig {
 // Default plugin configuration
 export const DEFAULT_CONFIG: PluginConfig = {
   routingDatabase: './data/routing_graph.sqlite',
-  defaultDraft: 2.0,
-  defaultBeam: 4.0,
-  defaultAirDraft: 10.0,
+  safetyMarginDraft: 0.3,
+  safetyMarginAirDraft: 1.5,
+  safetyMarginBeam: 2.0,
   defaultCoastDistance: 0.5,
   fairwayMultiplier: 0.8,
   openWaterMultiplier: 1.2,
