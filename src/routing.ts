@@ -1178,6 +1178,13 @@ export class RoutingEngine {
     const minDepth = (this.vesselDimensions.draft || 2.0) + this.config.safetyMarginDraft;
     const airDraft = (this.vesselDimensions.airDraft || 10.0) + this.config.safetyMarginAirDraft;
 
+    let totalViolationSegments = 0;
+    let totalViolationDist = 0;
+    let worstDepth = Infinity;
+    let worstAirDraft = Infinity;
+    let firstFromCoord: number[] | null = null;
+    let lastToCoord: number[] | null = null;
+
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
       const depthViolation = seg.minDepth >= 0 && seg.minDepth < minDepth;
@@ -1196,7 +1203,28 @@ export class RoutingEngine {
           from: { latitude: fromCoord[1], longitude: fromCoord[0] },
           to: { latitude: toCoord[1], longitude: toCoord[0] },
         });
+
+        totalViolationSegments++;
+        totalViolationDist += seg.distance || 0;
+        if (depthViolation && seg.minDepth < worstDepth) worstDepth = seg.minDepth;
+        if (airDraftViolation && seg.maxAirDraft < worstAirDraft) worstAirDraft = seg.maxAirDraft;
+        if (!firstFromCoord) firstFromCoord = fromCoord;
+        lastToCoord = toCoord;
       }
+    }
+
+    if (totalViolationSegments > 0 && firstFromCoord && lastToCoord) {
+      const reasons: string[] = [];
+      if (worstDepth < Infinity) reasons.push(`depth ${worstDepth.toFixed(1)}m < required ${minDepth}m`);
+      if (worstAirDraft < Infinity) reasons.push(`air draft ${worstAirDraft.toFixed(1)}m < required ${airDraft}m`);
+      const distNm = totalViolationDist / 1852;
+      warnings.push({
+        type: 'via_constrained',
+        message: `Route to ${label}: constrained for ${totalViolationSegments} leg(s) ${distNm.toFixed(1)}Nm — ${reasons.join('; ')}`,
+        from: { latitude: firstFromCoord[1], longitude: firstFromCoord[0] },
+        to: { latitude: lastToCoord[1], longitude: lastToCoord[0] },
+        distanceMeters: totalViolationDist,
+      });
     }
   }
 

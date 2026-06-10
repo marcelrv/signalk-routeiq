@@ -171,7 +171,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 /* ---------- export (right, below settings) ---------- */
 #export-panel { bottom: 20px; right: 20px; }
 .export-btn {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
   margin-bottom: 8px;
   background: #1f6391;
@@ -182,6 +184,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   font-weight: 600;
   cursor: pointer;
   font-size: 13px;
+  line-height: 1.2;
   transition: background 0.15s;
   text-align: center;
 }
@@ -599,9 +602,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     <div id="route-summary" style="display:none;padding:6px 0 4px;border-top:1px solid rgba(79,148,212,0.15);margin-top:4px;font-size:12px;color:#9bb8da"></div>
     <div id="route-warnings"></div>
     <div id="route-nodes"></div>
-    <div id="route-export" style="padding:6px 0;border-top:1px solid rgba(79,148,212,0.15);margin-top:4px">
-      <button class="export-btn" id="gpx-btn">Download GPX</button>
-      <button class="export-btn push-btn" id="push-btn" style="margin-left:6px">Save to Signal K</button>
+    <div id="route-export" style="padding:6px 0;border-top:1px solid rgba(79,148,212,0.15);margin-top:4px;display:flex;gap:6px">
+      <button class="export-btn" id="gpx-btn" style="flex:1;white-space:nowrap">Download GPX</button>
+      <button class="export-btn push-btn" id="push-btn" style="flex:1;white-space:nowrap">Save to Signal K</button>
     </div>
     <div id="route-pane-empty" style="color:#6d96c0;font-size:12px;padding:8px 0;text-align:center;display:none">No route loaded.</div>
   </div>
@@ -1968,6 +1971,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         startConnectingMsg = w.message;
       } else if (w.type === 'end_connecting') {
         endConnectingMsg = w.message;
+      } else if (w.type === 'via_constrained' && !w.distanceMeters) {
+        continue;
       } else {
         const div = document.createElement('div');
         div.className = 'route-overall-warn';
