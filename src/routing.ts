@@ -1076,6 +1076,13 @@ export class RoutingEngine {
       });
     }
 
+    if (segmentFeatures.length > 0) {
+      segmentFeatures[0].properties.segments = segments;
+      segmentFeatures[0].properties.totalDistance = totalDistance;
+      segmentFeatures[0].properties.totalCost = totalCost;
+      segmentFeatures[0].properties.crossings = feature.properties.crossings;
+    }
+
     route.features = segmentFeatures;
     route.totalDistance = totalDistance;
     route.totalCost = totalCost;
