@@ -2,10 +2,12 @@ import os
 import math
 import json
 import sqlite3
+import hashlib
 import logging
 import argparse
 import multiprocessing as mp
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Tuple, Optional
 
 import numpy as np
@@ -107,15 +109,22 @@ def _edge_attr_worker(edge_chunk):
 
         # Depth
         attrs['min_depth'] = 99.0
+        attrs['drval1'] = None
         if not depare_gdf.empty:
             depare_candidates = _candidates_by_bounds_static(depare_gdf, edge_geom)
             if not depare_candidates.empty:
                 intersecting = depare_candidates[depare_candidates.intersects(edge_geom)]
                 if not intersecting.empty:
                     if 'DRVAL1' in intersecting.columns:
-                        positive = intersecting[intersecting['DRVAL1'] > 0]
-                        if not positive.empty:
-                            attrs['min_depth'] = float(positive['DRVAL1'].min())
+                        # Store raw DRVAL1 (including negative values above
+                        # chart datum) for future tide-aware routing.
+                        # For now: min_depth = max(0, DRVAL1) gives conservative
+                        # routing until tide data is available.
+                        vals = intersecting['DRVAL1'].dropna()
+                        if not vals.empty:
+                            min_val = float(vals.min())
+                            attrs['min_depth'] = max(0.0, min_val)
+                            attrs['drval1'] = min_val
 
         # Bridges
         attrs['max_air_draft'] = 999.0
@@ -195,15 +204,22 @@ def _edge_attr_worker(edge_chunk):
     return results
 
 class NauticalRoutingPipeline:
-    def __init__(self, data_paths: Dict[str, str], db_path: str):
+    def __init__(self, data_paths: Dict[str, str], db_path: str,
+                 country: str = '', region_name: str = '', description: str = ''):
         """
         Initializes the pipeline for generating a nautical routing graph.
         
         :param data_paths: Dictionary mapping layer names to file paths (e.g., shapefiles/GeoJSONs).
         :param db_path: Path to the output SQLite database.
+        :param country: ISO country code (e.g., 'NL', 'BE') for the metadata table.
+        :param region_name: Human-readable region name (e.g., 'Netherlands').
+        :param description: Optional description of the data coverage.
         """
         self.data_paths = data_paths
         self.db_path = db_path
+        self.country = country
+        self.region_name = region_name or country
+        self.description = description
         
         # Geodetic calculator for accurate WGS84 distance measurements (meters)
         self.geod = Geod(ellps="WGS84")
@@ -257,8 +273,7 @@ class NauticalRoutingPipeline:
         Combines Inland waterway centerlines and Coastal Navigation Meshes.
         """
         logger.info("Building base network topology...")
-        self.node_id_counter = 1
-        self.coords_to_node = {} # Mapping (lon, lat) -> node_id to prevent duplicates
+        self.coords_to_node = {} # Mapping (lon, lat) -> node_id for node_type upgrades
 
         # 1. Generate Inland Waterway Network (from centerlines)
         if 'inland_waterways' in self.gdfs and not self.gdfs['inland_waterways'].empty:
@@ -270,14 +285,35 @@ class NauticalRoutingPipeline:
 
         logger.info(f"Network built with {self.graph.number_of_nodes()} nodes and {self.graph.number_of_edges()} edges.")
 
+    @staticmethod
+    def _coord_to_id(lon: float, lat: float) -> int:
+        """Deterministic 53-bit-safe node ID from snapped coordinates.
+        
+        Packs (lon, lat) snapped to 5 decimal places into a single integer.
+        Max value: 1,800,000,036,000,000 (well within Number.MAX_SAFE_INTEGER).
+        """
+        lat_int = int((round(lat, 5) + 90.0) * 100000)   # 0 .. 18,000,000
+        lon_int = int((round(lon, 5) + 180.0) * 100000)  # 0 .. 36,000,000
+        return (lat_int * 100000000) + lon_int
+
+    @staticmethod
+    def _generate_poi_id(poi_type: str, lat: float, lon: float) -> int:
+        """Deterministic 52-bit POI ID from type + snapped coordinates.
+        
+        Collisions between different types at the same coordinate are impossible
+        because the input string includes the type prefix. Spelling variations
+        in names are ignored — only type + location matters.
+        """
+        unique_str = f"{poi_type}_{round(lat, 5)}_{round(lon, 5)}"
+        return int(hashlib.md5(unique_str.encode('utf-8')).hexdigest()[:13], 16)
+
     def _get_or_create_node(self, lon: float, lat: float, node_type: str = 'coastal') -> int:
         """Helper to create nodes and avoid duplicates by snapping to 5 decimal places (~1 meter)."""
         coord = (round(lon, 5), round(lat, 5))
+        node_id = self._coord_to_id(lon, lat)
         if coord not in self.coords_to_node:
-            node_id = self.node_id_counter
             self.graph.add_node(node_id, lon=coord[0], lat=coord[1], node_type=node_type)
             self.coords_to_node[coord] = node_id
-            self.node_id_counter += 1
         elif node_type == 'inland':
             self.graph.nodes[self.coords_to_node[coord]]['node_type'] = 'inland'
         return self.coords_to_node[coord]
@@ -917,8 +953,10 @@ class NauticalRoutingPipeline:
                 row = positive.iloc[idx]
                 if row.geometry.contains(pt):
                     # CRITICAL FIX: If DRVAL1 is NaN, assume general deep water (99.0)
+                    # Normalize negative DRVAL1 (above chart datum) to 0.0
+                    # to match edge depth assignment.
                     if 'DRVAL1' in row and pd.notnull(row['DRVAL1']):
-                        depth = float(row['DRVAL1'])
+                        depth = max(0.0, float(row['DRVAL1']))
                     else:
                         depth = 99.0
                     found += 1
@@ -1003,13 +1041,22 @@ class NauticalRoutingPipeline:
             
             # Create Tables
             cursor.executescript("""
+                CREATE TABLE metadata (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    country TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    last_update_date TEXT NOT NULL
+                );
+                
                 CREATE TABLE nodes (
                     id INTEGER PRIMARY KEY,
                     lat REAL,
                     lon REAL,
                     resolution REAL DEFAULT 0.0,
                     node_type TEXT DEFAULT 'coastal',
-                    node_depth REAL DEFAULT -1
+                    node_depth REAL DEFAULT -1,
+                    region_id INTEGER REFERENCES metadata(id) ON DELETE CASCADE
                 );
                 
                 CREATE TABLE edges (
@@ -1017,6 +1064,7 @@ class NauticalRoutingPipeline:
                     target INTEGER,
                     distance REAL,
                     min_depth REAL,
+                    drval1 REAL,
                     max_air_draft REAL,
                     min_width REAL,
                     is_fairway INTEGER,
@@ -1044,19 +1092,29 @@ class NauticalRoutingPipeline:
                 CREATE INDEX idx_edges_target ON edges(target);
             """)
             
+            # Insert metadata row
+            now_utc = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            cursor.execute(
+                "INSERT INTO metadata (country, name, description, last_update_date) VALUES (?, ?, ?, ?)",
+                (self.country, self.region_name, self.description, now_utc)
+            )
+            region_id = cursor.lastrowid
+            
             # Insert Nodes
             nodes_data = [(n, data['lat'], data['lon'],
                            data.get('resolution', 0.0),
                            data.get('node_type', 'coastal'),
-                           data.get('node_depth', -1))
+                           data.get('node_depth', -1),
+                           region_id)
                           for n, data in self.graph.nodes(data=True)]
-            cursor.executemany("INSERT INTO nodes (id, lat, lon, resolution, node_type, node_depth) VALUES (?, ?, ?, ?, ?, ?)", nodes_data)
+            cursor.executemany("INSERT INTO nodes (id, lat, lon, resolution, node_type, node_depth, region_id) VALUES (?, ?, ?, ?, ?, ?, ?)", nodes_data)
             
             # Insert Edges
             edges_data = [(
                 u, v, 
                 data.get('distance', 0.0), 
                 data.get('min_depth', 99.0), 
+                data.get('drval1'),  # may be None
                 data.get('max_air_draft', 999.0),
                 data.get('min_width', 999.0),
                 int(data.get('is_fairway', False)),
@@ -1069,8 +1127,8 @@ class NauticalRoutingPipeline:
             ) for u, v, data in self.graph.edges(data=True)]
             cursor.executemany("""
                 INSERT INTO edges 
-                (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, direction_penalty, distance_to_land, edge_type, is_one_way, traffic_dir, crosses_land)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (source, target, distance, min_depth, drval1, max_air_draft, min_width, is_fairway, direction_penalty, distance_to_land, edge_type, is_one_way, traffic_dir, crosses_land)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, edges_data)
             
             # Insert POIs — harvest named locations from multiple layers
@@ -1123,7 +1181,6 @@ class NauticalRoutingPipeline:
                 ('fairways', 'fairway'),
                 ('inland_waterways', 'waterway'),
             ]
-            poi_id_gen = iter(range(1, 10_000_000))
             poi_data = []
             for layer_key, default_type in poi_layers:
                 gdf = self.gdfs.get(layer_key, gpd.GeoDataFrame())
@@ -1136,9 +1193,10 @@ class NauticalRoutingPipeline:
                     pt = _poi_point(row.geometry)
                     if pt is None:
                         continue
-                    poi_data.append((next(poi_id_gen), name, default_type, _poi_properties(row, default_type), pt[0], pt[1]))
+                    pid = self._generate_poi_id(default_type, pt[0], pt[1])
+                    poi_data.append((pid, name, default_type, _poi_properties(row, default_type), pt[0], pt[1]))
             if poi_data:
-                cursor.executemany("INSERT INTO pois (id, name, type, properties, lat, lon) VALUES (?, ?, ?, ?, ?, ?)", poi_data)
+                cursor.executemany("INSERT OR IGNORE INTO pois (id, name, type, properties, lat, lon) VALUES (?, ?, ?, ?, ?, ?)", poi_data)
                 logger.info(f"Inserted {len(poi_data)} named POIs from {len(poi_layers)} layers")
             else:
                 logger.warning("No named POIs found in any layer")
@@ -1154,7 +1212,13 @@ if __name__ == "__main__":
     parser.add_argument("--input-dir", default="./output_geojson",
                         help="Directory containing preprocessed GeoJSON files (default: ./output_geojson)")
     parser.add_argument("--output", default="./routing_graph.sqlite",
-                        help="Output SQLite database path (default: ./routing_graph.sqlite)")
+                        help="Output SQLite database path (default: ./output_geojson)")
+    parser.add_argument("--country", default="",
+                        help="ISO country code for this region (e.g., NL, BE)")
+    parser.add_argument("--name", default="",
+                        help="Human-readable region name (e.g., Netherlands)")
+    parser.add_argument("--description", default="",
+                        help="Optional description of the data coverage")
     args = parser.parse_args()
 
     data_sources = {
@@ -1168,6 +1232,8 @@ if __name__ == "__main__":
         'pois': os.path.join(args.input_dir, 'pois_points.geojson')
     }
 
-    pipeline = NauticalRoutingPipeline(data_paths=data_sources, db_path=args.output)
+    pipeline = NauticalRoutingPipeline(data_paths=data_sources, db_path=args.output,
+                                       country=args.country, region_name=args.name,
+                                       description=args.description)
     pipeline.run_pipeline()
 

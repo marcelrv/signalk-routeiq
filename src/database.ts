@@ -1,15 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import { PoiResult } from './types.js';
-
-interface NodeRow {
-  id: number;
-  lat: number;
-  lon: number;
-  resolution?: number;
-  node_type?: string;
-}
 
 export interface EdgeRow {
   source: number;
@@ -24,8 +17,7 @@ export interface EdgeRow {
   edge_type?: string;
   is_one_way?: number;
   traffic_dir?: number;
-  crosses_land?: number; // 1 = edge crosses land (always 0 for post-pipeline graphs)
-  // Target node coordinates (always populated by loading or queries)
+  crosses_land?: number;
   lat: number;
   lon: number;
   source_lat?: number;
@@ -44,101 +36,150 @@ interface PoiRow {
 export interface EdgeSnapResult {
   source: number;
   target: number;
-  fraction: number;       // 0-1 along edge from source→target
+  fraction: number;
   point: { lat: number; lon: number };
-  distance: number;        // perpendicular distance (meters)
-  nearNode: number;        // nearer endpoint
-  farNode: number;         // farther endpoint
+  distance: number;
+  nearNode: number;
+  farNode: number;
   edge: EdgeRow;
 }
 
 export class RoutingDatabase {
-  private db: DatabaseSync;
-  private dbPath: string;
-  private nodes: Map<number, { lat: number; lon: number }> = new Map();
+  private worker: Worker | null = null;
+  private messageIdCounter = 0;
+  private pending = new Map<number, { resolve: (value: any) => void; reject: (reason: any) => void }>();
+  private dbDir: string;
+  private nodes: Map<number, { lat: number; lon: number; regionId: number }> = new Map();
   private edgesBySource: Map<number, Array<EdgeRow & { lat: number; lon: number }>> = new Map();
+  private pois: PoiRow[] = [];
   private graphLoaded: boolean = false;
   private spatialGrid: Map<string, number[]> = new Map();
-  // Flat bbox index for water polygons: [minLon, minLat, maxLon, maxLat, featureIndex]
   private waterBBoxIndex: Float64Array | null = null;
   private hasCrossesLand: boolean = false;
   private hasNodeDepth: boolean = false;
+  private hasRegionId: boolean = false;
 
-  constructor(dbPath: string) {
-    this.dbPath = dbPath;
-    this.db = new DatabaseSync(dbPath, { open: true });
+  constructor(dbDir: string) {
+    this.dbDir = dbDir;
+  }
+
+  private sendMessage(type: string, payload?: any): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const id = ++this.messageIdCounter;
+      this.pending.set(id, { resolve, reject });
+      this.worker!.postMessage({ id, type, payload });
+    });
   }
 
   async init(): Promise<void> {
+    let files: string[];
     try {
-      const row = this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as unknown as { count: number } | undefined;
-      if (!row) {
-        throw new Error('nodes table not found');
-      }
-      // Check for crosses_land column (added in schema v2 for land-crossing validation)
-      const edgeCols = this.db.prepare("PRAGMA table_info('edges')").all() as Array<{ name: string }>;
-      this.hasCrossesLand = edgeCols.some(c => c.name === 'crosses_land');
-      // Check for node_depth column (pre-computed depth at node point)
-      const nodeCols = this.db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>;
-      this.hasNodeDepth = nodeCols.some(c => c.name === 'node_depth');
-    } catch (error: any) {
-      throw new Error(`Failed to connect to routing database: ${error.message}`);
+      files = readdirSync(this.dbDir).filter(f => f.endsWith('.sqlite'));
+    } catch (err: any) {
+      throw new Error(`Cannot read routing data directory "${this.dbDir}": ${err.message}`);
     }
+    if (files.length === 0) {
+      throw new Error(`No .sqlite files found in routing data directory: ${this.dbDir}`);
+    }
+
+    const workerPath = join(dirname(fileURLToPath(import.meta.url)), 'db-worker.js');
+    this.worker = new Worker(workerPath);
+
+    this.worker.on('message', (msg: { id: number; type: string; result?: any; error?: string; chunk?: boolean; chunkIndex?: number; totalChunks?: number }) => {
+      const pending = this.pending.get(msg.id);
+      if (!pending) return;
+
+      if (msg.error) {
+        this.pending.delete(msg.id);
+        pending.reject(new Error(msg.error));
+        return;
+      }
+
+      // Edge-loading chunked response
+      if (msg.chunk === true && msg.totalChunks !== undefined) {
+        // Initialize accumulator on first chunk
+        if (!(pending as any)._chunks) {
+          (pending as any)._chunks = [];
+        }
+        (pending as any)._chunks.push(msg.result);
+        // Resolve when all chunks arrive
+        if ((pending as any)._chunks.length === msg.totalChunks) {
+          this.pending.delete(msg.id);
+          pending.resolve((pending as any)._chunks.flat());
+        }
+        return;
+      }
+      // Final marker (chunk=false) — already resolved by last chunk above
+      if (msg.chunk === false) return;
+
+      this.pending.delete(msg.id);
+      pending.resolve(msg.result);
+    });
+
+    this.worker.on('error', (err) => {
+      for (const [, p] of this.pending) {
+        p.reject(err);
+      }
+      this.pending.clear();
+    });
+
+    const dbPaths = files.map(f => join(this.dbDir, f));
+    const schema = await this.sendMessage('init', { dbPaths });
+    this.hasCrossesLand = schema.hasCrossesLand;
+    this.hasNodeDepth = schema.hasNodeDepth;
+    this.hasRegionId = schema.hasRegionId;
+  }
+
+  private regionIdCol(): string {
+    return this.hasRegionId ? 'region_id' : '0 AS region_id';
+  }
+
+  async getMetadata(): Promise<Array<{ id: number; country: string; name: string; description: string | null; lastUpdateDate: string }>> {
+    return this.sendMessage('getMetadata');
   }
 
   private crossesLandCol(): string {
-    // Only include the column when it exists in the DB schema.
-    // When absent (pre-schema-v2 databases), the field stays undefined in EdgeRow,
-    // and isEdgeSafe() safely treats undefined === 1 as false (no false positives).
     return this.hasCrossesLand ? ', e.crosses_land' : '';
   }
 
   async loadGraph(): Promise<void> {
-    const nodes = this.db.prepare('SELECT id, lat, lon FROM nodes').all() as unknown as NodeRow[];
-    for (const n of nodes) {
-      this.nodes.set(n.id, { lat: n.lat, lon: n.lon });
+    const allNodes: Array<{ id: number; lat: number; lon: number; region_id?: number }> = await this.sendMessage('loadNodes');
+    for (const n of allNodes) {
+      this.nodes.set(n.id, { lat: n.lat, lon: n.lon, regionId: n.region_id ?? 0 });
     }
     this.buildSpatialIndex();
 
-    const edges = this.db.prepare(
-      `SELECT e.*${this.crossesLandCol()},
-              s.lat AS source_lat, s.lon AS source_lon,
-              t.lat AS target_lat, t.lon AS target_lon
-       FROM edges e
-       JOIN nodes s ON e.source = s.id
-       JOIN nodes t ON e.target = t.id`
-    ).all() as unknown as Array<
-      EdgeRow & {
-        source_lat: number; source_lon: number;
-        target_lat: number; target_lon: number;
-      }
-    >;
-
-    for (const edge of edges) {
-      edge.lat = edge.target_lat;
-      edge.lon = edge.target_lon;
+    const allEdges: Array<EdgeRow> = await this.sendMessage('loadEdges');
+    for (const edge of allEdges) {
+      const s = this.nodes.get(edge.source);
+      const t = this.nodes.get(edge.target);
+      if (!s || !t) continue;
+      edge.lat = t.lat;
+      edge.lon = t.lon;
+      (edge as any).source_lat = s.lat;
+      (edge as any).source_lon = s.lon;
       if (!this.edgesBySource.has(edge.source)) {
         this.edgesBySource.set(edge.source, []);
       }
-      this.edgesBySource.get(edge.source)!.push(edge);
+      this.edgesBySource.get(edge.source)!.push(edge as any);
     }
+
+    const allPois: Array<{ id: number; name: string; type: string; properties: string | null; lat: number; lon: number }> = await this.sendMessage('loadPois');
+    this.pois.push(...allPois);
+
+    await this.sendMessage('close');
 
     this.graphLoaded = true;
   }
 
-  async getNodeById(id: number): Promise<{ lat: number; lon: number } | null> {
+  async getNodeById(id: number): Promise<{ lat: number; lon: number; regionId: number } | null> {
     if (this.graphLoaded) {
       return this.nodes.get(id) || null;
     }
-    const row = this.db.prepare('SELECT lat, lon FROM nodes WHERE id = ?').get(id) as unknown as NodeRow | undefined;
-    return row || null;
+    return null;
   }
 
-  /**
-   * Synchronous node lookup — only valid when graph is loaded in memory.
-   * Throws if graph is not loaded.
-   */
-  getNodeSync(id: number): { lat: number; lon: number } | null {
+  getNodeSync(id: number): { lat: number; lon: number; regionId: number } | null {
     if (!this.graphLoaded) {
       throw new Error('Graph must be loaded for synchronous node lookup');
     }
@@ -149,123 +190,64 @@ export class RoutingDatabase {
     if (this.graphLoaded) {
       return this.edgesBySource.get(nodeId) || [];
     }
-    return this.db.prepare(
-      `SELECT e.*${this.crossesLandCol()}, n.lat, n.lon
-       FROM edges e
-       JOIN nodes n ON e.target = n.id
-       WHERE e.source = ?`
-    ).all(nodeId) as unknown as Array<EdgeRow & { lat: number; lon: number }>;
+    return [];
   }
 
   async getEdge(source: number, target: number): Promise<EdgeRow & { lat: number; lon: number } | null> {
     if (this.graphLoaded) {
       const edges = this.edgesBySource.get(source);
       if (edges) {
-        const edge = edges.find(e => e.target === target);
-        if (edge) return edge;
+        return edges.find(e => e.target === target) || null;
       }
     }
-    const row = this.db.prepare(
-      `SELECT e.*${this.crossesLandCol()}, n.lat, n.lon
-       FROM edges e
-       JOIN nodes n ON e.target = n.id
-       WHERE e.source = ? AND e.target = ?`
-    ).get(source, target) as unknown as (EdgeRow & { lat: number; lon: number }) | undefined;
-    return row || null;
+    return null;
   }
 
   async getEdgesBySources(nodeIds: number[]): Promise<Map<number, Array<EdgeRow>>> {
     const result = new Map<number, Array<EdgeRow>>();
-    if (nodeIds.length === 0) {
-      return result;
-    }
-    const placeholders = nodeIds.map(() => '?').join(', ');
-    const rows = this.db.prepare(
-      `SELECT e.*${this.crossesLandCol()} FROM edges AS e WHERE e.source IN (${placeholders})`
-    ).all(...nodeIds) as unknown as EdgeRow[];
-    for (const row of rows) {
-      if (!result.has(row.source)) {
-        result.set(row.source, []);
+    if (!this.graphLoaded) return result;
+    for (const id of nodeIds) {
+      const edges = this.edgesBySource.get(id);
+      if (edges) {
+        result.set(id, edges);
       }
-      result.get(row.source)!.push(row);
     }
     return result;
   }
 
   async findNearestNode(latitude: number, longitude: number, maxDistanceMeters: number = 50000): Promise<number | null> {
-    // Fast path: use the in-memory node map when the graph is loaded.
-    // A single O(N) scan over the flat map is much faster than a SQLite
-    // haversine sort on 100k+ rows with no index, and keeps the correct
-    // "closest geometry" behaviour from the previous fix.
-    if (this.graphLoaded) {
-      let bestId: number | null = null;
-      let bestDist = maxDistanceMeters;
-      const latRad = latitude * Math.PI / 180;
-      const cosLat = Math.cos(latRad);
-      // Cheap equirectangular pre-filter: skip nodes outside a degree bounding box
-      const marginDeg = maxDistanceMeters / 111320;
-      for (const [id, c] of this.nodes) {
-        if (Math.abs(c.lat - latitude) > marginDeg) continue;
-        if (Math.abs(c.lon - longitude) > marginDeg / cosLat) continue;
-        // Full haversine only for bbox candidates
-        const dLat = (c.lat - latitude) * Math.PI / 180;
-        const dLon = (c.lon - longitude) * Math.PI / 180;
-        const a = Math.sin(dLat / 2) ** 2 + cosLat * Math.cos(c.lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-        const d = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        if (d < bestDist) { bestDist = d; bestId = id; }
-      }
-      return bestId;
-    }
-
-    // Slow path (graph not yet loaded): use SQLite with a bounding-box pre-filter
-    // so the query uses lat/lon range scans instead of a full-table haversine sort.
+    if (!this.graphLoaded) return null;
+    let bestId: number | null = null;
+    let bestDist = maxDistanceMeters;
+    const latRad = latitude * Math.PI / 180;
+    const cosLat = Math.cos(latRad);
     const marginDeg = maxDistanceMeters / 111320;
-    const query = `
-      SELECT id,
-        (6371000 * acos(
-          cos(radians(?)) * cos(radians(lat)) *
-          cos(radians(lon) - radians(?)) +
-          sin(radians(?)) * sin(radians(lat))
-        )) as distance
-      FROM nodes
-      WHERE lat BETWEEN ? AND ?
-        AND lon BETWEEN ? AND ?
-      ORDER BY distance ASC
-      LIMIT 1
-    `;
-    const row = this.db.prepare(query).get(
-      latitude, longitude, latitude,
-      latitude - marginDeg, latitude + marginDeg,
-      longitude - marginDeg, longitude + marginDeg,
-    ) as any | undefined;
-    if (!row) return null;
-    return row.distance <= maxDistanceMeters ? row.id : null;
+    for (const [id, c] of this.nodes) {
+      if (Math.abs(c.lat - latitude) > marginDeg) continue;
+      if (Math.abs(c.lon - longitude) > marginDeg / cosLat) continue;
+      const dLat = (c.lat - latitude) * Math.PI / 180;
+      const dLon = (c.lon - longitude) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 + cosLat * Math.cos(c.lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+      const d = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      if (d < bestDist) { bestDist = d; bestId = id; }
+    }
+    return bestId;
   }
 
   async findNearestNodeInSet(latitude: number, longitude: number, candidates: Set<number>, maxDistanceMeters: number = 5000): Promise<{ id: number; lat: number; lon: number; distance: number } | null> {
-    if (candidates.size === 0) return null;
-    const placeholders = [...candidates].join(',');
-    const query = `
-      SELECT id, lat, lon,
-        (6371000 * acos(
-          cos(radians(?)) * cos(radians(lat)) *
-          cos(radians(lon) - radians(?)) +
-          sin(radians(?)) * sin(radians(lat))
-        )) as distance
-      FROM nodes
-      WHERE id IN (${placeholders})
-        AND distance <= ?
-      ORDER BY distance ASC
-      LIMIT 1
-    `;
-    const row = this.db.prepare(query).get(latitude, longitude, latitude, maxDistanceMeters) as any | undefined;
-    return row ? { id: row.id, lat: row.lat, lon: row.lon, distance: row.distance } : null;
+    if (candidates.size === 0 || !this.graphLoaded) return null;
+    let best: { id: number; lat: number; lon: number; distance: number } | null = null;
+    for (const id of candidates) {
+      const c = this.nodes.get(id);
+      if (!c) continue;
+      const d = this.haversineMeters(latitude, longitude, c.lat, c.lon);
+      if (d <= maxDistanceMeters && (!best || d < best.distance)) {
+        best = { id, lat: c.lat, lon: c.lon, distance: d };
+      }
+    }
+    return best;
   }
 
-  /**
-   * Return all node IDs within `radiusMeters` of the given point, sorted by distance ascending.
-   * Uses a fast in-memory scan when the graph is loaded.
-   */
   async getNodesInRadius(latitude: number, longitude: number, radiusMeters: number): Promise<Array<{ id: number; lat: number; lon: number; distance: number }>> {
     const results: Array<{ id: number; lat: number; lon: number; distance: number }> = [];
     if (!this.graphLoaded) return results;
@@ -285,11 +267,6 @@ export class RoutingDatabase {
     return results;
   }
 
-  /**
-   * Find the nearest graph edge to a point, with perpendicular projection.
-   * Searches edges incident to nodes within ~2km via the spatial grid.
-   * Returns null if no edge is found within maxDistMeters.
-   */
   async findNearestEdge(
     latitude: number,
     longitude: number,
@@ -346,11 +323,6 @@ export class RoutingDatabase {
     return best;
   }
 
-  /**
-   * Project a point onto a line segment in lat/lon space.
-   * Uses Euclidean approximation (valid for short distances <2km).
-   * Returns the projection fraction (0-1), projected point, and perpendicular distance in meters.
-   */
   public projectOnEdge(
     ax: number, ay: number,
     bx: number, by: number,
@@ -398,42 +370,34 @@ export class RoutingDatabase {
   }
 
   async searchPois(query: string, maxResults: number = 20): Promise<PoiResult[]> {
-    const searchPattern = `%${query}%`;
-    const rows = this.db.prepare(
-      `SELECT id, name, type, properties, lat, lon
-       FROM pois
-       WHERE name LIKE ?
-       ORDER BY name
-       LIMIT ?`
-    ).all(searchPattern, maxResults) as unknown as PoiRow[];
-    return rows.map(row => ({
-      id: row.id,
-      name: row.name,
-      type: row.type,
-      properties: row.properties ? JSON.parse(row.properties) : {},
-      latitude: row.lat,
-      longitude: row.lon,
-    }));
+    const pattern = query.toLowerCase();
+    const results: PoiResult[] = [];
+    for (const row of this.pois) {
+      if (row.name.toLowerCase().includes(pattern)) {
+        results.push({
+          id: row.id,
+          name: row.name,
+          type: row.type,
+          properties: row.properties ? JSON.parse(row.properties) : {},
+          latitude: row.lat,
+          longitude: row.lon,
+        });
+        if (results.length >= maxResults) break;
+      }
+    }
+    return results.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async getStats(): Promise<{ nodes: number; edges: number; pois: number }> {
-    const row = this.db.prepare(
-      `SELECT
-        (SELECT COUNT(*) FROM nodes) as nodes,
-        (SELECT COUNT(*) FROM edges) as edges,
-        (SELECT COUNT(*) FROM pois) as pois`
-    ).get() as unknown as { nodes: number; edges: number; pois: number } | undefined;
-    return row || { nodes: 0, edges: 0, pois: 0 };
-  }
-
-  private hasNodeMetaColumns: boolean | null = null;
-
-  private checkNodeMetaColumns(): boolean {
-    if (this.hasNodeMetaColumns === null) {
-      const cols = this.db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>;
-      this.hasNodeMetaColumns = cols.some(c => c.name === 'resolution') && cols.some(c => c.name === 'node_type');
+    let edgeCount = 0;
+    for (const edges of this.edgesBySource.values()) {
+      edgeCount += edges.length;
     }
-    return this.hasNodeMetaColumns;
+    return {
+      nodes: this.nodes.size,
+      edges: edgeCount,
+      pois: this.pois.length,
+    };
   }
 
   async getNodesInBBox(
@@ -441,26 +405,20 @@ export class RoutingDatabase {
     maxLat: number, maxLon: number,
     limit: number = 5000,
   ): Promise<Array<{ id: number; lat: number; lon: number; resolution: number; node_type: string; min_depth: number }>> {
-    const cols = this.checkNodeMetaColumns() ? 'n.id, n.lat, n.lon, n.resolution, n.node_type' : 'n.id, n.lat, n.lon';
-    // Use pre-computed node_depth when available (pipeline schema v2+).
-    // Fall back to MIN over incident edges for backward compat with old DBs.
-    const depthExpr = this.hasNodeDepth
-      ? 'n.node_depth'
-      : 'COALESCE((SELECT MIN(e.min_depth) FROM edges e WHERE e.source = n.id OR e.target = n.id), -1)';
-    const rows = this.db.prepare(
-      `SELECT ${cols},
-              ${depthExpr} AS min_depth
-       FROM nodes n
-       WHERE n.lat >= ? AND n.lat <= ? AND n.lon >= ? AND n.lon <= ?
-       ORDER BY n.id
-       LIMIT ?`
-    ).all(minLat, maxLat, minLon, maxLon, limit) as unknown as (NodeRow & { min_depth: number })[];
-    return rows.map((r: any) => ({
-      id: r.id, lat: r.lat, lon: r.lon,
-      resolution: r.resolution ?? 0,
-      node_type: r.node_type ?? 'coastal',
-      min_depth: r.min_depth ?? -1,
-    }));
+    const results: Array<{ id: number; lat: number; lon: number; resolution: number; node_type: string; min_depth: number }> = [];
+    for (const [id, c] of this.nodes) {
+      if (c.lat >= minLat && c.lat <= maxLat && c.lon >= minLon && c.lon <= maxLon) {
+        results.push({
+          id, lat: c.lat, lon: c.lon,
+          resolution: 0,
+          node_type: 'coastal',
+          min_depth: -1,
+        });
+        if (results.length >= limit) break;
+      }
+    }
+    results.sort((a, b) => a.id - b.id);
+    return results;
   }
 
   async getPoisInBBox(
@@ -468,27 +426,25 @@ export class RoutingDatabase {
     maxLat: number, maxLon: number,
     limit: number = 2000,
   ): Promise<Array<{ id: number; name: string; type: string; properties: Record<string, unknown>; lat: number; lon: number }>> {
-    const rows = this.db.prepare(
-      `SELECT id, name, type, properties, lat, lon
-       FROM pois
-       WHERE lat >= ? AND lat <= ? AND lon >= ? AND lon <= ?
-       ORDER BY name
-       LIMIT ?`
-    ).all(minLat, maxLat, minLon, maxLon, limit) as unknown as PoiRow[];
-    return rows.map(r => ({ id: r.id, name: r.name, type: r.type, properties: r.properties ? JSON.parse(r.properties) : {}, lat: r.lat, lon: r.lon }));
+    const results: Array<{ id: number; name: string; type: string; properties: Record<string, unknown>; lat: number; lon: number }> = [];
+    for (const row of this.pois) {
+      if (row.lat >= minLat && row.lat <= maxLat && row.lon >= minLon && row.lon <= maxLon) {
+        results.push({
+          id: row.id, name: row.name, type: row.type,
+          properties: row.properties ? JSON.parse(row.properties) : {},
+          lat: row.lat, lon: row.lon,
+        });
+        if (results.length >= limit) break;
+      }
+    }
+    results.sort((a, b) => a.name.localeCompare(b.name));
+    return results;
   }
 
   async getNearestPoi(lat: number, lon: number, maxDistanceMeters: number = 250): Promise<{ id: number; name: string; type: string; properties: Record<string, unknown>; latitude: number; longitude: number; distance: number } | null> {
-    const latDeg = maxDistanceMeters / 111320;
-    const lonDeg = maxDistanceMeters / (111320 * Math.cos(lat * Math.PI / 180));
-    const rows = this.db.prepare(
-      `SELECT id, name, type, properties, lat, lon
-       FROM pois
-       WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?`
-    ).all(lat - latDeg, lat + latDeg, lon - lonDeg, lon + lonDeg) as unknown as PoiRow[];
     let best: PoiRow | null = null;
     let bestDist = Infinity;
-    for (const row of rows) {
+    for (const row of this.pois) {
       const d = this.haversineMeters(lat, lon, row.lat, row.lon);
       if (d < bestDist && d <= maxDistanceMeters) {
         bestDist = d;
@@ -496,7 +452,12 @@ export class RoutingDatabase {
       }
     }
     if (!best) return null;
-    return { id: best.id, name: best.name, type: best.type, properties: best.properties ? JSON.parse(best.properties) : {}, latitude: best.lat, longitude: best.lon, distance: Math.round(bestDist) };
+    return {
+      id: best.id, name: best.name, type: best.type,
+      properties: best.properties ? JSON.parse(best.properties) : {},
+      latitude: best.lat, longitude: best.lon,
+      distance: Math.round(bestDist),
+    };
   }
 
   private haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -510,21 +471,14 @@ export class RoutingDatabase {
   private waterGeoJson: any = null;
   private waterGeojsonPath: string | null = null;
 
-  /**
-   * Return water polygon features (from coastal_water_polygons.geojson)
-   * that intersect the given bounding box.
-   */
   async getWaterPolygons(
     minLat: number, minLon: number,
     maxLat: number, maxLon: number,
   ): Promise<any[]> {
-    // Derive GeoJSON path from SQLite path: same directory, different filename
     if (!this.waterGeojsonPath) {
-      const dir = dirname(this.dbPath);
-      this.waterGeojsonPath = join(dir, 'coastal_water_polygons.geojson');
+      this.waterGeojsonPath = join(this.dbDir, 'coastal_water_polygons.geojson');
     }
 
-    // Load and cache the GeoJSON on first call
     if (!this.waterGeoJson) {
       if (!existsSync(this.waterGeojsonPath)) {
         this.waterGeoJson = { type: 'FeatureCollection', features: [] };
@@ -552,17 +506,12 @@ export class RoutingDatabase {
   private waterwaysGeoJson: any = null;
   private waterwaysGeojsonPath: string | null = null;
 
-  /**
-   * Return waterway line features (from inland_waterways_lines.geojson)
-   * that intersect the given bounding box.
-   */
   async getWaterways(
     minLat: number, minLon: number,
     maxLat: number, maxLon: number,
   ): Promise<any[]> {
     if (!this.waterwaysGeojsonPath) {
-      const dir = dirname(this.dbPath);
-      this.waterwaysGeojsonPath = join(dir, 'inland_waterways_lines.geojson');
+      this.waterwaysGeojsonPath = join(this.dbDir, 'inland_waterways_lines.geojson');
     }
 
     if (!this.waterwaysGeoJson) {
@@ -676,6 +625,7 @@ export class RoutingDatabase {
       }
     }
 
+    const toNodeCoords = this.nodes.get(toNode);
     return {
       source: fromNode,
       target: toNode,
@@ -688,30 +638,34 @@ export class RoutingDatabase {
       distance_to_land: 0,
       crosses_land: crossesLand,
       edge_type: edgeType,
-      lat: this.nodes.get(toNode)?.lat || 0,
-      lon: this.nodes.get(toNode)?.lon || 0,
+      lat: toNodeCoords?.lat || 0,
+      lon: toNodeCoords?.lon || 0,
     };
   }
 
   close(): Promise<void> {
-    this.db.close();
+    if (this.worker) {
+      try {
+        this.sendMessage('close');
+      } catch { /* worker may already be dead */ }
+      this.worker.terminate();
+      this.worker = null;
+    }
+    this.nodes.clear();
+    this.edgesBySource.clear();
+    this.pois = [];
+    this.spatialGrid.clear();
+    this.graphLoaded = false;
     return Promise.resolve();
   }
 
-
-
-   
   private landGeoJson: any = null;
   private landGeojsonPath: string | null = null;
   private landBBoxIndex: Float64Array | null = null;
 
-  /**
-   * Check whether any sampled points along a straight line fall inside a LAND polygon.
-   */
   isLineCrossingLand(lat1: number, lon1: number, lat2: number, lon2: number, numSamples: number): boolean {
     if (!this.landGeojsonPath) {
-      const dir = dirname(this.dbPath);
-      this.landGeojsonPath = join(dir, 'land_polygons.geojson');
+      this.landGeojsonPath = join(this.dbDir, 'land_polygons.geojson');
     }
     if (!this.landGeoJson) {
       if (!existsSync(this.landGeojsonPath)) {
@@ -727,11 +681,10 @@ export class RoutingDatabase {
 
     const features: any[] = this.landGeoJson.features ?? [];
     if (features.length === 0) {
-      return false; // If no land data, fail-open to rely on node-proximity
+      return false;
     }
 
     if (!this.landBBoxIndex) {
-      // Re-use the bbox index builder for land features
       this.landBBoxIndex = buildBBoxIndex(features);
     }
 
@@ -739,7 +692,6 @@ export class RoutingDatabase {
       const t = i / numSamples;
       const lat = lat1 + (lat2 - lat1) * t;
       const lon = lon1 + (lon2 - lon1) * t;
-      // If ANY point hits a land polygon, the line crosses land!
       if (this.isPointInAnyPolygon(lat, lon, features, this.landBBoxIndex)) return true;
     }
     return false;
@@ -747,7 +699,7 @@ export class RoutingDatabase {
 
   private isPointInAnyPolygon(lat: number, lon: number, features: any[], bboxIndex: Float64Array | null): boolean {
     const idx = bboxIndex;
-    const STRIDE = 5; 
+    const STRIDE = 5;
     if (idx) {
       const n = idx.length / STRIDE;
       for (let i = 0; i < n; i++) {
@@ -767,7 +719,6 @@ export class RoutingDatabase {
       }
       return false;
     }
-    // Fallback if index isn't available
     for (const f of features) {
       const geom = f.geometry;
       if (!geom) continue;
@@ -782,14 +733,8 @@ export class RoutingDatabase {
     return false;
   }
 
-  /**
-   * Ray-casting inside/outside test for a GeoJSON polygon ring array.
-   * rings[0] = outer ring, rings[1..] = holes.
-   */
   private raycastPolygon(x: number, y: number, rings: number[][][]): boolean {
-    // Test outer ring
     if (!this.raycastRing(x, y, rings[0])) return false;
-    // Subtract holes
     for (let h = 1; h < rings.length; h++) {
       if (this.raycastRing(x, y, rings[h])) return false;
     }
@@ -808,13 +753,8 @@ export class RoutingDatabase {
     }
     return inside;
   }
-} // end class RoutingDatabase
+}
 
-/**
- * Build a flat Float64Array bbox index over GeoJSON features for fast spatial rejection.
- * Layout per feature: [minLon, minLat, maxLon, maxLat, featureIndex] (5 values).
- * Only Polygon and MultiPolygon features are indexed.
- */
 function buildBBoxIndex(features: any[]): Float64Array {
   const STRIDE = 5;
   const buf = new Float64Array(features.length * STRIDE);
@@ -843,9 +783,6 @@ function buildBBoxIndex(features: any[]): Float64Array {
   return buf.subarray(0, count * STRIDE);
 }
 
-/**
- * Check whether a GeoJSON feature's bounding box overlaps a query bounding box.
- */
 function featureIntersectsBBox(
   feature: any,
   minLat: number, minLon: number,

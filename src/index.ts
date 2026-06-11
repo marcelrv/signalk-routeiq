@@ -45,11 +45,20 @@ export function pluginConstructor(app: ServerAPI) {
       // Merge received configuration with defaults
       config = { ...DEFAULT_CONFIG, ...options };
 
-      // Safety margins are configured in the schema; no legacy migration needed before first public release
+      // Migrate legacy routingDatabase config to routingDataDir
+      if (!config.routingDataDir && (options as any).routingDatabase) {
+        config.routingDataDir = path.dirname((options as any).routingDatabase);
+        console.log(`[autoroute] Migrated legacy routingDatabase → routingDataDir: ${config.routingDataDir}`);
+      }
 
-      // Resolve database path relative to plugin directory
-      if (config.routingDatabase && !path.isAbsolute(config.routingDatabase)) {
-        config.routingDatabase = path.resolve(__plugindir, config.routingDatabase);
+      // Resolve data directory relative to plugin directory
+      if (config.routingDataDir && !path.isAbsolute(config.routingDataDir)) {
+        config.routingDataDir = path.resolve(__plugindir, config.routingDataDir);
+      }
+
+      // Ensure the data directory exists
+      if (config.routingDataDir) {
+        try { fs.mkdirSync(config.routingDataDir, { recursive: true }); } catch { /* ignore */ }
       }
       console.log(`[autoroute] Configuration loaded: ${JSON.stringify(config)}`);
 
@@ -100,11 +109,11 @@ export function pluginConstructor(app: ServerAPI) {
       return {
         type: 'object',
         properties: {
-          routingDatabase: {
+          routingDataDir: {
             type: 'string',
-            title: 'Routing Database Path',
-            description: 'Path to the routing_graph.sqlite database',
-            default: DEFAULT_CONFIG.routingDatabase,
+            title: 'Routing Data Directory',
+            description: 'Directory containing .sqlite routing graph files',
+            default: DEFAULT_CONFIG.routingDataDir,
           },
           safetyMarginDraft: {
             type: 'number',
@@ -223,7 +232,10 @@ export function pluginConstructor(app: ServerAPI) {
    */
   async function initPluginAsync(app: ServerAPI) {
     try {
-      database = new RoutingDatabase(config.routingDatabase);
+      if (!config.routingDataDir) {
+        throw new Error('routingDataDir is not configured');
+      }
+      database = new RoutingDatabase(config.routingDataDir);
       await database.init();
       await database.loadGraph();
       const stats = await database.getStats();

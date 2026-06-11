@@ -72,6 +72,8 @@ export interface RouteWarning {
 export interface RouteResult {
   type: 'FeatureCollection';
   warnings?: RouteWarning[];
+  totalDistance?: number;
+  totalCost?: number;
   features: Array<{
     type: 'Feature';
     geometry: {
@@ -79,21 +81,29 @@ export interface RouteResult {
       coordinates: Array<[number, number]>; // [lon, lat]
     };
     properties: {
-      totalDistance: number; // meters
-      totalCost: number;
-        segments: Array<{
-          from: number; // node id
-          to: number; // node id
-          distance: number; // meters
-          minDepth: number; // meters
-          maxAirDraft: number; // meters
-          isFairway: boolean;
-          directionPenalty: number;
-          isOneWay?: boolean;
-          trafficDir?: number;
-          edgeType?: string;
-        }>;
-        crossings?: RouteCrossing[];
+      totalDistance?: number; // meters (only on first feature in single-feature mode)
+      totalCost?: number;
+      distance?: number; // segment distance (only per-segment features)
+      minDepth?: number; // meters (only per-segment features)
+      maxAirDraft?: number; // meters (only per-segment features)
+      isFairway?: boolean;
+      directionPenalty?: number;
+      isOneWay?: boolean;
+      trafficDir?: number;
+      edgeType?: string;
+      segments?: Array<{
+        from: number; // node id
+        to: number; // node id
+        distance: number; // meters
+        minDepth: number; // meters
+        maxAirDraft: number; // meters
+        isFairway: boolean;
+        directionPenalty: number;
+        isOneWay?: boolean;
+        trafficDir?: number;
+        edgeType?: string;
+      }>;
+      crossings?: RouteCrossing[];
     };
   }>;
 }
@@ -119,7 +129,7 @@ export interface BBox {
 
 // Plugin configuration
 export interface PluginConfig {
-  routingDatabase: string;
+  routingDataDir: string;
   safetyMarginDraft: number;     // meters, added to design draft
   safetyMarginAirDraft: number;  // meters, added to design air draft
   safetyMarginBeam: number;      // meters, added to design beam
@@ -136,7 +146,7 @@ export interface PluginConfig {
 
 // Default plugin configuration
 export const DEFAULT_CONFIG: PluginConfig = {
-  routingDatabase: './data/routing_graph.sqlite',
+  routingDataDir: './data/',
   safetyMarginDraft: 0.3,
   safetyMarginAirDraft: 1.5,
   safetyMarginBeam: 2.0,

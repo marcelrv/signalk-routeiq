@@ -125,8 +125,6 @@ export class ApiHandler {
 
       const route: RouteResult = await this.routingEngine!.calculateRoute(request);
 
-      console.log(`[autoroute] Route response: ${JSON.stringify(route)}`);
-
       res.json(route);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';

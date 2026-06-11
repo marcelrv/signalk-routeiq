@@ -5,7 +5,7 @@
 - Always use `pip3` (not `pip`) when installing packages.
 - The backend has two scripts:
   - `enc_preprocessor.py` — accepts `--input` and `--output`
-  - `nautical_routing_pipeline.py` — accepts `--input-dir` and `--output`
+  - `nautical_routing_pipeline.py` — accepts `--input-dir`, `--output`, `--country`, `--name`, `--description`
 - Dependencies in `requirements.txt`. Install via `pip3 install --user --break-system-packages -r backend/requirements.txt`
 - No system `sudo` available in dev environment; use `--user` + `--break-system-packages` for pip installs.
 
@@ -22,7 +22,20 @@
 - BBox expansion adds warnings to the route result.
 - Via points each get their own per-segment bounding box.
 
-## Config (new fields)
+## Deterministic Node IDs (coordinate hashing)
+- Node IDs are globally unique integers derived from snapped (lat, lon) at 5 decimal places.
+- Formula: `lat_int = int((round(lat,5) + 90.0) * 100000)`, `lon_int = int((round(lon,5) + 180.0) * 100000)`, `id = lat_int * 100000000 + lon_int`.
+- Fits within `Number.MAX_SAFE_INTEGER` (53 bits). Allows merging multiple regional `.sqlite` files without ID collisions.
+- POI IDs use a deterministic MD5 hash of `"{poi_type}_{round(lat,5)}_{round(lon,5)}"` truncated to 13 hex chars.
+
+## SQLite Schema
+- **`metadata`** table: `country` (UNIQUE), `name`, `description`, `last_update_date` — describes the data source.
+- **`nodes`** table: includes `region_id INTEGER REFERENCES metadata(id)` for per-region replacement.
+- **`edges`**: same as before, no region-level column needed (edges follow their source node's region).
+- **`pois`**: `INSERT OR IGNORE` handles duplicate POI IDs from overlapping regions (uses deterministic hash based on type+coords, ignoring name variations).
+
+## Config
+- `routingDataDir` (was `routingDatabase`): path to a **directory** containing one or more `.sqlite` routing graph files.
 - `routingBBoxMargin` (deg, default 0.1): initial bounding box margin
 - `routingBBoxMaxExtent` (deg, default 10.0): max bbox before full-graph fallback
 - `lineOfSightSampleInterval` (m, default 500): LOS sample spacing

@@ -196,6 +196,7 @@ export class RoutingEngine {
             ...violationWarnings,
           ];
           if (result.warnings.length === 0) delete result.warnings;
+          this.splitToSegmentFeatures(result);
           return result;
         } catch {
           // Expand bounding box and retry
@@ -285,6 +286,7 @@ export class RoutingEngine {
       await this.connectUserPoint(start, route, 'start');
       await this.connectUserPoint(end, route, 'end');
 
+      this.splitToSegmentFeatures(route);
       return route;
     }
 
@@ -345,7 +347,7 @@ export class RoutingEngine {
         allCoordinates.push(...segmentResult.features[0].geometry.coordinates.slice(1));
       }
 
-      allSegments.push(...segmentResult.features[0].properties.segments);
+      allSegments.push(...segmentResult.features[0].properties.segments!);
       currentStart = nextPoint;
     }
 
@@ -373,7 +375,7 @@ export class RoutingEngine {
     } else {
       allCoordinates.push(...finalResult.features[0].geometry.coordinates.slice(1));
     }
-    allSegments.push(...finalResult.features[0].properties.segments);
+    allSegments.push(...finalResult.features[0].properties.segments!);
 
     const allWarnings = [...warnings, ...(globalWarnings || [])];
 
@@ -394,6 +396,7 @@ export class RoutingEngine {
     // Connect only the overall end coordinate (start is handled per-segment above)
     await this.connectUserPoint(end, result, 'end');
 
+    this.splitToSegmentFeatures(result);
     return result;
   }
 
@@ -473,7 +476,7 @@ export class RoutingEngine {
     position: 'start' | 'end',
   ): Promise<void> {
     const coords = route.features[0].geometry.coordinates;
-    const segments = route.features[0].properties.segments;
+    const segments = route.features[0].properties.segments!;
     if (coords.length === 0) return;
 
     // Try edge-snapped projection for smoother entry/exit
@@ -517,7 +520,7 @@ export class RoutingEngine {
             directionPenalty: 1,
           },
         );
-        route.features[0].properties.totalDistance += Math.round(edgeSnap.distance + edgePortion + snapToNode);
+        route.features[0].properties.totalDistance! += Math.round(edgeSnap.distance + edgePortion + snapToNode);
         if (!route.warnings) route.warnings = [];
         route.warnings.push({
           type: 'start_connecting',
@@ -536,7 +539,7 @@ export class RoutingEngine {
           isFairway: false,
           directionPenalty: 1,
         });
-        route.features[0].properties.totalDistance += Math.round(directDist);
+        route.features[0].properties.totalDistance! += Math.round(directDist);
         if (!route.warnings) route.warnings = [];
         route.warnings.push({
           type: 'start_connecting',
@@ -594,7 +597,7 @@ export class RoutingEngine {
                 directionPenalty: 1,
               });
 
-              route.features[0].properties.totalDistance += Math.round(truncatedDist + proj.distance - lastSeg.distance);
+              route.features[0].properties.totalDistance! += Math.round(truncatedDist + proj.distance - lastSeg.distance);
 
               if (!route.warnings) route.warnings = [];
               route.warnings.push({
@@ -643,7 +646,7 @@ export class RoutingEngine {
             directionPenalty: 1,
           },
         );
-        route.features[0].properties.totalDistance += Math.round(edgeSnap.distance + edgePortion + nodeToSnap);
+        route.features[0].properties.totalDistance! += Math.round(edgeSnap.distance + edgePortion + nodeToSnap);
         if (!route.warnings) route.warnings = [];
         route.warnings.push({
           type: 'end_connecting',
@@ -662,7 +665,7 @@ export class RoutingEngine {
           isFairway: false,
           directionPenalty: 1,
         });
-        route.features[0].properties.totalDistance += Math.round(directDist);
+        route.features[0].properties.totalDistance! += Math.round(directDist);
         if (!route.warnings) route.warnings = [];
         route.warnings.push({
           type: 'end_connecting',
@@ -1017,6 +1020,52 @@ export class RoutingEngine {
   }
 
   /**
+   * Split a single-feature route (LineString + segments array) into individual
+   * per-segment features so the frontend can color each segment independently
+   * based on its minDepth / maxAirDraft properties.
+   */
+  private splitToSegmentFeatures(route: RouteResult): void {
+    const feature = route.features[0];
+    const segments = feature.properties.segments;
+    if (!feature || !segments || segments.length === 0) return;
+
+    const coords = feature.geometry.coordinates;
+    const totalDistance = feature.properties.totalDistance!;
+    const totalCost = feature.properties.totalCost!;
+
+    const segmentFeatures: RouteResult['features'] = [];
+
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const fromCoord = coords[i];
+      const toCoord = coords[i + 1];
+      if (!fromCoord || !toCoord) continue;
+
+      segmentFeatures.push({
+        type: 'Feature',
+        geometry: {
+          type: 'LineString',
+          coordinates: [fromCoord, toCoord],
+        },
+        properties: {
+          minDepth: seg.minDepth,
+          maxAirDraft: seg.maxAirDraft,
+          isFairway: seg.isFairway,
+          directionPenalty: seg.directionPenalty,
+          isOneWay: seg.isOneWay,
+          trafficDir: seg.trafficDir,
+          edgeType: seg.edgeType,
+          distance: seg.distance,
+        },
+      });
+    }
+
+    route.features = segmentFeatures;
+    route.totalDistance = totalDistance;
+    route.totalCost = totalCost;
+  }
+
+  /**
    * Build GeoJSON RouteResult from path node IDs
    */
   private async buildRouteResult(
@@ -1174,7 +1223,7 @@ export class RoutingEngine {
   ) {
     if (!result.features[0] || !result.features[0].properties.segments) return;
     const coords = result.features[0].geometry.coordinates;
-    const segments = result.features[0].properties.segments;
+    const segments = result.features[0].properties.segments!;
     const minDepth = (this.vesselDimensions.draft || 2.0) + this.config.safetyMarginDraft;
     const airDraft = (this.vesselDimensions.airDraft || 10.0) + this.config.safetyMarginAirDraft;
 
