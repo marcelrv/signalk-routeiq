@@ -477,6 +477,17 @@ export class RoutingEngine {
   ): Promise<void> {
     const coords = route.features[0].geometry.coordinates;
     const segments = route.features[0].properties.segments!;
+
+    const markOverland = (segIdx: number, fromLon: number, fromLat: number, toLon: number, toLat: number) => {
+      const seg = segments[segIdx];
+      if (!seg) return;
+      const overland = (this.db as any).isLineCrossingLand &&
+        (this.db as any).isLineCrossingLand(fromLat, fromLon, toLat, toLon, 5);
+      if (overland) {
+        seg.minDepth = 0;
+        seg.edgeType = 'overland';
+      }
+    };
     if (coords.length === 0) return;
 
     // Try edge-snapped projection for smoother entry/exit
@@ -520,6 +531,7 @@ export class RoutingEngine {
             directionPenalty: 1,
           },
         );
+        markOverland(0, userPoint.longitude, userPoint.latitude, edgeSnap.point.lon, edgeSnap.point.lat);
         route.features[0].properties.totalDistance! += Math.round(edgeSnap.distance + edgePortion + snapToNode);
         if (!route.warnings) route.warnings = [];
         route.warnings.push({
@@ -539,6 +551,7 @@ export class RoutingEngine {
           isFairway: false,
           directionPenalty: 1,
         });
+        markOverland(0, userPoint.longitude, userPoint.latitude, firstCoord[0], firstCoord[1]);
         route.features[0].properties.totalDistance! += Math.round(directDist);
         if (!route.warnings) route.warnings = [];
         route.warnings.push({
@@ -596,6 +609,7 @@ export class RoutingEngine {
                 isFairway: false,
                 directionPenalty: 1,
               });
+              markOverland(segments.length - 1, proj.point.lon, proj.point.lat, userPoint.longitude, userPoint.latitude);
 
               route.features[0].properties.totalDistance! += Math.round(truncatedDist + proj.distance - lastSeg.distance);
 
@@ -646,6 +660,7 @@ export class RoutingEngine {
             directionPenalty: 1,
           },
         );
+        markOverland(segments.length - 1, edgeSnap.point.lon, edgeSnap.point.lat, userPoint.longitude, userPoint.latitude);
         route.features[0].properties.totalDistance! += Math.round(edgeSnap.distance + edgePortion + nodeToSnap);
         if (!route.warnings) route.warnings = [];
         route.warnings.push({
@@ -665,6 +680,7 @@ export class RoutingEngine {
           isFairway: false,
           directionPenalty: 1,
         });
+        markOverland(segments.length - 1, lastCoord[0], lastCoord[1], userPoint.longitude, userPoint.latitude);
         route.features[0].properties.totalDistance! += Math.round(directDist);
         if (!route.warnings) route.warnings = [];
         route.warnings.push({

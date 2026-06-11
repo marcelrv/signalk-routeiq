@@ -1352,7 +1352,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     state.junctionMarkers = L.layerGroup().addTo(state.routeLayers);
     if (!geoJson) return;
 
-    const warnings = geoJson.warnings || [];
+    const features = (geoJson.type === 'FeatureCollection' && Array.isArray(geoJson.features))
+      ? geoJson.features
+      : (geoJson.type === 'Feature' ? [geoJson] : []);
+
     let coords = [];
     if (geoJson.type === 'FeatureCollection' && Array.isArray(geoJson.features)) {
       for (const f of geoJson.features) {
@@ -1367,14 +1370,47 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
     const latLngs = coords.map(c => L.latLng(c[1], c[0]));
 
-    // Build warned-coordinate set (only via_constrained marks route orange)
-    const warnIdx = new Set();
-    for (const w of warnings) {
-      if (w.type === 'via_constrained' && w.from && w.to) {
-        const fi = closestCoordIndex(coords, w.from.latitude, w.from.longitude);
-        const ti = closestCoordIndex(coords, w.to.latitude, w.to.longitude);
-        for (let i = Math.min(fi, ti); i <= Math.max(fi, ti); i++) warnIdx.add(i);
+    // Resolve vessel thresholds (with sensible fallbacks)
+    const draftEl = document.getElementById('boat-draft');
+    const airDraftEl = document.getElementById('boat-airdraft');
+    const draftStr = draftEl ? (draftEl.querySelector('.value') || {}).textContent : '';
+    const airDraftStr = airDraftEl ? (airDraftEl.querySelector('.value') || {}).textContent : '';
+    const vesselDraft = parseFloat(draftStr) || 2.0;
+    const vesselAirDraft = parseFloat(airDraftStr) || 10.0;
+    const SAFETY_MARGIN_DRAFT = 0.3;
+    const SAFETY_MARGIN_AIRDRAFT = 1.5;
+    const shallowThreshold = vesselDraft + SAFETY_MARGIN_DRAFT;
+    const airDraftThreshold = vesselAirDraft + SAFETY_MARGIN_AIRDRAFT;
+
+    const isSegmentWarning = (props) => {
+      if (!props) return false;
+      if (props.edgeType === 'overland') return true;
+      if (typeof props.minDepth === 'number' && props.minDepth >= 0 && props.minDepth < shallowThreshold) return true;
+      if (typeof props.maxAirDraft === 'number' && props.maxAirDraft >= 0 && props.maxAirDraft < airDraftThreshold) return true;
+      return false;
+    };
+
+    // Build a per-transition warning array from the per-feature segment data.
+    // Each feature is a 2-coord LineString (one segment) after splitToSegmentFeatures;
+    // after concatenation features share endpoint coords, so feature k owns the
+    // segment from coord[2k] → coord[2k+1].
+    const coordWarn = new Array(Math.max(0, coords.length - 1)).fill(false);
+    let coordCursor = 0;
+    for (const f of features) {
+      if (!f || !f.geometry) continue;
+      const fc = extractCoords(f.geometry);
+      if (fc.length < 2) continue;
+      const w = isSegmentWarning(f.properties || {});
+      for (let j = 0; j < fc.length - 1; j++) {
+        if (coordCursor + j < coordWarn.length) coordWarn[coordCursor + j] = w;
       }
+      coordCursor += fc.length;
+    }
+
+    // A coord is "in a warning" if either adjacent segment is a warning.
+    const warnIdx = new Set();
+    for (let i = 0; i < coordWarn.length; i++) {
+      if (coordWarn[i]) { warnIdx.add(i); warnIdx.add(i + 1); }
     }
 
     // Split at BOTH major node boundaries AND warn/no-warn transitions.
