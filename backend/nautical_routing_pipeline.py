@@ -203,6 +203,9 @@ def _edge_attr_worker(edge_chunk):
         results[(u, v)] = attrs
     return results
 
+# Coordinate space constant for type-packed node IDs
+COORD_SPACE = 36000000
+
 class NauticalRoutingPipeline:
     def __init__(self, data_paths: Dict[str, str], db_path: str,
                  country: str = '', region_name: str = '', description: str = ''):
@@ -286,15 +289,18 @@ class NauticalRoutingPipeline:
         logger.info(f"Network built with {self.graph.number_of_nodes()} nodes and {self.graph.number_of_edges()} edges.")
 
     @staticmethod
-    def _coord_to_id(lon: float, lat: float) -> int:
-        """Deterministic 53-bit-safe node ID from snapped coordinates.
-        
-        Packs (lon, lat) snapped to 5 decimal places into a single integer.
-        Max value: 1,800,000,036,000,000 (well within Number.MAX_SAFE_INTEGER).
+    def _coord_to_id(lon: float, lat: float, node_type: str = 'coastal') -> int:
+        """Deterministic 53-bit-safe node ID from snapped coordinates + type.
+
+        Packs node_type (0=coastal, 1=inland), lat, lon into a single integer.
+        type_int = 1 for 'inland', 0 otherwise.
+        ID = (type_int * 648,000,000,000,000) + (lat_int * 36,000,000) + lon_int
+        Max value: ~1,296,000,036,000,000 (well within Number.MAX_SAFE_INTEGER).
         """
         lat_int = int((round(lat, 5) + 90.0) * 100000)   # 0 .. 18,000,000
         lon_int = int((round(lon, 5) + 180.0) * 100000)  # 0 .. 36,000,000
-        return (lat_int * 100000000) + lon_int
+        type_int = 1 if node_type == 'inland' else 0
+        return (type_int * 648000000000000) + (lat_int * COORD_SPACE) + lon_int
 
     @staticmethod
     def _generate_poi_id(poi_type: str, lat: float, lon: float) -> int:
@@ -308,15 +314,62 @@ class NauticalRoutingPipeline:
         return int(hashlib.md5(unique_str.encode('utf-8')).hexdigest()[:13], 16)
 
     def _get_or_create_node(self, lon: float, lat: float, node_type: str = 'coastal') -> int:
-        """Helper to create nodes and avoid duplicates by snapping to 5 decimal places (~1 meter)."""
+        """Helper to create nodes and avoid duplicates by snapping to 5 decimal places (~1 meter).
+
+        When the type changes, the node ID encodes the new type via migration.
+        Only upgrades (coastal → inland) are handled here; downgrades (inland → coastal)
+        must be done explicitly via _set_node_type().
+        """
         coord = (round(lon, 5), round(lat, 5))
-        node_id = self._coord_to_id(lon, lat)
-        if coord not in self.coords_to_node:
-            self.graph.add_node(node_id, lon=coord[0], lat=coord[1], node_type=node_type)
-            self.coords_to_node[coord] = node_id
-        elif node_type == 'inland':
-            self.graph.nodes[self.coords_to_node[coord]]['node_type'] = 'inland'
-        return self.coords_to_node[coord]
+        if coord in self.coords_to_node:
+            existing_id = self.coords_to_node[coord]
+            existing_type = self.graph.nodes[existing_id].get('node_type', 'coastal')
+            if existing_type == node_type:
+                return existing_id
+            # Only upgrade to inland, never downgrade
+            if node_type == 'inland':
+                return self._migrate_node_type(existing_id, 'inland')
+            return existing_id
+        node_id = self._coord_to_id(lon, lat, node_type)
+        self.graph.add_node(node_id, lon=coord[0], lat=coord[1], node_type=node_type)
+        self.coords_to_node[coord] = node_id
+        return node_id
+
+    def _migrate_node_type(self, nid: int, new_type: str) -> int:
+        """Migrate a node to a new type-embedded ID when its type changes.
+
+        Creates a new node with the updated ID, rewires all edges, and removes the old node.
+        Returns the new node ID.
+        """
+        existing_type = self.graph.nodes[nid].get('node_type', 'coastal')
+        if existing_type == new_type:
+            return nid
+        lon = self.graph.nodes[nid].get('lon', 0.0)
+        lat = self.graph.nodes[nid].get('lat', 0.0)
+        new_id = self._coord_to_id(lon, lat, new_type)
+        attrs = dict(self.graph.nodes[nid])
+        attrs['node_type'] = new_type
+        self.graph.add_node(new_id, **attrs)
+        # Rewire incoming edges
+        for pred, _, data in list(self.graph.in_edges(nid, data=True)):
+            self.graph.add_edge(pred, new_id, **data)
+        # Rewire outgoing edges
+        for _, succ, data in list(self.graph.out_edges(nid, data=True)):
+            self.graph.add_edge(new_id, succ, **data)
+        # Update coords_to_node if this coord was tracked
+        coord = (round(lon, 5), round(lat, 5))
+        if coord in self.coords_to_node and self.coords_to_node[coord] == nid:
+            self.coords_to_node[coord] = new_id
+        self.graph.remove_node(nid)
+        return new_id
+
+    def _set_node_type(self, nid: int, new_type: str) -> int:
+        """Explicitly change a node's type with ID migration.
+
+        Unlike _get_or_create_node (which only upgrades to inland),
+        this always performs the migration and returns the (possibly new) node ID.
+        """
+        return self._migrate_node_type(nid, new_type)
 
     def _build_inland_network(self):
         """Extracts nodes and edges from inland waterway LineStrings."""
@@ -534,21 +587,21 @@ class NauticalRoutingPipeline:
         logger.info("Creating graph nodes...")
         for cx, cy in coarse_positions:
             nid = self._get_or_create_node(cx, cy)
+            nid = self._set_node_type(nid, 'coastal')
             self.graph.nodes[nid]['resolution'] = MAX_RES
-            self.graph.nodes[nid]['node_type'] = 'coastal'
 
         for cx, cy, res in refined_positions:
             nid = self._get_or_create_node(cx, cy)
+            nid = self._set_node_type(nid, 'coastal')
             self.graph.nodes[nid]['resolution'] = res
-            self.graph.nodes[nid]['node_type'] = 'coastal'
 
         # Centreline-anchored coastal nodes (fallback for narrow channels)
         for clon, clat in centreline_positions:
             nid = self._get_or_create_node(clon, clat)
-            # Don't overwrite if this coordinate already hosts an 'inland' node
+            # Overwrite any non-coastal (e.g. inland) nodes at centreline positions
             if self.graph.nodes[nid].get('node_type') != 'coastal':
+                nid = self._set_node_type(nid, 'coastal')
                 self.graph.nodes[nid]['resolution'] = MAX_RES
-                self.graph.nodes[nid]['node_type'] = 'coastal'
 
         coastal_node_data = [
             (nid, data['lon'], data['lat'], data.get('resolution', MAX_RES))
@@ -874,8 +927,8 @@ class NauticalRoutingPipeline:
 
             # Create bridge node at centroid
             b_id = self._get_or_create_node(c_lon, c_lat, node_type='coastal')
+            b_id = self._set_node_type(b_id, 'coastal')
             self.graph.nodes[b_id]['resolution'] = 0.001
-            self.graph.nodes[b_id]['node_type'] = 'coastal'
 
             # Compute depth at bridge node from DEPARE
             node_depth = -1
@@ -1054,7 +1107,6 @@ class NauticalRoutingPipeline:
                     lat REAL,
                     lon REAL,
                     resolution REAL DEFAULT 0.0,
-                    node_type TEXT DEFAULT 'coastal',
                     node_depth REAL DEFAULT -1,
                     region_id INTEGER REFERENCES metadata(id) ON DELETE CASCADE
                 );
@@ -1100,14 +1152,13 @@ class NauticalRoutingPipeline:
             )
             region_id = cursor.lastrowid
             
-            # Insert Nodes
+            # Insert Nodes (node_type is encoded in the node ID, no separate column)
             nodes_data = [(n, data['lat'], data['lon'],
                            data.get('resolution', 0.0),
-                           data.get('node_type', 'coastal'),
                            data.get('node_depth', -1),
                            region_id)
                           for n, data in self.graph.nodes(data=True)]
-            cursor.executemany("INSERT INTO nodes (id, lat, lon, resolution, node_type, node_depth, region_id) VALUES (?, ?, ?, ?, ?, ?, ?)", nodes_data)
+            cursor.executemany("INSERT INTO nodes (id, lat, lon, resolution, node_depth, region_id) VALUES (?, ?, ?, ?, ?, ?)", nodes_data)
             
             # Insert Edges
             edges_data = [(

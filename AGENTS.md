@@ -13,7 +13,7 @@
 - `nautical_routing_pipeline.py` uses adaptive quadtree subdivision (replacing the old fixed 0.01° grid).
 - Resolution: 0.005° (~500m) in open sea → 0.0002° (~20m) in narrow channels.
 - Subdivision criteria: narrowness (distance to nearest land), presence of centerlines, land/water boundary.
-- Nodes store `resolution` and `node_type` metadata in the SQLite DB.
+- Nodes store `resolution` metadata in the SQLite DB; `node_type` is encoded in the node ID (see below).
 - Edges store `edge_type` ('coastal' or 'inland').
 
 ## Bounding-Box A* Search (runtime)
@@ -22,15 +22,18 @@
 - BBox expansion adds warnings to the route result.
 - Via points each get their own per-segment bounding box.
 
-## Deterministic Node IDs (coordinate hashing)
-- Node IDs are globally unique integers derived from snapped (lat, lon) at 5 decimal places.
-- Formula: `lat_int = int((round(lat,5) + 90.0) * 100000)`, `lon_int = int((round(lon,5) + 180.0) * 100000)`, `id = lat_int * 100000000 + lon_int`.
+## Deterministic Node IDs (coordinate hashing + type packing)
+- Node IDs are globally unique integers derived from snapped (lat, lon) at 5 decimal places + node type.
+- Formula: `lat_int = int((round(lat,5) + 90.0) * 100000)` (0..18M), `lon_int = int((round(lon,5) + 180.0) * 100000)` (0..36M), `type_int = 1 if 'inland' else 0`.
+- `id = (type_int * 648_000_000_000_000) + (lat_int * 36_000_000) + lon_int`.
 - Fits within `Number.MAX_SAFE_INTEGER` (53 bits). Allows merging multiple regional `.sqlite` files without ID collisions.
+- On the TypeScript side, use `getNodeTypeInt(id)` (`Math.floor(id / 648000000000000)`) to extract the type (0=coastal, 1=inland) without loading a string column.
+- No `node_type` column in SQLite — the ID encodes the type at all times.
 - POI IDs use a deterministic MD5 hash of `"{poi_type}_{round(lat,5)}_{round(lon,5)}"` truncated to 13 hex chars.
 
 ## SQLite Schema
 - **`metadata`** table: `country` (UNIQUE), `name`, `description`, `last_update_date` — describes the data source.
-- **`nodes`** table: includes `region_id INTEGER REFERENCES metadata(id)` for per-region replacement.
+- **`nodes`** table: includes `region_id INTEGER REFERENCES metadata(id)` for per-region replacement. No `node_type` column — type is encoded in the node ID (see above).
 - **`edges`**: same as before, no region-level column needed (edges follow their source node's region).
 - **`pois`**: `INSERT OR IGNORE` handles duplicate POI IDs from overlapping regions (uses deterministic hash based on type+coords, ignoring name variations).
 

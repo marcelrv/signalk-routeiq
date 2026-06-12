@@ -4,6 +4,15 @@ import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { PoiResult } from './types.js';
 
+// Node type constants (encoded in the node ID via coordinate hashing)
+export const NODE_TYPE_COASTAL = 0;
+export const NODE_TYPE_INLAND = 1;
+
+/** Extract node type integer from a type-packed node ID. */
+export function getNodeTypeInt(id: number): number {
+  return Math.floor(id / 648000000000000);
+}
+
 export interface EdgeRow {
   source: number;
   target: number;
@@ -404,14 +413,13 @@ export class RoutingDatabase {
     minLat: number, minLon: number,
     maxLat: number, maxLon: number,
     limit: number = 5000,
-  ): Promise<Array<{ id: number; lat: number; lon: number; resolution: number; node_type: string; min_depth: number }>> {
-    const results: Array<{ id: number; lat: number; lon: number; resolution: number; node_type: string; min_depth: number }> = [];
+  ): Promise<Array<{ id: number; lat: number; lon: number; resolution: number; min_depth: number }>> {
+    const results: Array<{ id: number; lat: number; lon: number; resolution: number; min_depth: number }> = [];
     for (const [id, c] of this.nodes) {
       if (c.lat >= minLat && c.lat <= maxLat && c.lon >= minLon && c.lon <= maxLon) {
         results.push({
           id, lat: c.lat, lon: c.lon,
           resolution: 0,
-          node_type: 'coastal',
           min_depth: -1,
         });
         if (results.length >= limit) break;

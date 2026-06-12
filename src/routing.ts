@@ -3,7 +3,7 @@
  * Implements vessel-aware directed A* with multi-layered cost function
  */
 
-import { EdgeRow, RoutingDatabase } from './database.js';
+import { EdgeRow, RoutingDatabase, getNodeTypeInt, NODE_TYPE_INLAND } from './database.js';
 import {
     BBox,
     PluginConfig,
@@ -1375,7 +1375,7 @@ private async smoothPath(path: number[]): Promise<number[]> {
     const smoothed: number[] = [path[0]];
     let i = 0;
 
-    // Pre-fetch all nodes to check their type
+    // Pre-fetch all nodes for line-of-sight checks
     const nodeMap = new Map<number, any>();
     for (const id of path) {
       const n = await this.db.getNodeById(id);
@@ -1387,10 +1387,10 @@ private async smoothPath(path: number[]): Promise<number[]> {
       while (j > i + 1) {
         // CRITICAL FIX: Do not shortcut if any intermediate node is an official inland centerline.
         // This forces the route to perfectly track river curves and fairways.
+        // Node type is extracted from the ID itself (see database.ts getNodeTypeInt).
         let skippingInland = false;
         for (let k = i + 1; k < j; k++) {
-          const n = nodeMap.get(path[k]);
-          if (n && n.node_type === 'inland') {
+          if (getNodeTypeInt(path[k]) === NODE_TYPE_INLAND) {
             skippingInland = true;
             break;
           }

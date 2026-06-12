@@ -33,7 +33,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   text-transform: uppercase;
   letter-spacing: 1.2px;
   color: #5c9bd5;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
   font-weight: 600;
 }
 .panel label {
@@ -89,8 +89,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
 /* ---------- route info (inside route pane) ---------- */
 #route-pane-inner .info-line {
-  font-size: 12px;
-  padding: 3px 0;
+  font-size: 11px;
+  padding: 1px 0;
   color: #c8dcee;
   display: flex;
   align-items: center;
@@ -98,19 +98,49 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 }
 #route-pane-inner .info-line .label { color: #6d96c0; min-width: 48px; }
 #route-pane-inner .info-line .coords { color: #b8d4f0; font-family: 'SF Mono', 'Cascadia Code', monospace; font-size: 11px; }
-#clear-btn {
-  margin-top: 8px;
-  margin-bottom: 4px;
-  background: transparent;
-  border: 1px solid rgba(200,70,70,0.55);
-  border-radius: 6px;
-  padding: 5px 12px;
-  color: #e07070;
-  cursor: pointer;
-  font-size: 12px;
-  transition: background 0.12s;
+
+/* route toolbar (icons) */
+.route-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 2px;
 }
-#clear-btn:hover { background: rgba(200,70,70,0.18); }
+.toolbar-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid rgba(79,148,212,0.3);
+  border-radius: 6px;
+  padding: 3px 8px;
+  color: #b8d4f0;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1;
+  transition: background 0.12s, border-color 0.12s;
+}
+.toolbar-btn:hover {
+  background: rgba(79,148,212,0.15);
+  border-color: rgba(79,148,212,0.5);
+}
+.toolbar-btn.clear-btn {
+  border-color: rgba(200,70,70,0.5);
+  color: #e07070;
+}
+.toolbar-btn.clear-btn:hover {
+  background: rgba(200,70,70,0.12);
+  border-color: rgba(200,70,70,0.7);
+}
+.toolbar-btn.push-btn {
+  border-color: rgba(70,180,100,0.5);
+  color: #5ddb7a;
+}
+.toolbar-btn.push-btn:hover {
+  background: rgba(70,180,100,0.12);
+  border-color: rgba(70,180,100,0.7);
+}
 
 /* ---------- settings (top-right) ---------- */
 #settings-panel { top: 20px; right: 28px; }
@@ -170,35 +200,13 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
 /* ---------- export (right, below settings) ---------- */
 #export-panel { bottom: 20px; right: 20px; }
-.export-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  margin-bottom: 8px;
-  background: #1f6391;
-  border: none;
-  border-radius: 6px;
-  padding: 9px 12px;
-  color: #fff;
-  font-weight: 600;
-  cursor: pointer;
-  font-size: 13px;
-  line-height: 1.2;
-  transition: background 0.15s;
-  text-align: center;
-}
-.export-btn:last-child { margin-bottom: 0; }
-.export-btn:hover { background: #287bb5; }
-.export-btn.push-btn { background: #1d7a4a; }
-.export-btn.push-btn:hover { background: #26975b; }
 
 /* ---------- route pane (left side) ---------- */
 #route-pane {
   top: 20px; left: 28px;
   width: 300px;
   bottom: 20px;
-  padding: 14px;
+  padding: 10px;
   transition: width 0.25s ease, padding 0.25s ease, border-color 0.25s ease;
   overflow: visible;
   display: flex;
@@ -298,8 +306,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 /* route node items */
 .route-node {
   border-left: 2px solid rgba(79, 148, 212, 0.3);
-  padding: 6px 0 6px 12px;
-  margin: 2px 0;
+  padding: 2px 0 2px 10px;
+  margin: 1px 0;
   position: relative;
   cursor: pointer;
   transition: background 0.12s;
@@ -310,7 +318,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   content: '';
   position: absolute;
   left: -5px;
-  top: 12px;
+  top: 50%;
+  transform: translateY(-50%);
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -319,15 +328,18 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 }
 .route-node.start::before { background: #22c55e; }
 .route-node.dest::before { background: #ef4444; }
+.route-node .node-label-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
 .route-node .node-label {
   font-size: 11px;
   font-weight: 600;
   color: #9bb8da;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  white-space: nowrap;
 }
 .route-node .node-label .turn-badge {
   font-size: 10px;
@@ -336,27 +348,26 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 }
 .route-node .node-coords {
   font-family: 'SF Mono', 'Cascadia Code', monospace;
-  font-size: 11px;
+  font-size: 10px;
   color: #b8d4f0;
-  margin-top: 2px;
 }
 .route-node .node-dist {
-  font-size: 11px;
+  font-size: 10px;
   color: #6d96c0;
-  margin-top: 1px;
+  line-height: 1.3;
 }
 .route-node .node-poi {
   font-size: 10px;
   color: #f59e0b;
-  margin-top: 1px;
   font-style: italic;
+  line-height: 1.3;
 }
 .route-node .node-crossings {
   font-size: 10px;
-  margin-top: 2px;
+  margin-top: 1px;
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 3px;
 }
 .route-node .node-crossings .node-crossing-icon {
   display: inline-flex;
@@ -372,17 +383,17 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
 /* leg segment details (expandable) */
 .route-leg {
-  margin: 0 0 2px 14px;
+  margin: 0 0 2px 10px;
   font-size: 11px;
   overflow: hidden;
   max-height: 0;
   transition: max-height 0.2s ease, padding 0.2s ease;
-  padding: 0 8px 0 12px;
+  padding: 0 6px 0 10px;
   border-left: 1px dashed rgba(79, 148, 212, 0.2);
 }
 .route-leg.expanded {
   max-height: 200px;
-  padding: 4px 8px 6px 12px;
+  padding: 2px 6px 4px 10px;
 }
 .route-leg .leg-stat {
   display: flex;
@@ -467,21 +478,6 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   color: #f07070;
   margin-bottom: 2px;
 }
-
-/* connecting-leg info (start/end off-route) */
-.route-connecting-info {
-  background: rgba(79, 148, 212, 0.1);
-  border: 1px solid rgba(79, 148, 212, 0.25);
-  border-radius: 6px;
-  padding: 6px 10px;
-  margin-bottom: 6px;
-  font-size: 11px;
-  color: #b8d4f0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.route-connecting-info .conn-icon { color: #7ab8f0; font-size: 13px; }
 
 /* ---------- status toast ---------- */
 #toast {
@@ -592,20 +588,20 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 <div id="route-pane" class="panel collapsed">
   <div id="route-pane-inner">
     <div class="panel-title">Route</div>
-    <div id="hint-line" class="info-line" style="color:#9bb8da;font-size:11px;padding-bottom:4px;border-bottom:1px solid rgba(79,148,212,0.2);margin-bottom:4px">
+    <div id="hint-line" class="info-line" style="color:#9bb8da;font-size:11px;padding-bottom:2px;border-bottom:1px solid rgba(79,148,212,0.2);margin-bottom:2px">
       Right-click map to set <span id="hint-action" style="color:#7ab8f0;font-weight:600">START</span>
     </div>
     <div id="start-info" class="info-line"><span class="label">START</span><span class="coords">—</span></div>
     <div id="dest-info" class="info-line"><span class="label">DEST</span><span class="coords">—</span></div>
     <div id="via-info" class="info-line vias"><span class="label">VIAS</span><span class="coords">—</span></div>
-    <button id="clear-btn">Clear Route</button>
-    <div id="route-summary" style="display:none;padding:6px 0 4px;border-top:1px solid rgba(79,148,212,0.15);margin-top:4px;font-size:12px;color:#9bb8da"></div>
+    <div class="route-toolbar">
+      <button id="clear-btn" class="toolbar-btn clear-btn" title="Clear route">✕</button>
+      <button id="gpx-btn" class="toolbar-btn" title="Download GPX">💾</button>
+      <button id="push-btn" class="toolbar-btn push-btn" title="Save to Signal K">📤</button>
+    </div>
+    <div id="route-summary" style="display:none;padding:3px 0 2px;border-top:1px solid rgba(79,148,212,0.15);margin-top:2px;font-size:11px;color:#9bb8da"></div>
     <div id="route-warnings"></div>
     <div id="route-nodes"></div>
-    <div id="route-export" style="padding:6px 0;border-top:1px solid rgba(79,148,212,0.15);margin-top:4px;display:flex;gap:6px">
-      <button class="export-btn" id="gpx-btn" style="flex:1;white-space:nowrap">Download GPX</button>
-      <button class="export-btn push-btn" id="push-btn" style="flex:1;white-space:nowrap">Save to Signal K</button>
-    </div>
     <div id="route-pane-empty" style="color:#6d96c0;font-size:12px;padding:8px 0;text-align:center;display:none">No route loaded.</div>
   </div>
 </div>
@@ -1997,16 +1993,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     const nodes = extractMajorNodes(coords);
     const segRanges = mapSegmentsToCoordRanges(segments);
 
-    // Overall warnings (extract start/end connecting for inline display)
+    // Overall warnings
     warningsEl.innerHTML = '';
     const overallWarnings = geoJson.warnings || [];
-    let startConnectingMsg = null;
-    let endConnectingMsg = null;
     for (const w of overallWarnings) {
-      if (w.type === 'start_connecting') {
-        startConnectingMsg = w.message;
-      } else if (w.type === 'end_connecting') {
-        endConnectingMsg = w.message;
+      if (w.type === 'start_connecting' || w.type === 'end_connecting') {
+        continue;
       } else if (w.type === 'via_constrained' && !w.distanceMeters) {
         continue;
       } else {
@@ -2027,12 +2019,11 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       const hours = Math.floor(timeH);
       const mins = Math.round((timeH - hours) * 60);
       let timeStr = '';
-      if (hours > 0) timeStr += hours + ' hr ';
-      timeStr += mins + ' min';
+      if (hours > 0) timeStr += hours + 'h ';
+      timeStr += mins + 'm';
 
       summaryEl.style.display = 'block';
-      const distStr = fmtDist(totalDistM);
-      summaryEl.innerHTML = 'Total: ' + distStr + '<br><span class="time-line">\u23f1 ' + timeStr + '</span> <span class="speed-label">@ ' + speedKn.toFixed(1) + ' kn</span>';
+      summaryEl.innerHTML = '\u23f1 ' + fmtDist(totalDistM) + '  \u00b7  ' + timeStr + '  \u00b7  ' + speedKn.toFixed(1) + ' kn';
     } else if (summaryEl) {
       summaryEl.style.display = 'none';
     }
@@ -2073,13 +2064,6 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       const cumTimeH = speedKn > 0 ? cumDistNm / speedKn : 0;
       const cumTimeStr = formatTime(cumTimeH);
 
-      let connHtml = '';
-      if (node.isStart && startConnectingMsg) {
-        connHtml = '<div class="route-connecting-info"><span class="conn-icon">\u21e2</span> ' + escapeHtml(startConnectingMsg) + '</div>';
-      } else if (node.isEnd && endConnectingMsg) {
-        connHtml = '<div class="route-connecting-info"><span class="conn-icon">\u21e0</span> ' + escapeHtml(endConnectingMsg) + '</div>';
-      }
-
       // Build collapsed crossing icons for the following leg
       let crossingHtml = '';
       if (!isLast) {
@@ -2115,12 +2099,14 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       }
 
       nodeDiv.innerHTML =
-        '<div class="node-label">' + label + badgeHtml + '</div>' +
-        '<div class="node-coords">' + fmtCoord(node.lat, node.lng) + '</div>' +
+        '<div class="node-label-row">' +
+          '<span class="node-label">' + label + '</span>' +
+          '<span class="node-coords">' + fmtCoord(node.lat, node.lng) + '</span>' +
+        '</div>' +
         '<div class="node-dist">\u25b8 ' + fmtDist(node.cumDistKm * 1000) +
           (cumTimeStr ? ' \u23f1 ' + cumTimeStr : '') +
           (node.heading ? ' \u2192 ' + Math.round(node.heading) + '\u00b0' : '') +
-        '</div>' + crossingHtml + connHtml;
+        '</div>' + crossingHtml;
 
       // For hover highlighting: store the coord range of the following leg
       if (!isLast) {

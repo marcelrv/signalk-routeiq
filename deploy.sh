@@ -14,7 +14,7 @@ SK_CONTAINER="signalk-server"
 
 echo "==> Building plugin..."
 # HOME=/tmp avoids EACCES on /.npm (root-owned in node:22 image)
-docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$REPO_DIR:/work" -w /work node:22 sh -c "npm install && npm run build"
+docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$REPO_DIR:/work" -w /work node:22 sh -c "npm install && npm run build && npm pack"
 
 echo "==> Restarting Signal K server..."
 docker restart "$SK_CONTAINER"
