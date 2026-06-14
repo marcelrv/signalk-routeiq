@@ -32,7 +32,13 @@ class ENCToGeoJSONPreprocessor:
             # for inland waterways centerlines
             'RECTRC': 'inland_waterways_lines.geojson',
             'NAVLNE': 'inland_waterways_lines.geojson',
-            'WTWAXS': 'inland_waterways_lines.geojson'
+            'WTWAXS': 'inland_waterways_lines.geojson',
+            # S-57 layers for navigational hazards and restricted areas (no-go zones)
+            'RESARE': 'restricted_areas_polygons.geojson',
+            'OBSTRN': 'obstructions_points.geojson',
+            'HULKES': 'hulks_polygons.geojson',
+            'MARCUL': 'mariculture_polygons.geojson',
+            'CTNARE': 'caution_areas_polygons.geojson'
         }
 
         # Dictionary to store lists of GeoDataFrames for each output file

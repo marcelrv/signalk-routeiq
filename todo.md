@@ -117,3 +117,51 @@ Better POI selection
 #remove/simplify the config
 #download UI for db files
 
+#the segments (legs) vs the details in the leg seem to be very confusing for the UI.
+We need to have this clarified. the frontend should be able to be dumb, so not too much logic in the frontend as other plugings much be able to use the endpoints and also provide the UI
+
+
+
+supernodes architecture
+
+
+Model 9:51 AM
+ThinkingThoughts
+Expand to view model thoughts
+
+chevron_right
+You have just identified one of the most complex challenges in modern constraint-based routing. You are 100% correct.
+If the system only precalculates the absolute shortest path between Supernode A and Supernode B, a sailboat with a 2.0m draft will be completely trapped if that one precalculated macro-edge goes through a 1.0m deep shortcut.
+The Solution: "Pareto-Optimal" Macro-Edges
+Instead of storing one macro-edge between two Supernodes, the Python cloud pipeline must store a set of alternative macro-edges.
+In graph theory, this is called finding the Pareto Front. The pipeline calculates and stores different variations of the path:
+The Shortcut: 5 km long, Min Depth 1.0m, Max Air Draft 3.0m.
+The Deep Channel: 8 km long, Min Depth 5.0m, Max Air Draft 3.0m.
+The Mast-Up Route: 12 km long, Min Depth 5.0m, Max Air Draft 20.0m (no fixed bridges).
+When the Signal K Node.js router runs, the A* algorithm looks at Supernode A and sees three macro-edges pointing to Supernode B.
+If a small motorboat (draft 0.5m, air draft 2m) asks for a route, the router evaluates all three, sees they are all safe, and picks Edge 1 (the 5km shortcut).
+If a sailboat (draft 1.8m, air draft 15m) asks for a route, the router evaluates all three. Edge 1 is too shallow. Edge 2 has a bridge that is too low. The router throws them out and seamlessly selects Edge 3.
+How to implement this in the AI Prompts
+We need to instruct the Python pipeline to find these alternative routes, and we need to ensure the Node.js backend knows how to filter them.
+Phase 1: Python Precomputation (Cloud)
+We will tell Python to use an algorithm (like Yen's k-shortest paths or bottleneck-removal) to find these alternative routes.
+AI Prompt for Python:
+"In backend/nautical_routing_pipeline.py, when generating the Hierarchical 'macro_edges' between Supernodes, we cannot just store the absolute shortest path. Different vessels have different dimensions, so a deep draft vessel cannot take a shallow shortcut.
+Please update the Supernode macro-edge generation logic to store Pareto-optimal alternative paths.
+Find the shortest path between Supernode A and B. Save it as a macro-edge.
+Identify the bottleneck edge of that path (e.g., the edge with the lowest min_depth or max_air_draft).
+Temporarily penalize or remove that bottleneck edge from the graph and run the shortest path algorithm again to find an alternative route (e.g., a longer route but with deeper water or higher clearance).
+Repeat this until you have found the alternative paths (or up to a reasonable limit, like max 3 macro-edges between the same two supernodes).
+Insert ALL of these alternative macro-edges into the macro_edges SQLite table. They will share the same source and target IDs, but have different distance, min_depth, max_air_draft, and path_json values."
+Phase 2: Node.js Runtime (Signal K Plugin)
+The Node.js logic barely has to change, we just need to ensure it evaluates all macro-edges between two nodes rather than just assuming there is only one.
+AI Prompt for Node.js:
+"In src/routing.ts and src/database.ts, the database now contains multiple alternative macro_edges between the same source and target Supernodes. These represent different physical routes (e.g., a shallow shortcut vs. a deep, longer channel).
+Please update the astarSearch logic to handle this:
+When expanding a Supernode, the algorithm must iterate over all available macro-edges to the target Supernodes.
+For each macro-edge, strictly apply the dynamic vessel constraints (if edge.min_depth < vessel.draft + margin or edge.max_air_draft < vessel.airDraft + margin, discard that specific macro-edge).
+Calculate the standard cost for the remaining valid macro-edges and push them to the A* Open Set.
+Because A* naturally explores the lowest-cost path first, this will automatically result in the algorithm taking the fastest macro-edge that safely fits the specific vessel's dimensions."
+Why this is the ultimate routing architecture
+By doing this, you have effectively built the "Holy Grail" of marine routing.
+The Python server does all the heavy lifting of figuring out the "shallow vs deep" topology of the Dutch waterways just once. The weak Raspberry Pi on the boat only does a few dozen calculations, instantly giving the perfect, vessel-specific route across the whole country.

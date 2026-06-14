@@ -800,18 +800,45 @@ export class RoutingEngine {
       startNode = improvedStart;
     }
 
+    // Expand bbox to include the actual snapped node coordinates so the
+    // strict isInsideBBox check below never rejects a valid start/end node.
+    if (bbox) {
+      const snapStart = await this.db.getNodeById(startNode);
+      const snapEnd = await this.db.getNodeById(endNode);
+      if (snapStart) {
+        bbox.minLat = Math.min(bbox.minLat, snapStart.lat);
+        bbox.maxLat = Math.max(bbox.maxLat, snapStart.lat);
+        bbox.minLon = Math.min(bbox.minLon, snapStart.lon);
+        bbox.maxLon = Math.max(bbox.maxLon, snapStart.lon);
+      }
+      if (snapEnd) {
+        bbox.minLat = Math.min(bbox.minLat, snapEnd.lat);
+        bbox.maxLat = Math.max(bbox.maxLat, snapEnd.lat);
+        bbox.minLon = Math.min(bbox.minLon, snapEnd.lon);
+        bbox.maxLon = Math.max(bbox.maxLon, snapEnd.lon);
+      }
+    }
+
     // A* data structures
     const openSet = new MinHeap<SearchState>((state) => state.f);
     const closedSet = new Set<number>();
     const gScore = new Map<number, number>();
     const parent = new Map<number, number | null>();
 
+    // Minimum possible cost multiplier — ensures A* heuristic never overestimates.
+    // The heuristic is multiplied by this value so it is ≤ any actual edge cost.
+    const minMultiplier = Math.min(
+      this.config.fairwayMultiplier,
+      this.config.openWaterMultiplier,
+      1.0,
+    );
+
     // Initialize
     gScore.set(startNode, 0);
     openSet.push({
       nodeId: startNode,
       g: 0,
-      f: this.haversineDistance(startLat, startLon, endLat, endLon),
+      f: this.haversineDistance(startLat, startLon, endLat, endLon) * minMultiplier,
       parent: null,
     });
 
@@ -877,7 +904,7 @@ export class RoutingEngine {
             edge.lon,
             endLat,
             endLon
-          );
+          ) * minMultiplier;
 
           openSet.push({
             nodeId: edge.target,
@@ -916,6 +943,7 @@ export class RoutingEngine {
 
   private getEdgePenalty(edge: EdgeRow & { lat: number; lon: number }, minCoastDistanceMeters: number): number {
     if (edge.crosses_land === 1) return -1;
+    if (edge.crosses_obstacle === 1) return -1;
 
     let penalty = 0;
 
@@ -1048,6 +1076,7 @@ export class RoutingEngine {
     const coords = feature.geometry.coordinates;
     const totalDistance = feature.properties.totalDistance!;
     const totalCost = feature.properties.totalCost!;
+    const crossings = feature.properties.crossings;
 
     const segmentFeatures: RouteResult['features'] = [];
 
@@ -1057,30 +1086,29 @@ export class RoutingEngine {
       const toCoord = coords[i + 1];
       if (!fromCoord || !toCoord) continue;
 
+      const segmentProps: Record<string, any> = {
+        minDepth: seg.minDepth,
+        maxAirDraft: seg.maxAirDraft,
+        isFairway: seg.isFairway,
+        directionPenalty: seg.directionPenalty,
+        isOneWay: seg.isOneWay,
+        trafficDir: seg.trafficDir,
+        edgeType: seg.edgeType,
+        distance: seg.distance,
+      };
+
+      if (i === 0 && crossings) {
+        segmentProps.crossings = crossings;
+      }
+
       segmentFeatures.push({
         type: 'Feature',
         geometry: {
           type: 'LineString',
           coordinates: [fromCoord, toCoord],
         },
-        properties: {
-          minDepth: seg.minDepth,
-          maxAirDraft: seg.maxAirDraft,
-          isFairway: seg.isFairway,
-          directionPenalty: seg.directionPenalty,
-          isOneWay: seg.isOneWay,
-          trafficDir: seg.trafficDir,
-          edgeType: seg.edgeType,
-          distance: seg.distance,
-        },
+        properties: segmentProps as any,
       });
-    }
-
-    if (segmentFeatures.length > 0) {
-      segmentFeatures[0].properties.segments = segments;
-      segmentFeatures[0].properties.totalDistance = totalDistance;
-      segmentFeatures[0].properties.totalCost = totalCost;
-      segmentFeatures[0].properties.crossings = feature.properties.crossings;
     }
 
     route.features = segmentFeatures;

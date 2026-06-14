@@ -49,6 +49,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- Module-level globals & workers for multiprocessing fork-based sharing ---
+#
+# On 'fork' (Linux), worker globals inherit parent memory via copy-on-write.
+# On 'spawn' (Windows/macOS), the Pool initializer pickles data to each worker
+# via initargs. R-tree indices (sindex) are rebuilt per worker on first access.
 _COARSE_SCAN_GDF = None
 
 def _coarse_scan_init(gdf):
@@ -98,6 +102,7 @@ def _edge_attr_worker(edge_chunk):
     bridges_gdf = gdfs.get('bridges', gpd.GeoDataFrame())
     fairways_gdf = gdfs.get('fairways', gpd.GeoDataFrame())
     locks_gdf = gdfs.get('locks', gpd.GeoDataFrame())
+    obstacles_gdf = gdfs.get('obstacles', gpd.GeoDataFrame())
 
     results = {}
     for u, v, u_lon, u_lat, v_lon, v_lat, edge_type, u_res, v_res in edge_chunk:
@@ -200,11 +205,64 @@ def _edge_attr_worker(edge_chunk):
                 closest_geom = land_metric.iloc[closest_idx].geometry
                 attrs['distance_to_land'] = round(edge_geom_metric.distance(closest_geom), 2)
 
+        # Obstacle crossing check
+        attrs['crosses_obstacle'] = 0
+        if not obstacles_gdf.empty:
+            obs_candidates = _candidates_by_bounds_static(obstacles_gdf, edge_geom)
+            if not obs_candidates.empty:
+                intersecting = obs_candidates[obs_candidates.intersects(edge_geom)]
+                if not intersecting.empty:
+                    attrs['crosses_obstacle'] = 1
+
         results[(u, v)] = attrs
     return results
 
 # Coordinate space constant for type-packed node IDs
 COORD_SPACE = 36000000
+
+OBSTACLE_BUFFER_METERS = 30
+
+def _s57_get_val(attrs, *candidates):
+    """Like _s57_col but also handles list/array values by returning the first scalar."""
+    val = _s57_col(attrs, *candidates)
+    if val is None:
+        return None
+    if isinstance(val, (list, tuple, np.ndarray)):
+        return val[0] if len(val) > 0 else None
+    return val
+
+def _point_in_obstacle(lon, lat, obstacle_gdf):
+    """Check if a point (lon, lat) falls inside any obstacle polygon."""
+    if obstacle_gdf.empty:
+        return False
+    pt = Point(lon, lat)
+    bounds = (lon - 1e-8, lat - 1e-8, lon + 1e-8, lat + 1e-8)
+    candidates = list(obstacle_gdf.sindex.intersection(bounds))
+    for idx in candidates:
+        geom = obstacle_gdf.iloc[idx].geometry
+        if geom is not None and geom.contains(pt):
+            return True
+    return False
+
+def _is_entry_prohibited(row):
+    """Check if a RESARE feature represents a true no-go / entry-prohibited area."""
+    restrn = _s57_col(row, 'restrn')
+    if restrn is not None and pd.notnull(restrn):
+        vals = restrn if isinstance(restrn, (list, tuple, np.ndarray)) else [restrn]
+        for v in vals:
+            try:
+                if int(v) == 1:
+                    return True
+            except (ValueError, TypeError):
+                pass
+
+    for col in ('OBJNAM', 'NOBJNM', 'INFORM'):
+        val = _s57_col(row, col)
+        if val is not None and isinstance(val, str):
+            lower = val.lower()
+            if any(phrase in lower for phrase in ('entry prohibited', 'toegang verboden', 'passage prohibited')):
+                return True
+    return False
 
 class NauticalRoutingPipeline:
     def __init__(self, data_paths: Dict[str, str], db_path: str,
@@ -270,6 +328,79 @@ class NauticalRoutingPipeline:
             name: gdf.to_crs(self.CRS_METRIC) for name, gdf in self.gdfs.items()
         }
 
+        self._build_obstacle_layer()
+
+    def _is_obstacle_feature(self, row) -> bool:
+        """Check if a row from any obstacle layer represents a no-go obstacle."""
+        layer = row.get('_layer', '')
+        if layer == 'restricted_areas':
+            return _is_entry_prohibited(row)
+        return True
+
+    def _build_obstacle_layer(self):
+        """Build a combined obstacle GeoDataFrame from restricted areas, hulks, mariculture, and obstructions.
+
+        Obstacles block coastal navigation edges — treated similarly to land
+        during validation so routes cannot cross them.
+        """
+        logger.info("Building obstacle layer from restricted areas, hulks, obstructions...")
+
+        obstacle_parts = []
+
+        # 1. RESARE — entry-prohibited / passage-prohibited areas only
+        resare = self.gdfs.get('restricted_areas', gpd.GeoDataFrame())
+        if not resare.empty:
+            ep_mask = resare.apply(_is_entry_prohibited, axis=1)
+            entry_prohibited = resare[ep_mask].copy()
+            if not entry_prohibited.empty:
+                entry_prohibited['_layer'] = 'restricted_areas'
+                obstacle_parts.append(entry_prohibited)
+                logger.info(f"  RESARE entry-prohibited: {len(entry_prohibited)} features")
+            else:
+                logger.info("  No entry-prohibited RESARE features found")
+
+        # 2. HULKES — hulls / wrecked vessels
+        hulks = self.gdfs.get('hulks', gpd.GeoDataFrame())
+        if not hulks.empty:
+            hulks = hulks.copy()
+            hulks['_layer'] = 'hulks'
+            obstacle_parts.append(hulks)
+            logger.info(f"  HULKES: {len(hulks)} features")
+
+        # 3. MARCUL — marine culture (mussel farms, etc.)
+        marcult = self.gdfs.get('mariculture', gpd.GeoDataFrame())
+        if not marcult.empty:
+            marcult = marcult.copy()
+            marcult['_layer'] = 'mariculture'
+            obstacle_parts.append(marcult)
+            logger.info(f"  MARCUL: {len(marcult)} features")
+
+        # 4. OBSTRN — point/line obstructions buffered into polygons
+        obstrn = self.gdfs.get('obstructions', gpd.GeoDataFrame())
+        if not obstrn.empty:
+            buf_metric = obstrn.to_crs(self.CRS_METRIC)
+            buf_metric['geometry'] = buf_metric.geometry.buffer(OBSTACLE_BUFFER_METERS)
+            buf_wgs84 = buf_metric.to_crs(self.CRS_WGS84)
+            buf_wgs84['_layer'] = 'obstructions'
+            obstacle_parts.append(buf_wgs84)
+            logger.info(f"  OBSTRN: {len(obstrn)} features (buffered {OBSTACLE_BUFFER_METERS}m)")
+
+        if not obstacle_parts:
+            logger.info("  No obstacle features found — creating empty layer")
+            self.gdfs['obstacles'] = gpd.GeoDataFrame(geometry=[], crs=self.CRS_WGS84)
+            self.gdfs_metric['obstacles'] = gpd.GeoDataFrame(geometry=[], crs=self.CRS_METRIC)
+            return
+
+        merged = gpd.pd.concat(obstacle_parts, ignore_index=True)
+        merged['geometry'] = merged['geometry'].make_valid()
+        merged = merged[merged.geometry.notnull()]
+        if not merged.empty:
+            merged = merged[merged.geometry.is_valid]
+        logger.info(f"  Combined obstacle layer: {len(merged)} features")
+
+        self.gdfs['obstacles'] = merged
+        self.gdfs_metric['obstacles'] = merged.to_crs(self.CRS_METRIC)
+
     def build_network(self):
         """
         Generates the Directed Graph base topology.
@@ -323,6 +454,13 @@ class NauticalRoutingPipeline:
         coord = (round(lon, 5), round(lat, 5))
         if coord in self.coords_to_node:
             existing_id = self.coords_to_node[coord]
+            # Node may have been removed by a previous type migration — treat as new
+            if existing_id not in self.graph:
+                del self.coords_to_node[coord]
+                node_id = self._coord_to_id(lon, lat, node_type)
+                self.graph.add_node(node_id, lon=coord[0], lat=coord[1], node_type=node_type)
+                self.coords_to_node[coord] = node_id
+                return node_id
             existing_type = self.graph.nodes[existing_id].get('node_type', 'coastal')
             if existing_type == node_type:
                 return existing_id
@@ -470,7 +608,9 @@ class NauticalRoutingPipeline:
             logger.warning("No valid bounds for coastal navmesh.")
             return
 
-        # Trigger lazy R-tree build before forking (COW share)
+        # Trigger lazy R-tree build before forking (COW share on fork systems).
+        # On 'spawn' (Windows/macOS) this R-tree is NOT shared with workers;
+        # each worker rebuilds its own via initargs pickle transfer.
         _ = coastal_gdf.sindex
 
         num_workers = max(1, min(int(mp.cpu_count() * 0.8), len(x_coarse)))
@@ -490,6 +630,18 @@ class NauticalRoutingPipeline:
                 coarse_positions.extend(t.get())
 
         logger.info(f"Coarse scan: {len(coarse_positions)} water nodes at {MAX_RES}°")
+
+        # Filter coarse points against obstacle polygons
+        obstacles = self.gdfs.get('obstacles', gpd.GeoDataFrame())
+        if not obstacles.empty:
+            _ = obstacles.sindex
+            pre_count = len(coarse_positions)
+            coarse_positions = [
+                (x, y) for x, y in coarse_positions
+                if not _point_in_obstacle(x, y, obstacles)
+            ]
+            if pre_count - len(coarse_positions) > 0:
+                logger.info(f"  Obstacle filter: removed {pre_count - len(coarse_positions)} coarse points in obstacles")
 
         # ==============================================================
         # STEP 2: Refinement planning (narrowness + centreline handling)
@@ -574,6 +726,16 @@ class NauticalRoutingPipeline:
                                predicate='within', how='inner')
             joined = joined.drop_duplicates(subset=['lon', 'lat'])
 
+            # Filter refined points against obstacle polygons
+            if not obstacles.empty:
+                pre_count = len(joined)
+                obs_mask = joined.apply(
+                    lambda r: _point_in_obstacle(r['lon'], r['lat'], obstacles), axis=1
+                )
+                joined = joined[~obs_mask]
+                if pre_count - len(joined) > 0:
+                    logger.info(f"  Obstacle filter: removed {pre_count - len(joined)} refined points in obstacles")
+
             refined_positions = list(zip(
                 joined['lon'].values, joined['lat'].values, joined['res'].values
             ))
@@ -597,6 +759,8 @@ class NauticalRoutingPipeline:
 
         # Centreline-anchored coastal nodes (fallback for narrow channels)
         for clon, clat in centreline_positions:
+            if _point_in_obstacle(clon, clat, obstacles):
+                continue
             nid = self._get_or_create_node(clon, clat)
             # Overwrite any non-coastal (e.g. inland) nodes at centreline positions
             if self.graph.nodes[nid].get('node_type') != 'coastal':
@@ -831,6 +995,28 @@ class NauticalRoutingPipeline:
 
             logger.info(f"  Land-crossing check: tested {land_check_count}, removed {land_remove_count}")
 
+        # ---- Step 2b: Obstacle-checking for remaining edges ----
+        obstacle_gdf = self.gdfs.get('obstacles', gpd.GeoDataFrame())
+        if not obstacle_gdf.empty:
+            _ = obstacle_gdf.sindex
+            obs_check_count = 0
+            obs_remove_count = 0
+            for (a, b), (u_lon, u_lat, v_lon, v_lat) in edge_endpoints.items():
+                if (a, b) in edges_to_remove:
+                    continue
+                obs_check_count += 1
+
+                line = LineString([(u_lon, u_lat), (v_lon, v_lat)])
+                candidates = list(obstacle_gdf.sindex.intersection(line.bounds))
+                for idx in candidates:
+                    obs_geom = obstacle_gdf.iloc[idx].geometry
+                    if line.crosses(obs_geom):
+                        edges_to_remove.add((a, b))
+                        obs_remove_count += 1
+                        break
+
+            logger.info(f"  Obstacle-crossing check: tested {obs_check_count}, removed {obs_remove_count}")
+
         # ---- Step 3: Remove invalid edges (both directions) ----
         removed_count = 0
         for a, b in edges_to_remove:
@@ -1062,10 +1248,11 @@ class NauticalRoutingPipeline:
             'bridges': self.gdfs.get('bridges', gpd.GeoDataFrame()),
             'fairways': self.gdfs.get('fairways', gpd.GeoDataFrame()),
             'locks': self.gdfs.get('locks', gpd.GeoDataFrame()),
+            'obstacles': self.gdfs.get('obstacles', gpd.GeoDataFrame()),
         }
         for gdf in worker_gdfs.values():
             if not gdf.empty:
-                _ = gdf.sindex  # build R-tree before fork
+                _ = gdf.sindex  # build R-tree before fork (COW on Linux; on spawn each worker rebuilds)
 
         logger.info(f"  Spawning {num_workers} workers for {total_edges} edges...")
         with mp.Pool(num_workers, initializer=_edge_attr_init,
@@ -1126,6 +1313,7 @@ class NauticalRoutingPipeline:
                     is_one_way INTEGER DEFAULT 0,
                     traffic_dir INTEGER DEFAULT 1,
                     crosses_land INTEGER DEFAULT 0,
+                    crosses_obstacle INTEGER DEFAULT 0,
                     FOREIGN KEY(source) REFERENCES nodes(id),
                     FOREIGN KEY(target) REFERENCES nodes(id)
                 );
@@ -1142,6 +1330,7 @@ class NauticalRoutingPipeline:
                 -- Create indices for fast routing queries
                 CREATE INDEX idx_edges_source ON edges(source);
                 CREATE INDEX idx_edges_target ON edges(target);
+                CREATE INDEX idx_nodes_lat_lon ON nodes(lat, lon);
             """)
             
             # Insert metadata row
@@ -1174,12 +1363,13 @@ class NauticalRoutingPipeline:
                 data.get('edge_type', 'coastal'),
                 int(data.get('is_one_way', False)),
                 data.get('traffic_dir', 1),
-                int(data.get('crosses_land', 0))
+                int(data.get('crosses_land', 0)),
+                int(data.get('crosses_obstacle', 0))
             ) for u, v, data in self.graph.edges(data=True)]
             cursor.executemany("""
                 INSERT INTO edges 
-                (source, target, distance, min_depth, drval1, max_air_draft, min_width, is_fairway, direction_penalty, distance_to_land, edge_type, is_one_way, traffic_dir, crosses_land)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (source, target, distance, min_depth, drval1, max_air_draft, min_width, is_fairway, direction_penalty, distance_to_land, edge_type, is_one_way, traffic_dir, crosses_land, crosses_obstacle)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, edges_data)
             
             # Insert POIs — harvest named locations from multiple layers
@@ -1280,7 +1470,12 @@ if __name__ == "__main__":
         'bridges': os.path.join(args.input_dir, 'bridges_polygons.geojson'),
         'locks': os.path.join(args.input_dir, 'locks_polygons.geojson'),
         'fairways': os.path.join(args.input_dir, 'fairways_polygons.geojson'),
-        'pois': os.path.join(args.input_dir, 'pois_points.geojson')
+        'pois': os.path.join(args.input_dir, 'pois_points.geojson'),
+        'restricted_areas': os.path.join(args.input_dir, 'restricted_areas_polygons.geojson'),
+        'obstructions': os.path.join(args.input_dir, 'obstructions_points.geojson'),
+        'hulks': os.path.join(args.input_dir, 'hulks_polygons.geojson'),
+        'mariculture': os.path.join(args.input_dir, 'mariculture_polygons.geojson'),
+        'caution_areas': os.path.join(args.input_dir, 'caution_areas_polygons.geojson')
     }
 
     pipeline = NauticalRoutingPipeline(data_paths=data_sources, db_path=args.output,

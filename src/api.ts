@@ -5,7 +5,7 @@
 
 import crypto from 'crypto';
 import { ServerAPI } from '@signalk/server-api';
-import { Request, Response, Router } from 'express';
+import { NextFunction, Request, Response, Router } from 'express';
 import { RoutingDatabase } from './database.js';
 import { GpxExporter } from './gpx-export.js';
 import { RoutingEngine } from './routing.js';
@@ -92,7 +92,7 @@ export class ApiHandler {
    * Handle route calculation request
    * POST /signalk/v1/api/router/route
    */
-  private async handleRoute(req: Request, res: Response): Promise<void> {
+  private async handleRoute(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.isReady()) {
       res.status(503).json({ error: 'Routing engine not ready, still initializing' });
       return;
@@ -131,6 +131,7 @@ export class ApiHandler {
       // Use 422 (Unprocessable Entity) so clients can distinguish a routing
       // failure (constraint/graph issue) from a server error (500).
       res.status(422).json({ error: message, code: 'ROUTE_NOT_FOUND' });
+      next(error);
     }
   }
 
@@ -138,7 +139,7 @@ export class ApiHandler {
    * Handle POI search request
    * GET /signalk/v1/api/router/search?q=...
    */
-  private async handleSearch(req: Request, res: Response): Promise<void> {
+  private async handleSearch(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.isReady()) {
       res.status(503).json({ error: 'Database not ready, still initializing' });
       return;
@@ -159,6 +160,7 @@ export class ApiHandler {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: message });
+      next(error);
     }
   }
 
@@ -166,7 +168,7 @@ export class ApiHandler {
    * Handle GPX export request
    * POST /signalk/v1/api/router/export/gpx
    */
-  private async handleExportGpx(req: Request, res: Response): Promise<void> {
+  private async handleExportGpx(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.isReady()) {
       res.status(503).json({ error: 'Routing engine not ready, still initializing' });
       return;
@@ -188,6 +190,7 @@ export class ApiHandler {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: message });
+      next(error);
     }
   }
 
@@ -195,7 +198,7 @@ export class ApiHandler {
    * Handle route push to Signal K resources
    * POST /signalk/v1/api/router/push
    */
-  private async handlePushRoute(req: Request, res: Response): Promise<void> {
+  private async handlePushRoute(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.isReady()) {
       res.status(503).json({ error: 'Routing engine not ready, still initializing' });
       return;
@@ -227,6 +230,7 @@ export class ApiHandler {
       const message = err instanceof Error ? err.message : `NonError: ${JSON.stringify(err)}`;
       console.error('[autoroute] Push route error:', error);
       res.status(500).json({ error: `Failed to push route: ${message}` });
+      next(error);
     }
   }
 
@@ -234,7 +238,7 @@ export class ApiHandler {
    * Handle database stats request
    * GET /signalk/v1/api/router/stats
    */
-  private async handleStats(req: Request, res: Response): Promise<void> {
+  private async handleStats(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.isReady()) {
       res.status(503).json({ error: 'Database not ready, still initializing' });
       return;
@@ -245,6 +249,7 @@ export class ApiHandler {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: message });
+      next(error);
     }
   }
 
@@ -252,7 +257,7 @@ export class ApiHandler {
    * Handle get vessel dimensions request
    * GET /signalk/v1/api/router/vessel
    */
-  private async handleGetVessel(req: Request, res: Response): Promise<void> {
+  private async handleGetVessel(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.isReady()) {
       res.status(503).json({ error: 'Routing engine not ready, still initializing' });
       return;
@@ -268,6 +273,7 @@ export class ApiHandler {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: message });
+      next(error);
     }
   }
 
@@ -275,7 +281,7 @@ export class ApiHandler {
    * Handle update vessel dimensions request
    * PUT /signalk/v1/api/router/vessel
    */
-  private async handleUpdateVessel(req: Request, res: Response): Promise<void> {
+  private async handleUpdateVessel(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.isReady()) {
       res.status(503).json({ error: 'Routing engine not ready, still initializing' });
       return;
@@ -287,6 +293,7 @@ export class ApiHandler {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: message });
+      next(error);
     }
   }
 
@@ -294,7 +301,7 @@ export class ApiHandler {
    * Handle graph nodes query
    * GET /signalk/v1/api/router/graph/nodes?bbox=minLon,minLat,maxLon,maxLat&limit=5000
    */
-  private async handleGraphNodes(req: Request, res: Response): Promise<void> {
+  private async handleGraphNodes(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.isReady()) {
       res.status(503).json({ error: 'Database not ready' });
       return;
@@ -318,6 +325,7 @@ export class ApiHandler {
       const message = error instanceof Error ? error.message : 'Unknown error';
       console.error('[autoroute] graph/nodes error:', error);
       res.status(500).json({ error: message });
+      next(error);
     }
   }
 
@@ -325,7 +333,7 @@ export class ApiHandler {
    * Handle POIs query
    * GET /signalk/v1/api/router/pois?bbox=minLon,minLat,maxLon,maxLat&limit=2000
    */
-  private async handlePois(req: Request, res: Response): Promise<void> {
+  private async handlePois(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.isReady()) {
       res.status(503).json({ error: 'Database not ready' });
       return;
@@ -348,6 +356,7 @@ export class ApiHandler {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: message });
+      next(error);
     }
   }
 
@@ -355,7 +364,7 @@ export class ApiHandler {
    * Handle nearest POI query
    * GET /signalk/v1/api/router/poi/nearest?lat=X&lon=Y&radius=250
    */
-  private async handleNearestPoi(req: Request, res: Response): Promise<void> {
+  private async handleNearestPoi(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.db) {
       res.status(503).json({ error: 'Database not ready' });
       return;
@@ -373,6 +382,7 @@ export class ApiHandler {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: message });
+      next(error);
     }
   }
 
@@ -380,7 +390,7 @@ export class ApiHandler {
    * Handle water polygon query
    * GET /signalk/v1/api/router/water?bbox=minLon,minLat,maxLon,maxLat
    */
-  private async handleWater(req: Request, res: Response): Promise<void> {
+  private async handleWater(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.db) {
       res.status(503).json({ error: 'Database not ready' });
       return;
@@ -403,6 +413,7 @@ export class ApiHandler {
       const message = error instanceof Error ? error.message : 'Unknown error';
       console.error('[autoroute] water error:', error);
       res.status(500).json({ error: message });
+      next(error);
     }
   }
 
@@ -410,7 +421,7 @@ export class ApiHandler {
    * Handle waterway line query
    * GET /signalk/v1/api/router/waterways?bbox=minLon,minLat,maxLon,maxLat
    */
-  private async handleWaterways(req: Request, res: Response): Promise<void> {
+  private async handleWaterways(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.db) {
       res.status(503).json({ error: 'Database not ready' });
       return;
@@ -433,6 +444,7 @@ export class ApiHandler {
       const message = error instanceof Error ? error.message : 'Unknown error';
       console.error('[autoroute] waterways error:', error);
       res.status(500).json({ error: message });
+      next(error);
     }
   }
 }

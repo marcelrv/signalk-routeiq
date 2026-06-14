@@ -12,7 +12,7 @@ export class GpxExporter {
     const totalCost = route.totalCost ?? 0;
 
     let gpx = `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="signalk-autoroute">
+<gpx version="1.1" creator="signalk-autoroute" xmlns:ar="http://signalk.org/autoroute">
   <rte>
     <name>${this.escapeXml(name)}</name>
     <desc>Route calculated by SignalK Autoroute - Distance: ${totalDistance.toFixed(0)}m, Cost: ${totalCost.toFixed(2)}</desc>`;
@@ -28,9 +28,9 @@ export class GpxExporter {
         gpx += `
       <ele>0</ele>
       <extensions>
-        <minDepth>${seg.minDepth.toFixed(1)}m</minDepth>
-        <maxAirDraft>${seg.maxAirDraft.toFixed(1)}m</maxAirDraft>
-        <isFairway>${seg.isFairway ? 'true' : 'false'}</isFairway>
+        <ar:minDepth>${seg.minDepth.toFixed(1)}m</ar:minDepth>
+        <ar:maxAirDraft>${seg.maxAirDraft.toFixed(1)}m</ar:maxAirDraft>
+        <ar:isFairway>${seg.isFairway ? 'true' : 'false'}</ar:isFairway>
       </extensions>`;
       }
 

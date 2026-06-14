@@ -1514,6 +1514,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         state.startLatLng = this.getLatLng();
         state.startPoiName = '';
         applyWaypoints();
+        lookupNearestPoi(state.startLatLng.lat, state.startLatLng.lng, 'start');
       });
     }
     if (state.destLatLng) {
@@ -1522,6 +1523,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         state.destLatLng = this.getLatLng();
         state.destPoiName = '';
         applyWaypoints();
+        lookupNearestPoi(state.destLatLng.lat, state.destLatLng.lng, 'dest');
       });
     }
     state.viaPoints.forEach(function (ll, i) {
@@ -1986,10 +1988,25 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     }
     if (coords.length < 2) { clearRoutePane(); return; }
 
-    const feature = geoJson.features && geoJson.features[0];
-    const props = feature && feature.properties;
-    const segments = (props && props.segments) || [];
-    const totalDistM = props ? props.totalDistance : 0;
+    const totalDistM = geoJson.totalDistance ||
+        (geoJson.features && geoJson.features[0] && geoJson.features[0].properties &&
+         geoJson.features[0].properties.totalDistance) || 0;
+
+    let segments = [];
+    const firstFeature = geoJson.features && geoJson.features[0];
+    const firstProps = firstFeature && firstFeature.properties;
+    if (firstProps && firstProps.segments && firstProps.segments.length > 0) {
+      segments = firstProps.segments;
+    } else if (geoJson.features && geoJson.features.length > 1) {
+      for (const f of geoJson.features) {
+        segments.push({
+          distance: f.properties.distance ?? 0,
+          minDepth: f.properties.minDepth ?? -1,
+          maxAirDraft: f.properties.maxAirDraft ?? -1,
+          isFairway: f.properties.isFairway ?? false,
+        });
+      }
+    }
     const nodes = extractMajorNodes(coords);
     const segRanges = mapSegmentsToCoordRanges(segments);
 
@@ -2029,7 +2046,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     }
 
     // Crossings mapped to legs (used in both collapsed node icons and expanded leg details)
-    const crossings = (props && props.crossings) || [];
+    const crossings = (firstProps && firstProps.crossings) || [];
     const crossingLegMap = mapCrossingsToLegs(crossings, coords, nodes);
 
     // Via points for labeling

@@ -50,7 +50,7 @@ describe('RoutingEngine', () => {
          VALUES ('TEST', 'Test Region', 'Test data for routing', '2025-01-01T00:00:00Z')`);
     const regionId = 1;
 
-    run(`CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL, lon REAL, region_id INTEGER)`);
+    run(`CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL, lon REAL, resolution REAL DEFAULT 0.0, node_depth REAL DEFAULT -1, region_id INTEGER)`);
     run(`INSERT INTO nodes (id, lat, lon, region_id) VALUES
       (1420000018500000, 52.0, 5.0, ${regionId}),
       (1420100018501000, 52.01, 5.01, ${regionId}),

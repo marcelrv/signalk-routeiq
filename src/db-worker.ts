@@ -5,6 +5,8 @@ interface NodeRow {
   id: number;
   lat: number;
   lon: number;
+  node_depth: number;
+  resolution: number;
   region_id?: number;
 }
 
@@ -22,6 +24,7 @@ interface EdgeRow {
   is_one_way?: number;
   traffic_dir?: number;
   crosses_land?: number;
+  crosses_obstacle?: number;
 }
 
 interface PoiRow {
@@ -35,6 +38,7 @@ interface PoiRow {
 
 const dbs: DatabaseSync[] = [];
 let hasCrossesLand = false;
+let hasCrossesObstacle = false;
 let hasNodeDepth = false;
 let hasRegionId = false;
 
@@ -56,29 +60,31 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         if (!row) throw new Error('nodes table not found');
         const edgeCols = db.prepare("PRAGMA table_info('edges')").all() as Array<{ name: string }>;
         hasCrossesLand = edgeCols.some(c => c.name === 'crosses_land');
+        hasCrossesObstacle = edgeCols.some(c => c.name === 'crosses_obstacle');
         const nodeCols = db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>;
         hasNodeDepth = nodeCols.some(c => c.name === 'node_depth');
         hasRegionId = nodeCols.some(c => c.name === 'region_id');
-        parentPort!.postMessage({ id, type, result: { hasCrossesLand, hasNodeDepth, hasRegionId } });
+        parentPort!.postMessage({ id, type, result: { hasCrossesLand, hasCrossesObstacle, hasNodeDepth, hasRegionId } });
         break;
       }
       case 'loadNodes': {
         const regionIdCol = hasRegionId ? 'region_id' : '0 AS region_id';
         const allNodes: NodeRow[] = [];
         for (const db of dbs) {
-          allNodes.push(...db.prepare(`SELECT id, lat, lon, ${regionIdCol} FROM nodes`).all() as unknown as NodeRow[]);
+          allNodes.push(...db.prepare(`SELECT id, lat, lon, node_depth, resolution, ${regionIdCol} FROM nodes`).all() as unknown as NodeRow[]);
         }
         parentPort!.postMessage({ id, type, result: allNodes });
         break;
       }
       case 'loadEdges': {
         const crossesCol = hasCrossesLand ? ', crosses_land' : '';
+        const obstacleCol = hasCrossesObstacle ? ', crosses_obstacle' : '';
         let allEdges: EdgeRow[] = [];
         for (const db of dbs) {
           const edges = db.prepare(
             `SELECT source, target, distance, min_depth, max_air_draft, min_width,
                     is_fairway, direction_penalty, distance_to_land,
-                    edge_type, is_one_way, traffic_dir${crossesCol}
+                    edge_type, is_one_way, traffic_dir${crossesCol}${obstacleCol}
              FROM edges`
           ).all() as unknown as EdgeRow[];
           allEdges = allEdges.concat(edges);

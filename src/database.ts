@@ -27,6 +27,7 @@ export interface EdgeRow {
   is_one_way?: number;
   traffic_dir?: number;
   crosses_land?: number;
+  crosses_obstacle?: number;
   lat: number;
   lon: number;
   source_lat?: number;
@@ -58,13 +59,14 @@ export class RoutingDatabase {
   private messageIdCounter = 0;
   private pending = new Map<number, { resolve: (value: any) => void; reject: (reason: any) => void }>();
   private dbDir: string;
-  private nodes: Map<number, { lat: number; lon: number; regionId: number }> = new Map();
+  private nodes: Map<number, { lat: number; lon: number; regionId: number; nodeDepth: number; resolution: number }> = new Map();
   private edgesBySource: Map<number, Array<EdgeRow & { lat: number; lon: number }>> = new Map();
   private pois: PoiRow[] = [];
   private graphLoaded: boolean = false;
   private spatialGrid: Map<string, number[]> = new Map();
   private waterBBoxIndex: Float64Array | null = null;
   private hasCrossesLand: boolean = false;
+  private hasCrossesObstacle: boolean = false;
   private hasNodeDepth: boolean = false;
   private hasRegionId: boolean = false;
 
@@ -135,6 +137,7 @@ export class RoutingDatabase {
     const dbPaths = files.map(f => join(this.dbDir, f));
     const schema = await this.sendMessage('init', { dbPaths });
     this.hasCrossesLand = schema.hasCrossesLand;
+    this.hasCrossesObstacle = schema.hasCrossesObstacle;
     this.hasNodeDepth = schema.hasNodeDepth;
     this.hasRegionId = schema.hasRegionId;
   }
@@ -152,9 +155,9 @@ export class RoutingDatabase {
   }
 
   async loadGraph(): Promise<void> {
-    const allNodes: Array<{ id: number; lat: number; lon: number; region_id?: number }> = await this.sendMessage('loadNodes');
+    const allNodes: Array<{ id: number; lat: number; lon: number; node_depth: number; resolution: number; region_id?: number }> = await this.sendMessage('loadNodes');
     for (const n of allNodes) {
-      this.nodes.set(n.id, { lat: n.lat, lon: n.lon, regionId: n.region_id ?? 0 });
+      this.nodes.set(n.id, { lat: n.lat, lon: n.lon, regionId: n.region_id ?? 0, nodeDepth: n.node_depth, resolution: n.resolution });
     }
     this.buildSpatialIndex();
 
@@ -181,14 +184,14 @@ export class RoutingDatabase {
     this.graphLoaded = true;
   }
 
-  async getNodeById(id: number): Promise<{ lat: number; lon: number; regionId: number } | null> {
+  async getNodeById(id: number): Promise<{ lat: number; lon: number; regionId: number; nodeDepth: number; resolution: number } | null> {
     if (this.graphLoaded) {
       return this.nodes.get(id) || null;
     }
     return null;
   }
 
-  getNodeSync(id: number): { lat: number; lon: number; regionId: number } | null {
+  getNodeSync(id: number): { lat: number; lon: number; regionId: number; nodeDepth: number; resolution: number } | null {
     if (!this.graphLoaded) {
       throw new Error('Graph must be loaded for synchronous node lookup');
     }
@@ -419,8 +422,8 @@ export class RoutingDatabase {
       if (c.lat >= minLat && c.lat <= maxLat && c.lon >= minLon && c.lon <= maxLon) {
         results.push({
           id, lat: c.lat, lon: c.lon,
-          resolution: 0,
-          min_depth: -1,
+          resolution: c.resolution,
+          min_depth: c.nodeDepth,
         });
         if (results.length >= limit) break;
       }
@@ -617,6 +620,7 @@ export class RoutingDatabase {
     let isFairway = false;
     let dirPenalty = 1;
     let crossesLand = 0;
+    let crossesObstacle = 0;
     let edgeType: string | undefined;
 
     for (let i = startIdx; i < endIdx; i++) {
@@ -629,6 +633,7 @@ export class RoutingDatabase {
         if (edge.is_fairway) isFairway = true;
         dirPenalty = Math.min(dirPenalty, edge.direction_penalty);
         if (edge.crosses_land === 1) crossesLand = 1;
+        if (edge.crosses_obstacle === 1) crossesObstacle = 1;
         edgeType = edgeType || edge.edge_type;
       }
     }
@@ -645,6 +650,7 @@ export class RoutingDatabase {
       direction_penalty: dirPenalty,
       distance_to_land: 0,
       crosses_land: crossesLand,
+      crosses_obstacle: crossesObstacle,
       edge_type: edgeType,
       lat: toNodeCoords?.lat || 0,
       lon: toNodeCoords?.lon || 0,
@@ -663,6 +669,13 @@ export class RoutingDatabase {
     this.edgesBySource.clear();
     this.pois = [];
     this.spatialGrid.clear();
+    this.waterGeoJson = null;
+    this.waterGeojsonPath = null;
+    this.waterwaysGeoJson = null;
+    this.waterwaysGeojsonPath = null;
+    this.landGeoJson = null;
+    this.landGeojsonPath = null;
+    this.landBBoxIndex = null;
     this.graphLoaded = false;
     return Promise.resolve();
   }
