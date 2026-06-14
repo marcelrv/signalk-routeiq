@@ -5,59 +5,7 @@ Each item includes a clear description and a ready-to-use prompt you can feed in
 ---
 
 ### Part 1: Top 10 Most Important Technical Issues to Fix
-
-#### 1. Node.js Event Loop Blocking (`node:sqlite`)
-**Description**: The backend uses `node:sqlite`'s `DatabaseSync`. While the wrapper methods (e.g., `getNodesInBBox`) are marked `async`, the underlying database calls (like `.all()`) execute synchronously. When querying large bounding boxes or loading a 150k+ node graph, this completely freezes the Node.js main thread, causing the SignalK server to drop NMEA sensor data and become unresponsive.
-**AI Prompt**:
-> "Refactor `src/database.ts` to prevent blocking the Node.js event loop. Replace the synchronous `node:sqlite` calls with an asynchronous SQLite driver (like `sqlite3` or `better-sqlite3` with `worker_threads`). Ensure that `loadGraph()`, `getNodesInBBox()`, and other heavy queries yield to the event loop so the main SignalK server is not blocked."
-
-#### 2. A* Heuristic Admissibility Violation
-**Description**: For A* to guarantee the shortest path, the heuristic $h$ must never overestimate the actual cost. Currently, `h` is the raw distance. However, `calculateEdgeCost()` multiplies distance by `fairwayMultiplier` (default `0.8`). This means actual cost ($0.8 \times d$) is less than heuristic cost ($1.0 \times d$). This makes the A* algorithm inadmissible, leading to sub-optimal, zig-zagging routes.
-**AI Prompt**:
-> "In `src/routing.ts`, update the A* algorithm's heuristic calculation `haversineDistance(...)` to multiply the resulting distance by the lowest possible cost multiplier (e.g., `Math.min(this.config.fairwayMultiplier, 1.0)`). This ensures the heuristic never overestimates the actual edge cost, restoring A* admissibility and optimal pathing."
-
-#### 3. Missing Spatial Indices in SQLite
-**Description**: In `nautical_routing_pipeline.py`, you create indices for `source` and `target` edges. However, the Node.js backend frequently queries nodes by bounding box (`WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?`). Without an index on `lat` and `lon`, SQLite performs a full table scan on 100k+ rows for every map pan/zoom.
-**AI Prompt**:
-> "In `backend/nautical_routing_pipeline.py`, update the `export_to_sqlite` function to include a composite index for node coordinates. Add the SQL statement: `CREATE INDEX idx_nodes_lat_lon ON nodes(lat, lon);`. Then, update `src/database.ts` to ensure `getNodesInBBox` takes advantage of this index."
-
-#### 4. SQL Statement Limit Risk in `findNearestNodeInSet`
-**Description**: In `src/database.ts`, `findNearestNodeInSet` converts a `Set` into a comma-separated string and injects it directly into an `IN (${placeholders})` clause. If the disconnected graph component has thousands of nodes, this creates a massively long query string that can exceed SQLite's max SQL length or max variables limit, crashing the query.
-**AI Prompt**:
-> "In `src/database.ts`, rewrite `findNearestNodeInSet`. Instead of injecting thousands of IDs into an `IN (...)` clause, utilize a temporary SQLite table, or iterate over the nodes in memory using the pre-loaded `this.nodes` map (similar to the fast path in `findNearestNode`), which is vastly faster and avoids SQL string limit errors."
-
-#### 5. BBox Routing Edge Case Exception
-**Description**: In `src/routing.ts` (`astarSearch`), there is a strict check: `if (!isInsideBBox(startCoords.lat, startCoords.lon, bbox)) throw Error`. Because `startNode` is the *nearest snapped graph node*, it might fall slightly outside the strict bounding box created around the user's click coordinate, instantly failing the route calculation.
-**AI Prompt**:
-> "In `src/routing.ts`, fix the bounding box initialisation in `astarSearch`. The bounding box should be dynamically expanded to explicitly encompass both the exact user click coordinates AND the snapped `startNode` and `endNode` coordinates, ensuring the snapped nodes are never accidentally outside the `bbox`."
-
-#### 6. Memory Leak on Plugin Restart
-**Description**: In `src/index.ts`, `stop()` sets `database = null`, but inside `src/database.ts`, the `close()` method does not clear `this.nodes`, `this.edgesBySource`, or `this.spatialGrid`. Since the graph is huge (~100MB+ in memory), restarting the plugin via the SignalK admin UI multiple times can cause V8 memory leaks if event listeners or old objects retain references.
-**AI Prompt**:
-> "In `src/database.ts`, update the `close()` method to explicitly clear all large in-memory data structures. Add `this.nodes.clear()`, `this.edgesBySource.clear()`, and `this.spatialGrid.clear()`. Also, clear the cached `waterGeoJson` and `landBBoxIndex` arrays to ensure memory is properly garbage collected on plugin stop."
-
-#### 7. Invalid GPX Export Extensions
-**Description**: In `src/gpx-export.ts`, custom elements like `<minDepth>` are injected directly inside `<extensions>`. According to the GPX 1.1 schema, custom extensions must belong to a defined XML namespace. Standard GPX parsers (like OpenCPN or Garmin) may reject the file as malformed XML.
-**AI Prompt**:
-> "In `src/gpx-export.ts`, fix the GPX XML generation. Add a custom namespace to the `<gpx>` tag (e.g., `xmlns:autoroute="http://signalk.org/autoroute"`). Then, prefix all elements inside the `<extensions>` block with that namespace (e.g., `<autoroute:minDepth>`)."
-
-#### 8. Global Scope Bug in Python Multiprocessing
-**Description**: In `backend/nautical_routing_pipeline.py`, the `_coarse_scan_worker` relies on a global `_COARSE_SCAN_GDF`. This works on Linux (which uses `fork`), but on Windows/macOS (which use `spawn`), global variables are not automatically shared with child processes, leading to crashes or massive memory duplication.
-**AI Prompt**:
-> "In `backend/nautical_routing_pipeline.py`, fix the multiprocessing context for `_coarse_scan_worker`. Ensure cross-platform compatibility by explicitly passing the required geometries to the worker, or use a shared memory architecture/manager, rather than relying on standard global variable inheritance which fails on 'spawn' multiprocessing contexts."
-
-#### 9. Unhandled Promise Rejections in Express Routes
-**Description**: In `src/api.ts`, errors inside the `handleRoute` try-catch block are handled, but if the internal `routingEngine.calculateRoute()` throws a completely unhandled exception (e.g., a memory error or deep undefined property), the Express request can hang.
-**AI Prompt**:
-> "In `src/api.ts`, review all Express endpoint handlers (like `handleRoute`, `handleExportGpx`). Ensure all async calls are properly wrapped in standard error handlers. Pass any unhandled `next(error)` to Express's default error middleware so that API requests do not hang indefinitely if an unexpected exception occurs."
-
-#### 10. Desync in Leaflet Waypoint UI State
-**Description**: In `public/index.html`, right-clicking the map toggles `state.waypointNext` between 'start' and 'dest'. If a user wants to set via-points, dragging existing points triggers `applyWaypoints()`, but the associated textual `state.startPoiName` doesn't reset or recalculate properly, resulting in UI text showing the old POI name while the marker is somewhere else.
-**AI Prompt**:
-> "In `public/index.html`, fix the Leaflet waypoint state management. When a user drags the `startMarker` or `destMarker`, automatically trigger `lookupNearestPoi()` for the new coordinates and update `state.startPoiName` / `state.destPoiName`. Also, provide a visual ghost line while dragging to improve UX."
-
----
-
+ 
 ### Part 2: Top 10 Suggestions for UI/UX & Smarter Routing
 
 #### 1. Elevation/Depth Route Profile Graph
@@ -165,3 +113,23 @@ Because A* naturally explores the lowest-cost path first, this will automaticall
 Why this is the ultimate routing architecture
 By doing this, you have effectively built the "Holy Grail" of marine routing.
 The Python server does all the heavy lifting of figuring out the "shallow vs deep" topology of the Dutch waterways just once. The weak Raspberry Pi on the boat only does a few dozen calculations, instantly giving the perfect, vessel-specific route across the whole country.
+
+
+
+
+
+
+
+
+"We need to fix an 'Edge Poisoning' bug in backend/nautical_routing_pipeline.py where coarse edges clip shallow sandbanks, while aggressively optimizing cloud CPU time using the nautical insight that any depth >= 4.0m is universally safe for our target vessels.
+Please update the depth extraction logic in _edge_attr_worker to use a '4-Meter Fast-Path' combined with 10-point sampling:
+Get the depth polygons intersecting the edge's bounding box:
+candidates = _candidates_by_bounds_static(depare_gdf, edge_geom)
+The Fast-Path: If candidates is not empty, check the DRVAL1 column. If the minimum DRVAL1 of all these candidates is >= 4.0, we don't need detailed sampling. Set attrs['min_depth'] = float(candidates['DRVAL1'].min()) and attrs['drval1'] = attrs['min_depth'], and skip step 3.
+High-Precision Sampling: If any candidate has DRVAL1 < 4.0 (or NaN), perform a 10-point sample along the edge:
+Generate 10 points: pts = [edge_geom.interpolate(f, normalized=True) for f in np.linspace(0.0, 1.0, 10)]
+For each point, find the first polygon in candidates where geom.contains(pt) is true.
+Extract its DRVAL1 (defaulting to 99.0 if no polygon is found).
+The edge's min_depth is the minimum of those 10 sampled depths.
+Assign attrs['min_depth'] = max(0.0, float(min_val)) and attrs['drval1'] = min_val if min_val < 99.0 else None.
+This ensures edges near sandbanks are meticulously sampled to avoid false shallows, while edges in universally deep water are processed instantly."

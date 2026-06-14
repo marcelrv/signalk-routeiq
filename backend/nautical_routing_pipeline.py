@@ -883,11 +883,9 @@ class NauticalRoutingPipeline:
         for nid, lon, lat in inland_nodes:
             fc = int(lon / MIN_RES + 0.5)
             fr = int(lat / MIN_RES + 0.5)
-            best_cnid = None
-            best_dist = float('inf')
+            candidates = []
             for dr in range(-inland_search_radius, inland_search_radius + 1):
                 for dc in range(-inland_search_radius, inland_search_radius + 1):
-                    # fine_pos keyed (col, row) = (fc, fr)
                     neighbor = fine_pos.get((fc + dc, fr + dr))
                     if neighbor is None:
                         continue
@@ -899,13 +897,14 @@ class NauticalRoutingPipeline:
                         math.radians((lat + clat) / 2))
                     dy = (clat - lat) * 111320
                     d = math.sqrt(dx * dx + dy * dy)
-                    if d < best_dist:
-                        best_dist = d
-                        best_cnid = neighbor
-            if best_cnid and best_dist < 2000 and not self.graph.has_edge(nid, best_cnid):
-                self.graph.add_edge(nid, best_cnid, edge_type='coastal')
-                self.graph.add_edge(best_cnid, nid, edge_type='coastal')
-                ic_edge_count += 2
+                    candidates.append((d, neighbor))
+            candidates.sort(key=lambda x: x[0])
+            max_dist = 3000
+            for best_dist, best_cnid in candidates[:2]:
+                if best_dist < max_dist and not self.graph.has_edge(nid, best_cnid):
+                    self.graph.add_edge(nid, best_cnid, edge_type='coastal')
+                    self.graph.add_edge(best_cnid, nid, edge_type='coastal')
+                    ic_edge_count += 2
         total_new_edges += ic_edge_count
         logger.info(f"  Inland-to-coastal: {ic_edge_count} edges")
 
@@ -1090,6 +1089,8 @@ class NauticalRoutingPipeline:
 
             west_nodes = []
             east_nodes = []
+            north_nodes = []
+            south_nodes = []
             for nid, data in self.graph.nodes(data=True):
                 if data.get('node_type') != 'coastal':
                     continue
@@ -1101,8 +1102,12 @@ class NauticalRoutingPipeline:
                     west_nodes.append((nid, lon, lat))
                 elif lon > maxx:
                     east_nodes.append((nid, lon, lat))
+                elif lat < miny:
+                    south_nodes.append((nid, lon, lat))
+                elif lat > maxy:
+                    north_nodes.append((nid, lon, lat))
 
-            if not west_nodes or not east_nodes:
+            if not (west_nodes or east_nodes or north_nodes or south_nodes):
                 continue
 
             # Sort by distance to bridge centroid
@@ -1114,9 +1119,8 @@ class NauticalRoutingPipeline:
 
             west_nodes.sort(key=lambda x: _dist(x[1], x[2]))
             east_nodes.sort(key=lambda x: _dist(x[1], x[2]))
-
-            wn, wl, wlt = west_nodes[0]
-            en, el, elt = east_nodes[0]
+            north_nodes.sort(key=lambda x: _dist(x[1], x[2]))
+            south_nodes.sort(key=lambda x: _dist(x[1], x[2]))
 
             # Create bridge node at centroid
             b_id = self._get_or_create_node(c_lon, c_lat, node_type='coastal')
@@ -1138,15 +1142,20 @@ class NauticalRoutingPipeline:
                         break
             self.graph.nodes[b_id]['node_depth'] = node_depth
 
-            # Create edges with air draft override tag
-            if not self.graph.has_edge(b_id, wn):
-                self.graph.add_edge(b_id, wn, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
-                self.graph.add_edge(wn, b_id, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
-                added += 2
-            if not self.graph.has_edge(b_id, en):
-                self.graph.add_edge(b_id, en, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
-                self.graph.add_edge(en, b_id, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
-                added += 2
+            # Create edges with air draft override tag — connect to closest node
+            # in each populated direction (handles both E-W and N-S waterways)
+            directional_groups = [
+                ('west', west_nodes), ('east', east_nodes),
+                ('north', north_nodes), ('south', south_nodes),
+            ]
+            for _dir_name, node_list in directional_groups:
+                if not node_list:
+                    continue
+                nid, _, _ = node_list[0]
+                if not self.graph.has_edge(b_id, nid):
+                    self.graph.add_edge(b_id, nid, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
+                    self.graph.add_edge(nid, b_id, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
+                    added += 2
 
         logger.info(f"Added {added} opening bridge crossing edges")
 
