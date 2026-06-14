@@ -47,45 +47,129 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   outline: none;
 }
 
-/* ---------- search (top-center) ---------- */
-#search-panel { top: 20px; left: 50%; transform: translateX(-50%); z-index: 1002; }
-#search-row { display: flex; gap: 6px; }
+/* ---------- search (top-center, minimal) ---------- */
+#search-panel {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1002;
+  width: 340px;
+  max-width: 90vw;
+}
+#search-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
 #search-input {
-  flex: 1;
-  background: rgba(255,255,255,0.07);
-  border: 1px solid rgba(79,148,212,0.4);
-  border-radius: 6px;
-  padding: 8px 11px;
+  width: 100%;
+  background: rgba(11, 26, 43, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1.5px solid rgba(79, 148, 212, 0.3);
+  border-radius: 24px;
+  padding: 10px 40px 10px 18px;
   color: #e0edf5;
-  font-size: 13px;
-  min-width: 160px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
 }
-#search-input::placeholder { color: #5f7a9a; }
-#search-btn {
-  background: #1f6391;
-  border: none;
-  border-radius: 6px;
-  padding: 8px 14px;
-  color: #fff;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s;
+#search-input:focus {
+  border-color: rgba(79, 148, 212, 0.7);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(79, 148, 212, 0.15);
 }
-#search-btn:hover { background: #287bb5; }
+#search-input::placeholder { color: #5f7a9a; font-size: 13px; }
+#search-icon {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #5f7a9a;
+  font-size: 15px;
+  pointer-events: none;
+  transition: color 0.2s;
+}
+#search-input:focus ~ #search-icon { color: #7ab8f0; }
 #search-results {
-  margin-top: 8px;
-  max-height: 180px;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 320px;
   overflow-y: auto;
   display: none;
+  background: rgba(11, 26, 43, 0.92);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(79, 148, 212, 0.2);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  padding: 4px 0;
 }
 .search-result-item {
-  padding: 6px 8px;
-  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
   cursor: pointer;
-  transition: background 0.12s;
+  transition: background 0.1s;
+  font-size: 13px;
+  color: #c8dcee;
+  border-left: 2px solid transparent;
+}
+.search-result-item:first-of-type { margin-top: 2px; }
+.search-result-item:last-of-type { margin-bottom: 2px; }
+.search-result-item:hover,
+.search-result-item.active {
+  background: rgba(79, 148, 212, 0.12);
+  border-left-color: #3b8fd4;
+}
+.search-result-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 13px;
+  border: 1.5px solid #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+  flex-shrink: 0;
+  line-height: 1;
+}
+.search-result-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-result-name mark {
+  background: rgba(59, 143, 212, 0.3);
+  color: #7ab8f0;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.search-result-type {
+  font-size: 10px;
+  color: #5f7a9a;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+.search-empty {
+  padding: 16px;
+  text-align: center;
+  color: #5f7a9a;
   font-size: 12px;
 }
-.search-result-item:hover { background: rgba(79,148,212,0.25); }
+.search-status {
+  padding: 8px 14px;
+  text-align: center;
+  color: #4a6a8a;
+  font-size: 11px;
+  border-top: 1px solid rgba(79,148,212,0.1);
+}
 
 /* ---------- route info (inside route pane) ---------- */
 #route-pane-inner .info-line {
@@ -516,6 +600,52 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(79,148,212,0.35); border-radius: 4px; }
+
+/* Data manager modal */
+#data-manager-modal .dm-tab-active { color: #e0edf5 !important; border-bottom-color: #3b8fd4 !important; }
+#data-manager-modal .dm-tab:hover { color: #b8d4f0 !important; }
+.dm-region-card {
+  background: rgba(255,255,255,0.03); border: 1px solid rgba(79,148,212,0.15);
+  border-radius: 8px; padding: 12px 14px; margin-bottom: 8px;
+  display: flex; align-items: flex-start; gap: 12px;
+  transition: background 0.12s;
+}
+.dm-region-card:hover { background: rgba(79,148,212,0.06); }
+.dm-region-color {
+  width: 6px; height: 48px; border-radius: 3px; flex-shrink: 0; margin-top: 2px;
+}
+.dm-region-body { flex: 1; min-width: 0; }
+.dm-region-name { font-size: 14px; font-weight: 600; color: #e0edf5; }
+.dm-region-country { font-size: 11px; color: #6d96c0; margin-left: 6px; font-weight: 400; }
+.dm-region-desc { font-size: 12px; color: #9bb8da; margin-top: 1px; }
+.dm-region-meta { font-size: 11px; color: #6d96c0; margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.dm-region-tag {
+  display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 4px;
+  background: rgba(79,148,212,0.12); color: #7ab8f0;
+}
+.dm-region-actions { flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.dm-btn-dl {
+  background: #1f6391; border: none; border-radius: 6px; padding: 6px 14px;
+  color: #fff; font-weight: 600; cursor: pointer; font-size: 12px;
+  transition: background 0.15s; white-space: nowrap;
+}
+.dm-btn-dl:hover { background: #287bb5; }
+.dm-btn-dl:disabled { background: #333; color: #666; cursor: default; }
+.dm-btn-update {
+  background: #22c55e; border: none; border-radius: 6px; padding: 6px 14px;
+  color: #fff; font-weight: 600; cursor: pointer; font-size: 12px;
+  transition: background 0.15s; white-space: nowrap;
+}
+.dm-btn-update:hover { background: #16a34a; }
+.dm-size { font-size: 11px; color: #6d96c0; }
+.dm-update-badge {
+  font-size: 10px; padding: 1px 6px; border-radius: 4px;
+  background: rgba(34,197,94,0.15); color: #4ade80; font-weight: 600;
+}
+.dm-installed-card {
+  background: rgba(255,255,255,0.03); border: 1px solid rgba(79,148,212,0.15);
+  border-radius: 8px; padding: 12px 14px; margin-bottom: 8px;
+}
 </style>
 </head>
 <body>
@@ -523,11 +653,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 <div id="map"></div>
 
 <!-- Search -->
-<div id="search-panel" class="panel">
-  <div class="panel-title">Search POI</div>
+<div id="search-panel">
   <div id="search-row">
-    <input id="search-input" type="text" placeholder="harbour, waypoint, ..." />
-    <button id="search-btn">Go</button>
+    <input id="search-input" type="text" placeholder="Search harbours, locks, bridges..." autocomplete="off" autocorrect="off" spellcheck="false" />
+    <span id="search-icon">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="7.5"/><line x1="16" y1="16" x2="22" y2="22"/></svg>
+    </span>
   </div>
   <div id="search-results"></div>
 </div>
@@ -579,6 +710,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     <div id="boat-beam" class="info-line"><span class="label">ROUTING BEAM</span><span class="value">—</span></div>
     <div id="boat-airdraft" class="info-line"><span class="label">ROUTING AIR</span><span class="value">—</span></div>
   </div>
+  <button id="manage-data-btn" style="margin-top:10px;width:100%;background:#1f6391;border:none;border-radius:6px;padding:8px 0;color:#fff;font-weight:600;cursor:pointer;font-size:12px;transition:background 0.15s">Manage Routing Data</button>
   </div>
 </div>
 
@@ -603,6 +735,36 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     <div id="route-warnings"></div>
     <div id="route-nodes"></div>
     <div id="route-pane-empty" style="color:#6d96c0;font-size:12px;padding:8px 0;text-align:center;display:none">No route loaded.</div>
+  </div>
+</div>
+
+<!-- Data Manager Modal -->
+<div id="data-manager-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:9000;font-family:'Segoe UI',system-ui,sans-serif">
+  <div style="position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px)" id="dm-backdrop"></div>
+  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:700px;max-width:95vw;max-height:85vh;background:#0f1f30;border:1px solid rgba(79,148,212,0.35);border-radius:12px;box-shadow:0 16px 48px rgba(0,0,0,0.6);display:flex;flex-direction:column;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px 12px;border-bottom:1px solid rgba(79,148,212,0.2)">
+      <h2 style="margin:0;font-size:16px;color:#e0edf5;font-weight:600">Routing Data Manager</h2>
+      <button id="dm-close" style="background:none;border:none;color:#6d96c0;font-size:22px;cursor:pointer;line-height:1;padding:0 4px">&times;</button>
+    </div>
+    <div style="display:flex;gap:0;border-bottom:1px solid rgba(79,148,212,0.15);padding:0 20px">
+      <button class="dm-tab dm-tab-active" data-tab="available" style="padding:10px 16px 8px;background:none;border:none;border-bottom:2px solid #3b8fd4;color:#e0edf5;font-size:13px;font-weight:600;cursor:pointer">Available</button>
+      <button class="dm-tab" data-tab="installed" style="padding:10px 16px 8px;background:none;border:none;border-bottom:2px solid transparent;color:#6d96c0;font-size:13px;font-weight:500;cursor:pointer">Installed</button>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:16px 20px 20px">
+      <div id="dm-tab-available">
+        <div id="dm-minimap" style="margin-bottom:12px;border-radius:8px;overflow:hidden;background:#0b1a2b;height:100px;position:relative">
+          <canvas id="dm-map-canvas" width="660" height="100" style="width:100%;height:100%"></canvas>
+        </div>
+        <input id="dm-filter" type="text" placeholder="Filter by country, name, or tag..." style="width:100%;background:rgba(255,255,255,0.07);border:1px solid rgba(79,148,212,0.4);border-radius:6px;padding:8px 11px;color:#e0edf5;font-size:13px;margin-bottom:12px;outline:none">
+        <div id="dm-loading" style="color:#6d96c0;font-size:13px;padding:20px 0;text-align:center">Loading available databases...</div>
+        <div id="dm-list" style="display:none"></div>
+        <div id="dm-error" style="display:none;color:#e07070;font-size:13px;padding:12px;background:rgba(200,70,70,0.1);border-radius:6px"></div>
+      </div>
+      <div id="dm-tab-installed" style="display:none">
+        <div id="dm-installed-loading" style="color:#6d96c0;font-size:13px;padding:20px 0;text-align:center">Loading installed databases...</div>
+        <div id="dm-installed-list" style="display:none"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1639,77 +1801,183 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     updateInfo();
   });
 
-  // ---- search ----
-  document.getElementById('search-btn').addEventListener('click', doSearch);
-  document.getElementById('search-input').addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') doSearch();
+  // ---- search (real-time, with icons, keyboard nav) ----
+  const SEARCH_TYPE_COLORS = { harbour: '#3b8fd4', lock: '#f59e0b', bridge: '#ef4444', fairway: '#8b5cf6', waterway: '#14b8a6' };
+  const SEARCH_SUBTYPE_COLORS = { bridge: { opening: '#22c55e', fixed: '#ef4444' } };
+
+  let searchDebounceTimer = null;
+  let searchActiveIdx = -1;
+  let searchItems = [];
+
+  const searchInput = document.getElementById('search-input');
+  const searchResults = document.getElementById('search-results');
+
+  function getSearchColor(type, props) {
+    const sub = SEARCH_SUBTYPE_COLORS[type];
+    if (sub && props && props.subtype && sub[props.subtype]) return sub[props.subtype];
+    return SEARCH_TYPE_COLORS[type] || '#6d96c0';
+  }
+
+  function highlightText(text, query) {
+    if (!query) return escapeHtml(text);
+    const re = new RegExp('(' + query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+    return escapeHtml(text).replace(re, '<mark>$1</mark>');
+  }
+
+  searchInput.addEventListener('input', function () {
+    const q = this.value.trim();
+    clearTimeout(searchDebounceTimer);
+    if (q.length < 2) {
+      searchResults.style.display = 'none';
+      searchResults.innerHTML = '';
+      searchItems = [];
+      return;
+    }
+    searchDebounceTimer = setTimeout(function () { doSearch(q); }, 250);
   });
 
-  function doSearch() {
-    const q = document.getElementById('search-input').value.trim();
-    if (!q) return;
+  searchInput.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (searchItems.length === 0) return;
+      searchActiveIdx = Math.min(searchActiveIdx + 1, searchItems.length - 1);
+      highlightActive();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (searchItems.length === 0) return;
+      searchActiveIdx = Math.max(searchActiveIdx - 1, 0);
+      highlightActive();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (searchActiveIdx >= 0 && searchActiveIdx < searchItems.length) {
+        selectSearchItem(searchItems[searchActiveIdx]);
+      } else {
+        doSearch(searchInput.value.trim());
+      }
+    } else if (e.key === 'Escape') {
+      searchResults.style.display = 'none';
+      searchInput.blur();
+    }
+  });
 
-    const resultsEl = document.getElementById('search-results');
-    resultsEl.style.display = 'none';
-    resultsEl.innerHTML = '';
+  searchInput.addEventListener('focus', function () {
+    if (searchItems.length > 0 && searchInput.value.trim().length >= 2) {
+      searchResults.style.display = 'block';
+    }
+  });
+
+  function highlightActive() {
+    const items = searchResults.querySelectorAll('.search-result-item');
+    items.forEach(function (el, i) {
+      el.classList.toggle('active', i === searchActiveIdx);
+    });
+    if (searchActiveIdx >= 0) {
+      const active = items[searchActiveIdx];
+      if (active) active.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function selectSearchItem(item) {
+    const pos = { lat: item.latitude, lng: item.longitude };
+    if (pos && pos.lat != null && pos.lng != null) {
+      map.setView([pos.lat, pos.lng], 12);
+      const ll = L.latLng(pos.lat, pos.lng);
+      const name = item.name || 'POI';
+      if (state.waypointNext === 'start') {
+        state.startLatLng = ll;
+        state.startPoiName = name;
+        state.waypointNext = 'dest';
+      } else {
+        state.destLatLng = ll;
+        state.destPoiName = name;
+        state.waypointNext = 'start';
+      }
+      applyWaypoints();
+    }
+    searchResults.style.display = 'none';
+    searchInput.blur();
+  }
+
+  function doSearch(q) {
+    if (!q || q.length < 2) return;
+    searchActiveIdx = -1;
+    searchResults.style.display = 'none';
+    searchResults.innerHTML = '<div class="search-empty">Searching...</div>';
+    searchResults.style.display = 'block';
 
     const searchQ = searchUrl() + '?q=' + encodeURIComponent(q);
     logDebug('SEARCH', searchQ);
     fetch(searchQ)
-      .then(r => {
+      .then(function (r) {
         logDebug('SEARCH', searchQ, undefined, r);
         if (!r.ok) throw new Error('Search error ' + r.status);
         return r.json();
       })
-      .then(data => {
-        const items = Array.isArray(data) ? data : (data.results || data.features || []);
+      .then(function (data) {
+        const items = Array.isArray(data) ? data : (data.results || []);
+        searchItems = items;
+        const qLower = q.toLowerCase();
+
         if (items.length === 0) {
-          showToast('No results found', 'error');
+          searchResults.innerHTML = '<div class="search-empty">No results found for "' + escapeHtml(q) + '"</div>';
           return;
         }
-        resultsEl.innerHTML = '';
-        items.forEach(function (item) {
-          const coords = item.geometry &&
-            (item.geometry.coordinates || (item.geometry.type === 'Point' ? null : null));
-          const pos = coords ? { lat: coords[1], lng: coords[0] } :
-            (item.position || item.latlng || item.center ||
-             (item.latitude != null && item.longitude != null ? { lat: item.latitude, lng: item.longitude } : null));
-          const name = item.properties?.name || item.name || item.label || 'POI';
-          const div = document.createElement('div');
-          div.className = 'search-result-item';
-          div.textContent = pos
-            ? name + ' (' + pos.lat.toFixed(3) + ', ' + pos.lng.toFixed(3) + ')'
-            : name;
-          div.addEventListener('click', function () {
-            if (pos) {
-              map.setView([pos.lat, pos.lng], 12);
-              const ll = L.latLng(pos.lat, pos.lng);
-              if (state.waypointNext === 'start') {
-                state.startLatLng = ll;
-                state.startPoiName = name;
-                state.waypointNext = 'dest';
-              } else {
-                state.destLatLng = ll;
-                state.destPoiName = name;
-                state.waypointNext = 'start';
-              }
-              applyWaypoints();
+
+        var html = '';
+        for (var i = 0; i < items.length; i++) {
+          var item = items[i];
+          var name = item.name || 'POI';
+          var type = item.type || '';
+          var props = item.properties || {};
+          if (typeof props === 'string') { try { props = JSON.parse(props); } catch (e) { props = {}; } }
+          var color = getSearchColor(type, props);
+          var iconHtml = poiIcon(type, props, 16);
+          var typeLabel = type.charAt(0).toUpperCase() + type.slice(1);
+          var lat = item.latitude, lon = item.longitude;
+          var coordsStr = lat != null && lon != null
+            ? (lat > 0 ? lat.toFixed(3) + '\u00b0N' : (-lat).toFixed(3) + '\u00b0S') + ' ' +
+              (lon > 0 ? lon.toFixed(3) + '\u00b0E' : (-lon).toFixed(3) + '\u00b0W')
+            : '';
+
+          html += '<div class="search-result-item" data-idx="' + i + '">' +
+            '<span class="search-result-icon" style="background:' + color + ';font-size:14px;line-height:1">' + iconHtml + '</span>' +
+            '<span class="search-result-name">' + highlightText(name, qLower) + '</span>' +
+            (typeLabel ? '<span class="search-result-type">' + typeLabel + '</span>' : '') +
+            '</div>';
+        }
+        if (items.length > 0) {
+          html += '<div class="search-status">' + items.length + ' result' + (items.length > 1 ? 's' : '') + '</div>';
+        }
+        searchResults.innerHTML = html;
+        searchResults.style.display = 'block';
+        searchActiveIdx = -1;
+
+        // Click handlers on result items
+        Array.prototype.forEach.call(searchResults.querySelectorAll('.search-result-item'), function (el) {
+          el.addEventListener('click', function () {
+            var idx = parseInt(this.dataset.idx, 10);
+            if (!isNaN(idx) && idx >= 0 && idx < searchItems.length) {
+              selectSearchItem(searchItems[idx]);
             }
-            resultsEl.style.display = 'none';
           });
-          resultsEl.appendChild(div);
+          el.addEventListener('mouseenter', function () {
+            var idx = parseInt(this.dataset.idx, 10);
+            if (!isNaN(idx)) {
+              searchActiveIdx = idx;
+              highlightActive();
+            }
+          });
         });
-        resultsEl.style.display = 'block';
       })
-      .catch(err => {
-        showToast('Search failed: ' + err.message, 'error');
+      .catch(function (err) {
+        searchResults.innerHTML = '<div class="search-empty">Search failed: ' + escapeHtml(err.message) + '</div>';
       });
   }
 
+  // Close results on click outside
   document.addEventListener('click', function (e) {
-    const el = document.getElementById('search-results');
     if (!e.target.closest('#search-panel')) {
-      el.style.display = 'none';
+      searchResults.style.display = 'none';
     }
   });
 
@@ -2375,6 +2643,336 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     const pane = document.getElementById('settings-panel');
     pane.classList.toggle('collapsed');
     this.textContent = pane.classList.contains('collapsed') ? '\u25c0' : '\u25b6';
+  });
+
+  // ---- Data Manager (download dialog) ----
+  var dmTabAvailable = document.getElementById('dm-tab-available');
+  var dmTabInstalled = document.getElementById('dm-tab-installed');
+  var dmList = document.getElementById('dm-list');
+  var dmInstalledList = document.getElementById('dm-installed-list');
+  var dmLoading = document.getElementById('dm-loading');
+  var dmInstalledLoading = document.getElementById('dm-installed-loading');
+  var dmError = document.getElementById('dm-error');
+  var dmFilter = document.getElementById('dm-filter');
+  var dmCanvas = document.getElementById('dm-map-canvas');
+  var dmAvailableRegions = []; // cached catalog regions
+  var dmInstalledRegions = []; // cached installed databases
+
+  function getCatalogUrl() {
+    return getApiBase() + '/signalk/v1/api/router/databases/available';
+  }
+
+  function getInstalledUrl() {
+    return getApiBase() + '/signalk/v1/api/router/databases';
+  }
+
+  var DM_COLORS = ['#3b8fd4','#22c55e','#f59e0b','#ef4444','#8b5cf6','#14b8a6','#ec4899','#f97316','#06b6d4','#a855f7'];
+
+  function dmRenderMiniMap(regions) {
+    var ctx = dmCanvas.getContext('2d');
+    var w = dmCanvas.width, h = dmCanvas.height;
+    ctx.clearRect(0, 0, w, h);
+    if (!regions || regions.length === 0) return;
+
+    // Determine world bounds from data (with padding)
+    var minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
+    for (var i = 0; i < regions.length; i++) {
+      var bb = regions[i].bounding_box;
+      if (!bb) continue;
+      if (bb.min_lat < minLat) minLat = bb.min_lat;
+      if (bb.max_lat > maxLat) maxLat = bb.max_lat;
+      if (bb.min_lon < minLon) minLon = bb.min_lon;
+      if (bb.max_lon > maxLon) maxLon = bb.max_lon;
+    }
+    if (minLat === 90) return;
+    var padLon = (maxLon - minLon) * 0.05 || 1;
+    var padLat = (maxLat - minLat) * 0.05 || 1;
+    minLon -= padLon; maxLon += padLon;
+    minLat -= padLat; maxLat += padLat;
+
+    function x(lon) { return (lon - minLon) / (maxLon - minLon) * w; }
+    function y(lat) { return h - (lat - minLat) / (maxLat - minLat) * h; }
+
+    // Draw land background (simple grid for reference)
+    ctx.strokeStyle = 'rgba(79,148,212,0.06)';
+    ctx.lineWidth = 0.5;
+    for (var lon = Math.ceil(minLon / 10) * 10; lon <= maxLon; lon += 10) {
+      ctx.beginPath(); ctx.moveTo(x(lon), 0); ctx.lineTo(x(lon), h); ctx.stroke();
+    }
+    for (var lat = Math.ceil(minLat / 10) * 10; lat <= maxLat; lat += 10) {
+      ctx.beginPath(); ctx.moveTo(0, y(lat)); ctx.lineTo(w, y(lat)); ctx.stroke();
+    }
+
+    // Draw region polygons or bboxes
+    for (var i = 0; i < regions.length; i++) {
+      var r = regions[i];
+      var color = DM_COLORS[i % DM_COLORS.length];
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.3;
+
+      var geom = r.boundary_geometry;
+      if (geom && geom.type === 'Polygon') {
+        ctx.beginPath();
+        var coords = geom.coordinates[0];
+        for (var j = 0; j < coords.length; j++) {
+          var px = x(coords[j][0]), py = y(coords[j][1]);
+          if (j === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      } else if (r.bounding_box) {
+        var bb = r.bounding_box;
+        ctx.fillRect(x(bb.min_lon), y(bb.max_lat), x(bb.max_lon) - x(bb.min_lon), y(bb.min_lat) - y(bb.max_lat));
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x(bb.min_lon), y(bb.max_lat), x(bb.max_lon) - x(bb.min_lon), y(bb.min_lat) - y(bb.max_lat));
+      }
+    }
+  }
+
+  function dmRenderAvailable(filterText) {
+    var regions = dmAvailableRegions;
+    if (!regions || regions.length === 0) {
+      dmLoading.textContent = 'No databases available in the catalog.';
+      dmLoading.style.display = '';
+      dmList.style.display = 'none';
+      return;
+    }
+
+    var filtered = regions;
+    if (filterText) {
+      var ft = filterText.toLowerCase();
+      filtered = regions.filter(function(r) {
+        return (r.country || '').toLowerCase().indexOf(ft) !== -1 ||
+               (r.name || '').toLowerCase().indexOf(ft) !== -1 ||
+               (r.tags || []).some(function(t) { return t.toLowerCase().indexOf(ft) !== -1; }) ||
+               (r.description || '').toLowerCase().indexOf(ft) !== -1;
+      });
+    }
+
+    dmLoading.style.display = 'none';
+    dmList.style.display = '';
+    dmList.innerHTML = '';
+
+    if (filtered.length === 0) {
+      dmList.innerHTML = '<div style="color:#6d96c0;font-size:13px;padding:12px 0;text-align:center">No regions match your filter.</div>';
+      return;
+    }
+
+    var CATALOG_BASE = 'https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/';
+
+    // Build a lookup of installed regions for update detection
+    var installedLookup = {};
+    for (var i = 0; i < dmInstalledRegions.length; i++) {
+      var ir = dmInstalledRegions[i];
+      installedLookup[ir.country + '|' + ir.name] = ir;
+    }
+
+    for (var i = 0; i < filtered.length; i++) {
+      var r = filtered[i];
+      var color = DM_COLORS[i % DM_COLORS.length];
+      var installed = installedLookup[r.country + '|' + r.name];
+      var needsUpdate = installed && installed.lastUpdateDate && r.last_update &&
+                        installed.lastUpdateDate < r.last_update;
+      var isSame = installed && installed.lastUpdateDate === r.last_update;
+      var sizeMb = (r.size_bytes / 1048576).toFixed(1);
+      var tags = (r.tags || []).map(function(t) { return '<span class="dm-region-tag">' + t + '</span>'; }).join('');
+
+      // Determine download URL: use the .sqlite.gz file from the catalog
+      var dlUrl = CATALOG_BASE + r.file;
+      // Inner filename is what the user sees / the plugin extracts to
+      var innerName = r.inner_filename || r.file.split('/').pop().replace(/\.gz$/, '');
+      var displayName = innerName;
+
+      var card = document.createElement('div');
+      card.className = 'dm-region-card';
+      card.innerHTML =
+        '<div class="dm-region-color" style="background:' + color + '"></div>' +
+        '<div class="dm-region-body">' +
+          '<div><span class="dm-region-name">' + (r.name || r.id) + '</span><span class="dm-region-country">' + (r.country || '') + '</span></div>' +
+          '<div class="dm-region-desc">' + (r.description || '') + '</div>' +
+          '<div class="dm-region-meta">' +
+            '<span>Updated: ' + (r.last_update ? r.last_update.slice(0,10) : 'unknown') + '</span>' +
+            '<span class="dm-size">' + sizeMb + ' MB' + (r.compression === 'gzip' ? ' (gz)' : '') + '</span>' +
+            (r.stats ? '<span>' + (r.stats.nodes || 0).toLocaleString() + ' nodes</span>' : '') +
+          '</div>' +
+          '<div style="margin-top:4px">' + tags + '</div>' +
+        '</div>' +
+        '<div class="dm-region-actions">' +
+          (needsUpdate
+            ? '<button class="dm-btn-update" data-url="' + dlUrl + '" data-filename="' + r.file.split('/').pop() + '">Update</button><span class="dm-update-badge">Newer</span>'
+            : isSame
+              ? '<button class="dm-btn-dl" disabled>Installed</button>'
+              : '<button class="dm-btn-dl" data-url="' + dlUrl + '" data-filename="' + r.file.split('/').pop() + '">Download</button>'
+          ) +
+        '</div>';
+      dmList.appendChild(card);
+    }
+
+    // Attach click handlers
+    dmList.querySelectorAll('.dm-btn-dl:not([disabled]), .dm-btn-update').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        dmStartDownload(btn.dataset.url, btn.dataset.filename, btn);
+      });
+    });
+  }
+
+  function dmRenderInstalled() {
+    var list = dmInstalledRegions;
+    dmInstalledLoading.style.display = 'none';
+    dmInstalledList.style.display = '';
+
+    if (!list || list.length === 0) {
+      dmInstalledList.innerHTML = '<div style="color:#6d96c0;font-size:13px;padding:12px 0;text-align:center">No routing databases are currently installed.</div>';
+      return;
+    }
+
+    dmInstalledList.innerHTML = '';
+    for (var i = 0; i < list.length; i++) {
+      var r = list[i];
+      var tags = (r.tags || []).map(function(t) { return '<span class="dm-region-tag">' + t + '</span>'; }).join('');
+      var card = document.createElement('div');
+      card.className = 'dm-installed-card';
+      card.innerHTML =
+        '<div style="display:flex;align-items:flex-start;justify-content:space-between">' +
+          '<div>' +
+            '<div><span class="dm-region-name">' + (r.name || 'Unknown') + '</span><span class="dm-region-country">' + (r.country || '') + '</span></div>' +
+            '<div class="dm-region-desc">' + (r.description || '') + '</div>' +
+            '<div class="dm-region-meta">' +
+              '<span>Updated: ' + (r.lastUpdateDate ? r.lastUpdateDate.slice(0,10) : 'unknown') + '</span>' +
+              '<span>' + (r.stats ? r.stats.nodes.toLocaleString() + ' nodes' : '') + '</span>' +
+              '<span>' + (r.stats ? r.stats.edges.toLocaleString() + ' edges' : '') + '</span>' +
+              '<span>' + (r.stats ? r.stats.pois.toLocaleString() + ' POIs' : '') + '</span>' +
+            '</div>' +
+            '<div style="margin-top:4px">' + tags + '</div>' +
+          '</div>' +
+        '</div>';
+      dmInstalledList.appendChild(card);
+    }
+  }
+
+  function dmStartDownload(url, filename, btn) {
+    if (!url || !filename) return;
+    btn.textContent = 'Downloading...';
+    btn.disabled = true;
+
+    showToast('Downloading ' + filename + '...', '');
+
+    fetch(getApiBase() + '/signalk/v1/api/router/databases/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url, filename: filename }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.success) {
+        btn.textContent = 'Installed';
+        btn.disabled = true;
+        showToast('Downloaded ' + filename + ' (' + (data.sizeBytes / 1048576).toFixed(1) + ' MB). Reload the plugin to use it.', 'success');
+        // Refresh installed list
+        dmFetchInstalled();
+      } else {
+        btn.textContent = 'Download';
+        btn.disabled = false;
+        showToast('Download failed: ' + (data.error || 'Unknown error'), 'error');
+      }
+    })
+    .catch(function(err) {
+      btn.textContent = 'Download';
+      btn.disabled = false;
+      showToast('Download failed: ' + err.message, 'error');
+    });
+  }
+
+  function dmFetchAvailable() {
+    dmLoading.style.display = '';
+    dmList.style.display = 'none';
+    dmError.style.display = 'none';
+
+    fetch(getCatalogUrl(), { signal: AbortSignal.timeout(15000) })
+      .then(function(r) {
+        if (!r.ok) throw new Error('Server returned ' + r.status);
+        return r.json();
+      })
+      .then(function(catalog) {
+        dmAvailableRegions = catalog.regions || [];
+        dmRenderMiniMap(dmAvailableRegions);
+        dmRenderAvailable(dmFilter.value);
+      })
+      .catch(function(err) {
+        dmLoading.style.display = 'none';
+        dmError.style.display = '';
+        dmError.textContent = 'Failed to fetch database catalog: ' + err.message;
+      });
+  }
+
+  function dmFetchInstalled() {
+    dmInstalledLoading.style.display = '';
+    dmInstalledList.style.display = 'none';
+
+    fetch(getInstalledUrl(), { signal: AbortSignal.timeout(10000) })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(data) {
+        dmInstalledRegions = data && data.databases ? data.databases : [];
+        dmRenderInstalled();
+        // Re-render available with update info if available already loaded
+        if (dmAvailableRegions.length > 0) dmRenderAvailable(dmFilter.value);
+      })
+      .catch(function() {
+        dmInstalledLoading.style.display = 'none';
+        dmInstalledList.style.display = '';
+        dmInstalledList.innerHTML = '<div style="color:#e07070;font-size:13px;padding:12px;background:rgba(200,70,70,0.1);border-radius:6px">Failed to load installed databases.</div>';
+      });
+  }
+
+  // Modal open/close
+  document.getElementById('manage-data-btn').addEventListener('click', function() {
+    document.getElementById('data-manager-modal').style.display = '';
+    dmFetchAvailable();
+    dmFetchInstalled();
+  });
+
+  function dmClose() {
+    document.getElementById('data-manager-modal').style.display = 'none';
+  }
+  document.getElementById('dm-close').addEventListener('click', dmClose);
+  document.getElementById('dm-backdrop').addEventListener('click', dmClose);
+
+  // Tab switching
+  document.querySelectorAll('.dm-tab').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      document.querySelectorAll('.dm-tab').forEach(function(t) {
+        t.className = 'dm-tab';
+        t.style.borderBottomColor = 'transparent';
+        t.style.color = '#6d96c0';
+        t.style.fontWeight = '500';
+      });
+      this.className = 'dm-tab dm-tab-active';
+      this.style.borderBottomColor = '#3b8fd4';
+      this.style.color = '#e0edf5';
+      this.style.fontWeight = '600';
+
+      var tabName = this.dataset.tab;
+      document.getElementById('dm-tab-available').style.display = tabName === 'available' ? '' : 'none';
+      document.getElementById('dm-tab-installed').style.display = tabName === 'installed' ? '' : 'none';
+    });
+  });
+
+  // Filter
+  dmFilter.addEventListener('input', function() {
+    dmRenderAvailable(this.value);
+  });
+
+  // Keyboard: Escape to close
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && document.getElementById('data-manager-modal').style.display !== 'none') {
+      dmClose();
+    }
   });
 
   // ---- expose state for debugging ----

@@ -187,6 +187,12 @@ export function pluginConstructor(app: ServerAPI) {
             description: 'Radius to search for graph nodes when verifying line-of-sight',
             default: DEFAULT_CONFIG.lineOfSightSearchRadius,
           },
+          catalogUrl: {
+            type: 'string',
+            title: 'Database Catalog URL',
+            description: 'URL to the index.json catalog for downloading routing databases',
+            default: DEFAULT_CONFIG.catalogUrl,
+          },
         },
       };
     },

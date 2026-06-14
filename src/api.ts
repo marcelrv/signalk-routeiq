@@ -4,6 +4,9 @@
  */
 
 import crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as zlib from 'node:zlib';
 import { ServerAPI } from '@signalk/server-api';
 import { NextFunction, Request, Response, Router } from 'express';
 import { RoutingDatabase } from './database.js';
@@ -86,6 +89,15 @@ export class ApiHandler {
 
     // GET /signalk/v1/api/router/waterways?bbox=minLon,minLat,maxLon,maxLat
     this.router.get('/waterways', this.handleWaterways.bind(this));
+
+    // GET /signalk/v1/api/router/databases — list locally installed databases
+    this.router.get('/databases', this.handleListDatabases.bind(this));
+
+    // GET /signalk/v1/api/router/databases/available — fetch remote catalog
+    this.router.get('/databases/available', this.handleAvailableDatabases.bind(this));
+
+    // POST /signalk/v1/api/router/databases/download — download a database file
+    this.router.post('/databases/download', this.handleDownloadDatabase.bind(this));
   }
 
   /**
@@ -148,9 +160,9 @@ export class ApiHandler {
       const query = req.query.q as string;
       const limit = parseInt(req.query.limit as string) || 20;
 
-      if (!query || query.length < 2) {
+      if (!query || query.length < 1) {
         res.status(400).json({
-          error: 'Search query parameter "q" is required (minimum 2 characters)',
+          error: 'Search query parameter "q" is required (minimum 1 character)',
         });
         return;
       }
@@ -444,6 +456,109 @@ export class ApiHandler {
       const message = error instanceof Error ? error.message : 'Unknown error';
       console.error('[autoroute] waterways error:', error);
       res.status(500).json({ error: message });
+      next(error);
+    }
+  }
+
+  /**
+   * Handle list locally installed databases
+   * GET /signalk/v1/api/router/databases
+   */
+  private async handleListDatabases(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.db) {
+      res.status(503).json({ error: 'Database not ready' });
+      return;
+    }
+    try {
+      const info = await this.db.getDatabaseInfo();
+      res.json({ databases: info });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: message });
+      next(error);
+    }
+  }
+
+  /**
+   * Handle fetch available databases from remote catalog
+   * GET /signalk/v1/api/router/databases/available
+   */
+  private async handleAvailableDatabases(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const catalogUrl = this.config.catalogUrl;
+      if (!catalogUrl) {
+        res.status(400).json({ error: 'No catalog URL configured' });
+        return;
+      }
+      const response = await fetch(catalogUrl, { signal: AbortSignal.timeout(15000) });
+      if (!response.ok) {
+        res.status(502).json({ error: `Catalog server returned ${response.status}` });
+        return;
+      }
+      const catalog = await response.json();
+      res.json(catalog);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(502).json({ error: `Failed to fetch catalog: ${message}` });
+      next(error);
+    }
+  }
+
+  /**
+   * Handle download a database file from a URL and save to data directory.
+   * If the download is a .sqlite.gz file, it is automatically decompressed.
+   * POST /signalk/v1/api/router/databases/download
+   * Body: { url: string, filename: string }
+   */
+  private async handleDownloadDatabase(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { url, filename } = req.body;
+      if (!url || !filename) {
+        res.status(400).json({ error: 'Missing required fields: url, filename' });
+        return;
+      }
+
+      const dataDir = this.config.routingDataDir;
+      if (!dataDir) {
+        res.status(400).json({ error: 'routingDataDir is not configured' });
+        return;
+      }
+
+      // Ensure data directory exists
+      try { fs.mkdirSync(dataDir, { recursive: true }); } catch { /* ignore */ }
+
+      console.log(`[autoroute] Downloading database: ${url}`);
+      const response = await fetch(url, { signal: AbortSignal.timeout(120000) });
+      if (!response.ok) {
+        res.status(502).json({ error: `Download failed: server returned ${response.status}` });
+        return;
+      }
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+
+      // If the downloaded file is .sqlite.gz, decompress it
+      let saveFilename = filename;
+      let saveBuffer = buffer;
+      if (filename.endsWith('.sqlite.gz')) {
+        saveFilename = filename.slice(0, -3); // strip .gz
+        saveBuffer = zlib.gunzipSync(buffer);
+        console.log(`[autoroute] Decompressed ${filename} -> ${saveFilename} (${buffer.length} -> ${saveBuffer.length} bytes)`);
+      }
+
+      const destPath = path.join(dataDir, saveFilename);
+      fs.writeFileSync(destPath, saveBuffer);
+
+      console.log(`[autoroute] Database saved: ${saveFilename} (${saveBuffer.length} bytes)`);
+      res.json({
+        success: true,
+        filename: saveFilename,
+        sizeBytes: saveBuffer.length,
+        message: `Downloaded ${saveFilename} (${(saveBuffer.length / 1048576).toFixed(1)} MB)`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.error('[autoroute] Database download error:', error);
+      res.status(500).json({ error: `Download failed: ${message}` });
       next(error);
     }
   }

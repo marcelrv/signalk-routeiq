@@ -140,8 +140,9 @@ export interface PluginConfig {
   routingBBoxMargin: number;        // degrees, default 0.1 (~11km)
   routingBBoxMaxExtent: number;     // degrees, default 10.0
   lineOfSightSampleInterval: number; // meters, default 500
-  lineOfSightSearchRadius: number;   // meters, default 800
+  lineOfSightSearchRadius: number; // meters, default 800
   averageSpeedKnots: number;        // knots, default 6.0
+  catalogUrl: string;               // URL to the index.json catalog for downloadable databases
 }
 
 // Default plugin configuration
@@ -159,4 +160,5 @@ export const DEFAULT_CONFIG: PluginConfig = {
   lineOfSightSampleInterval: 500,
   lineOfSightSearchRadius: 800,
   averageSpeedKnots: 6.0,
+  catalogUrl: 'https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/index.json',
 };

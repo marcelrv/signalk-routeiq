@@ -47,45 +47,128 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   outline: none;
 }
 
-/* ---------- search (top-left) ---------- */
-#search-panel { top: 20px; left: 70px; }
-#search-row { display: flex; gap: 6px; }
+/* ---------- search (top-left, minimal) ---------- */
+#search-panel {
+  position: absolute;
+  top: 20px;
+  left: 70px;
+  z-index: 1002;
+  width: 340px;
+  max-width: calc(100vw - 90px);
+}
+#search-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
 #search-input {
-  flex: 1;
-  background: rgba(255,255,255,0.07);
-  border: 1px solid rgba(79,148,212,0.4);
-  border-radius: 6px;
-  padding: 8px 11px;
+  width: 100%;
+  background: rgba(11, 26, 43, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1.5px solid rgba(79, 148, 212, 0.3);
+  border-radius: 24px;
+  padding: 10px 40px 10px 18px;
   color: #e0edf5;
-  font-size: 13px;
-  min-width: 160px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
 }
-#search-input::placeholder { color: #5f7a9a; }
-#search-btn {
-  background: #1f6391;
-  border: none;
-  border-radius: 6px;
-  padding: 8px 14px;
-  color: #fff;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s;
+#search-input:focus {
+  border-color: rgba(79, 148, 212, 0.7);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(79, 148, 212, 0.15);
 }
-#search-btn:hover { background: #287bb5; }
+#search-input::placeholder { color: #5f7a9a; font-size: 13px; }
+#search-icon {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #5f7a9a;
+  font-size: 15px;
+  pointer-events: none;
+  transition: color 0.2s;
+}
+#search-input:focus ~ #search-icon { color: #7ab8f0; }
 #search-results {
-  margin-top: 8px;
-  max-height: 180px;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 320px;
   overflow-y: auto;
   display: none;
+  background: rgba(11, 26, 43, 0.92);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(79, 148, 212, 0.2);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  padding: 4px 0;
 }
 .search-result-item {
-  padding: 6px 8px;
-  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
   cursor: pointer;
-  transition: background 0.12s;
+  transition: background 0.1s;
+  font-size: 13px;
+  color: #c8dcee;
+  border-left: 2px solid transparent;
+}
+.search-result-item:first-of-type { margin-top: 2px; }
+.search-result-item:last-of-type { margin-bottom: 2px; }
+.search-result-item:hover,
+.search-result-item.active {
+  background: rgba(79, 148, 212, 0.12);
+  border-left-color: #3b8fd4;
+}
+.search-result-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 13px;
+  border: 1.5px solid #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+  flex-shrink: 0;
+  line-height: 1;
+}
+.search-result-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-result-name mark {
+  background: rgba(59, 143, 212, 0.3);
+  color: #7ab8f0;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.search-result-type {
+  font-size: 10px;
+  color: #5f7a9a;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+.search-empty {
+  padding: 16px;
+  text-align: center;
+  color: #5f7a9a;
   font-size: 12px;
 }
-.search-result-item:hover { background: rgba(79,148,212,0.25); }
+.search-status {
+  padding: 8px 14px;
+  text-align: center;
+  color: #4a6a8a;
+  font-size: 11px;
+  border-top: 1px solid rgba(79,148,212,0.1);
+}
 
 /* ---------- info (below search) ---------- */
 #info-panel { top: 100px; left: 70px; min-width: 240px; }
@@ -230,11 +313,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 <div id="map"></div>
 
 <!-- Search -->
-<div id="search-panel" class="panel">
-  <div class="panel-title">Search POI</div>
+<div id="search-panel">
   <div id="search-row">
-    <input id="search-input" type="text" placeholder="harbour, waypoint, ..." />
-    <button id="search-btn">Go</button>
+    <input id="search-input" type="text" placeholder="Search harbours, locks, bridges..." autocomplete="off" autocorrect="off" spellcheck="false" />
+    <span id="search-icon">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="7.5"/><line x1="16" y1="16" x2="22" y2="22"/></svg>
+    </span>
   </div>
   <div id="search-results"></div>
 </div>
@@ -455,6 +539,20 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         }
       })
       .catch(() => {});
+  }
+
+  function poiIcon(type, props, size) {
+    size = size || 22;
+    if (type === 'bridge') {
+      if (props && props.subtype === 'opening') {
+        return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 22 22"><line x1="3" y1="11" x2="7" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="9.7" y2="3.5" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="19" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="7" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="15" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>';
+      }
+      return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 22 22"><line x1="3" y1="11" x2="19" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="7" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="15" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>';
+    }
+    if (type === 'lock') {
+      return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 22 22"><line x1="3" y1="8" x2="3" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="3" y1="18" x2="19" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="19" y1="8" x2="19" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><polyline points="8,14 11,16 14,14" stroke="white" stroke-width="1.5" fill="none" stroke-linejoin="round"/><line x1="11" y1="14" x2="11" y2="10" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>';
+    }
+    return ({ harbour: '⚓', fairway: '⛵', waterway: '💧' }[type] || '📍');
   }
 
   function fetchWater() {
@@ -1070,68 +1168,181 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     updateInfo();
   });
 
-  // ---- search ----
-  document.getElementById('search-btn').addEventListener('click', doSearch);
-  document.getElementById('search-input').addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') doSearch();
+  function escapeHtml(str) {
+    if (!str) return '';
+    const div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+  }
+
+  // ---- search (real-time, with icons, keyboard nav) ----
+  const SEARCH_TYPE_COLORS = { harbour: '#3b8fd4', lock: '#f59e0b', bridge: '#ef4444', fairway: '#8b5cf6', waterway: '#14b8a6' };
+  const SEARCH_SUBTYPE_COLORS = { bridge: { opening: '#22c55e', fixed: '#ef4444' } };
+
+  let searchDebounceTimer = null;
+  let searchActiveIdx = -1;
+  let searchItems = [];
+
+  const searchInput = document.getElementById('search-input');
+  const searchResults = document.getElementById('search-results');
+
+  function getSearchColor(type, props) {
+    const sub = SEARCH_SUBTYPE_COLORS[type];
+    if (sub && props && props.subtype && sub[props.subtype]) return sub[props.subtype];
+    return SEARCH_TYPE_COLORS[type] || '#6d96c0';
+  }
+
+  function highlightText(text, query) {
+    if (!query) return escapeHtml(text);
+    const re = new RegExp('(' + query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+    return escapeHtml(text).replace(re, '<mark>$1</mark>');
+  }
+
+  searchInput.addEventListener('input', function () {
+    const q = this.value.trim();
+    clearTimeout(searchDebounceTimer);
+    if (q.length < 2) {
+      searchResults.style.display = 'none';
+      searchResults.innerHTML = '';
+      searchItems = [];
+      return;
+    }
+    searchDebounceTimer = setTimeout(function () { doSearch(q); }, 250);
   });
 
-  function doSearch() {
-    const q = document.getElementById('search-input').value.trim();
-    if (!q) return;
+  searchInput.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (searchItems.length === 0) return;
+      searchActiveIdx = Math.min(searchActiveIdx + 1, searchItems.length - 1);
+      highlightActive();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (searchItems.length === 0) return;
+      searchActiveIdx = Math.max(searchActiveIdx - 1, 0);
+      highlightActive();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (searchActiveIdx >= 0 && searchActiveIdx < searchItems.length) {
+        selectSearchItem(searchItems[searchActiveIdx]);
+      } else {
+        doSearch(searchInput.value.trim());
+      }
+    } else if (e.key === 'Escape') {
+      searchResults.style.display = 'none';
+      searchInput.blur();
+    }
+  });
 
-    const resultsEl = document.getElementById('search-results');
-    resultsEl.style.display = 'none';
-    resultsEl.innerHTML = '';
+  searchInput.addEventListener('focus', function () {
+    if (searchItems.length > 0 && searchInput.value.trim().length >= 2) {
+      searchResults.style.display = 'block';
+    }
+  });
+
+  function highlightActive() {
+    const items = searchResults.querySelectorAll('.search-result-item');
+    items.forEach(function (el, i) {
+      el.classList.toggle('active', i === searchActiveIdx);
+    });
+    if (searchActiveIdx >= 0) {
+      const active = items[searchActiveIdx];
+      if (active) active.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function selectSearchItem(item) {
+    const pos = { lat: item.latitude, lng: item.longitude };
+    if (pos && pos.lat != null && pos.lng != null) {
+      map.setView([pos.lat, pos.lng], 12);
+      const ll = L.latLng(pos.lat, pos.lng);
+      const name = item.name || 'POI';
+      state.startLatLng = ll;
+      state.waypointNext = 'start';
+      applyWaypoints();
+    }
+    searchResults.style.display = 'none';
+    searchInput.blur();
+  }
+
+  function doSearch(q) {
+    if (!q || q.length < 2) return;
+    searchActiveIdx = -1;
+    searchResults.style.display = 'none';
+    searchResults.innerHTML = '<div class="search-empty">Searching...</div>';
+    searchResults.style.display = 'block';
 
     const searchQ = searchUrl() + '?q=' + encodeURIComponent(q);
     logDebug('SEARCH', searchQ);
     fetch(searchQ)
-      .then(r => {
+      .then(function (r) {
         logDebug('SEARCH', searchQ, undefined, r);
         if (!r.ok) throw new Error('Search error ' + r.status);
         return r.json();
       })
-      .then(data => {
-        const items = Array.isArray(data) ? data : (data.features || []);
+      .then(function (data) {
+        const items = Array.isArray(data) ? data : (data.results || []);
+        searchItems = items;
+        const qLower = q.toLowerCase();
+
         if (items.length === 0) {
-          showToast('No results found', 'error');
+          searchResults.innerHTML = '<div class="search-empty">No results found for "' + escapeHtml(q) + '"</div>';
           return;
         }
-        resultsEl.innerHTML = '';
-        items.forEach(function (item) {
-          const coords = item.geometry &&
-            (item.geometry.coordinates || (item.geometry.type === 'Point' ? null : null));
-          const pos = coords ? { lat: coords[1], lng: coords[0] } :
-            (item.position || item.latlng || item.center);
-          const name = item.properties?.name || item.name || item.label || 'POI';
-          const div = document.createElement('div');
-          div.className = 'search-result-item';
-          div.textContent = pos
-            ? name + ' (' + pos.lat.toFixed(3) + ', ' + pos.lng.toFixed(3) + ')'
-            : name;
-          div.addEventListener('click', function () {
-            if (pos) {
-              map.setView([pos.lat, pos.lng], 12);
-              state.destLatLng = L.latLng(pos.lat, pos.lng);
-              state.waypointNext = 'start';
-              applyWaypoints();
+
+        var html = '';
+        for (var i = 0; i < items.length; i++) {
+          var item = items[i];
+          var name = item.name || 'POI';
+          var type = item.type || '';
+          var props = item.properties || {};
+          if (typeof props === 'string') { try { props = JSON.parse(props); } catch (e) { props = {}; } }
+          var color = getSearchColor(type, props);
+          var iconHtml = poiIcon(type, props, 16);
+          var typeLabel = type.charAt(0).toUpperCase() + type.slice(1);
+          var lat = item.latitude, lon = item.longitude;
+          var coordsStr = lat != null && lon != null
+            ? (lat > 0 ? lat.toFixed(3) + '\u00b0N' : (-lat).toFixed(3) + '\u00b0S') + ' ' +
+              (lon > 0 ? lon.toFixed(3) + '\u00b0E' : (-lon).toFixed(3) + '\u00b0W')
+            : '';
+
+          html += '<div class="search-result-item" data-idx="' + i + '">' +
+            '<span class="search-result-icon" style="background:' + color + ';font-size:14px;line-height:1">' + iconHtml + '</span>' +
+            '<span class="search-result-name">' + highlightText(name, qLower) + '</span>' +
+            (typeLabel ? '<span class="search-result-type">' + typeLabel + '</span>' : '') +
+            '</div>';
+        }
+        if (items.length > 0) {
+          html += '<div class="search-status">' + items.length + ' result' + (items.length > 1 ? 's' : '') + '</div>';
+        }
+        searchResults.innerHTML = html;
+        searchResults.style.display = 'block';
+        searchActiveIdx = -1;
+
+        Array.prototype.forEach.call(searchResults.querySelectorAll('.search-result-item'), function (el) {
+          el.addEventListener('click', function () {
+            var idx = parseInt(this.dataset.idx, 10);
+            if (!isNaN(idx) && idx >= 0 && idx < searchItems.length) {
+              selectSearchItem(searchItems[idx]);
             }
-            resultsEl.style.display = 'none';
           });
-          resultsEl.appendChild(div);
+          el.addEventListener('mouseenter', function () {
+            var idx = parseInt(this.dataset.idx, 10);
+            if (!isNaN(idx)) {
+              searchActiveIdx = idx;
+              highlightActive();
+            }
+          });
         });
-        resultsEl.style.display = 'block';
       })
-      .catch(err => {
-        showToast('Search failed: ' + err.message, 'error');
+      .catch(function (err) {
+        searchResults.innerHTML = '<div class="search-empty">Search failed: ' + escapeHtml(err.message) + '</div>';
       });
   }
 
   document.addEventListener('click', function (e) {
-    const el = document.getElementById('search-results');
     if (!e.target.closest('#search-panel')) {
-      el.style.display = 'none';
+      searchResults.style.display = 'none';
     }
   });
 

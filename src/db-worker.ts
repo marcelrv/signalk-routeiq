@@ -106,14 +106,43 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         break;
       }
       case 'getMetadata': {
-        const results: Array<{ id: number; country: string; name: string; description: string | null; lastUpdateDate: string }> = [];
+        const results: Array<{
+          id: number; country: string; name: string; description: string | null;
+          lastUpdateDate: string; tags: string | null; boundingBox: string | null;
+          boundaryGeometry: string | null; schemaVersion: number | null;
+          contributor: string | null; url: string | null;
+        }> = [];
         for (const db of dbs) {
           try {
-            const rows = db.prepare('SELECT id, country, name, description, last_update_date FROM metadata ORDER BY id').all() as Array<{
-              id: number; country: string; name: string; description: string | null; last_update_date: string;
-            }>;
+            const metaCols = db.prepare("PRAGMA table_info('metadata')").all() as Array<{ name: string }>;
+            const colNames = new Set(metaCols.map(c => c.name));
+            const hasTags = colNames.has('tags');
+            const hasBbox = colNames.has('bounding_box');
+            const hasBoundary = colNames.has('boundary_geometry');
+            const hasSchemaVer = colNames.has('schema_version');
+            const hasContributor = colNames.has('contributor');
+            const hasUrl = colNames.has('url');
+
+            const sql = `SELECT id, country, name, description, last_update_date,
+              ${hasTags ? 'tags' : 'NULL AS tags'},
+              ${hasBbox ? 'bounding_box' : 'NULL AS bounding_box'},
+              ${hasBoundary ? 'boundary_geometry' : 'NULL AS boundary_geometry'},
+              ${hasSchemaVer ? 'schema_version' : 'NULL AS schema_version'},
+              ${hasContributor ? 'contributor' : "'' AS contributor"},
+              ${hasUrl ? 'url' : "'' AS url"}
+              FROM metadata ORDER BY id`;
+            const rows = db.prepare(sql).all() as Array<any>;
             for (const r of rows) {
-              results.push({ id: r.id, country: r.country, name: r.name, description: r.description, lastUpdateDate: r.last_update_date });
+              results.push({
+                id: r.id, country: r.country, name: r.name, description: r.description,
+                lastUpdateDate: r.last_update_date,
+                tags: r.tags ?? null,
+                boundingBox: r.bounding_box ?? null,
+                boundaryGeometry: r.boundary_geometry ?? null,
+                schemaVersion: r.schema_version ?? null,
+                contributor: r.contributor ?? null,
+                url: r.url ?? null,
+              });
             }
           } catch {
             // metadata table might not exist in legacy DBs

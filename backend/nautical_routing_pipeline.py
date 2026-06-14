@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 import networkx as nx
-from shapely.geometry import Point, LineString, Polygon
+from shapely.geometry import Point, LineString, Polygon, MultiPoint
 from pyproj import Geod
 
 def _s57_col(attrs, *candidates):
@@ -266,7 +266,8 @@ def _is_entry_prohibited(row):
 
 class NauticalRoutingPipeline:
     def __init__(self, data_paths: Dict[str, str], db_path: str,
-                 country: str = '', region_name: str = '', description: str = ''):
+                 country: str = '', region_name: str = '', description: str = '',
+                 tags: Optional[str] = None, contributor: str = '', url: str = ''):
         """
         Initializes the pipeline for generating a nautical routing graph.
         
@@ -275,12 +276,18 @@ class NauticalRoutingPipeline:
         :param country: ISO country code (e.g., 'NL', 'BE') for the metadata table.
         :param region_name: Human-readable region name (e.g., 'Netherlands').
         :param description: Optional description of the data coverage.
+        :param tags: JSON array of tag strings (e.g., '["official","rws","enc"]').
+        :param contributor: GitHub username or organization that contributed this data.
+        :param url: Source URL for the original data.
         """
         self.data_paths = data_paths
         self.db_path = db_path
         self.country = country
         self.region_name = region_name or country
         self.description = description
+        self.tags = tags or '[]'
+        self.contributor = contributor
+        self.url = url
         
         # Geodetic calculator for accurate WGS84 distance measurements (meters)
         self.geod = Geod(ellps="WGS84")
@@ -1269,6 +1276,41 @@ class NauticalRoutingPipeline:
 
         logger.info(f"  Edge attributes merged: {merged}/{total_edges}")
 
+    def _compute_boundary_geometry(self) -> Tuple[str, str]:
+        """Compute bounding box and convex hull boundary from graph nodes.
+
+        Returns (bounding_box_json, boundary_geometry_json).
+        If the graph has fewer than 3 nodes, returns the point/line as a polygon.
+        """
+        nodes = [(data['lon'], data['lat'])
+                 for _, data in self.graph.nodes(data=True)]
+        if not nodes:
+            empty = json.dumps({"type": "Polygon", "coordinates": [[[0, 0], [0, 0], [0, 0], [0, 0]]]})
+            return (json.dumps({"min_lat": 0, "min_lon": 0, "max_lat": 0, "max_lon": 0}), empty)
+
+        lons, lats = zip(*nodes)
+        bbox = json.dumps({
+            "min_lat": min(lats), "min_lon": min(lons),
+            "max_lat": max(lats), "max_lon": max(lons)
+        })
+
+        if len(nodes) < 3:
+            poly = Polygon([(min(lons), min(lats)), (min(lons), max(lats)),
+                            (max(lons), max(lats)), (max(lons), min(lats)),
+                            (min(lons), min(lats))])
+        else:
+            points = [Point(lon, lat) for lon, lat in nodes]
+            hull = MultiPoint(points).convex_hull
+            if isinstance(hull, (Point, LineString)):
+                poly = Polygon([(min(lons), min(lats)), (min(lons), max(lats)),
+                                (max(lons), max(lats)), (max(lons), min(lats)),
+                                (min(lons), min(lats))])
+            else:
+                poly = hull
+
+        geom_json = json.dumps(poly.__geo_interface__)
+        return (bbox, geom_json)
+
     def export_to_sqlite(self):
         """Exports the nodes, edges, and POIs to a highly compressed SQLite Database."""
         logger.info(f"Exporting data to SQLite database at '{self.db_path}'...")
@@ -1283,10 +1325,16 @@ class NauticalRoutingPipeline:
             cursor.executescript("""
                 CREATE TABLE metadata (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    country TEXT NOT NULL UNIQUE,
+                    country TEXT NOT NULL,
                     name TEXT NOT NULL,
                     description TEXT,
-                    last_update_date TEXT NOT NULL
+                    last_update_date TEXT NOT NULL,
+                    tags TEXT DEFAULT '[]',
+                    bounding_box TEXT,
+                    boundary_geometry TEXT,
+                    schema_version INTEGER DEFAULT 2,
+                    contributor TEXT DEFAULT '',
+                    url TEXT DEFAULT ''
                 );
                 
                 CREATE TABLE nodes (
@@ -1335,9 +1383,14 @@ class NauticalRoutingPipeline:
             
             # Insert metadata row
             now_utc = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            bbox_json, boundary_json = self._compute_boundary_geometry()
             cursor.execute(
-                "INSERT INTO metadata (country, name, description, last_update_date) VALUES (?, ?, ?, ?)",
-                (self.country, self.region_name, self.description, now_utc)
+                """INSERT INTO metadata
+                   (country, name, description, last_update_date, tags, bounding_box, boundary_geometry, schema_version, contributor, url)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (self.country, self.region_name, self.description, now_utc,
+                 self.tags, bbox_json, boundary_json, 2,
+                 self.contributor, self.url)
             )
             region_id = cursor.lastrowid
             
@@ -1460,6 +1513,12 @@ if __name__ == "__main__":
                         help="Human-readable region name (e.g., Netherlands)")
     parser.add_argument("--description", default="",
                         help="Optional description of the data coverage")
+    parser.add_argument("--tags", default="[]",
+                        help='JSON array of tags, e.g. \'["official","rws","enc"]\'')
+    parser.add_argument("--contributor", default="",
+                        help="GitHub username or organization that contributed this data")
+    parser.add_argument("--url", default="",
+                        help="Source URL for the original data")
     args = parser.parse_args()
 
     data_sources = {
@@ -1480,6 +1539,8 @@ if __name__ == "__main__":
 
     pipeline = NauticalRoutingPipeline(data_paths=data_sources, db_path=args.output,
                                        country=args.country, region_name=args.name,
-                                       description=args.description)
+                                       description=args.description,
+                                       tags=args.tags, contributor=args.contributor,
+                                       url=args.url)
     pipeline.run_pipeline()
 

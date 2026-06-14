@@ -146,8 +146,31 @@ export class RoutingDatabase {
     return this.hasRegionId ? 'region_id' : '0 AS region_id';
   }
 
-  async getMetadata(): Promise<Array<{ id: number; country: string; name: string; description: string | null; lastUpdateDate: string }>> {
+  async getMetadata(): Promise<Array<{
+    id: number; country: string; name: string; description: string | null;
+    lastUpdateDate: string; tags: string | null; boundingBox: string | null;
+    boundaryGeometry: string | null; schemaVersion: number | null;
+    contributor: string | null; url: string | null;
+  }>> {
     return this.sendMessage('getMetadata');
+  }
+
+  async getDatabaseInfo(): Promise<Array<{
+    id: number; country: string; name: string; description: string | null;
+    lastUpdateDate: string; tags: string[]; boundingBox: { min_lat: number; min_lon: number; max_lat: number; max_lon: number } | null;
+    boundaryGeometry: any | null; schemaVersion: number | null;
+    contributor: string | null; url: string | null;
+    stats: { nodes: number; edges: number; pois: number };
+  }>> {
+    const meta = await this.getMetadata();
+    const stats = await this.getStats();
+    return meta.map(m => ({
+      ...m,
+      tags: m.tags ? JSON.parse(m.tags) : [],
+      boundingBox: m.boundingBox ? JSON.parse(m.boundingBox) : null,
+      boundaryGeometry: m.boundaryGeometry ? JSON.parse(m.boundaryGeometry) : null,
+      stats: { nodes: stats.nodes, edges: stats.edges, pois: stats.pois },
+    }));
   }
 
   private crossesLandCol(): string {
