@@ -56,7 +56,7 @@ export class GpxExporter {
 
     return {
       name,
-      description: \`Route calculated by SignalK Autoroute Nautical Route Planner - Distance: \${totalDistance.toFixed(0)}m\`,
+      description: `Route calculated by SignalK Autoroute Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m`,
       distance: totalDistance,
       feature: {
         type: 'Feature',

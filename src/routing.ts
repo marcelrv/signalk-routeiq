@@ -124,6 +124,10 @@ export class RoutingEngine {
     this.vesselDimensions = { ...this.vesselDimensions, ...dimensions };
   }
 
+  get vesselDims(): VesselDimensions {
+    return { ...this.vesselDimensions };
+  }
+
   /**
    * Calculate a route using directed A* algorithm with bounding-box pruning.
    * Falls back to partial routing when the route cannot be completed

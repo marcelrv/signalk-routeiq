@@ -69,6 +69,28 @@ export function pluginConstructor(app: ServerAPI) {
         console.log('[autoroute] API handler created (awaiting database init)');
       }
 
+      // Set hot-reload callback: when a new database is downloaded, re-init everything
+      apiHandler.onReloadRequested = async (dataDir: string) => {
+        const currentDims = routingEngine?.vesselDims;
+        if (database) {
+          await database.close();
+          database = null;
+        }
+        routingEngine = null;
+
+        database = new RoutingDatabase(dataDir);
+        await database.init();
+        await database.loadGraph();
+        const stats = await database.getStats();
+        console.log(`[autoroute] Database hot-reloaded: ${stats.nodes} nodes, ${stats.edges} edges, ${stats.pois} POIs`);
+
+        routingEngine = new RoutingEngine(database, config, currentDims);
+        if (apiHandler) {
+          apiHandler.setComponents(database, routingEngine);
+        }
+        console.log('[autoroute] Routing engine hot-reloaded after database download');
+      };
+
       // Re-initialize database/routing engine with (possibly updated) config
       initPluginAsync(app);
     },

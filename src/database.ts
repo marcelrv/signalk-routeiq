@@ -69,6 +69,12 @@ export class RoutingDatabase {
   private hasCrossesObstacle: boolean = false;
   private hasNodeDepth: boolean = false;
   private hasRegionId: boolean = false;
+  private metadataCache: Array<{
+    id: number; country: string; name: string; description: string | null;
+    lastUpdateDate: string; tags: string | null; boundingBox: string | null;
+    boundaryGeometry: string | null; schemaVersion: number | null;
+    contributor: string | null; url: string | null;
+  }> = [];
 
   constructor(dbDir: string) {
     this.dbDir = dbDir;
@@ -162,7 +168,7 @@ export class RoutingDatabase {
     contributor: string | null; url: string | null;
     stats: { nodes: number; edges: number; pois: number };
   }>> {
-    const meta = await this.getMetadata();
+    const meta = this.metadataCache.length > 0 ? this.metadataCache : await this.getMetadata();
     const stats = await this.getStats();
     return meta.map(m => ({
       ...m,
@@ -171,6 +177,62 @@ export class RoutingDatabase {
       boundaryGeometry: m.boundaryGeometry ? JSON.parse(m.boundaryGeometry) : null,
       stats: { nodes: stats.nodes, edges: stats.edges, pois: stats.pois },
     }));
+  }
+
+  /**
+   * Re-scan the data directory for .sqlite files and refresh metadata cache.
+   * Used after downloading a new database to show it in the installed list without restart.
+   */
+  async reloadMetadata(): Promise<void> {
+    let files: string[];
+    try {
+      files = readdirSync(this.dbDir).filter(f => f.endsWith('.sqlite'));
+    } catch {
+      this.metadataCache = [];
+      return;
+    }
+    if (files.length === 0) {
+      this.metadataCache = [];
+      return;
+    }
+
+    const dbPaths = files.map(f => join(this.dbDir, f));
+    const workerPath = join(dirname(fileURLToPath(import.meta.url)), 'db-worker.js');
+    const worker = new Worker(workerPath);
+
+    try {
+      const result = await new Promise<any[]>((resolve, reject) => {
+        const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+        let msgId = 0;
+        worker.on('message', (msg: { id: number; type: string; result?: any; error?: string }) => {
+          const p = pending.get(msg.id);
+          if (!p) return;
+          pending.delete(msg.id);
+          if (msg.error) p.reject(new Error(msg.error));
+          else p.resolve(msg.result);
+        });
+        worker.on('error', reject);
+
+        const send = (type: string, payload?: any) => new Promise<any>((res, rej) => {
+          const id = ++msgId;
+          pending.set(id, { resolve: res, reject: rej });
+          worker.postMessage({ id, type, payload });
+        });
+
+        (async () => {
+          await send('init', { dbPaths });
+          const meta = await send('getMetadata');
+          send('close').catch(() => {});
+          setTimeout(() => worker.terminate(), 100);
+          resolve(meta);
+        })().catch(reject);
+      });
+
+      this.metadataCache = result;
+    } catch {
+      this.metadataCache = [];
+      worker.terminate();
+    }
   }
 
   private crossesLandCol(): string {
@@ -201,6 +263,9 @@ export class RoutingDatabase {
 
     const allPois: Array<{ id: number; name: string; type: string; properties: string | null; lat: number; lon: number }> = await this.sendMessage('loadPois');
     this.pois.push(...allPois);
+
+    // Cache metadata before closing databases
+    this.metadataCache = await this.getMetadata();
 
     await this.sendMessage('close');
 
@@ -703,6 +768,16 @@ export class RoutingDatabase {
     this.landGeojsonPath = null;
     this.landBBoxIndex = null;
     this.graphLoaded = false;
+  }
+
+  /**
+   * Hot-reload: close existing connection, re-scan data directory, and reload graph.
+   * Used after downloading a new database to replace the old one.
+   */
+  async reload(): Promise<void> {
+    await this.close();
+    await this.init();
+    await this.loadGraph();
   }
 
   private landGeoJson: any = null;

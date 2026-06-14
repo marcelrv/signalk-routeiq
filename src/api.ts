@@ -20,6 +20,8 @@ export class ApiHandler {
   private db: RoutingDatabase | null;
   private config: PluginConfig;
   private app: ServerAPI;
+  /** Callback invoked after a database download to hot-reload the routing engine */
+  public onReloadRequested: ((dataDir: string) => Promise<void>) | null = null;
 
   constructor(config: PluginConfig, app: ServerAPI) {
     this.routingEngine = null;
@@ -555,15 +557,47 @@ export class ApiHandler {
         console.log(`[autoroute] Decompressed ${filename} -> ${saveFilename} (${buffer.length} -> ${saveBuffer.length} bytes)`);
       }
 
+      // Remove all old .sqlite files before writing the new one
+      const oldFiles = fs.readdirSync(dataDir).filter(f => f.endsWith('.sqlite') && f !== saveFilename);
+      for (const f of oldFiles) {
+        try {
+          fs.unlinkSync(path.join(dataDir, f));
+          console.log(`[autoroute] Removed old database: ${f}`);
+        } catch (e) {
+          console.warn(`[autoroute] Failed to remove old database ${f}: ${e}`);
+        }
+      }
+
       const destPath = path.join(dataDir, saveFilename);
       fs.writeFileSync(destPath, saveBuffer);
 
       console.log(`[autoroute] Database saved: ${saveFilename} (${saveBuffer.length} bytes)`);
+
+      // Refresh metadata cache so the new DB shows in the installed list
+      try {
+        await this.db!.reloadMetadata();
+        console.log(`[autoroute] Metadata cache refreshed after download`);
+      } catch (e) {
+        console.warn(`[autoroute] Metadata refresh failed: ${e}`);
+      }
+
+      // Hot-reload the database and routing engine so the new DB is used immediately
+      if (this.onReloadRequested) {
+        try {
+          await this.onReloadRequested(dataDir);
+          console.log(`[autoroute] Routing engine hot-reloaded`);
+        } catch (e) {
+          console.error(`[autoroute] Hot-reload failed: ${e}`);
+          res.status(500).json({ error: `Database saved but hot-reload failed: ${e}` });
+          return;
+        }
+      }
+
       res.json({
         success: true,
         filename: saveFilename,
         sizeBytes: saveBuffer.length,
-        message: `Downloaded ${saveFilename} (${(saveBuffer.length / 1048576).toFixed(1)} MB)`,
+        message: `Downloaded and installed ${saveFilename} (${(saveBuffer.length / 1048576).toFixed(1)} MB)`,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
