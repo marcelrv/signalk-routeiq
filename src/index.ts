@@ -1,5 +1,5 @@
 /**
- * SignalK Autoroute Plugin - Main Entry Point
+ * SignalK Autoroute Nautical Route Planner Plugin - Main Entry Point
  * 
  * A SignalK server plugin that provides offline-first nautical route planning
  * with vessel-aware A* pathfinding on a pre-computed routing graph.
@@ -34,13 +34,13 @@ export function pluginConstructor(app: ServerAPI) {
 
   return {
     id: pluginId,
-    name: 'SignalK Nautical Autoroute',
+    name: 'SignalK Autoroute Nautical Route Planner',
 
     /**
      * Start the plugin
      */
     start(options: any, _restart?: () => void) {
-      console.log('[autoroute] Starting SignalK Autoroute Plugin...');
+      console.log('[autoroute] Starting SignalK Autoroute Nautical Route Planner Plugin...');
 
       // Merge received configuration with defaults
       config = { ...DEFAULT_CONFIG, ...options };
@@ -77,7 +77,7 @@ export function pluginConstructor(app: ServerAPI) {
      * Stop the plugin
      */
     async stop() {
-      console.log('[autoroute] Stopping SignalK Autoroute Plugin...');
+      console.log('[autoroute] Stopping SignalK Autoroute Nautical Route Planner Plugin...');
 
       // Unsubscribe from vessel dimensions
       if (subscriptionCancelled) {

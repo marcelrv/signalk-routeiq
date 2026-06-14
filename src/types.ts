@@ -1,5 +1,5 @@
 /**
- * Type definitions for the SignalK Autoroute Plugin
+ * Type definitions for the SignalK Autoroute Nautical Route Planner Plugin
  */
 
 // Vessel dimensions from SignalK delta tree

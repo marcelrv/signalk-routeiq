@@ -680,10 +680,13 @@ export class RoutingDatabase {
     };
   }
 
-  close(): Promise<void> {
+  async close(): Promise<void> {
     if (this.worker) {
       try {
-        this.sendMessage('close');
+        await Promise.race([
+          this.sendMessage('close'),
+          new Promise(resolve => setTimeout(resolve, 5000)),
+        ]);
       } catch { /* worker may already be dead */ }
       this.worker.terminate();
       this.worker = null;
@@ -700,7 +703,6 @@ export class RoutingDatabase {
     this.landGeojsonPath = null;
     this.landBBoxIndex = null;
     this.graphLoaded = false;
-    return Promise.resolve();
   }
 
   private landGeoJson: any = null;

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>SignalK Autoroute</title>
+<title>SignalK Autoroute Nautical Route Planner</title>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
@@ -2764,8 +2764,6 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       return;
     }
 
-    var CATALOG_BASE = 'https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/';
-
     // Build a lookup of installed regions for update detection
     var installedLookup = {};
     for (var i = 0; i < dmInstalledRegions.length; i++) {
@@ -2783,8 +2781,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       var sizeMb = (r.size_bytes / 1048576).toFixed(1);
       var tags = (r.tags || []).map(function(t) { return '<span class="dm-region-tag">' + t + '</span>'; }).join('');
 
-      // Determine download URL: use the .sqlite.gz file from the catalog
-      var dlUrl = CATALOG_BASE + r.file;
+      // Determine download URL: use the fully-qualified URL from the catalog
+      var dlUrl = r.downloadUrl || r.file;
       // Inner filename is what the user sees / the plugin extracts to
       var innerName = r.inner_filename || r.file.split('/').pop().replace(/\.gz$/, '');
       var displayName = innerName;

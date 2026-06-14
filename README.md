@@ -1,4 +1,4 @@
-# SignalK Autoroute - Nautical Route Planner
+# SignalK Autoroute Nautical Route Planner
 
 An offline-first, vessel-aware nautical route planner designed to run natively as a webapp and plugin within the Signal K ecosystem. Optimized for inland waterways and coastal navigation, it dynamically calculates safe routes based on a vessel's physical dimensions (draft, beam, air draft) and user safety preferences.
 

@@ -495,7 +495,17 @@ export class ApiHandler {
         res.status(502).json({ error: `Catalog server returned ${response.status}` });
         return;
       }
-      const catalog = await response.json();
+      const catalog = await response.json() as any;
+      // Derive the base URL from the catalog URL for constructing download links
+      const catalogUrlStr = catalogUrl.toString();
+      const baseUrl = catalogUrlStr.substring(0, catalogUrlStr.lastIndexOf('/') + 1);
+      if (catalog.regions && Array.isArray(catalog.regions)) {
+        for (const region of catalog.regions) {
+          if (region.file) {
+            region.downloadUrl = baseUrl + region.file;
+          }
+        }
+      }
       res.json(catalog);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';

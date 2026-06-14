@@ -286,7 +286,6 @@ export class RoutingEngine {
       await this.connectUserPoint(start, route, 'start');
       await this.connectUserPoint(end, route, 'end');
 
-      this.splitToSegmentFeatures(route);
       return route;
     }
 

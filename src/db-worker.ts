@@ -52,18 +52,42 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
     switch (type) {
       case 'init': {
         const { dbPaths } = payload!;
+        hasCrossesLand = false;
+        hasCrossesObstacle = false;
+        hasNodeDepth = false;
+        hasRegionId = false;
+        dbs.length = 0;
         for (const dbPath of dbPaths) {
-          dbs.push(new DatabaseSync(dbPath, { open: true }));
+          try {
+            const db = new DatabaseSync(dbPath, { open: true });
+            const row = db.prepare('SELECT COUNT(*) as count FROM nodes').get() as unknown as { count: number } | undefined;
+            if (!row) {
+              console.warn(`[db-worker] Skipping ${dbPath}: nodes table not found`);
+              db.close();
+              continue;
+            }
+            const edgeCols = db.prepare("PRAGMA table_info('edges')").all() as Array<{ name: string }>;
+            if (edgeCols.length === 0) {
+              console.warn(`[db-worker] Skipping ${dbPath}: edges table not found`);
+              db.close();
+              continue;
+            }
+            // Merge schema flags across all valid databases
+            hasCrossesLand = hasCrossesLand || edgeCols.some(c => c.name === 'crosses_land');
+            hasCrossesObstacle = hasCrossesObstacle || edgeCols.some(c => c.name === 'crosses_obstacle');
+            const nodeCols = db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>;
+            hasNodeDepth = hasNodeDepth || nodeCols.some(c => c.name === 'node_depth');
+            hasRegionId = hasRegionId || nodeCols.some(c => c.name === 'region_id');
+            dbs.push(db);
+            console.log(`[db-worker] Loaded database: ${dbPath}`);
+          } catch (err: any) {
+            console.warn(`[db-worker] Skipping invalid database ${dbPath}: ${err.message ?? String(err)}`);
+          }
         }
-        const db = dbs[0];
-        const row = db.prepare('SELECT COUNT(*) as count FROM nodes').get() as unknown as { count: number } | undefined;
-        if (!row) throw new Error('nodes table not found');
-        const edgeCols = db.prepare("PRAGMA table_info('edges')").all() as Array<{ name: string }>;
-        hasCrossesLand = edgeCols.some(c => c.name === 'crosses_land');
-        hasCrossesObstacle = edgeCols.some(c => c.name === 'crosses_obstacle');
-        const nodeCols = db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>;
-        hasNodeDepth = nodeCols.some(c => c.name === 'node_depth');
-        hasRegionId = nodeCols.some(c => c.name === 'region_id');
+        if (dbs.length === 0) {
+          parentPort!.postMessage({ id, type, error: 'No valid .sqlite routing databases found in the data directory' });
+          break;
+        }
         parentPort!.postMessage({ id, type, result: { hasCrossesLand, hasCrossesObstacle, hasNodeDepth, hasRegionId } });
         break;
       }

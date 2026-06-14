@@ -15,7 +15,7 @@ export class GpxExporter {
 <gpx version="1.1" creator="signalk-autoroute" xmlns:ar="http://signalk.org/autoroute">
   <rte>
     <name>${this.escapeXml(name)}</name>
-    <desc>Route calculated by SignalK Autoroute - Distance: ${totalDistance.toFixed(0)}m, Cost: ${totalCost.toFixed(2)}</desc>`;
+    <desc>Route calculated by SignalK Autoroute Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m, Cost: ${totalCost.toFixed(2)}</desc>`;
 
     coords.forEach((coord, index) => {
       const [lon, lat] = coord;
@@ -56,7 +56,7 @@ export class GpxExporter {
 
     return {
       name,
-      description: `Route calculated by SignalK Autoroute - Distance: ${totalDistance.toFixed(0)}m`,
+      description: \`Route calculated by SignalK Autoroute Nautical Route Planner - Distance: \${totalDistance.toFixed(0)}m\`,
       distance: totalDistance,
       feature: {
         type: 'Feature',
