@@ -33,10 +33,12 @@
 - POI IDs use a deterministic MD5 hash of `"{poi_type}_{round(lat,5)}_{round(lon,5)}"` truncated to 13 hex chars.
 
 ## SQLite Schema
-- **`metadata`** table: `country`, `name`, `description`, `last_update_date`, `tags` (JSON array), `bounding_box` (JSON), `boundary_geometry` (GeoJSON), `schema_version` (default 2), `contributor`, `url` — describes the data source. `country` is no longer UNIQUE (a country may have multiple region databases).
+- **`metadata`** table: `country`, `name`, `description`, `last_update_date`, `tags` (JSON array), `bounding_box` (JSON), `boundary_geometry` (GeoJSON), `schema_version` (default 3), `contributor`, `url` — describes the data source. `country` is no longer UNIQUE (a country may have multiple region databases).
+- **`edge_type_enum`** table: `(id, description)` — `0=coastal, 1=inland`.
+- **`poi_type_enum`** table: `(id, description)` — `0=harbour, 1=lock, 2=bridge, 3=fairway, 4=waterway`.
 - **`nodes`** table: includes `region_id INTEGER REFERENCES metadata(id)` for per-region replacement. No `node_type` column — type is encoded in the node ID (see above).
-- **`edges`**: same as before, no region-level column needed (edges follow their source node's region).
-- **`pois`**: `INSERT OR IGNORE` handles duplicate POI IDs from overlapping regions (uses deterministic hash based on type+coords, ignoring name variations).
+- **`edges`**: uses `edge_type_id INTEGER` (FK to `edge_type_enum`) and `traffic_mode INTEGER` (`0=two-way, 1=one-way fwd, 2=one-way rev`). No `direction_penalty`, `edge_type` TEXT, `is_one_way`, or `traffic_dir` columns. No region-level column needed (edges follow their source node's region).
+- **`pois`**: uses `type_id INTEGER` (FK to `poi_type_enum`). `INSERT OR IGNORE` handles duplicate POI IDs from overlapping regions (uses deterministic hash based on type+coords, ignoring name variations).
 
 ## Config
 - `routingDataDir` (was `routingDatabase`): path to a **directory** containing one or more `.sqlite` routing graph files.

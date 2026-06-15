@@ -73,10 +73,8 @@ export class GpxExporter {
             minDepth: s.minDepth,
             maxAirDraft: s.maxAirDraft,
             isFairway: s.isFairway,
-            directionPenalty: s.directionPenalty,
-            isOneWay: s.isOneWay,
-            trafficDir: s.trafficDir,
-            edgeType: s.edgeType,
+            trafficMode: s.trafficMode,
+            edgeTypeId: s.edgeTypeId,
           })),
         },
       },
@@ -94,7 +92,7 @@ export class GpxExporter {
     segments: Array<{
       from?: number; to?: number; distance: number;
       minDepth: number; maxAirDraft: number; isFairway: boolean;
-      directionPenalty: number; isOneWay?: boolean; trafficDir?: number; edgeType?: string;
+      trafficMode?: number; edgeTypeId?: number;
     }>;
   } {
     const coords: Array<[number, number]> = [];
@@ -127,10 +125,8 @@ export class GpxExporter {
           minDepth: f.properties.minDepth ?? -1,
           maxAirDraft: f.properties.maxAirDraft ?? -1,
           isFairway: f.properties.isFairway ?? false,
-          directionPenalty: f.properties.directionPenalty ?? 1,
-          isOneWay: f.properties.isOneWay,
-          trafficDir: f.properties.trafficDir,
-          edgeType: f.properties.edgeType,
+          trafficMode: f.properties.trafficMode,
+          edgeTypeId: f.properties.edgeTypeId,
         });
       }
     }

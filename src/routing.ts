@@ -3,7 +3,7 @@
  * Implements vessel-aware directed A* with multi-layered cost function
  */
 
-import { EdgeRow, RoutingDatabase, getNodeTypeInt, NODE_TYPE_INLAND } from './database.js';
+import { EdgeRow, RoutingDatabase, getNodeTypeInt, NODE_TYPE_INLAND, EDGE_TYPE_COASTAL, POI_TYPE_BRIDGE, POI_TYPE_LOCK, TRAFFIC_TWO_WAY, TRAFFIC_ONE_WAY_REV } from './database.js';
 import {
     BBox,
     PluginConfig,
@@ -488,7 +488,6 @@ export class RoutingEngine {
         (this.db as any).isLineCrossingLand(fromLat, fromLon, toLat, toLon, 5);
       if (overland) {
         seg.minDepth = 0;
-        seg.edgeType = 'overland';
       }
     };
     if (coords.length === 0) return;
@@ -522,16 +521,15 @@ export class RoutingEngine {
             minDepth: edgeSnap.edge.min_depth,
             maxAirDraft: edgeSnap.edge.max_air_draft,
             isFairway: edgeSnap.edge.is_fairway === 1,
-            directionPenalty: edgeSnap.edge.direction_penalty,
-            isOneWay: edgeSnap.edge.is_one_way === 1,
-            trafficDir: edgeSnap.edge.traffic_dir,
+            trafficMode: edgeSnap.edge.traffic_mode,
+            edgeTypeId: edgeSnap.edge.edge_type_id,
           },
           {
             from: -1, to: -1,
             distance: Math.round(edgeSnap.distance),
             minDepth: -1, maxAirDraft: -1,
             isFairway: false,
-            directionPenalty: 1,
+            trafficMode: TRAFFIC_TWO_WAY,
           },
         );
         markOverland(0, userPoint.longitude, userPoint.latitude, edgeSnap.point.lon, edgeSnap.point.lat);
@@ -552,7 +550,7 @@ export class RoutingEngine {
           distance: Math.round(directDist),
           minDepth: -1, maxAirDraft: -1,
           isFairway: false,
-          directionPenalty: 1,
+          trafficMode: TRAFFIC_TWO_WAY,
         });
         markOverland(0, userPoint.longitude, userPoint.latitude, firstCoord[0], firstCoord[1]);
         route.features[0].properties.totalDistance! += Math.round(directDist);
@@ -600,9 +598,8 @@ export class RoutingEngine {
                 minDepth: lastSeg.minDepth,
                 maxAirDraft: lastSeg.maxAirDraft,
                 isFairway: lastSeg.isFairway,
-                directionPenalty: lastSeg.directionPenalty,
-                isOneWay: lastSeg.isOneWay,
-                trafficDir: lastSeg.trafficDir,
+                trafficMode: lastSeg.trafficMode,
+                edgeTypeId: lastSeg.edgeTypeId,
               };
 
               segments.push({
@@ -610,7 +607,7 @@ export class RoutingEngine {
                 distance: Math.round(proj.distance),
                 minDepth: -1, maxAirDraft: -1,
                 isFairway: false,
-                directionPenalty: 1,
+                trafficMode: TRAFFIC_TWO_WAY,
               });
               markOverland(segments.length - 1, proj.point.lon, proj.point.lat, userPoint.longitude, userPoint.latitude);
 
@@ -651,16 +648,15 @@ export class RoutingEngine {
             minDepth: edgeSnap.edge.min_depth,
             maxAirDraft: edgeSnap.edge.max_air_draft,
             isFairway: edgeSnap.edge.is_fairway === 1,
-            directionPenalty: edgeSnap.edge.direction_penalty,
-            isOneWay: edgeSnap.edge.is_one_way === 1,
-            trafficDir: edgeSnap.edge.traffic_dir,
+            trafficMode: edgeSnap.edge.traffic_mode,
+            edgeTypeId: edgeSnap.edge.edge_type_id,
           },
           {
             from: -1, to: -1,
             distance: Math.round(edgeSnap.distance),
             minDepth: -1, maxAirDraft: -1,
             isFairway: false,
-            directionPenalty: 1,
+            trafficMode: TRAFFIC_TWO_WAY,
           },
         );
         markOverland(segments.length - 1, edgeSnap.point.lon, edgeSnap.point.lat, userPoint.longitude, userPoint.latitude);
@@ -681,7 +677,7 @@ export class RoutingEngine {
           distance: Math.round(directDist),
           minDepth: -1, maxAirDraft: -1,
           isFairway: false,
-          directionPenalty: 1,
+          trafficMode: TRAFFIC_TWO_WAY,
         });
         markOverland(segments.length - 1, lastCoord[0], lastCoord[1], userPoint.longitude, userPoint.latitude);
         route.features[0].properties.totalDistance! += Math.round(directDist);
@@ -957,7 +953,7 @@ export class RoutingEngine {
     const minDepth = (this.vesselDimensions.draft || 2.0) + this.config.safetyMarginDraft;
     if (edge.min_depth >= 0 && edge.min_depth < minDepth) penalty += 1000000;
     if (edge.min_width >= 0 && edge.min_width < (this.vesselDimensions.beam || 4.0) + this.config.safetyMarginBeam) penalty += 1000000;
-    if (edge.edge_type === 'coastal' && edge.distance_to_land < minCoastDistanceMeters) penalty += 50000;
+    if (edge.edge_type_id === EDGE_TYPE_COASTAL && edge.distance_to_land < minCoastDistanceMeters) penalty += 50000;
 
     return penalty;
   }
@@ -1017,22 +1013,10 @@ export class RoutingEngine {
       : this.config.openWaterMultiplier;
     cost *= fairwayMultiplier;
 
-    // Directional penalty: penalize traveling against traffic flow
-    cost *= edge.direction_penalty;
-
-    // One-way penalty: edges are stored source→target.
-    // If edge is one-way (traffic_dir=1, meaning source→target is allowed,
-    // or traffic_dir=-1, meaning target→source is allowed), traversing the
-    // wrong direction incurs a severe cost penalty (~1000× base).
-    // The direction_penalty in the DB already reflects asymmetric traffic
-    // modeling; is_one_way enforces strict regulatory one-way lanes.
-    if (edge.is_one_way === 1 && edge.traffic_dir !== undefined) {
-      // Edges are always traversed source→target via getOutgoingEdges().
-      // If the allowed direction is target→source (traffic_dir=-1),
-      // this traversal is against the one-way restriction.
-      if (edge.traffic_dir === -1) {
-        cost *= 1e6; // virtually impassable wrong-way
-      }
+    // One-way penalty: traffic_mode=2 means only reverse direction (target→source)
+    // is allowed, so traversing source→target is wrong-way.
+    if (edge.traffic_mode === TRAFFIC_ONE_WAY_REV) {
+      cost *= 1e6; // virtually impassable wrong-way
     }
 
     return cost;
@@ -1093,10 +1077,8 @@ export class RoutingEngine {
         minDepth: seg.minDepth,
         maxAirDraft: seg.maxAirDraft,
         isFairway: seg.isFairway,
-        directionPenalty: seg.directionPenalty,
-        isOneWay: seg.isOneWay,
-        trafficDir: seg.trafficDir,
-        edgeType: seg.edgeType,
+        trafficMode: seg.trafficMode,
+        edgeTypeId: seg.edgeTypeId,
         distance: seg.distance,
       };
 
@@ -1155,10 +1137,8 @@ export class RoutingEngine {
             minDepth: edge.min_depth,
             maxAirDraft: edge.max_air_draft,
             isFairway: edge.is_fairway === 1,
-            directionPenalty: edge.direction_penalty,
-            isOneWay: edge.is_one_way === 1,
-            trafficDir: edge.traffic_dir,
-            edgeType: edge.edge_type,
+            trafficMode: edge.traffic_mode,
+            edgeTypeId: edge.edge_type_id,
           });
         } else {
           const fromNode = await this.db.getNodeById(prevNode);
@@ -1176,7 +1156,7 @@ export class RoutingEngine {
               minDepth: -1,
               maxAirDraft: -1,
               isFairway: false,
-              directionPenalty: 1,
+              trafficMode: TRAFFIC_TWO_WAY,
             });
           }
         }
@@ -1221,15 +1201,15 @@ export class RoutingEngine {
       maxLat + MARGIN, maxLon + MARGIN,
     );
 
-    const bridgePois = pois.filter(p => p.type === 'bridge');
-    const lockPois = pois.filter(p => p.type === 'lock');
+    const bridgePois = pois.filter(p => p.typeId === POI_TYPE_BRIDGE);
+    const lockPois = pois.filter(p => p.typeId === POI_TYPE_LOCK);
     const crossings: RouteCrossing[] = [];
     const seenIds = new Set<number>();
     const seenCrossingKeys = new Set<string>();
     const MAX_DIST = 150;
     const crossingKey = (poi: typeof bridgePois[0]): string => {
       const subtype = (poi.properties as Record<string, unknown>)?.subtype as string | undefined;
-      return `${poi.name}|${poi.type}|${subtype || ''}`;
+      return `${poi.name}|${poi.typeId}|${subtype || ''}`;
     };
 
     for (const [lon, lat] of coordinates) {

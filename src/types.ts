@@ -36,10 +36,9 @@ export interface EdgeAttributes {
   maxAirDraft: number; // meters
   minWidth: number; // meters
   isFairway: boolean;
-  directionPenalty: number;
   distanceToLand: number; // meters
-  isOneWay?: boolean;
-  trafficDir?: number; // 1 = with edge direction (source→target), -1 = against
+  trafficMode: number; // 0=two-way, 1=one-way fwd, 2=one-way rev
+  edgeTypeId: number; // 0=coastal, 1=inland
 }
 
 // A* search node
@@ -87,10 +86,8 @@ export interface RouteResult {
       minDepth?: number; // meters (only per-segment features)
       maxAirDraft?: number; // meters (only per-segment features)
       isFairway?: boolean;
-      directionPenalty?: number;
-      isOneWay?: boolean;
-      trafficDir?: number;
-      edgeType?: string;
+      trafficMode?: number;
+      edgeTypeId?: number;
       segments?: Array<{
         from: number; // node id
         to: number; // node id
@@ -98,10 +95,8 @@ export interface RouteResult {
         minDepth: number; // meters
         maxAirDraft: number; // meters
         isFairway: boolean;
-        directionPenalty: number;
-        isOneWay?: boolean;
-        trafficDir?: number;
-        edgeType?: string;
+        trafficMode: number;
+        edgeTypeId?: number;
       }>;
       crossings?: RouteCrossing[];
     };
@@ -112,7 +107,7 @@ export interface RouteResult {
 export interface PoiResult {
   id: number;
   name: string;
-  type: string;
+  typeId: number;
   properties: Record<string, unknown>;
   latitude: number;
   longitude: number;

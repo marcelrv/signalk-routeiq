@@ -965,6 +965,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       .catch(() => {});
   }
 
+  const POI_TYPE_NAMES = ['harbour', 'lock', 'bridge', 'fairway', 'waterway'];
+  function poiTypeName(poi) { return poi.type || POI_TYPE_NAMES[poi.typeId] || 'harbour'; }
+
   function poiIcon(type, props, size) {
     size = size || 22;
     if (type === 'bridge') {
@@ -993,11 +996,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         const typeColor = { harbour: '#3b8fd4', lock: '#f59e0b', bridge: '#ef4444', fairway: '#8b5cf6', waterway: '#14b8a6' };
         for (const p of data.pois) {
           const props = p.properties || {};
-          const subtypeColors = subtypeColor[p.type];
-          let color = subtypeColors && props.subtype ? subtypeColors[props.subtype] : (typeColor[p.type] || '#6d96c0');
-          const iconHtml = poiIcon(p.type, props);
+          const t = poiTypeName(p);
+          const subtypeColors = subtypeColor[t];
+          let color = subtypeColors && props.subtype ? subtypeColors[props.subtype] : (typeColor[t] || '#6d96c0');
+          const iconHtml = poiIcon(t, props);
           let label = p.name;
-          if (p.type === 'bridge') {
+          if (t === 'bridge') {
             if (props.subtype === 'fixed') {
               if (props.height != null && props.height < 999) label += ' — ' + props.height + 'm';
             } else if (props.subtype === 'opening') {
@@ -1942,12 +1946,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         for (var i = 0; i < items.length; i++) {
           var item = items[i];
           var name = item.name || 'POI';
-          var type = item.type || '';
+          var t = poiTypeName(item);
           var props = item.properties || {};
           if (typeof props === 'string') { try { props = JSON.parse(props); } catch (e) { props = {}; } }
-          var color = getSearchColor(type, props);
-          var iconHtml = poiIcon(type, props, 16);
-          var typeLabel = type.charAt(0).toUpperCase() + type.slice(1);
+          var color = getSearchColor(t, props);
+          var iconHtml = poiIcon(t, props, 16);
+          var typeLabel = t.charAt(0).toUpperCase() + t.slice(1);
           var lat = item.latitude, lon = item.longitude;
           var coordsStr = lat != null && lon != null
             ? (lat > 0 ? lat.toFixed(3) + '\u00b0N' : (-lat).toFixed(3) + '\u00b0S') + ' ' +

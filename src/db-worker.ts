@@ -18,11 +18,9 @@ interface EdgeRow {
   max_air_draft: number;
   min_width: number;
   is_fairway: number;
-  direction_penalty: number;
   distance_to_land: number;
-  edge_type?: string;
-  is_one_way?: number;
-  traffic_dir?: number;
+  edge_type_id: number;
+  traffic_mode: number;
   crosses_land?: number;
   crosses_obstacle?: number;
 }
@@ -30,7 +28,7 @@ interface EdgeRow {
 interface PoiRow {
   id: number;
   name: string;
-  type: string;
+  type_id: number;
   properties: string | null;
   lat: number;
   lon: number;
@@ -107,8 +105,8 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         for (const db of dbs) {
           const edges = db.prepare(
             `SELECT source, target, distance, min_depth, max_air_draft, min_width,
-                    is_fairway, direction_penalty, distance_to_land,
-                    edge_type, is_one_way, traffic_dir${crossesCol}${obstacleCol}
+                    is_fairway, distance_to_land,
+                    edge_type_id, traffic_mode${crossesCol}${obstacleCol}
              FROM edges`
           ).all() as unknown as EdgeRow[];
           allEdges = allEdges.concat(edges);
@@ -124,7 +122,7 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
       case 'loadPois': {
         const allPois: PoiRow[] = [];
         for (const db of dbs) {
-          allPois.push(...db.prepare('SELECT id, name, type, properties, lat, lon FROM pois').all() as unknown as PoiRow[]);
+          allPois.push(...db.prepare('SELECT id, name, type_id, properties, lat, lon FROM pois').all() as unknown as PoiRow[]);
         }
         parentPort!.postMessage({ id, type, result: allPois });
         break;

@@ -68,6 +68,18 @@ Better POI selection
 #the segments (legs) vs the details in the leg seem to be very confusing for the UI.
 We need to have this clarified. the frontend should be able to be dumb, so not too much logic in the frontend as other plugings much be able to use the endpoints and also provide the UI
 
+database optiomisation --> types to enums with number
+traffic dir and isoneway --> combine 1,2,3 
+enum table 'field', id, 'desscription' + helper function
+direction_penalty
+
+
+'edge type to id'
+
+
+
+
+
 
 
 supernodes architecture

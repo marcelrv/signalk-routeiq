@@ -13,6 +13,22 @@ export function getNodeTypeInt(id: number): number {
   return Math.floor(id / 648000000000000);
 }
 
+// Edge type constants
+export const EDGE_TYPE_COASTAL = 0;
+export const EDGE_TYPE_INLAND = 1;
+
+// POI type constants
+export const POI_TYPE_HARBOUR = 0;
+export const POI_TYPE_LOCK = 1;
+export const POI_TYPE_BRIDGE = 2;
+export const POI_TYPE_FAIRWAY = 3;
+export const POI_TYPE_WATERWAY = 4;
+
+// Traffic mode: 0=two-way, 1=one-way fwd (source->target), 2=one-way rev
+export const TRAFFIC_TWO_WAY = 0;
+export const TRAFFIC_ONE_WAY_FWD = 1;
+export const TRAFFIC_ONE_WAY_REV = 2;
+
 export interface EdgeRow {
   source: number;
   target: number;
@@ -21,11 +37,9 @@ export interface EdgeRow {
   max_air_draft: number;
   min_width: number;
   is_fairway: number;
-  direction_penalty: number;
   distance_to_land: number;
-  edge_type?: string;
-  is_one_way?: number;
-  traffic_dir?: number;
+  edge_type_id: number;
+  traffic_mode: number;
   crosses_land?: number;
   crosses_obstacle?: number;
   lat: number;
@@ -37,7 +51,7 @@ export interface EdgeRow {
 interface PoiRow {
   id: number;
   name: string;
-  type: string;
+  type_id: number;
   properties: string | null;
   lat: number;
   lon: number;
@@ -261,7 +275,7 @@ export class RoutingDatabase {
       this.edgesBySource.get(edge.source)!.push(edge as any);
     }
 
-    const allPois: Array<{ id: number; name: string; type: string; properties: string | null; lat: number; lon: number }> = await this.sendMessage('loadPois');
+    const allPois: Array<{ id: number; name: string; type_id: number; properties: string | null; lat: number; lon: number }> = await this.sendMessage('loadPois');
     this.pois.push(...allPois);
 
     // Cache metadata before closing databases
@@ -477,7 +491,7 @@ export class RoutingDatabase {
         results.push({
           id: row.id,
           name: row.name,
-          type: row.type,
+          typeId: row.type_id,
           properties: row.properties ? JSON.parse(row.properties) : {},
           latitude: row.lat,
           longitude: row.lon,
@@ -524,12 +538,12 @@ export class RoutingDatabase {
     minLat: number, minLon: number,
     maxLat: number, maxLon: number,
     limit: number = 2000,
-  ): Promise<Array<{ id: number; name: string; type: string; properties: Record<string, unknown>; lat: number; lon: number }>> {
-    const results: Array<{ id: number; name: string; type: string; properties: Record<string, unknown>; lat: number; lon: number }> = [];
+  ): Promise<Array<{ id: number; name: string; typeId: number; properties: Record<string, unknown>; lat: number; lon: number }>> {
+    const results: Array<{ id: number; name: string; typeId: number; properties: Record<string, unknown>; lat: number; lon: number }> = [];
     for (const row of this.pois) {
       if (row.lat >= minLat && row.lat <= maxLat && row.lon >= minLon && row.lon <= maxLon) {
         results.push({
-          id: row.id, name: row.name, type: row.type,
+          id: row.id, name: row.name, typeId: row.type_id,
           properties: row.properties ? JSON.parse(row.properties) : {},
           lat: row.lat, lon: row.lon,
         });
@@ -540,7 +554,7 @@ export class RoutingDatabase {
     return results;
   }
 
-  async getNearestPoi(lat: number, lon: number, maxDistanceMeters: number = 250): Promise<{ id: number; name: string; type: string; properties: Record<string, unknown>; latitude: number; longitude: number; distance: number } | null> {
+  async getNearestPoi(lat: number, lon: number, maxDistanceMeters: number = 250): Promise<{ id: number; name: string; typeId: number; properties: Record<string, unknown>; latitude: number; longitude: number; distance: number } | null> {
     let best: PoiRow | null = null;
     let bestDist = Infinity;
     for (const row of this.pois) {
@@ -552,7 +566,7 @@ export class RoutingDatabase {
     }
     if (!best) return null;
     return {
-      id: best.id, name: best.name, type: best.type,
+      id: best.id, name: best.name, typeId: best.type_id,
       properties: best.properties ? JSON.parse(best.properties) : {},
       latitude: best.lat, longitude: best.lon,
       distance: Math.round(bestDist),
@@ -706,10 +720,10 @@ export class RoutingDatabase {
     let maxAirDraft = -Infinity;
     let minWidth = Infinity;
     let isFairway = false;
-    let dirPenalty = 1;
+    let trafficMode = TRAFFIC_TWO_WAY;
+    let edgeTypeId = EDGE_TYPE_COASTAL;
     let crossesLand = 0;
     let crossesObstacle = 0;
-    let edgeType: string | undefined;
 
     for (let i = startIdx; i < endIdx; i++) {
       const edge = this.getEdgeSync(originalPath[i], originalPath[i + 1]);
@@ -719,10 +733,10 @@ export class RoutingDatabase {
         if (edge.max_air_draft >= 0) maxAirDraft = Math.max(maxAirDraft, edge.max_air_draft);
         if (edge.min_width >= 0) minWidth = Math.min(minWidth, edge.min_width);
         if (edge.is_fairway) isFairway = true;
-        dirPenalty = Math.min(dirPenalty, edge.direction_penalty);
+        trafficMode = Math.min(trafficMode, edge.traffic_mode);
+        edgeTypeId = edge.edge_type_id;
         if (edge.crosses_land === 1) crossesLand = 1;
         if (edge.crosses_obstacle === 1) crossesObstacle = 1;
-        edgeType = edgeType || edge.edge_type;
       }
     }
 
@@ -735,11 +749,11 @@ export class RoutingDatabase {
       max_air_draft: maxAirDraft === -Infinity ? -1 : maxAirDraft,
       min_width: minWidth === Infinity ? -1 : minWidth,
       is_fairway: isFairway ? 1 : 0,
-      direction_penalty: dirPenalty,
       distance_to_land: 0,
+      edge_type_id: edgeTypeId,
+      traffic_mode: trafficMode,
       crosses_land: crossesLand,
       crosses_obstacle: crossesObstacle,
-      edge_type: edgeType,
       lat: toNodeCoords?.lat || 0,
       lon: toNodeCoords?.lon || 0,
     };

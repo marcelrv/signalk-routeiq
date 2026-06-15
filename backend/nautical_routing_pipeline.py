@@ -11,10 +11,22 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Tuple, Optional
 
 import numpy as np
+
+
+def _is_valid(val):
+    """Check val is not None, not empty array, and not NaN."""
+    if val is None:
+        return False
+    if isinstance(val, np.ndarray):
+        return val.size > 0
+    try:
+        return not pd.isna(val)
+    except (ValueError, TypeError):
+        return True
 import pandas as pd
 import geopandas as gpd
 import networkx as nx
-from shapely.geometry import Point, LineString, Polygon, MultiPoint
+from shapely.geometry import Point, LineString, Polygon, MultiPoint, MultiLineString
 from pyproj import Geod
 
 def _s57_col(attrs, *candidates):
@@ -142,20 +154,20 @@ def _edge_attr_worker(edge_chunk):
                     for _, row in intersecting.iterrows():
                         is_movable = False
                         catbrg = _s57_col(row, 'catbrg', 'CATAQA', 'CatBrg')
-                        if catbrg is not None and pd.notnull(catbrg):
+                        if _is_valid(catbrg):
                             vals = _parse_catbrg(catbrg)
                             if any(v in ('3', '4', '5', '6', '7') for v in vals):
                                 is_movable = True
                         if not is_movable:
                             vercop = _s57_col(row, 'vercop', 'VERCOP', 'VerCop')
-                            if vercop is not None and pd.notnull(vercop):
+                            if _is_valid(vercop):
                                 is_movable = True
 
                         if is_movable:
                             clearance = 999.0
                         else:
                             verclr = _s57_col(row, 'verclr', 'VERCLR', 'VerClr')
-                            if verclr is not None and pd.notnull(verclr):
+                            if _is_valid(verclr):
                                 clearance = float(verclr)
                             else:
                                 clearance = 999.0
@@ -176,8 +188,7 @@ def _edge_attr_worker(edge_chunk):
 
         # Fairway + one-way (TRAFIC)
         attrs['is_fairway'] = False
-        attrs['is_one_way'] = False
-        attrs['traffic_dir'] = 1
+        attrs['traffic_mode'] = TRAFFIC_TWO_WAY
         if not fairways_gdf.empty:
             fw_candidates = _candidates_by_bounds_static(fairways_gdf, edge_geom)
             if not fw_candidates.empty:
@@ -189,11 +200,7 @@ def _edge_attr_worker(edge_chunk):
                         if len(trafic_vals) == 1:
                             tv = int(trafic_vals[0])
                             if abs(tv) in (1, 3):
-                                attrs['is_one_way'] = True
-                                attrs['traffic_dir'] = 1 if tv in (1, 3) else -1
-
-        # Direction penalty
-        attrs['direction_penalty'] = 1.0
+                                attrs['traffic_mode'] = TRAFFIC_ONE_WAY_FWD if tv in (1, 3) else TRAFFIC_ONE_WAY_REV
 
         # Distance to land
         attrs['distance_to_land'] = 9999.0
@@ -221,6 +228,22 @@ def _edge_attr_worker(edge_chunk):
 COORD_SPACE = 36000000
 
 OBSTACLE_BUFFER_METERS = 30
+
+# Enum constants for edge types (edge_type_enum table)
+EDGE_TYPE_COASTAL = 0
+EDGE_TYPE_INLAND = 1
+
+# Enum constants for POI types (poi_type_enum table)
+POI_TYPE_HARBOUR = 0
+POI_TYPE_LOCK = 1
+POI_TYPE_BRIDGE = 2
+POI_TYPE_FAIRWAY = 3
+POI_TYPE_WATERWAY = 4
+
+# Traffic mode: 0=two-way, 1=one-way forward (source->target), 2=one-way reverse
+TRAFFIC_TWO_WAY = 0
+TRAFFIC_ONE_WAY_FWD = 1
+TRAFFIC_ONE_WAY_REV = 2
 
 def _s57_get_val(attrs, *candidates):
     """Like _s57_col but also handles list/array values by returning the first scalar."""
@@ -1048,45 +1071,165 @@ class NauticalRoutingPipeline:
         """
         Create coastal edges through opening/movable bridge polygons.
 
-        For each opening bridge (CATBRG 3-7 or VERCOP present), this method:
-        1. Identifies the nearest coastal node on the west and east sides
-        2. Creates a new graph node at the bridge centroid
-        3. Connects the bridge node to both side-nodes with max_air_draft=999
+        First tries to use official centerlines (RECTRC/NAVLNE/WTWAXS) as the
+        path through the bridge opening. Falls back to connecting the bridge
+        centroid to nearest coastal nodes if no centerline is available.
 
-        This ensures A* can route through opening bridges even when the
-        coarse grid's horizontal edges pass through fixed bridge sections.
+        Centerline paths eliminate zig-zags through bridge pillars because the
+        LOS smoother follows the survey-grade centerline geometry.
         """
         bridges_gdf = self.gdfs.get('bridges', gpd.GeoDataFrame())
         if bridges_gdf.empty:
             logger.info("No bridge data — skipping opening bridge edge creation")
             return
 
+        inland_gdf = self.gdfs.get('inland_waterways', gpd.GeoDataFrame())
         depare_gdf = self.gdfs.get('depth_areas', gpd.GeoDataFrame())
         logger.info("Adding opening bridge crossing edges...")
         added = 0
+        centerline_used = 0
+
+        # Build a fast coordinate lookup for existing inland (centerline) nodes
+        inland_coord_map = {}
+        for nid, data in self.graph.nodes(data=True):
+            if data.get('node_type') == 'inland':
+                coord = (round(data.get('lon', 0), 5), round(data.get('lat', 0), 5))
+                inland_coord_map[coord] = nid
 
         for _, row in bridges_gdf.iterrows():
             # Check if bridge is opening/movable
             is_movable = False
             catbrg = _s57_col(row, 'catbrg', 'CATAQA', 'CatBrg')
-            if catbrg is not None and pd.notnull(catbrg):
+            if _is_valid(catbrg):
                 vals = _parse_catbrg(catbrg)
                 if any(v in ('3', '4', '5', '6', '7') for v in vals):
                     is_movable = True
             if not is_movable:
                 vercop = _s57_col(row, 'vercop', 'VERCOP', 'VerCop')
-                if vercop is not None and pd.notnull(vercop):
+                if _is_valid(vercop):
                     is_movable = True
             if not is_movable:
                 continue
 
             bridge_geom = row.geometry
             centroid = bridge_geom.centroid
+            c_lon, c_lat = centroid.x, centroid.y
             bbox = bridge_geom.bounds
             minx, miny, maxx, maxy = bbox
 
             SEARCH_MARGIN = 0.01
 
+            # ----------------------------------------------------------------
+            # Attempt 1: Use centerline (RECTRC/NAVLNE/WTWAXS) through bridge
+            # ----------------------------------------------------------------
+            bridge_path_node_ids = []
+            if inland_gdf is not None and not inland_gdf.empty:
+                bridge_buf = bridge_geom.buffer(0.0005)
+                cl_candidates = list(inland_gdf.sindex.intersection(bridge_buf.bounds))
+                for cl_idx in cl_candidates:
+                    cl_geom = inland_gdf.iloc[cl_idx].geometry
+                    if not isinstance(cl_geom, LineString):
+                        continue
+                    if not cl_geom.intersects(bridge_buf):
+                        continue
+                    buf_vertices = []
+                    for clon, clat in cl_geom.coords:
+                        if bridge_buf.contains(Point(clon, clat)):
+                            coord = (round(clon, 5), round(clat, 5))
+                            if coord in inland_coord_map:
+                                buf_vertices.append((coord, inland_coord_map[coord]))
+                            else:
+                                nid = self._get_or_create_node(clon, clat, node_type='coastal')
+                                nid = self._set_node_type(nid, 'coastal')
+                                self.graph.nodes[nid]['resolution'] = 0.001
+                                buf_vertices.append((coord, nid))
+                    if len(buf_vertices) >= 2:
+                        bridge_path_node_ids = [nid for _, nid in buf_vertices]
+                        break
+
+            if len(bridge_path_node_ids) >= 2:
+                logger.info(f"  Bridge at ({c_lon:.4f}, {c_lat:.4f}): {len(bridge_path_node_ids)} centerline vertices")
+
+                for nid in bridge_path_node_ids:
+                    if 'node_depth' not in self.graph.nodes[nid] or self.graph.nodes[nid].get('node_depth', -1) < 0:
+                        node_depth = -1
+                        if not depare_gdf.empty:
+                            lon = self.graph.nodes[nid]['lon']
+                            lat = self.graph.nodes[nid]['lat']
+                            pt = Point(lon, lat)
+                            depth_candidates = list(depare_gdf.sindex.intersection(pt.bounds))
+                            for idx in depth_candidates:
+                                dr = depare_gdf.iloc[idx]
+                                if dr.geometry.contains(pt) and 'DRVAL1' in dr and pd.notnull(dr['DRVAL1']):
+                                    node_depth = float(dr['DRVAL1'])
+                                    break
+                        self.graph.nodes[nid]['node_depth'] = node_depth
+
+                for i in range(len(bridge_path_node_ids) - 1):
+                    u, v = bridge_path_node_ids[i], bridge_path_node_ids[i + 1]
+                    if not self.graph.has_edge(u, v):
+                        self.graph.add_edge(u, v, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
+                        self.graph.add_edge(v, u, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
+                        added += 2
+
+                # Connect centerline path to coastal network on each side of the bridge.
+                # For each side (west/east/south/north), find the (path_node, coastal_node)
+                # pair with minimum distance and connect them.  This guarantees at least
+                # two different sides are linked, providing a true bridge crossing.
+                path_set = set(bridge_path_node_ids)
+                side_coastal = {side: [] for side in ('west', 'east', 'south', 'north')}
+                for cnid, cdata in self.graph.nodes(data=True):
+                    if cdata.get('node_type') != 'coastal':
+                        continue
+                    if cnid in path_set:
+                        continue
+                    clon, clat = cdata['lon'], cdata['lat']
+                    if not (minx - SEARCH_MARGIN <= clon <= maxx + SEARCH_MARGIN and
+                            miny - SEARCH_MARGIN <= clat <= maxy + SEARCH_MARGIN):
+                        continue
+                    if clon < minx:
+                        side_coastal['west'].append((cnid, clon, clat))
+                    elif clon > maxx:
+                        side_coastal['east'].append((cnid, clon, clat))
+                    elif clat < miny:
+                        side_coastal['south'].append((cnid, clon, clat))
+                    elif clat > maxy:
+                        side_coastal['north'].append((cnid, clon, clat))
+
+                sides_connected = 0
+                for side_name, side_nodes in side_coastal.items():
+                    if not side_nodes:
+                        continue
+                    best_pair = None
+                    best_dist = float('inf')
+                    for pnid in bridge_path_node_ids:
+                        plon = self.graph.nodes[pnid]['lon']
+                        plat = self.graph.nodes[pnid]['lat']
+                        for cnid, clon, clat in side_nodes:
+                            dx = (clon - plon) * 111320 * math.cos(math.radians((clat + plat) / 2))
+                            dy = (clat - plat) * 111320
+                            d = math.sqrt(dx * dx + dy * dy)
+                            if d < best_dist:
+                                best_dist = d
+                                best_pair = (pnid, cnid)
+                    if best_pair is not None:
+                        pnid, cnid = best_pair
+                        if not self.graph.has_edge(pnid, cnid):
+                            self.graph.add_edge(pnid, cnid, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
+                            self.graph.add_edge(cnid, pnid, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
+                            added += 2
+                            sides_connected += 1
+
+                if sides_connected >= 2:
+                    centerline_used += 1
+                    logger.info(f"  -> {sides_connected} sides connected")
+                    continue
+                else:
+                    logger.info(f"  -> only {sides_connected} side(s), falling back to centroid")
+
+            # ----------------------------------------------------------------
+            # Fallback: centroid approach (no centerline available)
+            # ----------------------------------------------------------------
             west_nodes = []
             east_nodes = []
             north_nodes = []
@@ -1110,8 +1253,6 @@ class NauticalRoutingPipeline:
             if not (west_nodes or east_nodes or north_nodes or south_nodes):
                 continue
 
-            # Sort by distance to bridge centroid
-            c_lon, c_lat = centroid.x, centroid.y
             def _dist(lon, lat):
                 dx = (lon - c_lon) * 111320 * math.cos(math.radians((lat + c_lat) / 2))
                 dy = (lat - c_lat) * 111320
@@ -1122,12 +1263,10 @@ class NauticalRoutingPipeline:
             north_nodes.sort(key=lambda x: _dist(x[1], x[2]))
             south_nodes.sort(key=lambda x: _dist(x[1], x[2]))
 
-            # Create bridge node at centroid
             b_id = self._get_or_create_node(c_lon, c_lat, node_type='coastal')
             b_id = self._set_node_type(b_id, 'coastal')
             self.graph.nodes[b_id]['resolution'] = 0.001
 
-            # Compute depth at bridge node from DEPARE
             node_depth = -1
             if not depare_gdf.empty:
                 pt = Point(c_lon, c_lat)
@@ -1142,8 +1281,6 @@ class NauticalRoutingPipeline:
                         break
             self.graph.nodes[b_id]['node_depth'] = node_depth
 
-            # Create edges with air draft override tag — connect to closest node
-            # in each populated direction (handles both E-W and N-S waterways)
             directional_groups = [
                 ('west', west_nodes), ('east', east_nodes),
                 ('north', north_nodes), ('south', south_nodes),
@@ -1157,7 +1294,10 @@ class NauticalRoutingPipeline:
                     self.graph.add_edge(nid, b_id, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
                     added += 2
 
-        logger.info(f"Added {added} opening bridge crossing edges")
+        if centerline_used:
+            logger.info(f"Used centerline paths for {centerline_used} bridges; total {added} bridge crossing edges")
+        else:
+            logger.info(f"Added {added} opening bridge crossing edges (centroid fallback)")
 
     def _compute_node_depths(self):
         """
@@ -1341,10 +1481,23 @@ class NauticalRoutingPipeline:
                     tags TEXT DEFAULT '[]',
                     bounding_box TEXT,
                     boundary_geometry TEXT,
-                    schema_version INTEGER DEFAULT 2,
+                    schema_version INTEGER DEFAULT 3,
                     contributor TEXT DEFAULT '',
                     url TEXT DEFAULT ''
                 );
+                
+                CREATE TABLE edge_type_enum (
+                    id INTEGER PRIMARY KEY,
+                    description TEXT NOT NULL
+                );
+                INSERT INTO edge_type_enum VALUES (0, 'coastal'), (1, 'inland');
+                
+                CREATE TABLE poi_type_enum (
+                    id INTEGER PRIMARY KEY,
+                    description TEXT NOT NULL
+                );
+                INSERT INTO poi_type_enum VALUES
+                    (0, 'harbour'), (1, 'lock'), (2, 'bridge'), (3, 'fairway'), (4, 'waterway');
                 
                 CREATE TABLE nodes (
                     id INTEGER PRIMARY KEY,
@@ -1363,12 +1516,10 @@ class NauticalRoutingPipeline:
                     drval1 REAL,
                     max_air_draft REAL,
                     min_width REAL,
-                    is_fairway INTEGER,
-                    direction_penalty REAL,
-                    distance_to_land REAL,
-                    edge_type TEXT DEFAULT 'coastal',
-                    is_one_way INTEGER DEFAULT 0,
-                    traffic_dir INTEGER DEFAULT 1,
+                    is_fairway INTEGER DEFAULT 0,
+                    distance_to_land REAL DEFAULT 9999.0,
+                    edge_type_id INTEGER DEFAULT 0 REFERENCES edge_type_enum(id),
+                    traffic_mode INTEGER DEFAULT 0,
                     crosses_land INTEGER DEFAULT 0,
                     crosses_obstacle INTEGER DEFAULT 0,
                     FOREIGN KEY(source) REFERENCES nodes(id),
@@ -1378,7 +1529,7 @@ class NauticalRoutingPipeline:
                 CREATE TABLE pois (
                     id INTEGER PRIMARY KEY,
                     name TEXT,
-                    type TEXT,
+                    type_id INTEGER REFERENCES poi_type_enum(id),
                     properties TEXT,
                     lat REAL,
                     lon REAL
@@ -1397,8 +1548,8 @@ class NauticalRoutingPipeline:
                 """INSERT INTO metadata
                    (country, name, description, last_update_date, tags, bounding_box, boundary_geometry, schema_version, contributor, url)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (self.country, self.region_name, self.description, now_utc,
-                 self.tags, bbox_json, boundary_json, 2,
+                 (self.country, self.region_name, self.description, now_utc,
+                 self.tags, bbox_json, boundary_json, 3,
                  self.contributor, self.url)
             )
             region_id = cursor.lastrowid
@@ -1413,25 +1564,23 @@ class NauticalRoutingPipeline:
             
             # Insert Edges
             edges_data = [(
-                u, v, 
-                data.get('distance', 0.0), 
-                data.get('min_depth', 99.0), 
+                u, v,
+                data.get('distance', 0.0),
+                data.get('min_depth', 99.0),
                 data.get('drval1'),  # may be None
                 data.get('max_air_draft', 999.0),
                 data.get('min_width', 999.0),
                 int(data.get('is_fairway', False)),
-                data.get('direction_penalty', 1.0),
                 data.get('distance_to_land', 9999.0),
-                data.get('edge_type', 'coastal'),
-                int(data.get('is_one_way', False)),
-                data.get('traffic_dir', 1),
+                EDGE_TYPE_COASTAL if data.get('edge_type', 'coastal') == 'coastal' else EDGE_TYPE_INLAND,
+                data.get('traffic_mode', TRAFFIC_TWO_WAY),
                 int(data.get('crosses_land', 0)),
                 int(data.get('crosses_obstacle', 0))
             ) for u, v, data in self.graph.edges(data=True)]
             cursor.executemany("""
-                INSERT INTO edges 
-                (source, target, distance, min_depth, drval1, max_air_draft, min_width, is_fairway, direction_penalty, distance_to_land, edge_type, is_one_way, traffic_dir, crosses_land, crosses_obstacle)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO edges
+                (source, target, distance, min_depth, drval1, max_air_draft, min_width, is_fairway, distance_to_land, edge_type_id, traffic_mode, crosses_land, crosses_obstacle)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, edges_data)
             
             # Insert POIs — harvest named locations from multiple layers
@@ -1452,6 +1601,14 @@ class NauticalRoutingPipeline:
                     c = geom.interpolate(0.5, normalized=True)
                     return (c.y, c.x)
                 return None
+
+            POI_TYPE_MAP = {
+                'harbour': POI_TYPE_HARBOUR,
+                'lock': POI_TYPE_LOCK,
+                'bridge': POI_TYPE_BRIDGE,
+                'fairway': POI_TYPE_FAIRWAY,
+                'waterway': POI_TYPE_WATERWAY,
+            }
 
             def _poi_properties(row, default_type) -> str:
                 """Build JSON properties blob for a POI based on its type."""
@@ -1497,9 +1654,10 @@ class NauticalRoutingPipeline:
                     if pt is None:
                         continue
                     pid = self._generate_poi_id(default_type, pt[0], pt[1])
-                    poi_data.append((pid, name, default_type, _poi_properties(row, default_type), pt[0], pt[1]))
+                    type_id = POI_TYPE_MAP.get(default_type, POI_TYPE_HARBOUR)
+                    poi_data.append((pid, name, type_id, _poi_properties(row, default_type), pt[0], pt[1]))
             if poi_data:
-                cursor.executemany("INSERT OR IGNORE INTO pois (id, name, type, properties, lat, lon) VALUES (?, ?, ?, ?, ?, ?)", poi_data)
+                cursor.executemany("INSERT OR IGNORE INTO pois (id, name, type_id, properties, lat, lon) VALUES (?, ?, ?, ?, ?, ?)", poi_data)
                 logger.info(f"Inserted {len(poi_data)} named POIs from {len(poi_layers)} layers")
             else:
                 logger.warning("No named POIs found in any layer")

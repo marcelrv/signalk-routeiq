@@ -58,29 +58,33 @@ describe('RoutingEngine', () => {
       (1420300018503000, 52.03, 5.03, ${regionId}),
       (1420400018504000, 52.04, 5.04, ${regionId})`);
 
+    run(`CREATE TABLE edge_type_enum (id INTEGER PRIMARY KEY, description TEXT NOT NULL)`);
+    run(`INSERT INTO edge_type_enum VALUES (0, 'coastal'), (1, 'inland')`);
+    run(`CREATE TABLE poi_type_enum (id INTEGER PRIMARY KEY, description TEXT NOT NULL)`);
+    run(`INSERT INTO poi_type_enum VALUES (0, 'harbour'), (1, 'lock'), (2, 'bridge'), (3, 'fairway'), (4, 'waterway')`);
+
     run(`CREATE TABLE edges (
       source INTEGER, target INTEGER, distance REAL,
       min_depth REAL, max_air_draft REAL, min_width REAL,
-      is_fairway INTEGER, direction_penalty REAL, distance_to_land REAL,
-      edge_type TEXT DEFAULT 'coastal',
-      is_one_way INTEGER DEFAULT 0,
-      traffic_dir INTEGER DEFAULT 1
+      is_fairway INTEGER, distance_to_land REAL,
+      edge_type_id INTEGER DEFAULT 0,
+      traffic_mode INTEGER DEFAULT 0
     )`);
-    run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, direction_penalty, distance_to_land) VALUES
-      (1420000018500000, 1420100018501000, 1500, 5.0, 20.0, 10.0, 1, 1.0, 500),
-      (1420100018501000, 1420000018500000, 1500, 5.0, 20.0, 10.0, 1, 1.0, 500),
-      (1420100018501000, 1420200018502000, 1500, 5.0, 20.0, 10.0, 1, 1.0, 500),
-      (1420200018502000, 1420100018501000, 1500, 5.0, 20.0, 10.0, 1, 1.0, 500),
-      (1420200018502000, 1420300018503000, 1500, 5.0, 20.0, 10.0, 1, 1.0, 500),
-      (1420300018503000, 1420200018502000, 1500, 5.0, 20.0, 10.0, 1, 1.0, 500),
-      (1420300018503000, 1420400018504000, 1500, 5.0, 20.0, 10.0, 1, 1.0, 500),
-      (1420400018504000, 1420300018503000, 1500, 5.0, 20.0, 10.0, 1, 1.0, 500)`);
+    run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, distance_to_land, edge_type_id, traffic_mode) VALUES
+      (1420000018500000, 1420100018501000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0),
+      (1420100018501000, 1420000018500000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0),
+      (1420100018501000, 1420200018502000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0),
+      (1420200018502000, 1420100018501000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0),
+      (1420200018502000, 1420300018503000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0),
+      (1420300018503000, 1420200018502000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0),
+      (1420300018503000, 1420400018504000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0),
+      (1420400018504000, 1420300018503000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0)`);
 
-    run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type TEXT, properties TEXT, lat REAL, lon REAL)`);
-    run(`INSERT INTO pois (id, name, type, properties, lat, lon) VALUES
-      (1, 'Port of Rotterdam', 'port', NULL, 51.9244, 4.4777),
-      (2, 'Marina Amsterdam', 'marina', NULL, 52.3676, 4.9041),
-      (3, 'Lock Merwede', 'lock', NULL, 51.8833, 5.0333)`);
+    run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
+    run(`INSERT INTO pois (id, name, type_id, properties, lat, lon) VALUES
+      (1, 'Port of Rotterdam', 0, NULL, 51.9244, 4.4777),
+      (2, 'Marina Amsterdam', 0, NULL, 52.3676, 4.9041),
+      (3, 'Lock Merwede', 1, NULL, 51.8833, 5.0333)`);
 
     raw.close();
 
