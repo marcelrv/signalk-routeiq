@@ -124,10 +124,10 @@ python3 nautical_routing_pipeline.py \
   --output ./netherlands.sqlite \
   --country NL \
   --name "Netherlands" \
-  --description "Dutch inland waterways and coastal waters" \
-  --tags '["official","rws","enc","inland","coastal"]' \
-  --contributor "marcelrv" \
-  --url "https://example.com/source"
+  --description "Dutch inland waterways and coastal waters based on ENCs" \
+  --tags '["rws","enc","inland","coastal"]' \
+  --contributor "Marcel Verpaalen" \
+  --url "https://github.com/marcelrv/signalk-router-data"
 ```
 
 ### Deploy script for the data repo

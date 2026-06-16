@@ -601,6 +601,49 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(79,148,212,0.35); border-radius: 4px; }
 
+/* ---------- loading overlay ---------- */
+#loading-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 9999;
+  background: rgba(11, 26, 43, 0.95);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.5s ease;
+}
+#loading-overlay.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+#loading-spinner {
+  width: 36px; height: 36px;
+  border: 3px solid rgba(59,143,212,0.25);
+  border-top-color: #3b8fd4;
+  border-radius: 50%;
+  animation: dm-spin 0.8s linear infinite;
+  margin-bottom: 16px;
+}
+#loading-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #e0edf5;
+  margin-bottom: 8px;
+}
+#loading-subtitle {
+  font-size: 13px;
+  color: #6d96c0;
+  margin-bottom: 16px;
+}
+#loading-dbs {
+  font-size: 12px;
+  color: #7ab8f0;
+  text-align: center;
+  max-width: 320px;
+  line-height: 1.6;
+}
+
 /* Data manager modal */
 #data-manager-modal .dm-tab-active { color: #e0edf5 !important; border-bottom-color: #3b8fd4 !important; }
 #data-manager-modal .dm-tab:hover { color: #b8d4f0 !important; }
@@ -651,6 +694,14 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 <body>
 
 <div id="map"></div>
+
+<!-- Loading overlay -->
+<div id="loading-overlay">
+  <div id="loading-spinner"></div>
+  <div id="loading-title">Loading Routing Data</div>
+  <div id="loading-subtitle">Initializing nautical route planner...</div>
+  <div id="loading-dbs"></div>
+</div>
 
 <!-- Search -->
 <div id="search-panel">
@@ -1294,13 +1345,50 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           showToast('Connected', 'success');
           return r.json();
         })
-        .then(() => fetchBoatData())
+        .then(() => {
+          fetchBoatData();
+          checkDbStatus();
+        })
         .catch(err => {
           console.warn('[connect] try ' + i + ' failed:', attempts[i], err.message);
           tryConnect(i + 1);
         });
     }
     tryConnect(0);
+  }
+
+  function checkDbStatus() {
+    var overlay = document.getElementById('loading-overlay');
+    var dbsEl = document.getElementById('loading-dbs');
+    var subtitleEl = document.getElementById('loading-subtitle');
+
+    function poll() {
+      fetch(getApiBase() + '/signalk/v1/api/router/databases/status', { signal: AbortSignal.timeout(5000) })
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(status) {
+          if (!status) return;
+          if (status.filenames && status.filenames.length > 0) {
+            dbsEl.textContent = status.filenames.join(', ');
+          } else {
+            dbsEl.textContent = 'No databases found';
+          }
+          if (status.loaded) {
+            subtitleEl.textContent = 'Loaded ' + (status.filenames.length || 0) + ' database(s)';
+            setTimeout(function() {
+              overlay.classList.add('hidden');
+              setTimeout(function() { overlay.style.display = 'none'; }, 500);
+            }, 800);
+          } else {
+            subtitleEl.textContent = 'Loading routing graph...';
+            setTimeout(poll, 1000);
+          }
+        })
+        .catch(function() {
+          // Server not ready yet, try again
+          setTimeout(poll, 1500);
+        });
+    }
+    poll();
   }
 
   connBtn.addEventListener('click', doConnect);
@@ -2857,18 +2945,21 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     for (var i = 0; i < list.length; i++) {
       var r = list[i];
       var tags = (r.tags || []).map(function(t) { return '<span class="dm-region-tag">' + t + '</span>'; }).join('');
+      var filename = r.filename || '';
+      var displayName = r.name || filename.replace('.sqlite', '') || 'Unknown';
       var card = document.createElement('div');
       card.className = 'dm-installed-card';
       card.innerHTML =
         '<div style="display:flex;align-items:flex-start;justify-content:space-between">' +
-          '<div>' +
-            '<div><span class="dm-region-name">' + (r.name || 'Unknown') + '</span><span class="dm-region-country">' + (r.country || '') + '</span></div>' +
-            '<div class="dm-region-desc">' + (r.description || '') + '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div><span class="dm-region-name">' + displayName + '</span><span class="dm-region-country">' + (r.country || '') + '</span></div>' +
+            (r.description ? '<div class="dm-region-desc">' + r.description + '</div>' : '') +
             '<div class="dm-region-meta">' +
+              '<span title="Database file">' + filename + '</span>' +
               '<span>Updated: ' + (r.lastUpdateDate ? r.lastUpdateDate.slice(0,10) : 'unknown') + '</span>' +
-              '<span>' + (r.stats ? r.stats.nodes.toLocaleString() + ' nodes' : '') + '</span>' +
-              '<span>' + (r.stats ? r.stats.edges.toLocaleString() + ' edges' : '') + '</span>' +
-              '<span>' + (r.stats ? r.stats.pois.toLocaleString() + ' POIs' : '') + '</span>' +
+              (r.stats && r.stats.nodes ? '<span>' + r.stats.nodes.toLocaleString() + ' nodes</span>' : '') +
+              (r.stats && r.stats.edges ? '<span>' + r.stats.edges.toLocaleString() + ' edges</span>' : '') +
+              (r.stats && r.stats.pois ? '<span>' + r.stats.pois.toLocaleString() + ' POIs</span>' : '') +
             '</div>' +
             '<div style="margin-top:4px">' + tags + '</div>' +
           '</div>' +

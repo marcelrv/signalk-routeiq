@@ -34,7 +34,12 @@ interface PoiRow {
   lon: number;
 }
 
-const dbs: DatabaseSync[] = [];
+interface DbHandle {
+  db: DatabaseSync;
+  path: string;
+}
+
+const handles: DbHandle[] = [];
 let hasCrossesLand = false;
 let hasCrossesObstacle = false;
 let hasNodeDepth = false;
@@ -54,7 +59,8 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         hasCrossesObstacle = false;
         hasNodeDepth = false;
         hasRegionId = false;
-        dbs.length = 0;
+        handles.length = 0;
+        const loadedFilenames: string[] = [];
         for (const dbPath of dbPaths) {
           try {
             const db = new DatabaseSync(dbPath, { open: true });
@@ -76,24 +82,27 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
             const nodeCols = db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>;
             hasNodeDepth = hasNodeDepth || nodeCols.some(c => c.name === 'node_depth');
             hasRegionId = hasRegionId || nodeCols.some(c => c.name === 'region_id');
-            dbs.push(db);
+            const parts = dbPath.replace(/\\/g, '/').split('/');
+            const filename = parts[parts.length - 1];
+            handles.push({ db, path: dbPath });
+            loadedFilenames.push(filename);
             console.log(`[db-worker] Loaded database: ${dbPath}`);
           } catch (err: any) {
             console.warn(`[db-worker] Skipping invalid database ${dbPath}: ${err.message ?? String(err)}`);
           }
         }
-        if (dbs.length === 0) {
+        if (handles.length === 0) {
           parentPort!.postMessage({ id, type, error: 'No valid .sqlite routing databases found in the data directory' });
           break;
         }
-        parentPort!.postMessage({ id, type, result: { hasCrossesLand, hasCrossesObstacle, hasNodeDepth, hasRegionId } });
+        parentPort!.postMessage({ id, type, result: { hasCrossesLand, hasCrossesObstacle, hasNodeDepth, hasRegionId, filenames: loadedFilenames } });
         break;
       }
       case 'loadNodes': {
         const regionIdCol = hasRegionId ? 'region_id' : '0 AS region_id';
         const allNodes: NodeRow[] = [];
-        for (const db of dbs) {
-          allNodes.push(...db.prepare(`SELECT id, lat, lon, node_depth, resolution, ${regionIdCol} FROM nodes`).all() as unknown as NodeRow[]);
+        for (const h of handles) {
+          allNodes.push(...h.db.prepare(`SELECT id, lat, lon, node_depth, resolution, ${regionIdCol} FROM nodes`).all() as unknown as NodeRow[]);
         }
         parentPort!.postMessage({ id, type, result: allNodes });
         break;
@@ -102,8 +111,8 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         const crossesCol = hasCrossesLand ? ', crosses_land' : '';
         const obstacleCol = hasCrossesObstacle ? ', crosses_obstacle' : '';
         let allEdges: EdgeRow[] = [];
-        for (const db of dbs) {
-          const edges = db.prepare(
+        for (const h of handles) {
+          const edges = h.db.prepare(
             `SELECT source, target, distance, min_depth, max_air_draft, min_width,
                     is_fairway, distance_to_land,
                     edge_type_id, traffic_mode${crossesCol}${obstacleCol}
@@ -121,8 +130,8 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
       }
       case 'loadPois': {
         const allPois: PoiRow[] = [];
-        for (const db of dbs) {
-          allPois.push(...db.prepare('SELECT id, name, type_id, properties, lat, lon FROM pois').all() as unknown as PoiRow[]);
+        for (const h of handles) {
+          allPois.push(...h.db.prepare('SELECT id, name, type_id, properties, lat, lon FROM pois').all() as unknown as PoiRow[]);
         }
         parentPort!.postMessage({ id, type, result: allPois });
         break;
@@ -132,11 +141,11 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
           id: number; country: string; name: string; description: string | null;
           lastUpdateDate: string; tags: string | null; boundingBox: string | null;
           boundaryGeometry: string | null; schemaVersion: number | null;
-          contributor: string | null; url: string | null;
+          contributor: string | null; url: string | null; filename: string;
         }> = [];
-        for (const db of dbs) {
+        for (const h of handles) {
           try {
-            const metaCols = db.prepare("PRAGMA table_info('metadata')").all() as Array<{ name: string }>;
+            const metaCols = h.db.prepare("PRAGMA table_info('metadata')").all() as Array<{ name: string }>;
             const colNames = new Set(metaCols.map(c => c.name));
             const hasTags = colNames.has('tags');
             const hasBbox = colNames.has('bounding_box');
@@ -153,7 +162,9 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
               ${hasContributor ? 'contributor' : "'' AS contributor"},
               ${hasUrl ? 'url' : "'' AS url"}
               FROM metadata ORDER BY id`;
-            const rows = db.prepare(sql).all() as Array<any>;
+            const rows = h.db.prepare(sql).all() as Array<any>;
+            const parts = h.path.replace(/\\/g, '/').split('/');
+            const filename = parts[parts.length - 1];
             for (const r of rows) {
               results.push({
                 id: r.id, country: r.country, name: r.name, description: r.description,
@@ -164,20 +175,40 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
                 schemaVersion: r.schema_version ?? null,
                 contributor: r.contributor ?? null,
                 url: r.url ?? null,
+                filename,
+              });
+            }
+            // If the DB has no metadata rows, still include a minimal entry so it shows in the installed list
+            if (rows.length === 0) {
+              results.push({
+                id: 0, country: '', name: filename.replace('.sqlite', ''), description: null,
+                lastUpdateDate: '', tags: null,
+                boundingBox: null, boundaryGeometry: null,
+                schemaVersion: null, contributor: null, url: null,
+                filename,
               });
             }
           } catch {
-            // metadata table might not exist in legacy DBs
+            // metadata table might not exist in legacy DBs — include a minimal entry
+            const parts = h.path.replace(/\\/g, '/').split('/');
+            const filename = parts[parts.length - 1];
+            results.push({
+              id: 0, country: '', name: filename.replace('.sqlite', ''), description: null,
+              lastUpdateDate: '', tags: null,
+              boundingBox: null, boundaryGeometry: null,
+              schemaVersion: null, contributor: null, url: null,
+              filename,
+            });
           }
         }
         parentPort!.postMessage({ id, type, result: results });
         break;
       }
       case 'close': {
-        for (const db of dbs) {
-          try { db.close(); } catch { /* already closed */ }
+        for (const h of handles) {
+          try { h.db.close(); } catch { /* already closed */ }
         }
-        dbs.length = 0;
+        handles.length = 0;
         parentPort!.postMessage({ id, type, result: null });
         break;
       }

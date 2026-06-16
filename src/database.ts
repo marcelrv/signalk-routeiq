@@ -76,7 +76,6 @@ export class RoutingDatabase {
   private nodes: Map<number, { lat: number; lon: number; regionId: number; nodeDepth: number; resolution: number }> = new Map();
   private edgesBySource: Map<number, Array<EdgeRow & { lat: number; lon: number }>> = new Map();
   private pois: PoiRow[] = [];
-  private graphLoaded: boolean = false;
   private spatialGrid: Map<string, number[]> = new Map();
   private waterBBoxIndex: Float64Array | null = null;
   private hasCrossesLand: boolean = false;
@@ -87,8 +86,14 @@ export class RoutingDatabase {
     id: number; country: string; name: string; description: string | null;
     lastUpdateDate: string; tags: string | null; boundingBox: string | null;
     boundaryGeometry: string | null; schemaVersion: number | null;
-    contributor: string | null; url: string | null;
+    contributor: string | null; url: string | null; filename: string;
   }> = [];
+
+  /** Basenames of .sqlite files successfully loaded */
+  private loadedDbFilenames: string[] = [];
+
+  /** True once loadGraph() completes successfully */
+  private graphLoaded: boolean = false;
 
   constructor(dbDir: string) {
     this.dbDir = dbDir;
@@ -160,6 +165,7 @@ export class RoutingDatabase {
     this.hasCrossesObstacle = schema.hasCrossesObstacle;
     this.hasNodeDepth = schema.hasNodeDepth;
     this.hasRegionId = schema.hasRegionId;
+    this.loadedDbFilenames = schema.filenames || [];
   }
 
   private regionIdCol(): string {
@@ -170,7 +176,7 @@ export class RoutingDatabase {
     id: number; country: string; name: string; description: string | null;
     lastUpdateDate: string; tags: string | null; boundingBox: string | null;
     boundaryGeometry: string | null; schemaVersion: number | null;
-    contributor: string | null; url: string | null;
+    contributor: string | null; url: string | null; filename: string;
   }>> {
     return this.sendMessage('getMetadata');
   }
@@ -179,7 +185,7 @@ export class RoutingDatabase {
     id: number; country: string; name: string; description: string | null;
     lastUpdateDate: string; tags: string[]; boundingBox: { min_lat: number; min_lon: number; max_lat: number; max_lon: number } | null;
     boundaryGeometry: any | null; schemaVersion: number | null;
-    contributor: string | null; url: string | null;
+    contributor: string | null; url: string | null; filename: string;
     stats: { nodes: number; edges: number; pois: number };
   }>> {
     const meta = this.metadataCache.length > 0 ? this.metadataCache : await this.getMetadata();
@@ -191,6 +197,14 @@ export class RoutingDatabase {
       boundaryGeometry: m.boundaryGeometry ? JSON.parse(m.boundaryGeometry) : null,
       stats: { nodes: stats.nodes, edges: stats.edges, pois: stats.pois },
     }));
+  }
+
+  /** Return loading status info */
+  getLoadingStatus(): { loaded: boolean; filenames: string[] } {
+    return {
+      loaded: this.graphLoaded,
+      filenames: this.loadedDbFilenames,
+    };
   }
 
   /**

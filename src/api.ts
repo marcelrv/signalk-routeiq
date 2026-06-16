@@ -95,6 +95,9 @@ export class ApiHandler {
     // GET /signalk/v1/api/router/databases — list locally installed databases
     this.router.get('/databases', this.handleListDatabases.bind(this));
 
+    // GET /signalk/v1/api/router/databases/status — loading status
+    this.router.get('/databases/status', this.handleDatabasesStatus.bind(this));
+
     // GET /signalk/v1/api/router/databases/available — fetch remote catalog
     this.router.get('/databases/available', this.handleAvailableDatabases.bind(this));
 
@@ -474,6 +477,25 @@ export class ApiHandler {
     try {
       const info = await this.db.getDatabaseInfo();
       res.json({ databases: info });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: message });
+      next(error);
+    }
+  }
+
+  /**
+   * Handle databases loading status
+   * GET /signalk/v1/api/router/databases/status
+   */
+  private async handleDatabasesStatus(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.db) {
+      res.json({ loaded: false, filenames: [] });
+      return;
+    }
+    try {
+      const status = this.db.getLoadingStatus();
+      res.json(status);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: message });
