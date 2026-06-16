@@ -1,12 +1,188 @@
-Here is a comprehensive code review of the SignalK Autoroute plugin codebase. The review is broken down into two parts: the **Top 10 Technical Issues** to fix, and the **Top 10 Suggestions for UI/UX & Smarter Routing**. 
+# TODO — Feature Planning
 
-Each item includes a clear description and a ready-to-use prompt you can feed into your AI agent (like GitHub Copilot, Cursor, or Claude) to implement the change.
+## 1. Tide-Informed Depth Calculation in Routing
+
+### Problem
+Chart depths are referenced to Lowest Astronomical Tide (LAT) — the lowest expected water level under normal conditions. Actual depth at any time = charted depth + local tidal height above LAT at that moment. A route that seems impassable for a given draft might be perfectly safe at high tide, and conversely, a route that seems safe might be dangerous at low tide.
+
+### How It Should Work
+
+**Data source**: Query tidal predictions via Signal K's `resources/tides/*` path, or via an integrated harmonic tide model (e.g., XTide / pyTide). Each request includes a position (lat, lon) and a UTC time, returning predicted tide height in meters above LAT.
+
+**Depth adjustment per edge**: When evaluating an edge during A*, the system needs to know the "effective depth" at the time the vessel will *actually be at that edge*. This means:
+1. Estimate the arrival time at each edge/node along the route based on accumulated travel time from the departure time + distance/speed for each preceding edge.
+2. For each edge, query the tide height at the edge's midpoint (or a sample of points along it) for that estimated arrival time.
+3. `effective_depth = charted_min_depth + tide_height_above_lat`
+4. Filter: if `effective_depth < vessel_draft + safety_margin`, discard the edge.
+
+**Optimization — skip sampling when not needed**: If `charted_min_depth` alone is already `>= vessel_draft + safety_margin + max_tide_range_for_region`, the edge is always safe regardless of tide — skip tide lookup entirely. This avoids expensive tide queries for deep-water edges. Similar to the "4-meter fast-path" in depth extraction, but applied at routing time.
+
+**Tide variation along long edges**: For edges longer than ~2 km, take multiple tide samples at regular intervals. A 20 km coastal edge may cross from an area with high tidal range to one with low tidal range. Use the minimum effective depth across all samples.
+
+**Fallback**: If tide data is unavailable for a given region/time, log a warning and fall back to using `charted_min_depth` alone (conservative, always safe).
+
+**Data model changes**:
+- `DepartureTime` becomes a required input (see feature #4).
+- Each edge in the A* open set carries an `estimatedArrivalTime` field so that tide queries are anchored to the correct time.
+- Tide data can be cached aggressively (keyed by `(rounded_lat_3dp, rounded_lon_3dp, date_hour)`) since it changes slowly and predictably.
 
 ---
 
-### Part 1: Top 10 Most Important Technical Issues to Fix
- 
-### Part 2: Top 10 Suggestions for UI/UX & Smarter Routing
+## 2. Tidal Current (Stream) in Routing Cost
+
+### Problem
+Tidal streams add or subtract from a vessel's speed over ground. A 6-knot tidal current aligned with the route can double a 6-knot vessel's speed; the same current against the route can reduce it to zero. The current router assumes constant still-water speed, which can lead to wildly inaccurate ETAs and suboptimal route choices.
+
+### How It Should Work
+
+**Data source**: Tidal stream data from Signal K (`resources/currents/*`) or harmonic models. For a given position and time, returns: speed (knots) and direction (degrees true).
+
+**Speed adjustment**: For each edge, calculate:
+```
+tidal_component = tidal_speed * cos(tidal_dir - edge_bearing)
+effective_speed = vessel_speed + tidal_component  (can be > base or negative)
+```
+If `effective_speed <= 0`, the vessel is being pushed backwards — the edge is effectively impassable in the forward direction (or requires an extremely high penalty).
+
+**Cost function impact**: The A* cost (time) for an edge becomes:
+`edge_cost_seconds = edge_length_meters / (effective_speed * 0.514444)` (converting knots to m/s).
+This makes the router naturally prefer edges where the tidal stream is favorable (or at least not opposing), and avoid routing against a strong current.
+
+**Temporal dependence**: Like tide height, tidal streams vary by time. The estimated arrival time at each edge determines the tidal stream used. This makes the problem genuinely time-dependent (TDSP — Time-Dependent Shortest Path). The A* search must account for the fact that the cost of an edge depends on *when* you arrive at it, which in turn depends on the path taken so far.
+
+**Efficient lookup**: Precompute a "tidal stream grid" at low resolution (e.g., 1 km grid, 1-hour time steps) to avoid per-edge harmonic calculations. Interpolate (bilinear in space, linear in time) for the exact query point.
+
+**Fallback**: If tidal current data is unavailable, log a warning and use `effective_speed = vessel_speed` (no current). This keeps existing routes working in regions without current data.
+
+---
+
+## 3. Weather Routing & Sailing Polar Diagrams
+
+### Problem
+Sailing boats don't have a fixed speed. Their speed depends on wind speed and wind angle relative to the boat (True Wind Angle). The current router assumes a constant speed for all conditions, which is completely wrong for sailboats and inaccurate for power vessels in heavy weather.
+
+### How It Should Work
+
+**Polar data**: A "polar table" is a 2D lookup table: `boat_speed(TWS, TWA)` where:
+- TWS = True Wind Speed (knots) — rows
+- TWA = True Wind Angle (degrees) — columns (0° = headwind, 90° = beam reach, 180° = downwind)
+The table is vessel-specific and stored in the vessel's Signal K configuration or hardcoded per vessel type.
+
+**Wind data source**: Forecast wind data from Signal K (GRIB/WaveWatch III via `resources/weather/*` or forecast APIs). For a given position and time, returns: wind speed (knots) and direction (degrees true) at 10m height.
+
+**Speed calculation for each edge**:
+1. Look up wind at the edge's midpoint at the estimated arrival time.
+2. Calculate True Wind Angle: `TWA = abs(wind_dir - edge_bearing)`. If TWA > 180°, use `360 - TWA` (sailing is symmetric).
+3. Look up the polar table: `effective_speed = polar_table.lookup(TWS, TWA)`.
+4. If TWS is above the boat's maximum wind tolerance, apply a heavy penalty (reefing / heaving-to).
+5. If TWS is below the boat's minimum planing threshold for sail, use a minimal "ghosting" speed.
+
+**Integration with tidal current**: First calculate the Through-Water speed from the polar, then apply tidal current adjustment (feature #2) to get Speed Over Ground. The order matters: wind affects the boat through the water, current adds to that.
+
+**Non-sailing defaults**: If the vessel is a motorboat (or polar data is absent), use the configured `nominal_speed` regardless of wind, but still apply tidal current (feature #2). A power vessel might optionally have a "fuel efficiency vs. speed" curve for eco-routing.
+
+**Storing polars**: Store as a JSON blob in vessel config in Signal K, or in the plugin config under a key like `vesselPolar`. Provide a simple editor in the UI to set speed values for each wind bin.
+
+---
+
+## 4. Departure Time Selection
+
+### Problem
+The router currently assumes departure is "right now." All time-dependent features (tide height, tidal current, wind) require knowing *when* the vessel departs, because conditions change over time and the arrival time at each waypoint depends on when you started.
+
+### How It Should Work
+
+**UI element**: Add a date/time picker in the sidebar (or above the map) with the current time as the default. Include:
+- Departure date + time in local timezone (with UTC display)
+- A "Now" button to reset to current time
+- "Depart at" vs "Arrive by" toggle (see below)
+
+**API change**: The `/route` POST request now includes:
+```json
+{
+  "start": [...],
+  "destination": [...],
+  "departureTime": "2026-06-16T08:00:00Z",
+  "arriveBy": false,
+  ...
+}
+```
+If `arriveBy: true`, `departureTime` is treated as the desired arrival time, and the router works backwards (or iterates to find the optimal departure).
+
+**Backend propagation**: `departureTime` flows into the A* search as a `startTime` parameter. Each node in the search space carries `cumulativeTimeSeconds`. When evaluating an edge:
+1. `edgeArrivalTime = startTime + cumulativeTime + edgeTravelTime(using_current_speed)`
+2. Use `edgeArrivalTime` for all time-dependent lookups (tide height, tidal current, wind).
+
+**Iterative refinement**: Since edge travel time depends on conditions (tidal current + wind) which depend on arrival time, there's a circular dependency. Use iterative refinement:
+1. First pass: estimate travel time without time-dependent effects.
+2. Look up conditions at the estimated time window.
+3. Second pass: recalculate with better time estimates.
+4. Iterate until convergence (or max 3 iterations).
+This is standard practice in time-dependent routing.
+
+**"Arrive by" mode**: Common for tide-dependent passages (arrive at a shallow lock/harbor before the tide falls). The router should search for the optimal departure time that minimizes total travel time while arriving before the specified time. This is effectively a 1D optimization over departure time.
+
+---
+
+## 5. Manual Routing (User Takes Over Where Auto-Router Fails)
+
+### Problem
+The autorouter works well in well-charted fairways but can fail in complex areas with missing data, narrow passages, or unusual constraints. Currently there's no fallback — the user gets "route not found." Manual routing lets the user draw their own segments, which is especially important when the automatic graph doesn't fully cover the desired route.
+
+### How It Should Work
+
+**Concept**: A route becomes a *mixed sequence* of auto-routed segments and manually drawn segments. The user clicks to place waypoints; the system auto-routes between consecutive waypoints when possible, and falls back to straight-line/drawn segments when the auto-router fails (or when the user explicitly draws a manual segment).
+
+**UI interaction**:
+- **Add waypoint**: Single-click on the map inserts a new waypoint at that location (connected by auto-route to the previous waypoint).
+- **Manual segment toggle**: A "Draw" button/mode in the toolbar. When active, the user clicks to place individual routing points. Each click adds a point; connections between manual points are straight-line segments (or rhumb lines). These segments are labeled "manual" in the route result.
+- **Visual distinction**: Auto-routed segments in blue, manual segments in dashed orange/red. The user can immediately see where the auto-router succeeded and where they had to draw manually.
+- **Snapping**: When creating manual points, snap to the nearest node in the routing graph (within ~50m) to ensure the manual segment connects to the graph at both ends.
+- **Drag to adjust**: After placement, drag any waypoint to reposition it. This triggers a re-route of the affected auto-segments while preserving manual segments.
+
+**Backend**:
+- The route request includes a `segments` array:
+  ```json
+  {
+    "segments": [
+      { "type": "auto", "start": [...], "end": [...] },
+      { "type": "manual", "points": [[...], [...], ...] }
+    ]
+  }
+  ```
+- The router processes auto-segments normally via A*.
+- Manual segments are returned as-is (straight-line or rhumb-line interpolation between the user's points).
+- The router validates that manual segments don't cross land (optional, configurable). If they do, add a warning rather than blocking (the user may know about a bridge or ferry that isn't in the graph).
+
+**Use case**: A user needs to go from Amsterdam to a small marina up a narrow creek not in the ENC data. They auto-route to the mouth of the creek, then switch to manual mode to draw the final few hundred meters into the marina.
+
+---
+
+## 6. Swap Left-Click / Right-Click Interaction
+
+### Problem
+Currently, right-click places start/destination/via points, and left-click is used for map panning. This is unintuitive and conflicts with standard web map conventions where left-click selects/interacts, right-click shows context menus or pans (or does nothing). It also makes the interface hard to discover — new users don't think to right-click.
+
+### How It Should Work
+
+**New convention**:
+- **Left-click** on empty water → add a waypoint (start, via, or destination depending on state).
+- **Left-click** on an existing waypoint → drag to reposition it.
+- **Left-click** on a route segment (between waypoints) → insert a new via point at that position.
+- **Left-click drag** on empty map → pan (Leaflet default).
+- **Right-click** → context menu with options: "Set as departure", "Set as destination", "Add as via point", "Add manual segment here", "Remove waypoint", "Clear route".
+- **Right-click drag** → continues to pan (Leaflet default), so users who expect right-click to pan still can.
+
+**State machine**:
+- **Idle**: Map pans with left-drag. Left-click shows a popup: "Create route here" or adds a start point if no route exists.
+- **Has start, no destination**: Left-click adds destination (triggers route calculation).
+- **Has route**: Left-click on empty water adds a via point. Left-click on an existing via point allows dragging.
+- **Manual drawing mode**: Left-click adds manual routing points (see feature #5).
+- **Right-click**: Always opens context menu relevant to the clicked location.
+
+**Backward compatibility**: This is a significant UX change. Consider a settings option: "Use left-click for routing" (default ON). When OFF, revert to the current right-click-for-routing behavior. This gives experienced users a migration path.
+
+**Touch devices**: On mobile/tablet, a tap (touch) replaces left-click. Long-press replaces right-click (context menu). Pinch to zoom continues to work as normal.
 
 #### 1. Elevation/Depth Route Profile Graph
 **Description**: When viewing a route, users want to visually understand where the shallow spots or low bridges are. A 2D profile graph charting Depth and Air Draft over Distance makes it instantly clear where the bottlenecks are.
