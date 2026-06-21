@@ -25,7 +25,7 @@ let apiHandler: ApiHandler | null = null;
  */
 export function pluginConstructor(app: ServerAPI) {
   let config: PluginConfig = { ...DEFAULT_CONFIG };
-  let vesselDimensions = { draft: 0, beam: 4, airDraft: 10 };
+  let vesselDimensions = { draft: 0, beam: 4, airDraft: 0 };
   let subscriptionCancelled: (() => void) | null = null;
 
   const pluginId = 'signalk-autoroute';

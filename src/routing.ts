@@ -113,7 +113,7 @@ export class RoutingEngine {
     this.vesselDimensions = vesselDimensions || {
       draft: 0,   // unknown until SignalK provides it
       beam: 4,    // reaseonable default until SignalK provides it
-      airDraft: 10, // reasonable default until SignalK provides it
+      airDraft: 0,
     };
   }
 
@@ -1269,7 +1269,7 @@ export class RoutingEngine {
     const coords = result.features[0].geometry.coordinates;
     const segments = result.features[0].properties.segments!;
     const minDepth = (this.vesselDimensions.draft || 2.0) + this.config.safetyMarginDraft;
-    const airDraft = (this.vesselDimensions.airDraft || 10.0) + this.config.safetyMarginAirDraft;
+    const airDraft = (this.vesselDimensions.airDraft || 0) + this.config.safetyMarginAirDraft;
 
     let totalViolationSegments = 0;
     let totalViolationDist = 0;

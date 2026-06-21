@@ -757,7 +757,7 @@ export class RoutingDatabase {
       if (edge) {
         totalDist += edge.distance;
         if (typeof edge.min_depth === 'number' && edge.min_depth >= 0) minDepth = Math.min(minDepth, edge.min_depth);
-        if (typeof edge.max_air_draft === 'number' && edge.max_air_draft >= 0) maxAirDraft = Math.max(maxAirDraft, edge.max_air_draft);
+        if (typeof edge.max_air_draft === 'number' && edge.max_air_draft >= 0) maxAirDraft = Math.min(maxAirDraft, edge.max_air_draft);
         if (typeof edge.min_width === 'number' && edge.min_width >= 0) minWidth = Math.min(minWidth, edge.min_width);
         if (edge.is_fairway) isFairway = true;
         trafficMode = Math.min(trafficMode, edge.traffic_mode);
@@ -808,6 +808,13 @@ export class RoutingDatabase {
     if (!edges) throw new Error(`No edges from source ${source}`);
     const edge = edges.find(e => e.target === target);
     if (!edge) throw new Error(`Edge ${source}->${target} not found`);
+    if (updates.distance !== undefined && (updates.distance < 0 || !updates.distance)) {
+      const s = this.nodes.get(source);
+      const t = this.nodes.get(target);
+      if (s && t) {
+        updates.distance = Math.round(this.haversineDistance(s.lat, s.lon, t.lat, t.lon));
+      }
+    }
     await this.sendMessage('updateEdge', { dbIndex, source, target, ...updates });
     if (updates.distance !== undefined) edge.distance = updates.distance;
     if (updates.min_depth !== undefined) edge.min_depth = updates.min_depth;
@@ -853,10 +860,13 @@ export class RoutingDatabase {
     is_fairway?: number; distance_to_land?: number;
     edge_type_id?: number; traffic_mode?: number;
   }): Promise<void> {
-    await this.sendMessage('insertEdge', { dbIndex, ...edge });
     const s = this.nodes.get(edge.source);
     const t = this.nodes.get(edge.target);
     if (!s || !t) throw new Error('Source or target node not found');
+    if (!edge.distance || edge.distance <= 0) {
+      edge.distance = Math.round(this.haversineDistance(s.lat, s.lon, t.lat, t.lon));
+    }
+    await this.sendMessage('insertEdge', { dbIndex, ...edge });
     const newEdge: EdgeRow & { lat: number; lon: number } = {
       source: edge.source,
       target: edge.target,
