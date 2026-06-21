@@ -1055,6 +1055,33 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
   }).addTo(map);
 
+  // Right-drag panning: left click for node/graph interaction, right drag to pan
+  map.dragging.disable();
+  map.boxZoom.disable();
+  map.on('contextmenu', function (e) { L.DomEvent.preventDefault(e.originalEvent); });
+  {
+    let dragging = false, lastPos = null;
+    map.on('mousedown', function (e) {
+      if (e.originalEvent.button === 2) {
+        dragging = true;
+        lastPos = e.containerPoint;
+        L.DomEvent.preventDefault(e);
+      }
+    });
+    map.on('mousemove', function (e) {
+      if (dragging && lastPos) {
+        const dx = e.containerPoint.x - lastPos.x;
+        const dy = e.containerPoint.y - lastPos.y;
+        lastPos = e.containerPoint;
+        map.panBy([-dx, -dy], { animate: false });
+      }
+    });
+    map.on('mouseup', function (e) {
+      if (e.originalEvent.button === 2) dragging = false;
+    });
+    map.on('mouseleave', function () { dragging = false; });
+  }
+
   // ---- overlay layers for debug / visualization ----
   const waterwaysLayer = L.featureGroup().addTo(map);
   const graphLayer = L.featureGroup().addTo(map);
@@ -1121,7 +1148,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         for (const e of data.edges) {
           const color = e.edge_type_id === 1 ? '#a855f7' : '#22d3ee';
           const dash = e.traffic_mode !== 0 ? '5,5' : null;
-          const opts = { color, weight: 1, opacity: 0.5, dashArray: dash };
+          const opts = { color, weight: 3, opacity: 0.7, dashArray: dash };
           const line = L.polyline([[e.source_lat, e.source_lon], [e.target_lat, e.target_lon]], opts);
           if (state.editMode) {
             line._edgeData = e;
@@ -1727,7 +1754,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         if (!cog) cog = nav?.courseOverGroundTrue?.value;
         draft = draft || sr.value?.design?.draft?.value || nav?.draft?.value;
         beam = beam || sr.value?.design?.beam?.value;
-        airDraft = airDraft || sr.value?.design?.airDraft?.value;
+        airDraft = airDraft || sr.value?.design?.airHeight?.value;
       }
       showBoatData(lat, lng, sog, cog, draft, beam, airDraft, effectiveDraft, effectiveBeam, effectiveAirDraft);
     });
@@ -1875,6 +1902,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         end: end,
         via: via,
         minCoastDistance: minCoastNauticalMiles,
+        draft: bd.draft,
+        beam: bd.beam,
+        airDraft: bd.airDraft,
       };
 
       console.log('[MarineRouter] via payload:', JSON.stringify(via));
