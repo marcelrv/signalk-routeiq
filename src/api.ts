@@ -80,17 +80,26 @@ export class ApiHandler {
     // GET /signalk/v1/api/router/graph/nodes?bbox=minLon,minLat,maxLon,maxLat
     this.router.get('/graph/nodes', this.handleGraphNodes.bind(this));
 
+    // GET /signalk/v1/api/router/graph/edges?bbox=minLon,minLat,maxLon,maxLat
+    this.router.get('/graph/edges', this.handleGraphEdges.bind(this));
+
     // GET /signalk/v1/api/router/pois?bbox=minLon,minLat,maxLon,maxLat
     this.router.get('/pois', this.handlePois.bind(this));
 
     // GET /signalk/v1/api/router/poi/nearest?lat=X&lon=Y&radius=250
     this.router.get('/poi/nearest', this.handleNearestPoi.bind(this));
 
-    // GET /signalk/v1/api/router/water?bbox=minLon,minLat,maxLon,maxLat
-    this.router.get('/water', this.handleWater.bind(this));
-
     // GET /signalk/v1/api/router/waterways?bbox=minLon,minLat,maxLon,maxLat
     this.router.get('/waterways', this.handleWaterways.bind(this));
+
+    // GET /signalk/v1/api/router/graph/databases — list loaded DB filenames for editing
+    this.router.get('/graph/databases', this.handleGraphDatabases.bind(this));
+
+    // Graph editor endpoints (all POST with manual auth check)
+    this.router.post('/graph/nodes/:id', this.handleUpsertNode.bind(this));
+    this.router.post('/graph/nodes/:id/delete', this.handleDeleteNode.bind(this));
+    this.router.post('/graph/edges/:source/:target', this.handleUpsertEdge.bind(this));
+    this.router.post('/graph/edges/:source/:target/delete', this.handleDeleteEdge.bind(this));
 
     // GET /signalk/v1/api/router/databases — list locally installed databases
     this.router.get('/databases', this.handleListDatabases.bind(this));
@@ -347,6 +356,161 @@ export class ApiHandler {
   }
 
   /**
+   * Handle graph edges query
+   * GET /signalk/v1/api/router/graph/edges?bbox=minLon,minLat,maxLon,maxLat&limit=5000
+   */
+  private async handleGraphEdges(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.isReady()) {
+      res.status(503).json({ error: 'Database not ready' });
+      return;
+    }
+    try {
+      const bbox = req.query.bbox as string;
+      const limit = parseInt(req.query.limit as string) || 5000;
+      if (!bbox) {
+        res.status(400).json({ error: 'Missing bbox parameter (minLon,minLat,maxLon,maxLat)' });
+        return;
+      }
+      const parts = bbox.split(',').map(Number);
+      if (parts.length !== 4 || parts.some(isNaN)) {
+        res.status(400).json({ error: 'Invalid bbox format, expected minLon,minLat,maxLon,maxLat' });
+        return;
+      }
+      const [minLon, minLat, maxLon, maxLat] = parts;
+      const edges = await this.db!.getEdgesInBBox(minLat, minLon, maxLat, maxLon, limit);
+      res.json({ count: edges.length, edges });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.error('[autoroute] graph/edges error:', error);
+      res.status(500).json({ error: message });
+      next(error);
+    }
+  }
+
+  /**
+   * Handle list loaded databases for graph editing
+   * GET /signalk/v1/api/router/graph/databases
+   */
+  private async handleGraphDatabases(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.isReady()) {
+      res.status(503).json({ error: 'Database not ready' });
+      return;
+    }
+    try {
+      const list = await this.db!.getDatabaseList();
+      res.json({ databases: list });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: message });
+      next(error);
+    }
+  }
+
+  /**
+   * Simple auth check — verifies the SK auth cookie is present.
+   * The SK server sets the `JAUTHENTICATION` cookie on login.
+   */
+  private requireAuth(req: Request, res: Response): boolean {
+    const cookies = req.headers.cookie || '';
+    if (!cookies.includes('JAUTHENTICATION=')) {
+      res.status(401).json({ error: 'Authentication required. Please log into the Signal K admin UI.' });
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Handle upsert node (create or update)
+   * POST /signalk/v1/api/router/graph/nodes/:id
+   */
+  private async handleUpsertNode(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+    if (!this.requireAuth(req, res)) return;
+    try {
+      const nodeId = parseInt(req.params.id, 10);
+      const { dbIndex, lat, lon, node_depth, resolution } = req.body;
+      if (dbIndex === undefined) { res.status(400).json({ error: 'Missing dbIndex' }); return; }
+      if (lat !== undefined && lon !== undefined) {
+        await this.db!.addNode(dbIndex, { id: nodeId, lat, lon, node_depth, resolution });
+      } else {
+        await this.db!.updateNode(dbIndex, nodeId, { node_depth, resolution });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: message });
+      next(error);
+    }
+  }
+
+  /**
+   * Handle delete node
+   * POST /signalk/v1/api/router/graph/nodes/:id/delete  body: { dbIndex }
+   */
+  private async handleDeleteNode(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+    if (!this.requireAuth(req, res)) return;
+    try {
+      const nodeId = parseInt(req.params.id, 10);
+      const { dbIndex } = req.body;
+      if (dbIndex === undefined) { res.status(400).json({ error: 'Missing dbIndex' }); return; }
+      await this.db!.deleteNode(dbIndex, nodeId);
+      res.json({ success: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: message });
+      next(error);
+    }
+  }
+
+  /**
+   * Handle upsert edge (create or update)
+   * POST /signalk/v1/api/router/graph/edges/:source/:target
+   */
+  private async handleUpsertEdge(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+    if (!this.requireAuth(req, res)) return;
+    try {
+      const source = parseInt(req.params.source, 10);
+      const target = parseInt(req.params.target, 10);
+      const { dbIndex, distance, min_depth, max_air_draft, min_width, traffic_mode, is_fairway, distance_to_land, edge_type_id } = req.body;
+      if (dbIndex === undefined) { res.status(400).json({ error: 'Missing dbIndex' }); return; }
+      // Try update first; if edge doesn't exist in memory, create it
+      try {
+        await this.db!.updateEdge(dbIndex, source, target, { distance, min_depth, max_air_draft, min_width, traffic_mode, is_fairway });
+      } catch {
+        await this.db!.addEdge(dbIndex, { source, target, distance, min_depth, max_air_draft, min_width, traffic_mode, is_fairway, distance_to_land, edge_type_id });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: message });
+      next(error);
+    }
+  }
+
+  /**
+   * Handle delete edge
+   * POST /signalk/v1/api/router/graph/edges/:source/:target/delete  body: { dbIndex }
+   */
+  private async handleDeleteEdge(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+    if (!this.requireAuth(req, res)) return;
+    try {
+      const source = parseInt(req.params.source, 10);
+      const target = parseInt(req.params.target, 10);
+      const { dbIndex } = req.body;
+      if (dbIndex === undefined) { res.status(400).json({ error: 'Missing dbIndex' }); return; }
+      await this.db!.deleteEdge(dbIndex, source, target);
+      res.json({ success: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: message });
+      next(error);
+    }
+  }
+
+  /**
    * Handle POIs query
    * GET /signalk/v1/api/router/pois?bbox=minLon,minLat,maxLon,maxLat&limit=2000
    */
@@ -398,37 +562,6 @@ export class ApiHandler {
       res.json({ poi });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      res.status(500).json({ error: message });
-      next(error);
-    }
-  }
-
-  /**
-   * Handle water polygon query
-   * GET /signalk/v1/api/router/water?bbox=minLon,minLat,maxLon,maxLat
-   */
-  private async handleWater(req: Request, res: Response, next: NextFunction): Promise<void> {
-    if (!this.db) {
-      res.status(503).json({ error: 'Database not ready' });
-      return;
-    }
-    try {
-      const bbox = req.query.bbox as string;
-      if (!bbox) {
-        res.status(400).json({ error: 'Missing bbox parameter (minLon,minLat,maxLon,maxLat)' });
-        return;
-      }
-      const parts = bbox.split(',').map(Number);
-      if (parts.length !== 4 || parts.some(isNaN)) {
-        res.status(400).json({ error: 'Invalid bbox format, expected minLon,minLat,maxLon,maxLat' });
-        return;
-      }
-      const [minLon, minLat, maxLon, maxLat] = parts;
-      const features = await this.db!.getWaterPolygons(minLat, minLon, maxLat, maxLon);
-      res.json({ type: 'FeatureCollection', features });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[autoroute] water error:', error);
       res.status(500).json({ error: message });
       next(error);
     }

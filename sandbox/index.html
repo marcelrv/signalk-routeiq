@@ -357,12 +357,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     <span>Show graph</span>
   </label>
   <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
-    <input id="poi-cb" type="checkbox" />
-    <span>Show POIs</span>
+    <input id="edges-cb" type="checkbox" />
+    <span>Show edges</span>
   </label>
   <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
-    <input id="water-cb" type="checkbox" />
-    <span>Show Water</span>
+    <input id="poi-cb" type="checkbox" />
+    <span>Show POIs</span>
   </label>
   <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
     <input id="waterways-cb" type="checkbox" />
@@ -482,13 +482,13 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   }).addTo(map);
 
   // ---- overlay layers for debug / visualization ----
-  const waterLayer = L.featureGroup().addTo(map);
   const waterwaysLayer = L.featureGroup().addTo(map);
   const graphLayer = L.featureGroup().addTo(map);
+  const edgesLayer = L.featureGroup().addTo(map);
   const poiLayer = L.featureGroup().addTo(map);
-  let waterVisible = false;
   let waterwaysVisible = false;
   let graphVisible = false;
+  let edgesVisible = false;
   let poiVisible = false;
 
   function getBboxStr() {
@@ -497,8 +497,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   }
 
   function graphNodesUrl() { return getApiBase() + '/signalk/v1/api/router/graph/nodes?bbox=' + getBboxStr() + '&limit=8000'; }
+  function graphEdgesUrl() { return getApiBase() + '/signalk/v1/api/router/graph/edges?bbox=' + getBboxStr() + '&limit=5000'; }
   function poisUrl()        { return getApiBase() + '/signalk/v1/api/router/pois?bbox=' + getBboxStr() + '&limit=4000'; }
-  function waterUrl()       { return getApiBase() + '/signalk/v1/api/router/water?bbox=' + getBboxStr(); }
   function waterwaysUrl()   { return getApiBase() + '/signalk/v1/api/router/waterways?bbox=' + getBboxStr(); }
 
   function fetchGraphNodes() {
@@ -515,6 +515,24 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           L.circleMarker([n.lat, n.lon], {
             radius, color, fillColor: color, fillOpacity: 0.5, weight: 0.5, opacity: 0.4,
           }).addTo(graphLayer);
+        }
+      })
+      .catch(() => {});
+  }
+
+  function fetchEdges() {
+    if (!edgesVisible) return;
+    edgesLayer.clearLayers();
+    logDebug('EDGES', graphEdgesUrl());
+    fetch(graphEdgesUrl())
+      .then(r => { logDebug('EDGES', graphEdgesUrl(), undefined, r); return r.ok ? r.json() : null; })
+      .then(data => {
+        if (!data || !data.edges) return;
+        for (const e of data.edges) {
+          const color = e.edge_type_id === 1 ? '#a855f7' : '#22d3ee';
+          const dash = e.traffic_mode !== 0 ? '5,5' : null;
+          const opts = { color, weight: 1, opacity: 0.5, dashArray: dash };
+          L.polyline([[e.source_lat, e.source_lon], [e.target_lat, e.target_lon]], opts).addTo(edgesLayer);
         }
       })
       .catch(() => {});
@@ -555,20 +573,6 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     return ({ harbour: '⚓', fairway: '⛵', waterway: '💧' }[type] || '📍');
   }
 
-  function fetchWater() {
-    if (!waterVisible) return;
-    waterLayer.clearLayers();
-    fetch(waterUrl())
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (!data || !data.features) return;
-        L.geoJSON(data, {
-          style: { color: '#38bdf8', weight: 0.5, fillColor: '#38bdf8', fillOpacity: 0.12 },
-        }).addTo(waterLayer);
-      })
-      .catch(() => {});
-  }
-
   function fetchWaterways() {
     if (!waterwaysVisible) return;
     waterwaysLayer.clearLayers();
@@ -587,9 +591,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   map.on('moveend', function () {
     clearTimeout(moveTimer);
     moveTimer = setTimeout(function () {
-      if (waterVisible) fetchWater();
       if (waterwaysVisible) fetchWaterways();
       if (graphVisible) fetchGraphNodes();
+      if (edgesVisible) fetchEdges();
       if (poiVisible) fetchPois();
     }, 400);
   });
@@ -599,15 +603,15 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     if (graphVisible) fetchGraphNodes();
     else graphLayer.clearLayers();
   });
+  document.getElementById('edges-cb').addEventListener('change', function () {
+    edgesVisible = this.checked;
+    if (edgesVisible) fetchEdges();
+    else edgesLayer.clearLayers();
+  });
   document.getElementById('poi-cb').addEventListener('change', function () {
     poiVisible = this.checked;
     if (poiVisible) fetchPois();
     else poiLayer.clearLayers();
-  });
-  document.getElementById('water-cb').addEventListener('change', function () {
-    waterVisible = this.checked;
-    if (waterVisible) fetchWater();
-    else waterLayer.clearLayers();
   });
   document.getElementById('waterways-cb').addEventListener('change', function () {
     waterwaysVisible = this.checked;

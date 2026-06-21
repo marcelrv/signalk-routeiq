@@ -40,6 +40,7 @@ interface DbHandle {
 }
 
 const handles: DbHandle[] = [];
+const filenames: string[] = [];
 let hasCrossesLand = false;
 let hasCrossesObstacle = false;
 let hasNodeDepth = false;
@@ -60,10 +61,10 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         hasNodeDepth = false;
         hasRegionId = false;
         handles.length = 0;
-        const loadedFilenames: string[] = [];
+        filenames.length = 0;
         for (const dbPath of dbPaths) {
           try {
-            const db = new DatabaseSync(dbPath, { open: true });
+            const db = new DatabaseSync(dbPath);
             const row = db.prepare('SELECT COUNT(*) as count FROM nodes').get() as unknown as { count: number } | undefined;
             if (!row) {
               console.warn(`[db-worker] Skipping ${dbPath}: nodes table not found`);
@@ -85,12 +86,13 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
             const parts = dbPath.replace(/\\/g, '/').split('/');
             const filename = parts[parts.length - 1];
             handles.push({ db, path: dbPath });
-            loadedFilenames.push(filename);
+            filenames.push(filename);
             console.log(`[db-worker] Loaded database: ${dbPath}`);
           } catch (err: any) {
             console.warn(`[db-worker] Skipping invalid database ${dbPath}: ${err.message ?? String(err)}`);
           }
         }
+        const loadedFilenames = [...filenames];
         if (handles.length === 0) {
           parentPort!.postMessage({ id, type, error: 'No valid .sqlite routing databases found in the data directory' });
           break;
@@ -131,7 +133,15 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
       case 'loadPois': {
         const allPois: PoiRow[] = [];
         for (const h of handles) {
-          allPois.push(...h.db.prepare('SELECT id, name, type_id, properties, lat, lon FROM pois').all() as unknown as PoiRow[]);
+          try {
+            // Some databases may not have a pois table
+            const cols = h.db.prepare("PRAGMA table_info('pois')").all() as Array<{ name: string }>;
+            if (cols.length === 0) continue;
+            allPois.push(...h.db.prepare('SELECT id, name, type_id, properties, lat, lon FROM pois').all() as unknown as PoiRow[]);
+          } catch {
+            // Skip databases that don't have the pois table
+            continue;
+          }
         }
         parentPort!.postMessage({ id, type, result: allPois });
         break;
@@ -204,11 +214,76 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         parentPort!.postMessage({ id, type, result: results });
         break;
       }
+      case 'updateNode': {
+        const { dbIndex, nodeId, node_depth, resolution } = payload!;
+        const h = handles[dbIndex];
+        if (!h) throw new Error(`Database index ${dbIndex} not found`);
+        const stmt = h.db.prepare('UPDATE nodes SET node_depth = ?, resolution = ? WHERE id = ?');
+        stmt.run(node_depth, resolution, nodeId);
+        parentPort!.postMessage({ id, type, result: { success: true } });
+        break;
+      }
+      case 'updateEdge': {
+        const { dbIndex, source, target, distance, min_depth, max_air_draft, min_width, traffic_mode, is_fairway } = payload!;
+        const h = handles[dbIndex];
+        if (!h) throw new Error(`Database index ${dbIndex} not found`);
+        const cols: string[] = [];
+        const vals: any[] = [];
+        if (distance !== undefined) { cols.push('distance = ?'); vals.push(distance); }
+        if (min_depth !== undefined) { cols.push('min_depth = ?'); vals.push(min_depth); }
+        if (max_air_draft !== undefined) { cols.push('max_air_draft = ?'); vals.push(max_air_draft); }
+        if (min_width !== undefined) { cols.push('min_width = ?'); vals.push(min_width); }
+        if (traffic_mode !== undefined) { cols.push('traffic_mode = ?'); vals.push(traffic_mode); }
+        if (is_fairway !== undefined) { cols.push('is_fairway = ?'); vals.push(is_fairway); }
+        if (cols.length === 0) throw new Error('No fields to update');
+        vals.push(source, target);
+        const stmt = h.db.prepare(`UPDATE edges SET ${cols.join(', ')} WHERE source = ? AND target = ?`);
+        stmt.run(...vals);
+        parentPort!.postMessage({ id, type, result: { success: true } });
+        break;
+      }
+      case 'deleteNode': {
+        const { dbIndex, nodeId } = payload!;
+        const h = handles[dbIndex];
+        if (!h) throw new Error(`Database index ${dbIndex} not found`);
+        h.db.prepare('DELETE FROM edges WHERE source = ? OR target = ?').run(nodeId, nodeId);
+        h.db.prepare('DELETE FROM nodes WHERE id = ?').run(nodeId);
+        parentPort!.postMessage({ id, type, result: { success: true } });
+        break;
+      }
+      case 'deleteEdge': {
+        const { dbIndex, source, target } = payload!;
+        const h = handles[dbIndex];
+        if (!h) throw new Error(`Database index ${dbIndex} not found`);
+        h.db.prepare('DELETE FROM edges WHERE source = ? AND target = ?').run(source, target);
+        parentPort!.postMessage({ id, type, result: { success: true } });
+        break;
+      }
+      case 'insertNode': {
+        const { dbIndex, id: nodeId, lat, lon, node_depth, resolution } = payload!;
+        const h = handles[dbIndex];
+        if (!h) throw new Error(`Database index ${dbIndex} not found`);
+        h.db.prepare('INSERT INTO nodes (id, lat, lon, node_depth, resolution) VALUES (?, ?, ?, ?, ?)').run(nodeId, lat, lon, node_depth ?? -1, resolution ?? 0);
+        parentPort!.postMessage({ id, type, result: { success: true } });
+        break;
+      }
+      case 'insertEdge': {
+        const { dbIndex, source, target, distance, min_depth, max_air_draft, min_width, is_fairway, distance_to_land, edge_type_id, traffic_mode } = payload!;
+        const h = handles[dbIndex];
+        if (!h) throw new Error(`Database index ${dbIndex} not found`);
+        h.db.prepare(
+          `INSERT OR REPLACE INTO edges (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, distance_to_land, edge_type_id, traffic_mode)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(source, target, distance ?? 0, min_depth ?? -1, max_air_draft ?? -1, min_width ?? -1, is_fairway ?? 0, distance_to_land ?? 0, edge_type_id ?? 0, traffic_mode ?? 0);
+        parentPort!.postMessage({ id, type, result: { success: true } });
+        break;
+      }
       case 'close': {
         for (const h of handles) {
           try { h.db.close(); } catch { /* already closed */ }
         }
         handles.length = 0;
+        filenames.length = 0;
         parentPort!.postMessage({ id, type, result: null });
         break;
       }

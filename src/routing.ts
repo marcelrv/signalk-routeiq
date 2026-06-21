@@ -207,12 +207,7 @@ export class RoutingEngine {
           if (currentMargin < maxMargin) {
             const newMargin = Math.min(currentMargin * 2, maxMargin);
             if (newMargin > currentMargin) {
-              bboxWarnings.push({
-                type: 'bbox_expanded',
-                message: `Route search expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box to find a path.`,
-                from: { latitude: start.latitude, longitude: start.longitude },
-                to: { latitude: end.latitude, longitude: end.longitude },
-              });
+              console.log(`Route search expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box`);
             }
             currentMargin = newMargin;
           } else {
@@ -316,11 +311,31 @@ export class RoutingEngine {
     const allCoordinates: [number, number][] = [];
     const warnings: RouteWarning[] = [];
 
+    // Compute an adaptive margin from the overall span of all waypoints.
+    // Water routes can make large lat/lon excursions (e.g. Lisbon→Italy via
+    // Gibraltar is ~3° south of both endpoints), so the per-segment bbox must
+    // be generous enough to contain the full water path, not just the chord.
+    const allPts = [start, ...via, end];
+    const minPtLat = Math.min(...allPts.map(p => p.latitude));
+    const maxPtLat = Math.max(...allPts.map(p => p.latitude));
+    const minPtLon = Math.min(...allPts.map(p => p.longitude));
+    const maxPtLon = Math.max(...allPts.map(p => p.longitude));
+    const spanLat = maxPtLat - minPtLat;
+    const spanLon = maxPtLon - minPtLon;
+    const adaptiveMargin = Math.min(
+      this.config.routingBBoxMaxExtent,
+      Math.max(
+        this.config.routingBBoxMargin,
+        spanLat * 0.3,
+        spanLon * 0.2,
+      ),
+    );
+
     for (let i = 0; i < via.length; i++) {
       const nextPoint = via[i];
       const segmentBbox = bboxFromPoints(
         currentStart, nextPoint,
-        this.config.routingBBoxMargin,
+        adaptiveMargin,
       );
       const segmentResult = await this.tryRouteSegment(
         currentStart.latitude, currentStart.longitude,
@@ -356,7 +371,7 @@ export class RoutingEngine {
 
     const finalBbox = bboxFromPoints(
       currentStart, end,
-      this.config.routingBBoxMargin,
+      adaptiveMargin,
     );
     const finalResult = await this.tryRouteSegment(
       currentStart.latitude, currentStart.longitude,
@@ -421,7 +436,7 @@ export class RoutingEngine {
     const endPt = { latitude: endLat, longitude: endLon };
 
     let currentMargin = this.config.routingBBoxMargin;
-    const segmentMaxMargin = Math.min(this.config.routingBBoxMaxExtent, this.config.routingBBoxMargin * 16);
+    const segmentMaxMargin = this.config.routingBBoxMaxExtent;
 
     while (currentMargin <= segmentMaxMargin) {
       const segmentBbox = bbox ?? bboxFromPoints(startPt, endPt, currentMargin);
@@ -434,12 +449,7 @@ export class RoutingEngine {
         if (currentMargin >= segmentMaxMargin) break;
         const newMargin = Math.min(currentMargin * 2, segmentMaxMargin);
         if (newMargin > currentMargin) {
-          warnings.push({
-            type: 'bbox_expanded',
-            message: `Route search for ${label} expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box.`,
-            from: startPt,
-            to: endPt,
-          });
+          console.log(`Route search for ${label} expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box`);
         }
         currentMargin = newMargin;
       }
@@ -482,6 +492,7 @@ export class RoutingEngine {
     const segments = route.features[0].properties.segments!;
 
     const markOverland = (segIdx: number, fromLon: number, fromLat: number, toLon: number, toLat: number) => {
+      if (!this.config.lineOfSightSearchRadius) return;
       const seg = segments[segIdx];
       if (!seg) return;
       const overland = (this.db as any).isLineCrossingLand &&
@@ -766,7 +777,7 @@ export class RoutingEngine {
         if (anyTowardDeep) return node;
       } else {
         // For end nodes: keep the original logic — if all outgoing edges are shallow, improve.
-        const allShallow = edges.every(e => e.min_depth >= 0 && e.min_depth < minDepth);
+        const allShallow = edges.every(e => typeof e.min_depth === 'number' && e.min_depth >= 0 && e.min_depth < minDepth);
         if (!allShallow) return node;
       }
 
@@ -843,7 +854,7 @@ export class RoutingEngine {
 
     let goalReached = false;
     let iterations = 0;
-    const maxIterations = 100000; // Safety limit
+    const maxIterations = 5000000; // Safety limit (5000K suffices for trans-continental routes like NL→Italy ~2000nm)
 
     // Pre-fetch start node coords for boundary checks
     const startCoords = await this.db.getNodeById(startNode);
@@ -946,13 +957,13 @@ export class RoutingEngine {
 
     let penalty = 0;
 
-    if (edge.max_air_draft >= 0 && edge.max_air_draft < (this.vesselDimensions.airDraft || 0) + this.config.safetyMarginAirDraft) {
+    if (typeof edge.max_air_draft === 'number' && edge.max_air_draft >= 0 && edge.max_air_draft < (this.vesselDimensions.airDraft || 0) + this.config.safetyMarginAirDraft) {
       penalty += 1000000;
     }
 
     const minDepth = (this.vesselDimensions.draft || 2.0) + this.config.safetyMarginDraft;
-    if (edge.min_depth >= 0 && edge.min_depth < minDepth) penalty += 1000000;
-    if (edge.min_width >= 0 && edge.min_width < (this.vesselDimensions.beam || 4.0) + this.config.safetyMarginBeam) penalty += 1000000;
+    if (typeof edge.min_depth === 'number' && edge.min_depth >= 0 && edge.min_depth < minDepth) penalty += 1000000;
+    if (typeof edge.min_width === 'number' && edge.min_width >= 0 && edge.min_width < (this.vesselDimensions.beam || 4.0) + this.config.safetyMarginBeam) penalty += 1000000;
     if (edge.edge_type_id === EDGE_TYPE_COASTAL && edge.distance_to_land < minCoastDistanceMeters) penalty += 50000;
 
     return penalty;
@@ -976,19 +987,18 @@ export class RoutingEngine {
     lat1: number, lon1: number,
     lat2: number, lon2: number,
   ): boolean {
+    if (!this.config.lineOfSightSearchRadius) {
+      return true;
+    }
     const dist = this.haversineDistance(lat1, lon1, lat2, lon2);
 
-    // CRITICAL: Force a dense 50m sampling interval so it cannot jump over land
     const numSamples = Math.max(3, Math.ceil(dist / 50));
 
-    // Primary check: Does the line intersect Land polygons?
-    // If it crosses land, it's NOT a clear line of sight.
     if ((this.db as any).isLineCrossingLand && (this.db as any).isLineCrossingLand(lat1, lon1, lat2, lon2, numSamples)) {
         return false; 
     }
 
-    // Secondary fallback: Make sure the path stays near navigable graph nodes
-    const searchRadius = this.config.lineOfSightSearchRadius; // config default is 50m
+    const searchRadius = this.config.lineOfSightSearchRadius;
     for (let i = 1; i < numSamples; i++) {
       const t = i / numSamples;
       const lat = lat1 + (lat2 - lat1) * t;
@@ -1381,12 +1391,11 @@ export class RoutingEngine {
    * the intermediate grid nodes.
    */
 private async smoothPath(path: number[]): Promise<number[]> {
-    if (path.length <= 2) return path;
+    if (path.length <= 2 || !this.config.lineOfSightSearchRadius) return path;
 
     const smoothed: number[] = [path[0]];
     let i = 0;
 
-    // Pre-fetch all nodes for line-of-sight checks
     const nodeMap = new Map<number, any>();
     for (const id of path) {
       const n = await this.db.getNodeById(id);
@@ -1396,9 +1405,6 @@ private async smoothPath(path: number[]): Promise<number[]> {
     while (i < path.length - 1) {
       let j = path.length - 1;
       while (j > i + 1) {
-        // CRITICAL FIX: Do not shortcut if any intermediate node is an official inland centerline.
-        // This forces the route to perfectly track river curves and fairways.
-        // Node type is extracted from the ID itself (see database.ts getNodeTypeInt).
         let skippingInland = false;
         for (let k = i + 1; k < j; k++) {
           if (getNodeTypeInt(path[k]) === NODE_TYPE_INLAND) {

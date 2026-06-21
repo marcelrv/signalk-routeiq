@@ -261,6 +261,52 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 .boat-info .info-line .value { color: #b8d4f0; font-family: 'SF Mono', 'Cascadia Code', monospace; font-size: 11px; }
 .debug-toggle input[type="checkbox"] { accent-color: #3b8fd4; width: 14px; height: 14px; cursor: pointer; }
 .debug-toggle span { color: #9bb8da; font-size: 12px; }
+
+/* ---------- graph editor ---------- */
+#editor-panel { font-size: 12px; }
+#editor-panel .panel-title { margin-bottom: 8px; }
+.editor-btn {
+  background: rgba(79,148,212,0.2);
+  border: 1px solid rgba(79,148,212,0.35);
+  border-radius: 4px;
+  padding: 4px 10px;
+  color: #b8d4f0;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.editor-btn:hover { background: rgba(79,148,212,0.35); }
+.editor-btn-primary { background: #1f6391; border-color: #3b8fd4; color: #fff; }
+.editor-btn-primary:hover { background: #2a7ab5; }
+.editor-btn-danger { background: rgba(200,70,70,0.25); border-color: rgba(200,70,70,0.5); color: #f0a0a0; }
+.editor-btn-danger:hover { background: rgba(200,70,70,0.4); }
+#editor-props-form label { display: block; font-size: 11px; color: #6d96c0; margin-top: 4px; }
+#editor-props-form input, #editor-props-form select {
+  width: 100%;
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(79,148,212,0.4);
+  border-radius: 4px;
+  padding: 4px 7px;
+  color: #e0edf5;
+  font-size: 11px;
+  outline: none;
+  margin-top: 1px;
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+}
+#editor-props-form input:focus, #editor-props-form select:focus {
+  border-color: #3b8fd4;
+}
+#editor-node-highlight {
+  fill-opacity: 0.8;
+  stroke: #f59e0b;
+  stroke-width: 2;
+}
+#editor-edge-highlight {
+  color: #f59e0b;
+  weight: 3;
+  opacity: 0.9;
+}
+
 #url-history-list {
   margin-top: 4px;
   display: none;
@@ -565,11 +611,11 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
 /* ---------- status toast ---------- */
 #toast {
-  position: absolute;
+  position: fixed;
   bottom: 30px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 2000;
+  z-index: 10000;
   background: rgba(11, 26, 43, 0.92);
   backdrop-filter: blur(8px);
   border: 1px solid rgba(79,148,212,0.4);
@@ -742,12 +788,16 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     <span>Show graph</span>
   </label>
   <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
-    <input id="poi-cb" type="checkbox" />
-    <span>Show POIs</span>
+    <input id="edges-cb" type="checkbox" />
+    <span>Show edges</span>
   </label>
   <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
-    <input id="water-cb" type="checkbox" />
-    <span>Show Water</span>
+    <input id="edit-cb" type="checkbox" />
+    <span>Edit nodes &amp; edges</span>
+  </label>
+  <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
+    <input id="poi-cb" type="checkbox" />
+    <span>Show POIs</span>
   </label>
   <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
     <input id="waterways-cb" type="checkbox" />
@@ -830,6 +880,30 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           New databases are loaded and ready for route calculation immediately.
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Graph Editor Panel (floating) -->
+<div id="editor-panel" class="panel" style="display:none;bottom:80px;right:20px;width:320px;max-height:50vh;overflow-y:auto;z-index:2001">
+  <div class="panel-title">Graph Editor</div>
+  <div id="editor-db-select" style="margin-bottom:8px">
+    <label style="font-size:11px;color:#6d96c0">Database</label>
+    <select id="editor-db-selector" style="width:100%;background:rgba(255,255,255,0.07);border:1px solid rgba(79,148,212,0.4);border-radius:4px;padding:5px 8px;color:#e0edf5;font-size:12px;outline:none;margin-top:2px"></select>
+  </div>
+  <div id="editor-status" style="font-size:11px;color:#6d96c0;margin-bottom:6px;padding:4px 0">&mdash;</div>
+  <div id="editor-toolbar" style="display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap">
+    <button id="editor-add-node-btn" class="editor-btn">+ Node</button>
+    <button id="editor-add-edge-btn" class="editor-btn">+ Edge</button>
+    <button id="editor-cancel-btn" class="editor-btn" style="display:none">Cancel</button>
+  </div>
+  <div id="editor-props" style="display:none;border-top:1px solid rgba(79,148,212,0.15);padding-top:8px">
+    <div id="editor-props-header" style="font-size:11px;font-weight:600;color:#9bb8da;margin-bottom:6px"></div>
+    <div id="editor-props-form"></div>
+    <div style="display:flex;gap:4px;margin-top:8px">
+      <button id="editor-save-btn" class="editor-btn editor-btn-primary">Save</button>
+      <button id="editor-delete-btn" class="editor-btn editor-btn-danger">Delete</button>
+      <button id="editor-deselect-btn" class="editor-btn">Deselect</button>
     </div>
   </div>
 </div>
@@ -960,6 +1034,14 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     startPoiName: '',         // POI name when start was set via search
     destPoiName: '',          // POI name when destination was set via search
     routeName:    '',         // computed route name for display/export
+    // Graph editor state
+    editMode:     false,
+    editDatabases: [],        // { index, filename }
+    editDbIndex:  0,
+    selectedItem: null,       // { type: 'node'|'edge', data: ... }
+    selectedLayer: null,      // Leaflet layer for highlight
+    editAddMode:  null,       // 'node' | 'edge' | null
+    editAddSource: null,      // source node id when adding edge
   };
 
   const map = L.map('map', {
@@ -974,13 +1056,13 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   }).addTo(map);
 
   // ---- overlay layers for debug / visualization ----
-  const waterLayer = L.featureGroup().addTo(map);
   const waterwaysLayer = L.featureGroup().addTo(map);
   const graphLayer = L.featureGroup().addTo(map);
+  const edgesLayer = L.featureGroup().addTo(map);
   const poiLayer = L.featureGroup().addTo(map);
-  let waterVisible = false;
   let waterwaysVisible = false;
   let graphVisible = false;
+  let edgesVisible = false;
   let poiVisible = false;
 
   // ---- custom markers layer ----
@@ -993,8 +1075,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   }
 
   function graphNodesUrl() { return getApiBase() + '/signalk/v1/api/router/graph/nodes?bbox=' + getBboxStr() + '&limit=8000'; }
+  function graphEdgesUrl() { return getApiBase() + '/signalk/v1/api/router/graph/edges?bbox=' + getBboxStr() + '&limit=5000'; }
   function poisUrl()        { return getApiBase() + '/signalk/v1/api/router/pois?bbox=' + getBboxStr() + '&limit=4000'; }
-  function waterUrl()       { return getApiBase() + '/signalk/v1/api/router/water?bbox=' + getBboxStr(); }
   function waterwaysUrl()   { return getApiBase() + '/signalk/v1/api/router/waterways?bbox=' + getBboxStr(); }
 
   function fetchGraphNodes() {
@@ -1008,9 +1090,47 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         for (const n of data.nodes) {
           const color = n.min_depth > 2 ? '#3b8fd4' : n.min_depth >= 1.2 ? '#eab308' : n.min_depth >= 0 ? '#ef4444' : '#888888';
           const radius = n.resolution > 0 ? Math.max(1.5, Math.min(5, n.resolution * 1000)) : 2;
-          L.circleMarker([n.lat, n.lon], {
+          const marker = L.circleMarker([n.lat, n.lon], {
             radius, color, fillColor: color, fillOpacity: 0.5, weight: 0.5, opacity: 0.4,
-          }).addTo(graphLayer);
+          });
+          if (state.editMode) {
+            marker._nodeData = n;
+            marker.on('click', function (e) {
+              L.DomEvent.stopPropagation(e);
+              if (state.editAddMode === 'edge') {
+                handleAddEdgeClick(n, marker);
+              } else {
+                selectNode(n, this);
+              }
+            });
+          }
+          marker.addTo(graphLayer);
+        }
+      })
+      .catch(() => {});
+  }
+
+  function fetchEdges() {
+    if (!edgesVisible) return;
+    edgesLayer.clearLayers();
+    logDebug('EDGES', graphEdgesUrl());
+    fetch(graphEdgesUrl())
+      .then(r => { logDebug('EDGES', graphEdgesUrl(), undefined, r); return r.ok ? r.json() : null; })
+      .then(data => {
+        if (!data || !data.edges) return;
+        for (const e of data.edges) {
+          const color = e.edge_type_id === 1 ? '#a855f7' : '#22d3ee';
+          const dash = e.traffic_mode !== 0 ? '5,5' : null;
+          const opts = { color, weight: 1, opacity: 0.5, dashArray: dash };
+          const line = L.polyline([[e.source_lat, e.source_lon], [e.target_lat, e.target_lon]], opts);
+          if (state.editMode) {
+            line._edgeData = e;
+            line.on('click', function (e) {
+              L.DomEvent.stopPropagation(e);
+              selectEdge(this._edgeData, this);
+            });
+          }
+          line.addTo(edgesLayer);
         }
       })
       .catch(() => {});
@@ -1108,20 +1228,6 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       .catch(() => {});
   }
 
-  function fetchWater() {
-    if (!waterVisible) return;
-    waterLayer.clearLayers();
-    fetch(waterUrl())
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (!data || !data.features) return;
-        L.geoJSON(data, {
-          style: { color: '#38bdf8', weight: 0.5, fillColor: '#38bdf8', fillOpacity: 0.12 },
-        }).addTo(waterLayer);
-      })
-      .catch(() => {});
-  }
-
   function fetchWaterways() {
     if (!waterwaysVisible) return;
     waterwaysLayer.clearLayers();
@@ -1140,9 +1246,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   map.on('moveend', function () {
     clearTimeout(moveTimer);
     moveTimer = setTimeout(function () {
-      if (waterVisible) fetchWater();
       if (waterwaysVisible) fetchWaterways();
       if (graphVisible) fetchGraphNodes();
+      if (edgesVisible) fetchEdges();
       if (poiVisible) fetchPois();
     }, 400);
   });
@@ -1152,15 +1258,15 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     if (graphVisible) fetchGraphNodes();
     else graphLayer.clearLayers();
   });
+  document.getElementById('edges-cb').addEventListener('change', function () {
+    edgesVisible = this.checked;
+    if (edgesVisible) fetchEdges();
+    else edgesLayer.clearLayers();
+  });
   document.getElementById('poi-cb').addEventListener('change', function () {
     poiVisible = this.checked;
     if (poiVisible) fetchPois();
     else poiLayer.clearLayers();
-  });
-  document.getElementById('water-cb').addEventListener('change', function () {
-    waterVisible = this.checked;
-    if (waterVisible) fetchWater();
-    else waterLayer.clearLayers();
   });
   document.getElementById('waterways-cb').addEventListener('change', function () {
     waterwaysVisible = this.checked;
@@ -1168,9 +1274,336 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     else waterwaysLayer.clearLayers();
   });
 
+  document.getElementById('edit-cb').addEventListener('change', function () {
+    state.editMode = this.checked;
+    toggleEditMode(state.editMode);
+  });
+
+  // ---- Graph Editor functions ----
+
+  function toggleEditMode(enabled) {
+    var panel = document.getElementById('editor-panel');
+    if (enabled) {
+      panel.style.display = '';
+      document.getElementById('graph-cb').checked = true;
+      graphVisible = true;
+      document.getElementById('edges-cb').checked = true;
+      edgesVisible = true;
+      fetchDatabases();
+      fetchGraphNodes();
+      fetchEdges();
+    } else {
+      panel.style.display = 'none';
+      clearEditorSelection();
+      state.selectedItem = null;
+      state.selectedLayer = null;
+      state.editAddMode = null;
+      state.editAddSource = null;
+      if (state.editAddMode) document.getElementById('editor-cancel-btn').style.display = 'none';
+      fetchGraphNodes();
+      fetchEdges();
+    }
+  }
+
+  function fetchDatabases() {
+    fetch(getApiBase() + '/signalk/v1/api/router/graph/databases')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || !data.databases) return;
+        state.editDatabases = data.databases;
+        var sel = document.getElementById('editor-db-selector');
+        sel.innerHTML = data.databases.map(function (d, i) {
+          return '<option value="' + i + '">' + d.filename + '</option>';
+        }).join('');
+        if (data.databases.length > 1) {
+          var statusEl = document.getElementById('editor-status');
+          statusEl.textContent = 'Multiple databases loaded. Select one to edit.';
+        }
+        sel.addEventListener('change', function () {
+          state.editDbIndex = parseInt(this.value, 10);
+          clearEditorSelection();
+        });
+      })
+      .catch(function () {});
+  }
+
+  function makeEditNodeIcon(n) {
+    return L.divIcon({
+      className: '',
+      html: '<div style="width:22px;height:22px;background:#8b5cf6;border:2px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:10px;color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.4)">' + n + '</div>',
+      iconSize: [22, 22],
+      iconAnchor: [11, 11],
+    });
+  }
+
+  function clearEditorSelection() {
+    if (state.selectedLayer) {
+      if (state.selectedLayer.setStyle) {
+        if (state.selectedLayer._editOrigStyle) {
+          state.selectedLayer.setStyle(state.selectedLayer._editOrigStyle);
+        }
+      } else if (state.selectedLayer.setIcon) {
+        if (state.selectedLayer._editOrigIcon) {
+          state.selectedLayer.setIcon(state.selectedLayer._editOrigIcon);
+        }
+      }
+    }
+    state.selectedLayer = null;
+    document.getElementById('editor-props').style.display = 'none';
+    setEditorStatus('');
+  }
+
+  function setEditorStatus(msg) {
+    var el = document.getElementById('editor-status');
+    el.textContent = msg || '\u2014';
+  }
+
+  function selectNode(nodeData, layer) {
+    clearEditorSelection();
+    state.selectedItem = { type: 'node', data: nodeData };
+    state.selectedLayer = layer;
+    if (layer && layer.setStyle) {
+      layer._editOrigStyle = { color: layer.options.color, fillColor: layer.options.fillColor, weight: layer.options.weight, radius: layer.options.radius };
+      layer.setStyle({ color: '#f59e0b', fillColor: '#f59e0b', weight: 2, radius: layer.options.radius + 2 });
+    }
+    var header = document.getElementById('editor-props-header');
+    header.textContent = 'Node ' + nodeData.id;
+    var form = document.getElementById('editor-props-form');
+    form.innerHTML =
+      '<label>Depth (m)</label><input id="edit-node-depth" type="number" step="0.1" value="' + (nodeData.min_depth != null ? nodeData.min_depth : '') + '" />' +
+      '<label>Resolution</label><input id="edit-node-res" type="number" step="0.0001" value="' + (nodeData.resolution != null ? nodeData.resolution : '') + '" />' +
+      '<label style="margin-top:6px;color:#5f7a9a">Lat</label><input type="text" value="' + nodeData.lat.toFixed(5) + '" readonly style="color:#6d96c0" />' +
+      '<label style="color:#5f7a9a">Lon</label><input type="text" value="' + (nodeData.lon || nodeData.lng).toFixed(5) + '" readonly style="color:#6d96c0" />';
+    document.getElementById('editor-props').style.display = '';
+    setEditorStatus('Node selected');
+  }
+
+  function selectEdge(edgeData, layer) {
+    clearEditorSelection();
+    state.selectedItem = { type: 'edge', data: edgeData };
+    state.selectedLayer = layer;
+    if (layer && layer.setStyle) {
+      layer._editOrigStyle = { color: layer.options.color, weight: layer.options.weight, opacity: layer.options.opacity, dashArray: layer.options.dashArray };
+      layer.setStyle({ color: '#f59e0b', weight: 3, opacity: 0.9, dashArray: null });
+    }
+    var header = document.getElementById('editor-props-header');
+    header.textContent = 'Edge ' + edgeData.source + '\u2192' + edgeData.target;
+    var form = document.getElementById('editor-props-form');
+    form.innerHTML =
+      '<label>Distance (m)</label><input id="edit-edge-dist" type="number" step="0.1" value="' + (edgeData.distance != null ? edgeData.distance : '') + '" />' +
+      '<label>Min Depth (m)</label><input id="edit-edge-depth" type="number" step="0.1" value="' + (edgeData.min_depth != null ? edgeData.min_depth : '') + '" />' +
+      '<label>Max Air Draft (m)</label><input id="edit-edge-air" type="number" step="0.1" value="' + (edgeData.max_air_draft != null ? edgeData.max_air_draft : '') + '" />' +
+      '<label>Min Width (m)</label><input id="edit-edge-width" type="number" step="0.1" value="' + (edgeData.min_width != null ? edgeData.min_width : '') + '" />' +
+      '<label>Traffic Mode</label>' +
+      '<select id="edit-edge-traffic">' +
+        '<option value="0"' + (edgeData.traffic_mode === 0 ? ' selected' : '') + '>Two-way</option>' +
+        '<option value="1"' + (edgeData.traffic_mode === 1 ? ' selected' : '') + '>One-way fwd</option>' +
+        '<option value="2"' + (edgeData.traffic_mode === 2 ? ' selected' : '') + '>One-way rev</option>' +
+      '</select>' +
+      '<label>Is Fairway</label>' +
+      '<select id="edit-edge-fairway">' +
+        '<option value="0"' + (!edgeData.is_fairway ? ' selected' : '') + '>No</option>' +
+        '<option value="1"' + (edgeData.is_fairway ? ' selected' : '') + '>Yes</option>' +
+      '</select>' +
+      '<label style="margin-top:6px;color:#5f7a9a">Source</label><input type="text" value="' + edgeData.source + '" readonly style="color:#6d96c0" />' +
+      '<label style="color:#5f7a9a">Target</label><input type="text" value="' + edgeData.target + '" readonly style="color:#6d96c0" />';
+    document.getElementById('editor-props').style.display = '';
+    setEditorStatus('Edge selected');
+  }
+
+  function editorFetchError(r, label) {
+    if (r && r.status === 401) {
+      setEditorStatus('Login required — please log into the Signal K admin UI');
+    } else {
+      setEditorStatus(label + ' failed');
+    }
+  }
+
+  function saveEditedItem() {
+    var item = state.selectedItem;
+    if (!item) return;
+    var dbIndex = state.editDbIndex;
+    if (item.type === 'node') {
+      var depth = parseFloat(document.getElementById('edit-node-depth').value);
+      var res = parseFloat(document.getElementById('edit-node-res').value);
+      fetch(getApiBase() + '/signalk/v1/api/router/graph/nodes/' + item.data.id, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dbIndex: dbIndex, node_depth: isNaN(depth) ? -1 : depth, resolution: isNaN(res) ? 0 : res }),
+      })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+        .then(function () {
+          item.data.min_depth = depth;
+          item.data.resolution = res;
+          setEditorStatus('Node saved');
+          fetchGraphNodes();
+        })
+        .catch(function (r) { editorFetchError(r, 'Save'); });
+    } else if (item.type === 'edge') {
+      var body = {
+        dbIndex: dbIndex,
+        distance: parseFloat(document.getElementById('edit-edge-dist').value),
+        min_depth: parseFloat(document.getElementById('edit-edge-depth').value),
+        max_air_draft: parseFloat(document.getElementById('edit-edge-air').value),
+        min_width: parseFloat(document.getElementById('edit-edge-width').value),
+        traffic_mode: parseInt(document.getElementById('edit-edge-traffic').value, 10),
+        is_fairway: parseInt(document.getElementById('edit-edge-fairway').value, 10),
+      };
+      fetch(getApiBase() + '/signalk/v1/api/router/graph/edges/' + item.data.source + '/' + item.data.target, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+        .then(function () {
+          Object.assign(item.data, body);
+          setEditorStatus('Edge saved');
+          fetchEdges();
+        })
+        .catch(function (r) { editorFetchError(r, 'Save'); });
+    }
+  }
+
+  function deleteEditedItem() {
+    var item = state.selectedItem;
+    if (!item) return;
+    var dbIndex = state.editDbIndex;
+    if (!confirm('Delete this ' + item.type + '?')) return;
+    if (item.type === 'node') {
+      fetch(getApiBase() + '/signalk/v1/api/router/graph/nodes/' + item.data.id + '/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dbIndex: dbIndex }),
+      })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+        .then(function () {
+          setEditorStatus('Node deleted');
+          clearEditorSelection();
+          fetchGraphNodes();
+          fetchEdges();
+        })
+        .catch(function (r) { editorFetchError(r, 'Delete'); });
+    } else if (item.type === 'edge') {
+      fetch(getApiBase() + '/signalk/v1/api/router/graph/edges/' + item.data.source + '/' + item.data.target + '/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dbIndex: dbIndex }),
+      })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+        .then(function () {
+          setEditorStatus('Edge deleted');
+          clearEditorSelection();
+          fetchEdges();
+        })
+        .catch(function (r) { editorFetchError(r, 'Delete'); });
+    }
+  }
+
+  function startAddNode() {
+    state.editAddMode = 'node';
+    document.getElementById('editor-cancel-btn').style.display = '';
+    setEditorStatus('Click on the map to place a new node');
+  }
+
+  function startAddEdge() {
+    state.editAddMode = 'edge';
+    state.editAddSource = null;
+    document.getElementById('editor-cancel-btn').style.display = '';
+    setEditorStatus('Click a source node, then a target node');
+  }
+
+  function cancelAddMode() {
+    state.editAddMode = null;
+    state.editAddSource = null;
+    document.getElementById('editor-cancel-btn').style.display = 'none';
+    setEditorStatus('');
+  }
+
+  function handleAddEdgeClick(nodeData, layer) {
+    if (!state.editAddSource) {
+      state.editAddSource = nodeData.id;
+      setEditorStatus('Source node ' + nodeData.id + ' set. Click target node.');
+      if (layer && layer.setStyle) {
+        layer._editOrigStyle = { color: layer.options.color, fillColor: layer.options.fillColor, weight: layer.options.weight, radius: layer.options.radius };
+        layer.setStyle({ color: '#f59e0b', fillColor: '#f59e0b', weight: 2, radius: layer.options.radius + 2 });
+        state.selectedLayer = layer;
+      }
+    } else {
+      var sourceId = state.editAddSource;
+      var targetId = nodeData.id;
+      if (sourceId === targetId) {
+        setEditorStatus('Source and target must be different');
+        return;
+      }
+      var dbIndex = state.editDbIndex;
+      var body = {
+        dbIndex: dbIndex,
+        source: sourceId,
+        target: targetId,
+        distance: 0,
+        min_depth: -1,
+        max_air_draft: -1,
+        min_width: -1,
+        is_fairway: 0,
+        distance_to_land: 0,
+        edge_type_id: 0,
+        traffic_mode: 0,
+      };
+      fetch(getApiBase() + '/signalk/v1/api/router/graph/edges/' + sourceId + '/' + targetId, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dbIndex: dbIndex, distance: 0, min_depth: -1, max_air_draft: -1, min_width: -1, is_fairway: 0, distance_to_land: 0, edge_type_id: 0, traffic_mode: 0 }),
+      })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+        .then(function () {
+          setEditorStatus('Edge ' + sourceId + '\u2192' + targetId + ' added');
+          cancelAddMode();
+          if (state.selectedLayer && state.selectedLayer.setStyle && state.selectedLayer._editOrigStyle) {
+            state.selectedLayer.setStyle(state.selectedLayer._editOrigStyle);
+            state.selectedLayer = null;
+          }
+          fetchEdges();
+        })
+        .catch(function (r) { editorFetchError(r, 'Add edge'); });
+    }
+  }
+
+  // Map click for add-node mode
+  map.on('click', function (e) {
+    if (state.editAddMode === 'node') {
+      var dbIndex = state.editDbIndex;
+      var lat = e.latlng.lat;
+      var lon = e.latlng.lng;
+      var latInt = Math.round((Math.round(lat * 100000) / 100000 + 90) * 100000);
+      var lonInt = Math.round((Math.round(lon * 100000) / 100000 + 180) * 100000);
+      var nodeId = 0 + (latInt * 36000000) + lonInt;
+      var body = {
+        dbIndex: dbIndex,
+        id: nodeId,
+        lat: lat,
+        lon: lon,
+        node_depth: -1,
+        resolution: 0,
+      };
+      fetch(getApiBase() + '/signalk/v1/api/router/graph/nodes/' + nodeId, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dbIndex: dbIndex, lat: lat, lon: lon, node_depth: -1, resolution: 0 }),
+      })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+        .then(function () {
+          setEditorStatus('Node ' + nodeId + ' added');
+          cancelAddMode();
+          fetchGraphNodes();
+        })
+        .catch(function (r) { editorFetchError(r, 'Add node'); });
+    }
+  });
+
+  // Editor button handlers
+  document.getElementById('editor-add-node-btn').addEventListener('click', startAddNode);
+  document.getElementById('editor-add-edge-btn').addEventListener('click', startAddEdge);
+  document.getElementById('editor-cancel-btn').addEventListener('click', cancelAddMode);
+  document.getElementById('editor-save-btn').addEventListener('click', saveEditedItem);
+  document.getElementById('editor-delete-btn').addEventListener('click', deleteEditedItem);
+  document.getElementById('editor-deselect-btn').addEventListener('click', clearEditorSelection);
+
   routeLayers.on('click', function (e) {
     if (state.startLatLng && state.destLatLng) {
       state.viaPoints.push(e.latlng);
+      state.viaPoints = sortViasByRoutePosition(state.viaPoints);
       applyWaypoints();
     }
   });
@@ -1549,6 +1982,29 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     return minI;
   }
 
+  function getRouteCoords(geoJson) {
+    if (!geoJson) return null;
+    let coords = [];
+    if (geoJson.type === 'FeatureCollection' && Array.isArray(geoJson.features)) {
+      for (const f of geoJson.features) coords = coords.concat(extractCoords(f.geometry));
+    } else if (geoJson.type === 'Feature') {
+      coords = extractCoords(geoJson.geometry);
+    } else {
+      coords = extractCoords(geoJson);
+    }
+    return coords.length >= 2 ? coords : null;
+  }
+
+  function sortViasByRoutePosition(viaPoints) {
+    const coords = getRouteCoords(state.lastGeoJson);
+    if (!coords || coords.length < 2 || viaPoints.length < 2) return viaPoints;
+    const withPos = viaPoints.map(vp => ({
+      vp, idx: closestCoordIndex(coords, vp.lat, vp.lng)
+    }));
+    withPos.sort((a, b) => a.idx - b.idx);
+    return withPos.map(w => w.vp);
+  }
+
   function highlightMapByCoordRange(fromIdx, toIdx) {
     clearMapHighlight();
     for (const seg of state.routeSegments) {
@@ -1761,7 +2217,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     document.getElementById('start-info').querySelector('.coords').textContent = fmtStart;
     document.getElementById('dest-info').querySelector('.coords').textContent = fmtDest;
     document.getElementById('via-info').querySelector('.coords').textContent =
-      state.viaPoints.length ? state.viaPoints.length + ' via point(s)' : '—';
+      state.viaPoints.length
+        ? state.viaPoints.map(v => fmtLatLng(v)).join('  |  ')
+        : '—';
     document.getElementById('hint-action').textContent =
       state.waypointNext === 'start' ? 'START' : 'DESTINATION';
   }
@@ -2420,12 +2878,43 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       summaryEl.style.display = 'none';
     }
 
+    // Via points for labeling
+    const viaPoints = state.viaPoints || [];
+
+    // Merge via points into nodes as explicit section boundaries (before crossing leg mapping)
+    if (viaPoints.length > 0 && coords.length >= 2) {
+      const cumDist = computeCumulativeDistances(coords);
+      for (let vi = 0; vi < viaPoints.length; vi++) {
+        const vp = viaPoints[vi];
+        const idx = closestCoordIndex(coords, vp.lat, vp.lng);
+        const existing = nodes.find(n => Math.abs(n.index - idx) <= 1);
+        if (existing) {
+          existing._viaIdx = vi;
+        } else {
+          let hdg = 0;
+          if (idx > 0) {
+            hdg = bearing(coords[idx - 1][1], coords[idx - 1][0], coords[idx][1], coords[idx][0]);
+          }
+          nodes.push({
+            index: idx,
+            lat: coords[idx][1],
+            lng: coords[idx][0],
+            cumDistKm: cumDist[idx] / 1000,
+            heading: hdg,
+            bearingChange: 0,
+            signedChange: 0,
+            isStart: false,
+            isEnd: false,
+            _viaIdx: vi,
+          });
+        }
+      }
+      nodes.sort((a, b) => a.index - b.index);
+    }
+
     // Crossings mapped to legs (used in both collapsed node icons and expanded leg details)
     const crossings = (firstProps && firstProps.crossings) || [];
     const crossingLegMap = mapCrossingsToLegs(crossings, coords, nodes);
-
-    // Via points for labeling
-    const viaPoints = state.viaPoints || [];
 
     // Nodes + legs
     nodesEl.innerHTML = '';
@@ -2443,11 +2932,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       let label = '';
       if (node.isStart) label = 'Start';
       else if (node.isEnd) label = 'Destination';
-      else {
-        const viaIdx = viaPoints.findIndex(vp => haversineDist(node.lat, node.lng, vp.lat, vp.lng) < 200);
-        if (viaIdx >= 0) label = 'Via ' + (viaIdx + 1);
-        else label = 'Turn ' + i;
-      }
+      else if (node._viaIdx !== undefined) label = 'Via ' + (node._viaIdx + 1);
+      else label = 'Turn ' + i;
 
       let badgeHtml = '';
 

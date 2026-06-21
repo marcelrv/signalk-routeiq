@@ -132,7 +132,7 @@ export interface PluginConfig {
   fairwayMultiplier: number;
   openWaterMultiplier: number;
   wrongWayPenalty: number;
-  routingBBoxMargin: number;        // degrees, default 0.1 (~11km)
+  routingBBoxMargin: number;        // degrees, default 1.0 (~111km)
   routingBBoxMaxExtent: number;     // degrees, default 10.0
   lineOfSightSampleInterval: number; // meters, default 500
   lineOfSightSearchRadius: number; // meters, default 800
@@ -150,10 +150,10 @@ export const DEFAULT_CONFIG: PluginConfig = {
   fairwayMultiplier: 0.8,
   openWaterMultiplier: 1.2,
   wrongWayPenalty: 5.0,
-  routingBBoxMargin: 0.1,
+  routingBBoxMargin: 1.0,
   routingBBoxMaxExtent: 10.0,
   lineOfSightSampleInterval: 500,
-  lineOfSightSearchRadius: 800,
+  lineOfSightSearchRadius: 0,
   averageSpeedKnots: 6.0,
   catalogUrl: 'https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/index.json',
 };

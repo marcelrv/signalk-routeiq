@@ -77,7 +77,6 @@ export class RoutingDatabase {
   private edgesBySource: Map<number, Array<EdgeRow & { lat: number; lon: number }>> = new Map();
   private pois: PoiRow[] = [];
   private spatialGrid: Map<string, number[]> = new Map();
-  private waterBBoxIndex: Float64Array | null = null;
   private hasCrossesLand: boolean = false;
   private hasCrossesObstacle: boolean = false;
   private hasNodeDepth: boolean = false;
@@ -91,6 +90,9 @@ export class RoutingDatabase {
 
   /** Basenames of .sqlite files successfully loaded */
   private loadedDbFilenames: string[] = [];
+
+  /** Cached database list for graph editor (populated during init) */
+  private cachedDatabaseList: Array<{ index: number; filename: string; path: string }> = [];
 
   /** True once loadGraph() completes successfully */
   private graphLoaded: boolean = false;
@@ -166,6 +168,11 @@ export class RoutingDatabase {
     this.hasNodeDepth = schema.hasNodeDepth;
     this.hasRegionId = schema.hasRegionId;
     this.loadedDbFilenames = schema.filenames || [];
+    this.cachedDatabaseList = dbPaths.map((p, i) => ({
+      index: i,
+      filename: this.loadedDbFilenames[i] || p.split('/').pop() || '',
+      path: p,
+    }));
   }
 
   private regionIdCol(): string {
@@ -292,10 +299,8 @@ export class RoutingDatabase {
     const allPois: Array<{ id: number; name: string; type_id: number; properties: string | null; lat: number; lon: number }> = await this.sendMessage('loadPois');
     this.pois.push(...allPois);
 
-    // Cache metadata before closing databases
+    // Cache metadata
     this.metadataCache = await this.getMetadata();
-
-    await this.sendMessage('close');
 
     this.graphLoaded = true;
   }
@@ -548,6 +553,49 @@ export class RoutingDatabase {
     return results;
   }
 
+  async getEdgesInBBox(
+    minLat: number, minLon: number,
+    maxLat: number, maxLon: number,
+    limit: number = 5000,
+  ): Promise<Array<{
+    source: number; target: number;
+    source_lat: number; source_lon: number;
+    target_lat: number; target_lon: number;
+    distance: number; min_depth: number; max_air_draft: number; min_width: number;
+    edge_type_id: number; traffic_mode: number;
+    is_fairway: number;
+  }>> {
+    const results: Array<{
+      source: number; target: number;
+      source_lat: number; source_lon: number;
+      target_lat: number; target_lon: number;
+      distance: number; min_depth: number; max_air_draft: number; min_width: number;
+      edge_type_id: number; traffic_mode: number;
+      is_fairway: number;
+    }> = [];
+    for (const [, edges] of this.edgesBySource) {
+      for (const e of edges) {
+        const slat = e.source_lat ?? 0;
+        const slon = e.source_lon ?? 0;
+        if ((slat >= minLat && slat <= maxLat && slon >= minLon && slon <= maxLon) ||
+            (e.lat >= minLat && e.lat <= maxLat && e.lon >= minLon && e.lon <= maxLon)) {
+          results.push({
+            source: e.source, target: e.target,
+            source_lat: slat, source_lon: slon,
+            target_lat: e.lat, target_lon: e.lon,
+            distance: e.distance, min_depth: e.min_depth,
+            max_air_draft: e.max_air_draft, min_width: e.min_width,
+            edge_type_id: e.edge_type_id, traffic_mode: e.traffic_mode,
+            is_fairway: e.is_fairway,
+          });
+          if (results.length >= limit) break;
+        }
+      }
+      if (results.length >= limit) break;
+    }
+    return results;
+  }
+
   async getPoisInBBox(
     minLat: number, minLon: number,
     maxLat: number, maxLon: number,
@@ -593,41 +641,6 @@ export class RoutingDatabase {
     const dLon = (lon2 - lon1) * Math.PI / 180;
     const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  }
-
-  private waterGeoJson: any = null;
-  private waterGeojsonPath: string | null = null;
-
-  async getWaterPolygons(
-    minLat: number, minLon: number,
-    maxLat: number, maxLon: number,
-  ): Promise<any[]> {
-    if (!this.waterGeojsonPath) {
-      this.waterGeojsonPath = join(this.dbDir, 'coastal_water_polygons.geojson');
-    }
-
-    if (!this.waterGeoJson) {
-      if (!existsSync(this.waterGeojsonPath)) {
-        this.waterGeoJson = { type: 'FeatureCollection', features: [] };
-      } else {
-        const raw = readFileSync(this.waterGeojsonPath, 'utf-8');
-        try {
-          this.waterGeoJson = JSON.parse(raw);
-        } catch {
-          this.waterGeoJson = { type: 'FeatureCollection', features: [] };
-        }
-      }
-    }
-
-    if (!this.waterGeoJson.features) return [];
-
-    const result: any[] = [];
-    for (const f of this.waterGeoJson.features) {
-      if (featureIntersectsBBox(f, minLat, minLon, maxLat, maxLon)) {
-        result.push(f);
-      }
-    }
-    return result;
   }
 
   private waterwaysGeoJson: any = null;
@@ -743,9 +756,9 @@ export class RoutingDatabase {
       const edge = this.getEdgeSync(originalPath[i], originalPath[i + 1]);
       if (edge) {
         totalDist += edge.distance;
-        if (edge.min_depth >= 0) minDepth = Math.min(minDepth, edge.min_depth);
-        if (edge.max_air_draft >= 0) maxAirDraft = Math.max(maxAirDraft, edge.max_air_draft);
-        if (edge.min_width >= 0) minWidth = Math.min(minWidth, edge.min_width);
+        if (typeof edge.min_depth === 'number' && edge.min_depth >= 0) minDepth = Math.min(minDepth, edge.min_depth);
+        if (typeof edge.max_air_draft === 'number' && edge.max_air_draft >= 0) maxAirDraft = Math.max(maxAirDraft, edge.max_air_draft);
+        if (typeof edge.min_width === 'number' && edge.min_width >= 0) minWidth = Math.min(minWidth, edge.min_width);
         if (edge.is_fairway) isFairway = true;
         trafficMode = Math.min(trafficMode, edge.traffic_mode);
         edgeTypeId = edge.edge_type_id;
@@ -773,6 +786,99 @@ export class RoutingDatabase {
     };
   }
 
+  async getDatabaseList(): Promise<Array<{ index: number; filename: string; path: string }>> {
+    return this.cachedDatabaseList;
+  }
+
+  async updateNode(dbIndex: number, nodeId: number, updates: { node_depth?: number; resolution?: number }): Promise<void> {
+    const cur = this.nodes.get(nodeId);
+    if (!cur) throw new Error(`Node ${nodeId} not found`);
+    const node_depth = updates.node_depth ?? cur.nodeDepth;
+    const resolution = updates.resolution ?? cur.resolution;
+    await this.sendMessage('updateNode', { dbIndex, nodeId, node_depth, resolution });
+    cur.nodeDepth = node_depth;
+    cur.resolution = resolution;
+  }
+
+  async updateEdge(dbIndex: number, source: number, target: number, updates: {
+    distance?: number; min_depth?: number; max_air_draft?: number;
+    min_width?: number; traffic_mode?: number; is_fairway?: number;
+  }): Promise<void> {
+    const edges = this.edgesBySource.get(source);
+    if (!edges) throw new Error(`No edges from source ${source}`);
+    const edge = edges.find(e => e.target === target);
+    if (!edge) throw new Error(`Edge ${source}->${target} not found`);
+    await this.sendMessage('updateEdge', { dbIndex, source, target, ...updates });
+    if (updates.distance !== undefined) edge.distance = updates.distance;
+    if (updates.min_depth !== undefined) edge.min_depth = updates.min_depth;
+    if (updates.max_air_draft !== undefined) edge.max_air_draft = updates.max_air_draft;
+    if (updates.min_width !== undefined) edge.min_width = updates.min_width;
+    if (updates.traffic_mode !== undefined) edge.traffic_mode = updates.traffic_mode;
+    if (updates.is_fairway !== undefined) edge.is_fairway = updates.is_fairway;
+  }
+
+  async deleteNode(dbIndex: number, nodeId: number): Promise<void> {
+    this.edgesBySource.delete(nodeId);
+    for (const [, edges] of this.edgesBySource) {
+      const idx = edges.findIndex(e => e.target === nodeId);
+      if (idx >= 0) edges.splice(idx, 1);
+    }
+    this.nodes.delete(nodeId);
+    await this.sendMessage('deleteNode', { dbIndex, nodeId });
+  }
+
+  async deleteEdge(dbIndex: number, source: number, target: number): Promise<void> {
+    const edges = this.edgesBySource.get(source);
+    if (edges) {
+      const idx = edges.findIndex(e => e.target === target);
+      if (idx >= 0) edges.splice(idx, 1);
+    }
+    await this.sendMessage('deleteEdge', { dbIndex, source, target });
+  }
+
+  async addNode(dbIndex: number, node: { id: number; lat: number; lon: number; node_depth?: number; resolution?: number }): Promise<void> {
+    await this.sendMessage('insertNode', { dbIndex, ...node });
+    this.nodes.set(node.id, {
+      lat: node.lat, lon: node.lon, regionId: 0,
+      nodeDepth: node.node_depth ?? -1,
+      resolution: node.resolution ?? 0,
+    });
+    this.spatialGrid.clear();
+    this.buildSpatialIndex();
+  }
+
+  async addEdge(dbIndex: number, edge: {
+    source: number; target: number; distance: number;
+    min_depth?: number; max_air_draft?: number; min_width?: number;
+    is_fairway?: number; distance_to_land?: number;
+    edge_type_id?: number; traffic_mode?: number;
+  }): Promise<void> {
+    await this.sendMessage('insertEdge', { dbIndex, ...edge });
+    const s = this.nodes.get(edge.source);
+    const t = this.nodes.get(edge.target);
+    if (!s || !t) throw new Error('Source or target node not found');
+    const newEdge: EdgeRow & { lat: number; lon: number } = {
+      source: edge.source,
+      target: edge.target,
+      source_lat: s.lat,
+      source_lon: s.lon,
+      distance: edge.distance,
+      min_depth: edge.min_depth ?? -1,
+      max_air_draft: edge.max_air_draft ?? -1,
+      min_width: edge.min_width ?? -1,
+      is_fairway: edge.is_fairway ?? 0,
+      distance_to_land: edge.distance_to_land ?? 0,
+      edge_type_id: edge.edge_type_id ?? 0,
+      traffic_mode: edge.traffic_mode ?? 0,
+      lat: t.lat,
+      lon: t.lon,
+    };
+    if (!this.edgesBySource.has(edge.source)) {
+      this.edgesBySource.set(edge.source, []);
+    }
+    this.edgesBySource.get(edge.source)!.push(newEdge);
+  }
+
   async close(): Promise<void> {
     if (this.worker) {
       try {
@@ -788,8 +894,6 @@ export class RoutingDatabase {
     this.edgesBySource.clear();
     this.pois = [];
     this.spatialGrid.clear();
-    this.waterGeoJson = null;
-    this.waterGeojsonPath = null;
     this.waterwaysGeoJson = null;
     this.waterwaysGeojsonPath = null;
     this.landGeoJson = null;

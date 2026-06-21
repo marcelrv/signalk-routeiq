@@ -11,10 +11,15 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Tuple, Optional
 
 import numpy as np
-
+import pandas as pd
+import geopandas as gpd
+import networkx as nx
+import shapely
+from shapely.geometry import Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon
+from shapely.ops import triangulate
+from pyproj import Geod
 
 def _is_valid(val):
-    """Check val is not None, not empty array, and not NaN."""
     if val is None:
         return False
     if isinstance(val, np.ndarray):
@@ -23,18 +28,11 @@ def _is_valid(val):
         return not pd.isna(val)
     except (ValueError, TypeError):
         return True
-import pandas as pd
-import geopandas as gpd
-import networkx as nx
-from shapely.geometry import Point, LineString, Polygon, MultiPoint, MultiLineString
-from pyproj import Geod
 
 def _s57_col(attrs, *candidates):
-    """Case-insensitive lookup for an S-57 attribute in a row/dict."""
     if isinstance(attrs, dict):
         keys = attrs.keys()
     else:
-        # pandas Series
         keys = attrs.index if hasattr(attrs, 'index') else attrs
     lower_map = {str(k).lower(): k for k in keys}
     for c in candidates:
@@ -44,11 +42,9 @@ def _s57_col(attrs, *candidates):
     return None
 
 def _parse_catbrg(catbrg):
-    """Normalize catbrg to a list of string category values."""
     if isinstance(catbrg, (list, tuple, np.ndarray)):
         return [str(v) for v in catbrg]
     if isinstance(catbrg, str):
-        # Handle stringified numpy arrays like "['9' '7']"
         import re
         vals = re.findall(r"(\d+)", catbrg)
         if vals:
@@ -59,31 +55,6 @@ def _parse_catbrg(catbrg):
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-# --- Module-level globals & workers for multiprocessing fork-based sharing ---
-#
-# On 'fork' (Linux), worker globals inherit parent memory via copy-on-write.
-# On 'spawn' (Windows/macOS), the Pool initializer pickles data to each worker
-# via initargs. R-tree indices (sindex) are rebuilt per worker on first access.
-_COARSE_SCAN_GDF = None
-
-def _coarse_scan_init(gdf):
-    global _COARSE_SCAN_GDF
-    _COARSE_SCAN_GDF = gdf
-
-def _coarse_scan_worker(columns_x, y_coords):
-    """Multiprocessing worker: return list of (x, y) water points for given columns."""
-    gdf = _COARSE_SCAN_GDF
-    results = []
-    for x in columns_x:
-        for y in y_coords:
-            pt = Point(x, y)
-            candidates = list(gdf.sindex.intersection(pt.bounds))
-            for idx in candidates:
-                if gdf.iloc[idx].geometry.contains(pt):
-                    results.append((x, y))
-                    break
-    return results
 
 # --- Module-level workers for edge attribute multiprocessing ---
 _EDGE_ATTR_GEOD = None
@@ -104,7 +75,6 @@ def _candidates_by_bounds_static(gdf, geom, margin=0.0):
     return gpd.GeoDataFrame()
 
 def _edge_attr_worker(edge_chunk):
-    """Process a chunk of edges. Returns dict {(u, v): {attr: value}}."""
     geod = _EDGE_ATTR_GEOD
     gdfs = _EDGE_ATTR_GDFS
     CRS_WGS84 = "EPSG:4326"
@@ -121,29 +91,37 @@ def _edge_attr_worker(edge_chunk):
         attrs = {}
         _, _, distance = geod.inv(u_lon, u_lat, v_lon, v_lat)
         attrs['distance'] = round(distance, 2)
-
         edge_geom = LineString([(u_lon, u_lat), (v_lon, v_lat)])
 
-        # Depth
+        # Depth — Fast Precision (5-point sample)
         attrs['min_depth'] = 99.0
         attrs['drval1'] = None
-        if not depare_gdf.empty:
-            depare_candidates = _candidates_by_bounds_static(depare_gdf, edge_geom)
-            if not depare_candidates.empty:
-                intersecting = depare_candidates[depare_candidates.intersects(edge_geom)]
-                if not intersecting.empty:
-                    if 'DRVAL1' in intersecting.columns:
-                        # Store raw DRVAL1 (including negative values above
-                        # chart datum) for future tide-aware routing.
-                        # For now: min_depth = max(0, DRVAL1) gives conservative
-                        # routing until tide data is available.
-                        vals = intersecting['DRVAL1'].dropna()
-                        if not vals.empty:
-                            min_val = float(vals.min())
-                            attrs['min_depth'] = max(0.0, min_val)
-                            attrs['drval1'] = min_val
+        if not depare_gdf.empty and 'DRVAL1' in depare_gdf.columns:
+            candidates = _candidates_by_bounds_static(depare_gdf, edge_geom)
+            if not candidates.empty:
+                vals = candidates['DRVAL1'].dropna()
+                if not vals.empty:
+                    if float(vals.min()) >= 5.0:
+                        min_val = float(vals.min())
+                        attrs['min_depth'] = min_val
+                        attrs['drval1'] = min_val
+                    else:
+                        sampled = []
+                        for i in range(5):
+                            f = i / 4.0
+                            pt = Point(u_lon + f*(v_lon-u_lon), u_lat + f*(v_lat-u_lat))
+                            found = None
+                            for _, row in candidates.iterrows():
+                                geom = row.geometry
+                                if geom is not None and geom.contains(pt):
+                                    found = row['DRVAL1']
+                                    break
+                            sampled.append(float(found) if pd.notna(found) else 99.0)
+                        min_val = min(sampled)
+                        attrs['min_depth'] = max(0.0, float(min_val))
+                        attrs['drval1'] = min_val if min_val < 99.0 else None
 
-        # Bridges
+        # Bridges - Determine Air Draft limit
         attrs['max_air_draft'] = 999.0
         if not bridges_gdf.empty:
             bridge_candidates = _candidates_by_bounds_static(bridges_gdf, edge_geom)
@@ -171,10 +149,8 @@ def _edge_attr_worker(edge_chunk):
                                 clearance = float(verclr)
                             else:
                                 clearance = 999.0
-
                         if clearance < min_clearance:
                             min_clearance = clearance
-
                     attrs['max_air_draft'] = min_clearance
 
         # Locks
@@ -188,7 +164,7 @@ def _edge_attr_worker(edge_chunk):
 
         # Fairway + one-way (TRAFIC)
         attrs['is_fairway'] = False
-        attrs['traffic_mode'] = TRAFFIC_TWO_WAY
+        attrs['traffic_mode'] = 0
         if not fairways_gdf.empty:
             fw_candidates = _candidates_by_bounds_static(fairways_gdf, edge_geom)
             if not fw_candidates.empty:
@@ -200,7 +176,7 @@ def _edge_attr_worker(edge_chunk):
                         if len(trafic_vals) == 1:
                             tv = int(trafic_vals[0])
                             if abs(tv) in (1, 3):
-                                attrs['traffic_mode'] = TRAFFIC_ONE_WAY_FWD if tv in (1, 3) else TRAFFIC_ONE_WAY_REV
+                                attrs['traffic_mode'] = 1 if tv in (1, 3) else 2
 
         # Distance to land
         attrs['distance_to_land'] = 9999.0
@@ -224,29 +200,20 @@ def _edge_attr_worker(edge_chunk):
         results[(u, v)] = attrs
     return results
 
-# Coordinate space constant for type-packed node IDs
 COORD_SPACE = 36000000
-
-OBSTACLE_BUFFER_METERS = 30
-
-# Enum constants for edge types (edge_type_enum table)
+OBSTACLE_BUFFER_METERS = 5
 EDGE_TYPE_COASTAL = 0
 EDGE_TYPE_INLAND = 1
-
-# Enum constants for POI types (poi_type_enum table)
 POI_TYPE_HARBOUR = 0
 POI_TYPE_LOCK = 1
 POI_TYPE_BRIDGE = 2
 POI_TYPE_FAIRWAY = 3
 POI_TYPE_WATERWAY = 4
-
-# Traffic mode: 0=two-way, 1=one-way forward (source->target), 2=one-way reverse
 TRAFFIC_TWO_WAY = 0
 TRAFFIC_ONE_WAY_FWD = 1
 TRAFFIC_ONE_WAY_REV = 2
 
 def _s57_get_val(attrs, *candidates):
-    """Like _s57_col but also handles list/array values by returning the first scalar."""
     val = _s57_col(attrs, *candidates)
     if val is None:
         return None
@@ -254,21 +221,7 @@ def _s57_get_val(attrs, *candidates):
         return val[0] if len(val) > 0 else None
     return val
 
-def _point_in_obstacle(lon, lat, obstacle_gdf):
-    """Check if a point (lon, lat) falls inside any obstacle polygon."""
-    if obstacle_gdf.empty:
-        return False
-    pt = Point(lon, lat)
-    bounds = (lon - 1e-8, lat - 1e-8, lon + 1e-8, lat + 1e-8)
-    candidates = list(obstacle_gdf.sindex.intersection(bounds))
-    for idx in candidates:
-        geom = obstacle_gdf.iloc[idx].geometry
-        if geom is not None and geom.contains(pt):
-            return True
-    return False
-
 def _is_entry_prohibited(row):
-    """Check if a RESARE feature represents a true no-go / entry-prohibited area."""
     restrn = _s57_col(row, 'restrn')
     if restrn is not None and pd.notnull(restrn):
         vals = restrn if isinstance(restrn, (list, tuple, np.ndarray)) else [restrn]
@@ -278,7 +231,6 @@ def _is_entry_prohibited(row):
                     return True
             except (ValueError, TypeError):
                 pass
-
     for col in ('OBJNAM', 'NOBJNM', 'INFORM'):
         val = _s57_col(row, col)
         if val is not None and isinstance(val, str):
@@ -289,1150 +241,513 @@ def _is_entry_prohibited(row):
 
 class NauticalRoutingPipeline:
     def __init__(self, data_paths: Dict[str, str], db_path: str,
-                 country: str = '', region_name: str = '', description: str = '',
-                 tags: Optional[str] = None, contributor: str = '', url: str = ''):
-        """
-        Initializes the pipeline for generating a nautical routing graph.
-        
-        :param data_paths: Dictionary mapping layer names to file paths (e.g., shapefiles/GeoJSONs).
-        :param db_path: Path to the output SQLite database.
-        :param country: ISO country code (e.g., 'NL', 'BE') for the metadata table.
-        :param region_name: Human-readable region name (e.g., 'Netherlands').
-        :param description: Optional description of the data coverage.
-        :param tags: JSON array of tag strings (e.g., '["official","rws","enc"]').
-        :param contributor: GitHub username or organization that contributed this data.
-        :param url: Source URL for the original data.
-        """
+                 country: str = "", region_name: str = "", description: str = "",
+                 tags: Optional[str] = None, contributor: str = "", url: str = ""):
         self.data_paths = data_paths
         self.db_path = db_path
         self.country = country
         self.region_name = region_name or country
         self.description = description
-        self.tags = tags or '[]'
+        self.tags = tags or "[]"
         self.contributor = contributor
         self.url = url
-        
-        # Geodetic calculator for accurate WGS84 distance measurements (meters)
         self.geod = Geod(ellps="WGS84")
-        
-        # CRS Constants
         self.CRS_WGS84 = "EPSG:4326"
-        self.CRS_METRIC = "EPSG:3857" # Web Mercator for fast 2D metric math
-        
+        self.CRS_METRIC = "EPSG:3857"
         self.gdfs = {}
         self.graph = nx.DiGraph()
         
     def run_pipeline(self):
-        """Executes the end-to-end data pipeline."""
         self.parse_shapefiles()
         self.build_network()
-        self._validate_edges_against_land()
         self._add_opening_bridge_edges()
+        self._validate_edges_against_land()
         self.calculate_edge_attributes()
-        # Override air draft for edges created through opening bridges
         for u, v, data in self.graph.edges(data=True):
-            if data.get('is_opening_bridge_edge'):
-                data['max_air_draft'] = 999.0
+            if data.get("is_opening_bridge_edge"):
+                data["max_air_draft"] = 999.0
         self._compute_node_depths()
         self.export_to_sqlite()
         logger.info("Pipeline execution completed successfully.")
 
     def parse_shapefiles(self):
-        """Loads vector map data into GeoDataFrames and standardizes their CRS."""
         logger.info("Parsing shapefiles and GeoJSONs...")
         for layer_name, path in self.data_paths.items():
             if os.path.exists(path):
                 gdf = gpd.read_file(path)
-                # Ensure everything is in standard WGS84 coordinates initially
                 if gdf.crs != self.CRS_WGS84:
                     gdf = gdf.to_crs(self.CRS_WGS84)
                 self.gdfs[layer_name] = gdf
                 logger.info(f"Loaded '{layer_name}' with {len(gdf)} features.")
             else:
                 logger.warning(f"File not found for '{layer_name}': {path}. Using empty fallback.")
-                # Create empty fallback GDF with standard geometry if missing
                 self.gdfs[layer_name] = gpd.GeoDataFrame(geometry=[], crs=self.CRS_WGS84)
-
-        # Pre-calculate projected (metric) GeodataFrames for fast distance math (like distance_to_land)
         self.gdfs_metric = {
             name: gdf.to_crs(self.CRS_METRIC) for name, gdf in self.gdfs.items()
         }
-
         self._build_obstacle_layer()
 
-    def _is_obstacle_feature(self, row) -> bool:
-        """Check if a row from any obstacle layer represents a no-go obstacle."""
-        layer = row.get('_layer', '')
-        if layer == 'restricted_areas':
-            return _is_entry_prohibited(row)
-        return True
-
     def _build_obstacle_layer(self):
-        """Build a combined obstacle GeoDataFrame from restricted areas, hulks, mariculture, and obstructions.
-
-        Obstacles block coastal navigation edges — treated similarly to land
-        during validation so routes cannot cross them.
-        """
         logger.info("Building obstacle layer from restricted areas, hulks, obstructions...")
-
         obstacle_parts = []
-
-        # 1. RESARE — entry-prohibited / passage-prohibited areas only
-        resare = self.gdfs.get('restricted_areas', gpd.GeoDataFrame())
+        resare = self.gdfs.get("restricted_areas", gpd.GeoDataFrame())
         if not resare.empty:
             ep_mask = resare.apply(_is_entry_prohibited, axis=1)
             entry_prohibited = resare[ep_mask].copy()
             if not entry_prohibited.empty:
-                entry_prohibited['_layer'] = 'restricted_areas'
+                entry_prohibited["_layer"] = "restricted_areas"
                 obstacle_parts.append(entry_prohibited)
-                logger.info(f"  RESARE entry-prohibited: {len(entry_prohibited)} features")
-            else:
-                logger.info("  No entry-prohibited RESARE features found")
 
-        # 2. HULKES — hulls / wrecked vessels
-        hulks = self.gdfs.get('hulks', gpd.GeoDataFrame())
+        hulks = self.gdfs.get("hulks", gpd.GeoDataFrame())
         if not hulks.empty:
             hulks = hulks.copy()
-            hulks['_layer'] = 'hulks'
+            hulks["_layer"] = "hulks"
             obstacle_parts.append(hulks)
-            logger.info(f"  HULKES: {len(hulks)} features")
 
-        # 3. MARCUL — marine culture (mussel farms, etc.)
-        marcult = self.gdfs.get('mariculture', gpd.GeoDataFrame())
+        marcult = self.gdfs.get("mariculture", gpd.GeoDataFrame())
         if not marcult.empty:
             marcult = marcult.copy()
-            marcult['_layer'] = 'mariculture'
+            marcult["_layer"] = "mariculture"
             obstacle_parts.append(marcult)
-            logger.info(f"  MARCUL: {len(marcult)} features")
 
-        # 4. OBSTRN — point/line obstructions buffered into polygons
-        obstrn = self.gdfs.get('obstructions', gpd.GeoDataFrame())
+        obstrn = self.gdfs.get("obstructions", gpd.GeoDataFrame())
         if not obstrn.empty:
             buf_metric = obstrn.to_crs(self.CRS_METRIC)
-            buf_metric['geometry'] = buf_metric.geometry.buffer(OBSTACLE_BUFFER_METERS)
+            buf_metric["geometry"] = buf_metric.geometry.buffer(OBSTACLE_BUFFER_METERS)
             buf_wgs84 = buf_metric.to_crs(self.CRS_WGS84)
-            buf_wgs84['_layer'] = 'obstructions'
+            buf_wgs84["_layer"] = "obstructions"
             obstacle_parts.append(buf_wgs84)
-            logger.info(f"  OBSTRN: {len(obstrn)} features (buffered {OBSTACLE_BUFFER_METERS}m)")
 
         if not obstacle_parts:
-            logger.info("  No obstacle features found — creating empty layer")
-            self.gdfs['obstacles'] = gpd.GeoDataFrame(geometry=[], crs=self.CRS_WGS84)
-            self.gdfs_metric['obstacles'] = gpd.GeoDataFrame(geometry=[], crs=self.CRS_METRIC)
+            self.gdfs["obstacles"] = gpd.GeoDataFrame(geometry=[], crs=self.CRS_WGS84)
+            self.gdfs_metric["obstacles"] = gpd.GeoDataFrame(geometry=[], crs=self.CRS_METRIC)
             return
 
         merged = gpd.pd.concat(obstacle_parts, ignore_index=True)
-        merged['geometry'] = merged['geometry'].make_valid()
+        merged["geometry"] = merged["geometry"].make_valid()
         merged = merged[merged.geometry.notnull()]
         if not merged.empty:
             merged = merged[merged.geometry.is_valid]
         logger.info(f"  Combined obstacle layer: {len(merged)} features")
-
-        self.gdfs['obstacles'] = merged
-        self.gdfs_metric['obstacles'] = merged.to_crs(self.CRS_METRIC)
+        self.gdfs["obstacles"] = merged
+        self.gdfs_metric["obstacles"] = merged.to_crs(self.CRS_METRIC)
 
     def build_network(self):
-        """
-        Generates the Directed Graph base topology.
-        Combines Inland waterway centerlines and Coastal Navigation Meshes.
-        """
         logger.info("Building base network topology...")
-        self.coords_to_node = {} # Mapping (lon, lat) -> node_id for node_type upgrades
-
-        # 1. Generate Inland Waterway Network (from centerlines)
-        if 'inland_waterways' in self.gdfs and not self.gdfs['inland_waterways'].empty:
+        self.coords_to_node = {}
+        if "inland_waterways" in self.gdfs and not self.gdfs["inland_waterways"].empty:
             self._build_inland_network()
-
-        # 2. Generate Coastal NavMesh (Grid-based fallback over open water polygons)
-        if 'coastal_water' in self.gdfs and not self.gdfs['coastal_water'].empty:
+        if "coastal_water" in self.gdfs and not self.gdfs["coastal_water"].empty:
             self._build_coastal_navmesh()
-
         logger.info(f"Network built with {self.graph.number_of_nodes()} nodes and {self.graph.number_of_edges()} edges.")
 
     @staticmethod
-    def _coord_to_id(lon: float, lat: float, node_type: str = 'coastal') -> int:
-        """Deterministic 53-bit-safe node ID from snapped coordinates + type.
-
-        Packs node_type (0=coastal, 1=inland), lat, lon into a single integer.
-        type_int = 1 for 'inland', 0 otherwise.
-        ID = (type_int * 648,000,000,000,000) + (lat_int * 36,000,000) + lon_int
-        Max value: ~1,296,000,036,000,000 (well within Number.MAX_SAFE_INTEGER).
-        """
-        lat_int = int((round(lat, 5) + 90.0) * 100000)   # 0 .. 18,000,000
-        lon_int = int((round(lon, 5) + 180.0) * 100000)  # 0 .. 36,000,000
-        type_int = 1 if node_type == 'inland' else 0
+    def _coord_to_id(lon: float, lat: float, node_type: str = "coastal") -> int:
+        lat_int = int((round(lat, 5) + 90.0) * 100000)
+        lon_int = int((round(lon, 5) + 180.0) * 100000)
+        type_int = 1 if node_type == "inland" else 0
         return (type_int * 648000000000000) + (lat_int * COORD_SPACE) + lon_int
 
     @staticmethod
     def _generate_poi_id(poi_type: str, lat: float, lon: float) -> int:
-        """Deterministic 52-bit POI ID from type + snapped coordinates.
-        
-        Collisions between different types at the same coordinate are impossible
-        because the input string includes the type prefix. Spelling variations
-        in names are ignored — only type + location matters.
-        """
         unique_str = f"{poi_type}_{round(lat, 5)}_{round(lon, 5)}"
-        return int(hashlib.md5(unique_str.encode('utf-8')).hexdigest()[:13], 16)
+        return int(hashlib.md5(unique_str.encode("utf-8")).hexdigest()[:13], 16)
 
-    def _get_or_create_node(self, lon: float, lat: float, node_type: str = 'coastal') -> int:
-        """Helper to create nodes and avoid duplicates by snapping to 5 decimal places (~1 meter).
-
-        When the type changes, the node ID encodes the new type via migration.
-        Only upgrades (coastal → inland) are handled here; downgrades (inland → coastal)
-        must be done explicitly via _set_node_type().
-        """
+    def _get_or_create_node(self, lon: float, lat: float, node_type: str = "coastal") -> int:
         coord = (round(lon, 5), round(lat, 5))
         if coord in self.coords_to_node:
             existing_id = self.coords_to_node[coord]
-            # Node may have been removed by a previous type migration — treat as new
             if existing_id not in self.graph:
                 del self.coords_to_node[coord]
                 node_id = self._coord_to_id(lon, lat, node_type)
                 self.graph.add_node(node_id, lon=coord[0], lat=coord[1], node_type=node_type)
                 self.coords_to_node[coord] = node_id
                 return node_id
-            existing_type = self.graph.nodes[existing_id].get('node_type', 'coastal')
-            if existing_type == node_type:
-                return existing_id
-            # Only upgrade to inland, never downgrade
-            if node_type == 'inland':
-                return self._migrate_node_type(existing_id, 'inland')
             return existing_id
         node_id = self._coord_to_id(lon, lat, node_type)
         self.graph.add_node(node_id, lon=coord[0], lat=coord[1], node_type=node_type)
         self.coords_to_node[coord] = node_id
         return node_id
 
-    def _migrate_node_type(self, nid: int, new_type: str) -> int:
-        """Migrate a node to a new type-embedded ID when its type changes.
-
-        Creates a new node with the updated ID, rewires all edges, and removes the old node.
-        Returns the new node ID.
-        """
-        existing_type = self.graph.nodes[nid].get('node_type', 'coastal')
-        if existing_type == new_type:
-            return nid
-        lon = self.graph.nodes[nid].get('lon', 0.0)
-        lat = self.graph.nodes[nid].get('lat', 0.0)
-        new_id = self._coord_to_id(lon, lat, new_type)
-        attrs = dict(self.graph.nodes[nid])
-        attrs['node_type'] = new_type
-        self.graph.add_node(new_id, **attrs)
-        # Rewire incoming edges
-        for pred, _, data in list(self.graph.in_edges(nid, data=True)):
-            self.graph.add_edge(pred, new_id, **data)
-        # Rewire outgoing edges
-        for _, succ, data in list(self.graph.out_edges(nid, data=True)):
-            self.graph.add_edge(new_id, succ, **data)
-        # Update coords_to_node if this coord was tracked
-        coord = (round(lon, 5), round(lat, 5))
-        if coord in self.coords_to_node and self.coords_to_node[coord] == nid:
-            self.coords_to_node[coord] = new_id
-        self.graph.remove_node(nid)
-        return new_id
-
-    def _set_node_type(self, nid: int, new_type: str) -> int:
-        """Explicitly change a node's type with ID migration.
-
-        Unlike _get_or_create_node (which only upgrades to inland),
-        this always performs the migration and returns the (possibly new) node ID.
-        """
-        return self._migrate_node_type(nid, new_type)
-
     def _build_inland_network(self):
-        """Extracts nodes and edges from inland waterway LineStrings."""
-        inland_gdf = self.gdfs['inland_waterways']
-        total_features = len(inland_gdf)
-        logger.info(f"  Processing {total_features} inland waterway features...")
-        
+        inland_gdf = self.gdfs["inland_waterways"]
         for fi, (_, row) in enumerate(inland_gdf.iterrows()):
-            if (fi + 1) % max(1, total_features // 20) == 0:
-                pct = (fi + 1) / total_features * 100
-                logger.info(f"  Inland waterways: {fi + 1}/{total_features} ({pct:.0f}%), {self.graph.number_of_nodes()} nodes so far")
             geom = row.geometry
             if isinstance(geom, LineString):
                 coords = list(geom.coords)
                 for i in range(len(coords) - 1):
                     u_lon, u_lat = coords[i]
                     v_lon, v_lat = coords[i+1]
-                    
-                    u = self._get_or_create_node(u_lon, u_lat, node_type='inland')
-                    v = self._get_or_create_node(v_lon, v_lat, node_type='inland')
-                    
-                    # Add parallel directional edges to support separated channels
-                    # Traffic rules/penalties will be assigned in the attributes step
-                    self.graph.add_edge(u, v, edge_type='inland')
-                    self.graph.add_edge(v, u, edge_type='inland')
+                    u = self._get_or_create_node(u_lon, u_lat, node_type="inland")
+                    v = self._get_or_create_node(v_lon, v_lat, node_type="inland")
+                    self.graph.add_edge(u, v, edge_type="inland")
+                    self.graph.add_edge(v, u, edge_type="inland")
 
     def _build_coastal_navmesh(self):
-        """Generates an adaptive-resolution coastal navmesh using grid scanning.
-        
-        Resolution varies from 0.005° (~500m) open sea to 0.001° (~100m)
-        in narrow channels. Refinement is skipped in cells that contain 
-        centreline features. Uses O(N) grid-based (two-level dict) 
-        connectivity instead of octant nearest-neighbor search.
-        """
-        coastal_gdf = self.gdfs['coastal_water']
-        if coastal_gdf.empty:
+        coastal_gdf = self.gdfs.get("coastal_water")
+        if coastal_gdf is None or coastal_gdf.empty:
             logger.warning("No coastal water data. Skipping navmesh.")
             return
-        
-        # Repair geometries for spatial index lookups
-        coastal_gdf = coastal_gdf.copy()
-        coastal_gdf['geometry'] = coastal_gdf['geometry'].make_valid()
-        coastal_gdf = coastal_gdf[coastal_gdf.geometry.notnull()]
-
-        land_gdf = self.gdfs.get('land', gpd.GeoDataFrame())
-        if not land_gdf.empty:
-            land_gdf = land_gdf.copy()
-            land_gdf['geometry'] = land_gdf['geometry'].make_valid()
-            land_gdf = land_gdf[land_gdf.geometry.notnull()]
-
-        inland_ww = self.gdfs.get('inland_waterways')
-
+            
         bounds = coastal_gdf.total_bounds
-        MAX_RES = 0.005      # coarsest (open sea, ~500m)
-        MIN_RES = 0.001      # finest (narrow channels, ~100m) — keeps node count ~50k
-        SEARCH_MARGIN = 0.01 # degrees for narrowness cache
+        BIN_SIZE = 0.0005 
+        binned_points = {}
+        
+        def add_point(lon, lat, priority):
+            bx, by = int(lon / BIN_SIZE), int(lat / BIN_SIZE)
+            if (bx, by) not in binned_points or priority > binned_points[(bx, by)][2]:
+                binned_points[(bx, by)] = (lon, lat, priority)
 
-        # --- Fast narrowness (distance to nearest land in degrees) ---
-        narrowness_cache = {}
-        def _narrowness(lon, lat):
-            key = (round(lon, 5), round(lat, 5))
-            if key in narrowness_cache:
-                return narrowness_cache[key]
-            if land_gdf.empty:
-                val = 10.0
-            else:
-                pt = Point(lon, lat)
-                candidates = list(land_gdf.sindex.intersection(
-                    (lon - SEARCH_MARGIN, lat - SEARCH_MARGIN,
-                     lon + SEARCH_MARGIN, lat + SEARCH_MARGIN)
-                ))
-                if not candidates:
-                    val = 10.0
-                else:
-                    min_d = float('inf')
-                    for idx in candidates:
-                        d = pt.distance(land_gdf.iloc[idx].geometry)
-                        if d < min_d:
-                            min_d = d
-                    val = min_d if min_d < 10.0 else 10.0
-            narrowness_cache[key] = val
-            return val
+        logger.info("Step 1: Injecting Fairways, Contours & Basins...")
+        
+        # Prio 3: Inland Centerlines & Fairways
+        hw_gdfs = []
+        if not self.gdfs.get("fairways", gpd.GeoDataFrame()).empty: hw_gdfs.append(self.gdfs["fairways"])
+        if not self.gdfs.get("inland_waterways", gpd.GeoDataFrame()).empty: hw_gdfs.append(self.gdfs["inland_waterways"])
+            
+        if hw_gdfs:
+            hw_gdf = pd.concat(hw_gdfs, ignore_index=True)
+            for geom in hw_gdf.geometry:
+                if geom is None: continue
+                lines = []
+                if isinstance(geom, (Polygon, MultiPolygon)):
+                    boundary = geom.boundary
+                    lines = boundary.geoms if isinstance(boundary, MultiLineString) else [boundary]
+                elif isinstance(geom, (LineString, MultiLineString)):
+                    lines = geom.geoms if isinstance(geom, MultiLineString) else [geom]
+                for line in lines:
+                    simple_line = line.simplify(0.001)
+                    for pt in simple_line.coords: add_point(pt[0], pt[1], 3)
 
-        # --- Fast centerline existence check ---
-        def _has_centerline(bbox):
-            if inland_ww is None or inland_ww.empty:
-                return False
-            return len(list(inland_ww.sindex.intersection(bbox))) > 0
+        # Prio 2: Centroids of all water areas 
+        for geom in coastal_gdf.geometry:
+            if geom is not None and isinstance(geom, (Polygon, MultiPolygon)):
+                rep = geom.representative_point()
+                add_point(rep.x, rep.y, 2)
+                
+        # Prio 1: Depth Contours
+        depare_gdf = self.gdfs.get("depth_areas", gpd.GeoDataFrame())
+        if not depare_gdf.empty and "DRVAL1" in depare_gdf.columns:
+            deep_areas = depare_gdf[depare_gdf["DRVAL1"] >= 0.5]
+            for geom in deep_areas.geometry:
+                if geom is None: continue
+                lines = []
+                if isinstance(geom, (Polygon, MultiPolygon)):
+                    boundary = geom.boundary
+                    lines = boundary.geoms if isinstance(boundary, MultiLineString) else [boundary]
+                elif isinstance(geom, (LineString, MultiLineString)):
+                    lines = geom.geoms if isinstance(geom, MultiLineString) else [geom]
+                for line in lines:
+                    simple_line = line.simplify(0.001)
+                    for pt in simple_line.coords: add_point(pt[0], pt[1], 1)
 
-        # ==============================================================
-        # STEP 1: Coarse scan (multiprocessing with fork-based sharing)
-        # ==============================================================
-        logger.info("Scanning coarse grid (multiprocessing)...")
+        # Prio 0: Vectorized Coarse Grid
+        MAX_RES = 0.005  
+        xs = np.arange(bounds[0], bounds[2], MAX_RES)
+        ys = np.arange(bounds[1], bounds[3], MAX_RES)
+        xx, yy = np.meshgrid(xs, ys)
+        grid_pts = gpd.GeoSeries(gpd.points_from_xy(xx.flatten(), yy.flatten()), crs=self.CRS_WGS84)
+        
+        coastal_geom = coastal_gdf.geometry
+        in_water_mask = grid_pts.sindex.query(coastal_geom, predicate="contains")
+        valid_pt_indices = np.unique(in_water_mask[1]) if in_water_mask.size > 0 else np.array([])
+        for pt in grid_pts.iloc[valid_pt_indices]:
+            add_point(pt.x, pt.y, 0)
 
-        x_coarse = np.arange(bounds[0], bounds[2], MAX_RES)
-        y_coarse = np.arange(bounds[1], bounds[3], MAX_RES)
-        if len(x_coarse) == 0 or len(y_coarse) == 0:
-            logger.warning("No valid bounds for coastal navmesh.")
-            return
+        # Gap Filler
+        invalid_pt_indices = np.setdiff1d(np.arange(len(grid_pts)), valid_pt_indices)
+        invalid_points = grid_pts.iloc[invalid_pt_indices]
+        
+        offset = MAX_RES / 3.0  
+        shifts = [(offset, 0), (-offset, 0), (0, offset), (0, -offset),
+                  (offset, offset), (-offset, -offset), (offset, -offset), (-offset, offset)]
+        for dx, dy in shifts:
+            shifted_pts = gpd.GeoSeries(gpd.points_from_xy(invalid_points.x + dx, invalid_points.y + dy), crs=self.CRS_WGS84)
+            mask = shifted_pts.sindex.query(coastal_geom, predicate="contains")
+            if mask.size > 0:
+                valid_shifted_indices = np.unique(mask[1])
+                for pt in shifted_pts.iloc[valid_shifted_indices]: add_point(pt.x, pt.y, 0)
+                        
+        points = [(x, y) for x, y, _ in binned_points.values()]
+        logger.info(f"Step 2: Total NavMesh Points: {len(points)}")
+        
+        if len(points) < 3: return
 
-        # Trigger lazy R-tree build before forking (COW share on fork systems).
-        # On 'spawn' (Windows/macOS) this R-tree is NOT shared with workers;
-        # each worker rebuilds its own via initargs pickle transfer.
-        _ = coastal_gdf.sindex
-
-        num_workers = max(1, min(int(mp.cpu_count() * 0.8), len(x_coarse)))
-        cols_per_worker = max(1, len(x_coarse) // num_workers)
-
-        with mp.Pool(num_workers, initializer=_coarse_scan_init,
-                     initargs=(coastal_gdf,)) as pool:
-            tasks = []
-            for w in range(num_workers):
-                start = w * cols_per_worker
-                end = start + cols_per_worker if w < num_workers - 1 else len(x_coarse)
-                cols = x_coarse[start:end]
-                tasks.append(pool.apply_async(_coarse_scan_worker,
-                                              (cols, y_coarse)))
-            coarse_positions = []
-            for t in tasks:
-                coarse_positions.extend(t.get())
-
-        logger.info(f"Coarse scan: {len(coarse_positions)} water nodes at {MAX_RES}°")
-
-        # Filter coarse points against obstacle polygons
-        obstacles = self.gdfs.get('obstacles', gpd.GeoDataFrame())
-        if not obstacles.empty:
-            _ = obstacles.sindex
-            pre_count = len(coarse_positions)
-            coarse_positions = [
-                (x, y) for x, y in coarse_positions
-                if not _point_in_obstacle(x, y, obstacles)
-            ]
-            if pre_count - len(coarse_positions) > 0:
-                logger.info(f"  Obstacle filter: removed {pre_count - len(coarse_positions)} coarse points in obstacles")
-
-        # ==============================================================
-        # STEP 2: Refinement planning (narrowness + centreline handling)
-        # ==============================================================
-        logger.info("Planning refinement (narrowness)...")
-        refinement_cells = []          # (x, y, local_res) for grid refinement
-        centreline_positions = []      # (lon, lat) — coastal nodes on centreline
-        seen_centreline_coords = set()  # dedup
-
-        for idx, (x, y) in enumerate(coarse_positions):
-            if (idx + 1) % 5000 == 0:
-                logger.info(f"  Refinement planning: {idx + 1}/{len(coarse_positions)}")
-
-            n = _narrowness(x, y)
-            n_m = n * 111320
-
-            if n_m < 200:
-                local_res = MIN_RES          # 0.001° (~100m)
-            elif n_m < 500:
-                local_res = 0.002            # ~200m
-            elif n_m < 2000:
-                local_res = 0.003            # ~300m
-            elif n_m < 5000:
-                local_res = 0.004            # ~400m
-            else:
-                continue
-
-            cell_bbox = (x - MAX_RES / 2, y - MAX_RES / 2,
-                         x + MAX_RES / 2, y + MAX_RES / 2)
-            if _has_centerline(cell_bbox):
-                # Plant a coastal node at each centreline vertex in this cell
-                # so even very narrow channels have a coastal connection point.
-                cl_candidates = list(inland_ww.sindex.intersection(cell_bbox))
-                for cl_idx in cl_candidates:
-                    cl_geom = inland_ww.iloc[cl_idx].geometry
-                    if not isinstance(cl_geom, LineString):
-                        continue
-                    for clon, clat in cl_geom.coords:
-                        if (cell_bbox[0] - 1e-8 <= clon <= cell_bbox[2] + 1e-8
-                                and cell_bbox[1] - 1e-8 <= clat <= cell_bbox[3] + 1e-8):
-                            key = (round(clon, 5), round(clat, 5))
-                            if key not in seen_centreline_coords:
-                                seen_centreline_coords.add(key)
-                                centreline_positions.append((clon, clat))
-                continue  # skip grid refinement; centreline provides navigation
-
-            refinement_cells.append((x, y, local_res))
-
-        logger.info(f"Refinement planning: {len(refinement_cells)} cells need refinement, "
-                    f"{len(centreline_positions)} centreline-anchored coastal positions")
-
-        # ==============================================================
-        # STEP 3: Batch spatial join for fine-grid candidate points
-        # ==============================================================
-        logger.info("Generating fine-grid candidate points...")
-        fine_candidates = []
-        for x, y, local_res in refinement_cells:
-            half = MAX_RES / 2
-            offsets = np.arange(-half + local_res / 2, half, local_res)
-            for ox in offsets:
-                for oy in offsets:
-                    if abs(ox) < 1e-8 and abs(oy) < 1e-8:
-                        continue
-                    fine_candidates.append({'lon': x + ox, 'lat': y + oy,
-                                            'res': local_res})
-
-        logger.info(f"Generated {len(fine_candidates)} candidate points")
-
-        refined_positions = []
-        if fine_candidates:
-            candidates_df = pd.DataFrame(fine_candidates)
-            candidates_gdf = gpd.GeoDataFrame(
-                candidates_df,
-                geometry=gpd.points_from_xy(candidates_df['lon'],
-                                             candidates_df['lat']),
-                crs="EPSG:4326"
-            )
-            water_for_join = coastal_gdf[['geometry']].copy()
-            water_for_join['water_idx'] = range(len(water_for_join))
-
-            joined = gpd.sjoin(candidates_gdf, water_for_join,
-                               predicate='within', how='inner')
-            joined = joined.drop_duplicates(subset=['lon', 'lat'])
-
-            # Filter refined points against obstacle polygons
-            if not obstacles.empty:
-                pre_count = len(joined)
-                obs_mask = joined.apply(
-                    lambda r: _point_in_obstacle(r['lon'], r['lat'], obstacles), axis=1
-                )
-                joined = joined[~obs_mask]
-                if pre_count - len(joined) > 0:
-                    logger.info(f"  Obstacle filter: removed {pre_count - len(joined)} refined points in obstacles")
-
-            refined_positions = list(zip(
-                joined['lon'].values, joined['lat'].values, joined['res'].values
+        logger.info("Step 3: Delaunay Triangulation...")
+        try:
+            import scipy.spatial
+            pts_array = np.array(points)
+            tri = scipy.spatial.Delaunay(pts_array)
+            simplices = tri.simplices
+            edges = np.vstack((
+                simplices[:, [0, 1]],
+                simplices[:, [1, 2]],
+                simplices[:, [2, 0]]
             ))
+            edges.sort(axis=1)
+            unique_edges = np.unique(edges, axis=0)
+            
+            MAX_EDGE_LEN = 0.015  # ~1.5km
+            pt_to_id = {}
+            for pt in points:
+                u = self._get_or_create_node(pt[0], pt[1], "coastal")
+                self.graph.nodes[u]["resolution"] = 0.005
+                pt_to_id[(pt[0], pt[1])] = u
 
-        logger.info(f"Batch spatial join: {len(refined_positions)} water "
-                    f"points out of {len(fine_candidates)} candidates")
+            added_edges = 0
+            # Pure Delaunay without Gabriel Pruning creates beautiful natural diagonals.
+            for idx1, idx2 in unique_edges:
+                p1 = pts_array[idx1]
+                p2 = pts_array[idx2]
+                dist_deg = math.hypot(p1[0]-p2[0], p1[1]-p2[1])
+                
+                if dist_deg <= MAX_EDGE_LEN:
+                    u = pt_to_id[(p1[0], p1[1])]
+                    v = pt_to_id[(p2[0], p2[1])]
+                    if not self.graph.has_edge(u, v):
+                        self.graph.add_edge(u, v, edge_type="coastal")
+                        self.graph.add_edge(v, u, edge_type="coastal")
+                        added_edges += 2
+                            
+        except ImportError:
+            logger.warning("  SciPy not found! Falling back to Shapely.")
+            
+        logger.info(f"Coastal navmesh complete: {self.graph.number_of_nodes()} nodes, {added_edges} new edges.")
 
-        # ==============================================================
-        # STEP 4: Create graph nodes (grid + centreline-anchored)
-        # ==============================================================
-        logger.info("Creating graph nodes...")
-        for cx, cy in coarse_positions:
-            nid = self._get_or_create_node(cx, cy)
-            nid = self._set_node_type(nid, 'coastal')
-            self.graph.nodes[nid]['resolution'] = MAX_RES
-
-        for cx, cy, res in refined_positions:
-            nid = self._get_or_create_node(cx, cy)
-            nid = self._set_node_type(nid, 'coastal')
-            self.graph.nodes[nid]['resolution'] = res
-
-        # Centreline-anchored coastal nodes (fallback for narrow channels)
-        for clon, clat in centreline_positions:
-            if _point_in_obstacle(clon, clat, obstacles):
-                continue
-            nid = self._get_or_create_node(clon, clat)
-            # Overwrite any non-coastal (e.g. inland) nodes at centreline positions
-            if self.graph.nodes[nid].get('node_type') != 'coastal':
-                nid = self._set_node_type(nid, 'coastal')
-                self.graph.nodes[nid]['resolution'] = MAX_RES
-
-        coastal_node_data = [
-            (nid, data['lon'], data['lat'], data.get('resolution', MAX_RES))
-            for nid, data in self.graph.nodes(data=True)
-            if data.get('node_type') == 'coastal'
-        ]
-        logger.info(f"Created {len(coastal_node_data)} coastal navmesh nodes")
-
-        # ==============================================================
-        # STEP 5: O(N) grid-based connectivity (two-level dict)
-        # ==============================================================
-        logger.info("Building O(N) grid connectivity...")
-
-        coarse_pos = {}  # (col, row) at MAX_RES → node_id
-        fine_pos = {}    # (col, row) at MIN_RES → node_id
-
-        for nid, lon, lat, res in coastal_node_data:
-            fc = int(lon / MIN_RES + 0.5)
-            fr = int(lat / MIN_RES + 0.5)
-            fine_pos[(fc, fr)] = nid
-
-            if res >= MAX_RES * 0.9:
-                cc = int(lon / MAX_RES + 0.5)
-                cr = int(lat / MAX_RES + 0.5)
-                coarse_pos[(cc, cr)] = nid
-
-        total_new_edges = 0
-
-        # 5a. Coarse-to-coarse (8-way adjacency at MAX_RES)
-        cc_edge_count = 0
-        for (cc, cr), nid in coarse_pos.items():
-            for dr in (-1, 0, 1):
-                for dc in (-1, 0, 1):
-                    if dr == 0 and dc == 0:
-                        continue
-                    neighbor = coarse_pos.get((cc + dc, cr + dr))
-                    if neighbor and neighbor > nid:
-                        self.graph.add_edge(nid, neighbor, edge_type='coastal')
-                        self.graph.add_edge(neighbor, nid, edge_type='coastal')
-                        cc_edge_count += 2
-        total_new_edges += cc_edge_count
-        logger.info(f"  Coarse-to-coarse: {cc_edge_count} edges")
-
-        # 5b. Fine-to-fine (8-way adjacency at MIN_RES)
-        ff_edge_count = 0
-        for (fc, fr), nid in fine_pos.items():
-            for dr in (-1, 0, 1):
-                for dc in (-1, 0, 1):
-                    if dr == 0 and dc == 0:
-                        continue
-                    neighbor = fine_pos.get((fc + dc, fr + dr))
-                    if neighbor and neighbor > nid:
-                        if not self.graph.has_edge(nid, neighbor):
-                            self.graph.add_edge(nid, neighbor,
-                                                edge_type='coastal')
-                            self.graph.add_edge(neighbor, nid,
-                                                edge_type='coastal')
-                            ff_edge_count += 2
-        total_new_edges += ff_edge_count
-        logger.info(f"  Fine-to-fine: {ff_edge_count} edges")
-
-        # 5c. Cross-resolution: fine → nearest coarse in 3×3 MAX_RES block
-        coarse_node_ids = set(coarse_pos.values())  # O(1) lookup set
-        cr_edge_count = 0
-        for (fc, fr), nid in fine_pos.items():
-            if nid in coarse_node_ids:
-                continue  # already connected via coarse-coarse
-
-            parent_cc = int(fc * MIN_RES / MAX_RES)
-            parent_cr = int(fr * MIN_RES / MAX_RES)
-            lon = self.graph.nodes[nid]['lon']
-            lat = self.graph.nodes[nid]['lat']
-
-            best_cnid = None
-            best_dist = float('inf')
-            for dr in (-1, 0, 1):
-                for dc in (-1, 0, 1):
-                    cnid = coarse_pos.get((parent_cc + dc, parent_cr + dr))
-                    if cnid:
-                        clon = self.graph.nodes[cnid]['lon']
-                        clat = self.graph.nodes[cnid]['lat']
-                        dx = (clon - lon) * 111320 * math.cos(
-                            math.radians((lat + clat) / 2))
-                        dy = (clat - lat) * 111320
-                        d = math.sqrt(dx * dx + dy * dy)
-                        if d < best_dist:
-                            best_dist = d
-                            best_cnid = cnid
-
-            if best_cnid and not self.graph.has_edge(nid, best_cnid):
-                self.graph.add_edge(nid, best_cnid, edge_type='coastal')
-                self.graph.add_edge(best_cnid, nid, edge_type='coastal')
-                cr_edge_count += 2
-        total_new_edges += cr_edge_count
-        logger.info(f"  Cross-resolution: {cr_edge_count} edges")
-
-        # 5d. Inland-to-coastal via grid-based nearest-neighbour lookup
-        # Use a search radius that covers at least one full coarse cell:
-        # MAX_RES / MIN_RES = 5 cells → radius of 3 covers a 7×7 block (0.007°)
-        inland_search_radius = max(2, round(MAX_RES / MIN_RES / 2))
-        inland_nodes = [
-            (nid, data['lon'], data['lat'])
-            for nid, data in self.graph.nodes(data=True)
-            if data.get('node_type') == 'inland'
-        ]
-
-        ic_edge_count = 0
-        for nid, lon, lat in inland_nodes:
-            fc = int(lon / MIN_RES + 0.5)
-            fr = int(lat / MIN_RES + 0.5)
-            candidates = []
-            for dr in range(-inland_search_radius, inland_search_radius + 1):
-                for dc in range(-inland_search_radius, inland_search_radius + 1):
-                    neighbor = fine_pos.get((fc + dc, fr + dr))
-                    if neighbor is None:
-                        continue
-                    if self.graph.nodes[neighbor].get('node_type') != 'coastal':
-                        continue
-                    clon = self.graph.nodes[neighbor]['lon']
-                    clat = self.graph.nodes[neighbor]['lat']
-                    dx = (clon - lon) * 111320 * math.cos(
-                        math.radians((lat + clat) / 2))
-                    dy = (clat - lat) * 111320
-                    d = math.sqrt(dx * dx + dy * dy)
-                    candidates.append((d, neighbor))
-            candidates.sort(key=lambda x: x[0])
-            max_dist = 3000
-            for best_dist, best_cnid in candidates[:2]:
-                if best_dist < max_dist and not self.graph.has_edge(nid, best_cnid):
-                    self.graph.add_edge(nid, best_cnid, edge_type='coastal')
-                    self.graph.add_edge(best_cnid, nid, edge_type='coastal')
-                    ic_edge_count += 2
-        total_new_edges += ic_edge_count
-        logger.info(f"  Inland-to-coastal: {ic_edge_count} edges")
-
-        logger.info(f"Coastal navmesh complete: {self.graph.number_of_nodes()} nodes, "
-                    f"{self.graph.number_of_edges()} edges ({total_new_edges} new)")
-
-    def _validate_edges_against_land(self):
-        """
-        Remove coastal graph edges that cross land polygons.
-
-        For each undirected coastal edge, validates:
-        1. The midpoint lies within a coastal water polygon (batch spatial join)
-        2. The edge segment does not cross any land polygon (R-tree filter + crosses test)
-
-        This mirrors rx.autoroute's createSuperMesh() two-part validation:
-        doesIntersect() + isPointInArea(midpoint).
-        Only edges that pass BOTH checks are kept in the graph.
-        """
-        land_gdf = self.gdfs.get('land', gpd.GeoDataFrame())
-        coastal_gdf = self.gdfs.get('coastal_water', gpd.GeoDataFrame())
-
-        if coastal_gdf.empty:
-            logger.info("No coastal water data — skipping land-crossing validation")
-            return
-
-        logger.info("Validating coastal edges against land polygons...")
-
-        # Collect unique (undirected) coastal edges with their endpoint coords
-        edge_endpoints = {}
-        for u, v, data in self.graph.edges(data=True):
-            if data.get('edge_type') != 'coastal':
-                continue
-            a, b = (u, v) if u < v else (v, u)
-            if (a, b) not in edge_endpoints:
-                edge_endpoints[(a, b)] = (
-                    self.graph.nodes[u]['lon'],
-                    self.graph.nodes[u]['lat'],
-                    self.graph.nodes[v]['lon'],
-                    self.graph.nodes[v]['lat'],
-                )
-
-        if not edge_endpoints:
-            return
-
-        logger.info(f"  Checking {len(edge_endpoints)} unique coastal edges")
-
-        # Ensure R-trees are built before any spatial ops
-        _ = coastal_gdf.sindex
-        if not land_gdf.empty:
-            _ = land_gdf.sindex
-
-        edges_to_remove = set()
-
-        # ---- Step 1: Midpoint water check (batch spatial join) ----
-        edge_list = list(edge_endpoints.items())
-        mp_data = []
-        for (a, b), (u_lon, u_lat, v_lon, v_lat) in edge_list:
-            mp_data.append({
-                'edge_key': (a, b),
-                'geometry': Point((u_lon + v_lon) * 0.5, (u_lat + v_lat) * 0.5),
-            })
-
-        mp_gdf = gpd.GeoDataFrame(mp_data, geometry='geometry', crs=self.CRS_WGS84)
-        water_for_join = coastal_gdf[['geometry']].copy()
-        # 'within' predicate: midpoint must be strictly inside water polygon
-        water_join = gpd.sjoin(mp_gdf, water_for_join, predicate='within', how='inner')
-        valid_midpoints = set(water_join['edge_key'].values)
-
-        for key in edge_endpoints:
-            if key not in valid_midpoints:
-                edges_to_remove.add(key)
-
-        logger.info(f"  Midpoint water check: {len(valid_midpoints)}/{len(edge_endpoints)} pass")
-
-        # ---- Step 2: Land-crossing check for remaining edges ----
-        if not land_gdf.empty:
-            land_check_count = 0
-            land_remove_count = 0
-            for (a, b), (u_lon, u_lat, v_lon, v_lat) in edge_endpoints.items():
-                if (a, b) in edges_to_remove:
-                    continue
-                land_check_count += 1
-
-                line = LineString([(u_lon, u_lat), (v_lon, v_lat)])
-                # R-tree filter: only test land polygons whose bbox overlaps the edge
-                candidates = list(land_gdf.sindex.intersection(line.bounds))
-                for idx in candidates:
-                    land_geom = land_gdf.iloc[idx].geometry
-                    # crosses = interior intersection (endpoint touches on boundary are OK)
-                    if line.crosses(land_geom):
-                        edges_to_remove.add((a, b))
-                        land_remove_count += 1
-                        break
-
-            logger.info(f"  Land-crossing check: tested {land_check_count}, removed {land_remove_count}")
-
-        # ---- Step 2b: Obstacle-checking for remaining edges ----
-        obstacle_gdf = self.gdfs.get('obstacles', gpd.GeoDataFrame())
-        if not obstacle_gdf.empty:
-            _ = obstacle_gdf.sindex
-            obs_check_count = 0
-            obs_remove_count = 0
-            for (a, b), (u_lon, u_lat, v_lon, v_lat) in edge_endpoints.items():
-                if (a, b) in edges_to_remove:
-                    continue
-                obs_check_count += 1
-
-                line = LineString([(u_lon, u_lat), (v_lon, v_lat)])
-                candidates = list(obstacle_gdf.sindex.intersection(line.bounds))
-                for idx in candidates:
-                    obs_geom = obstacle_gdf.iloc[idx].geometry
-                    if line.crosses(obs_geom):
-                        edges_to_remove.add((a, b))
-                        obs_remove_count += 1
-                        break
-
-            logger.info(f"  Obstacle-crossing check: tested {obs_check_count}, removed {obs_remove_count}")
-
-        # ---- Step 3: Remove invalid edges (both directions) ----
-        removed_count = 0
-        for a, b in edges_to_remove:
-            if self.graph.has_edge(a, b):
-                self.graph.remove_edge(a, b)
-                removed_count += 1
-            if self.graph.has_edge(b, a):
-                self.graph.remove_edge(b, a)
-                removed_count += 1
-
-        # Also set a crosses_land attribute on surviving edges (=0) for DB export
-        for u, v, data in self.graph.edges(data=True):
-            if data.get('edge_type') == 'coastal':
-                self.graph.edges[u, v]['crosses_land'] = 0
-
-        logger.info(
-            f"Land-crossing validation complete: removed {removed_count} directed edges "
-            f"({len(edges_to_remove)} undirected), "
-            f"{self.graph.number_of_edges()} edges remaining"
-        )
 
     def _add_opening_bridge_edges(self):
-        """
-        Create coastal edges through opening/movable bridge polygons.
-
-        First tries to use official centerlines (RECTRC/NAVLNE/WTWAXS) as the
-        path through the bridge opening. Falls back to connecting the bridge
-        centroid to nearest coastal nodes if no centerline is available.
-
-        Centerline paths eliminate zig-zags through bridge pillars because the
-        LOS smoother follows the survey-grade centerline geometry.
-        """
-        bridges_gdf = self.gdfs.get('bridges', gpd.GeoDataFrame())
+        """Creates accurate nodes exactly at the bridge opening span using centerline intersection."""
+        bridges_gdf = self.gdfs.get("bridges", gpd.GeoDataFrame())
         if bridges_gdf.empty:
-            logger.info("No bridge data — skipping opening bridge edge creation")
             return
 
-        inland_gdf = self.gdfs.get('inland_waterways', gpd.GeoDataFrame())
-        depare_gdf = self.gdfs.get('depth_areas', gpd.GeoDataFrame())
-        logger.info("Adding opening bridge crossing edges...")
+        logger.info("Adding opening bridge crossing edges (Fairway Intersections)...")
         added = 0
-        centerline_used = 0
 
-        # Build a fast coordinate lookup for existing inland (centerline) nodes
-        inland_coord_map = {}
-        for nid, data in self.graph.nodes(data=True):
-            if data.get('node_type') == 'inland':
-                coord = (round(data.get('lon', 0), 5), round(data.get('lat', 0), 5))
-                inland_coord_map[coord] = nid
+        # Combine Inland Waterways and Fairways to find the true navigable opening
+        fw_gdfs = []
+        if not self.gdfs.get("fairways", gpd.GeoDataFrame()).empty: fw_gdfs.append(self.gdfs["fairways"])
+        if not self.gdfs.get("inland_waterways", gpd.GeoDataFrame()).empty: fw_gdfs.append(self.gdfs["inland_waterways"])
+        hw_gdf = pd.concat(fw_gdfs, ignore_index=True) if fw_gdfs else gpd.GeoDataFrame()
 
         for _, row in bridges_gdf.iterrows():
-            # Check if bridge is opening/movable
             is_movable = False
-            catbrg = _s57_col(row, 'catbrg', 'CATAQA', 'CatBrg')
+            catbrg = _s57_col(row, "catbrg", "CATAQA", "CatBrg")
             if _is_valid(catbrg):
                 vals = _parse_catbrg(catbrg)
-                if any(v in ('3', '4', '5', '6', '7') for v in vals):
-                    is_movable = True
+                if any(v in ("3", "4", "5", "6", "7") for v in vals): is_movable = True
             if not is_movable:
-                vercop = _s57_col(row, 'vercop', 'VERCOP', 'VerCop')
-                if _is_valid(vercop):
-                    is_movable = True
+                vercop = _s57_col(row, "vercop", "VERCOP", "VerCop")
+                if _is_valid(vercop): is_movable = True
             if not is_movable:
                 continue
 
             bridge_geom = row.geometry
-            centroid = bridge_geom.centroid
-            c_lon, c_lat = centroid.x, centroid.y
-            bbox = bridge_geom.bounds
-            minx, miny, maxx, maxy = bbox
+            opening_pts = []
 
-            SEARCH_MARGIN = 0.01
+            # Determine exact opening location by intersecting bridge polygon with fairways
+            if not hw_gdf.empty:
+                intersecting = hw_gdf[hw_gdf.intersects(bridge_geom)]
+                for _, hw_row in intersecting.iterrows():
+                    intersection = bridge_geom.intersection(hw_row.geometry)
+                    if isinstance(intersection, Point):
+                        opening_pts.append(intersection)
+                    elif isinstance(intersection, (MultiPoint, LineString, MultiLineString)):
+                        opening_pts.append(intersection.centroid)
 
-            # ----------------------------------------------------------------
-            # Attempt 1: Use centerline (RECTRC/NAVLNE/WTWAXS) through bridge
-            # ----------------------------------------------------------------
-            bridge_path_node_ids = []
-            if inland_gdf is not None and not inland_gdf.empty:
-                bridge_buf = bridge_geom.buffer(0.0005)
-                cl_candidates = list(inland_gdf.sindex.intersection(bridge_buf.bounds))
-                for cl_idx in cl_candidates:
-                    cl_geom = inland_gdf.iloc[cl_idx].geometry
-                    if not isinstance(cl_geom, LineString):
-                        continue
-                    if not cl_geom.intersects(bridge_buf):
-                        continue
-                    buf_vertices = []
-                    for clon, clat in cl_geom.coords:
-                        if bridge_buf.contains(Point(clon, clat)):
-                            coord = (round(clon, 5), round(clat, 5))
-                            if coord in inland_coord_map:
-                                buf_vertices.append((coord, inland_coord_map[coord]))
-                            else:
-                                nid = self._get_or_create_node(clon, clat, node_type='coastal')
-                                nid = self._set_node_type(nid, 'coastal')
-                                self.graph.nodes[nid]['resolution'] = 0.001
-                                buf_vertices.append((coord, nid))
-                    if len(buf_vertices) >= 2:
-                        bridge_path_node_ids = [nid for _, nid in buf_vertices]
-                        break
+            # Fallback to bridge centroid if no fairway exists
+            if not opening_pts:
+                opening_pts.append(bridge_geom.centroid)
 
-            if len(bridge_path_node_ids) >= 2:
-                logger.info(f"  Bridge at ({c_lon:.4f}, {c_lat:.4f}): {len(bridge_path_node_ids)} centerline vertices")
+            for pt in opening_pts:
+                c_lon, c_lat = pt.x, pt.y
+                b_id = self._get_or_create_node(c_lon, c_lat, node_type="coastal")
+                self.graph.nodes[b_id]["resolution"] = 0.001
+                self.graph.nodes[b_id]["node_depth"] = 99.0
 
-                for nid in bridge_path_node_ids:
-                    if 'node_depth' not in self.graph.nodes[nid] or self.graph.nodes[nid].get('node_depth', -1) < 0:
-                        node_depth = -1
-                        if not depare_gdf.empty:
-                            lon = self.graph.nodes[nid]['lon']
-                            lat = self.graph.nodes[nid]['lat']
-                            pt = Point(lon, lat)
-                            depth_candidates = list(depare_gdf.sindex.intersection(pt.bounds))
-                            for idx in depth_candidates:
-                                dr = depare_gdf.iloc[idx]
-                                if dr.geometry.contains(pt) and 'DRVAL1' in dr and pd.notnull(dr['DRVAL1']):
-                                    node_depth = float(dr['DRVAL1'])
-                                    break
-                        self.graph.nodes[nid]['node_depth'] = node_depth
-
-                for i in range(len(bridge_path_node_ids) - 1):
-                    u, v = bridge_path_node_ids[i], bridge_path_node_ids[i + 1]
-                    if not self.graph.has_edge(u, v):
-                        self.graph.add_edge(u, v, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
-                        self.graph.add_edge(v, u, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
-                        added += 2
-
-                # Connect centerline path to coastal network on each side of the bridge.
-                # For each side (west/east/south/north), find the (path_node, coastal_node)
-                # pair with minimum distance and connect them.  This guarantees at least
-                # two different sides are linked, providing a true bridge crossing.
-                path_set = set(bridge_path_node_ids)
-                side_coastal = {side: [] for side in ('west', 'east', 'south', 'north')}
-                for cnid, cdata in self.graph.nodes(data=True):
-                    if cdata.get('node_type') != 'coastal':
-                        continue
-                    if cnid in path_set:
-                        continue
-                    clon, clat = cdata['lon'], cdata['lat']
-                    if not (minx - SEARCH_MARGIN <= clon <= maxx + SEARCH_MARGIN and
-                            miny - SEARCH_MARGIN <= clat <= maxy + SEARCH_MARGIN):
-                        continue
-                    if clon < minx:
-                        side_coastal['west'].append((cnid, clon, clat))
-                    elif clon > maxx:
-                        side_coastal['east'].append((cnid, clon, clat))
-                    elif clat < miny:
-                        side_coastal['south'].append((cnid, clon, clat))
-                    elif clat > maxy:
-                        side_coastal['north'].append((cnid, clon, clat))
-
-                sides_connected = 0
-                for side_name, side_nodes in side_coastal.items():
-                    if not side_nodes:
-                        continue
-                    best_pair = None
-                    best_dist = float('inf')
-                    for pnid in bridge_path_node_ids:
-                        plon = self.graph.nodes[pnid]['lon']
-                        plat = self.graph.nodes[pnid]['lat']
-                        for cnid, clon, clat in side_nodes:
-                            dx = (clon - plon) * 111320 * math.cos(math.radians((clat + plat) / 2))
-                            dy = (clat - plat) * 111320
-                            d = math.sqrt(dx * dx + dy * dy)
-                            if d < best_dist:
-                                best_dist = d
-                                best_pair = (pnid, cnid)
-                    if best_pair is not None:
-                        pnid, cnid = best_pair
-                        if not self.graph.has_edge(pnid, cnid):
-                            self.graph.add_edge(pnid, cnid, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
-                            self.graph.add_edge(cnid, pnid, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
+                # Connect opening to the 4 nearest surrounding nodes via Quadrant Ray-Casting
+                SEARCH_MARGIN = 0.015
+                candidates = []
+                for nid, data in self.graph.nodes(data=True):
+                    if nid == b_id: continue
+                    lon, lat = data["lon"], data["lat"]
+                    if (c_lon - SEARCH_MARGIN <= lon <= c_lon + SEARCH_MARGIN and
+                        c_lat - SEARCH_MARGIN <= lat <= c_lat + SEARCH_MARGIN):
+                        dx = (lon - c_lon) * 111320 * math.cos(math.radians((lat + c_lat) / 2))
+                        dy = (lat - c_lat) * 111320
+                        candidates.append((math.sqrt(dx*dx + dy*dy), lon, lat, nid))
+                
+                quadrants = {"NE": [], "NW": [], "SE": [], "SW": []}
+                for d, lon, lat, nid in candidates:
+                    if lon >= c_lon and lat >= c_lat: quadrants["NE"].append((d, nid))
+                    elif lon < c_lon and lat >= c_lat: quadrants["NW"].append((d, nid))
+                    elif lon >= c_lon and lat < c_lat: quadrants["SE"].append((d, nid))
+                    else: quadrants["SW"].append((d, nid))
+                    
+                for q, nodes in quadrants.items():
+                    if nodes:
+                        nodes.sort()
+                        best_nid = nodes[0][1]
+                        if not self.graph.has_edge(b_id, best_nid):
+                            self.graph.add_edge(b_id, best_nid, edge_type="coastal", crosses_land=0, is_opening_bridge_edge=True)
+                            self.graph.add_edge(best_nid, b_id, edge_type="coastal", crosses_land=0, is_opening_bridge_edge=True)
                             added += 2
-                            sides_connected += 1
 
-                if sides_connected >= 2:
-                    centerline_used += 1
-                    logger.info(f"  -> {sides_connected} sides connected")
-                    continue
-                else:
-                    logger.info(f"  -> only {sides_connected} side(s), falling back to centroid")
+        logger.info(f"Added {added} precise bridge opening edges.")
 
-            # ----------------------------------------------------------------
-            # Fallback: centroid approach (no centerline available)
-            # ----------------------------------------------------------------
-            west_nodes = []
-            east_nodes = []
-            north_nodes = []
-            south_nodes = []
-            for nid, data in self.graph.nodes(data=True):
-                if data.get('node_type') != 'coastal':
-                    continue
-                lon, lat = data['lon'], data['lat']
-                if not (minx - SEARCH_MARGIN <= lon <= maxx + SEARCH_MARGIN and
-                        miny - SEARCH_MARGIN <= lat <= maxy + SEARCH_MARGIN):
-                    continue
-                if lon < minx:
-                    west_nodes.append((nid, lon, lat))
-                elif lon > maxx:
-                    east_nodes.append((nid, lon, lat))
-                elif lat < miny:
-                    south_nodes.append((nid, lon, lat))
-                elif lat > maxy:
-                    north_nodes.append((nid, lon, lat))
+    def _validate_edges_against_land(self):
+        """Vectorized High-Performance Land Validation."""
+        land_gdf = self.gdfs.get("land", gpd.GeoDataFrame())
+        coastal_gdf = self.gdfs.get("coastal_water", gpd.GeoDataFrame())
 
-            if not (west_nodes or east_nodes or north_nodes or south_nodes):
-                continue
+        if coastal_gdf.empty:
+            return
 
-            def _dist(lon, lat):
-                dx = (lon - c_lon) * 111320 * math.cos(math.radians((lat + c_lat) / 2))
-                dy = (lat - c_lat) * 111320
-                return math.sqrt(dx * dx + dy * dy)
+        logger.info("Validating coastal edges against land polygons (Vectorized)...")
 
-            west_nodes.sort(key=lambda x: _dist(x[1], x[2]))
-            east_nodes.sort(key=lambda x: _dist(x[1], x[2]))
-            north_nodes.sort(key=lambda x: _dist(x[1], x[2]))
-            south_nodes.sort(key=lambda x: _dist(x[1], x[2]))
+        # 1. Collect coastal edges
+        edge_data = []
+        for u, v, data in self.graph.edges(data=True):
+            if data.get("edge_type") == "coastal":
+                # Ensure we only process unique undirected edges
+                if u < v:
+                    u_lon, u_lat = self.graph.nodes[u]["lon"], self.graph.nodes[u]["lat"]
+                    v_lon, v_lat = self.graph.nodes[v]["lon"], self.graph.nodes[v]["lat"]
+                    edge_data.append({"u": u, "v": v, "geometry": LineString([(u_lon, u_lat), (v_lon, v_lat)])})
 
-            b_id = self._get_or_create_node(c_lon, c_lat, node_type='coastal')
-            b_id = self._set_node_type(b_id, 'coastal')
-            self.graph.nodes[b_id]['resolution'] = 0.001
+        if not edge_data:
+            return
 
-            node_depth = -1
-            if not depare_gdf.empty:
-                pt = Point(c_lon, c_lat)
-                candidates = list(depare_gdf.sindex.intersection(pt.bounds))
-                for idx in candidates:
-                    dr = depare_gdf.iloc[idx]
-                    if dr.geometry.contains(pt):
-                        if 'DRVAL1' in dr and pd.notnull(dr['DRVAL1']):
-                            node_depth = float(dr['DRVAL1'])
-                        else:
-                            node_depth = 99.0
-                        break
-            self.graph.nodes[b_id]['node_depth'] = node_depth
+        edges_gdf = gpd.GeoDataFrame(edge_data, crs=self.CRS_WGS84)
+        logger.info(f"  Checking {len(edges_gdf)} unique coastal edges via Spatial Join")
 
-            directional_groups = [
-                ('west', west_nodes), ('east', east_nodes),
-                ('north', north_nodes), ('south', south_nodes),
-            ]
-            for _dir_name, node_list in directional_groups:
-                if not node_list:
-                    continue
-                nid, _, _ = node_list[0]
-                if not self.graph.has_edge(b_id, nid):
-                    self.graph.add_edge(b_id, nid, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
-                    self.graph.add_edge(nid, b_id, edge_type='coastal', crosses_land=0, is_opening_bridge_edge=True)
-                    added += 2
+        # 2. Vectorized Midpoint Water Check
+        edges_gdf["midpoint"] = edges_gdf.geometry.centroid
+        midpoints_gdf = edges_gdf.set_geometry("midpoint")
+        valid_mids = gpd.sjoin(midpoints_gdf, coastal_gdf[["geometry"]], predicate="within", how="inner")
+        
+        valid_u_v = set(zip(valid_mids["u"], valid_mids["v"]))
+        edges_to_remove = [(row["u"], row["v"]) for _, row in edges_gdf.iterrows() if (row["u"], row["v"]) not in valid_u_v]
 
-        if centerline_used:
-            logger.info(f"Used centerline paths for {centerline_used} bridges; total {added} bridge crossing edges")
-        else:
-            logger.info(f"Added {added} opening bridge crossing edges (centroid fallback)")
+        logger.info(f"  Midpoint water check: {len(valid_u_v)}/{len(edges_gdf)} passed")
+
+        # 3. Vectorized Land-Crossing Check (Only test edges that passed midpoint check)
+        if not land_gdf.empty:
+            remaining_edges = edges_gdf[edges_gdf.apply(lambda r: (r["u"], r["v"]) in valid_u_v, axis=1)].set_geometry("geometry")
+            land_intersections = gpd.sjoin(remaining_edges, land_gdf[["geometry"]], predicate="crosses", how="inner")
+            crossed_u_v = set(zip(land_intersections["u"], land_intersections["v"]))
+            
+            edges_to_remove.extend(crossed_u_v)
+            logger.info(f"  Land-crossing check: removed an additional {len(crossed_u_v)} edges")
+
+        # 4. Strip them from the graph
+        removed_count = 0
+        for u, v in edges_to_remove:
+            if self.graph.has_edge(u, v): 
+                self.graph.remove_edge(u, v)
+                removed_count += 1
+            if self.graph.has_edge(v, u): 
+                self.graph.remove_edge(v, u)
+                removed_count += 1
+
+        for u, v, data in self.graph.edges(data=True):
+            if data.get("edge_type") == "coastal":
+                self.graph.edges[u, v]["crosses_land"] = 0
+
+        logger.info(f"Land-crossing validation complete: removed {removed_count} directed edges. Validation took only seconds.")
 
     def _compute_node_depths(self):
-        """
-        Compute the depth at each node's exact point from DEPARE polygons.
-
-        For every node in the graph, finds the DEPARE (depth area) polygon whose
-        interior contains the node's point and stores its DRVAL1 (>0) as the
-        node's `node_depth` attribute.  Nodes outside any DEPARE polygon (or in
-        a polygon with DRVAL1 <= 0) get node_depth = -1 (unknown).
-
-        Unlike computing depth from incident edges (which picks up the minimum
-        depth along the *whole edge* — up to ~500 m long for coarse grid nodes),
-        this gives the *exact* depth at the node's coordinate, which is what we
-        need for colour-coded map display.
-        """
-        depare_gdf = self.gdfs.get('depth_areas', gpd.GeoDataFrame())
+        depare_gdf = self.gdfs.get("depth_areas", gpd.GeoDataFrame())
         if depare_gdf.empty:
-            logger.info("No depth-area data — node_depth will be -1 for all nodes")
-            for _, data in self.graph.nodes(data=True):
-                data['node_depth'] = -1
+            for _, data in self.graph.nodes(data=True): data["node_depth"] = -1
             return
 
         logger.info("Computing node depths from DEPARE polygons...")
-        _ = depare_gdf.sindex  # ensure R-tree built
-
-        # CRITICAL FIX: Do not filter by DRVAL1 > 0. Keep all depth areas.
         positive = depare_gdf.copy()
-        if positive.empty:
-            logger.info("  No DEPARE polygons found — all nodes unknown")
-            for _, data in self.graph.nodes(data=True):
-                data['node_depth'] = -1
-            return
-
+        
         total = self.graph.number_of_nodes()
         found = 0
         for i, (nid, data) in enumerate(self.graph.nodes(data=True)):
-            if (i + 1) % max(1, total // 20) == 0:
-                logger.info(f"  Node depths: {i + 1}/{total} ({found} found so far)")
+            if (i + 1) % max(1, total // 10) == 0:
+                logger.info(f"  Node depths: {i + 1}/{total} ({found} found)")
 
-            pt = Point(data['lon'], data['lat'])
+            pt = Point(data["lon"], data["lat"])
             candidates = list(positive.sindex.intersection(pt.bounds))
-            if not candidates:
-                data['node_depth'] = -1
-                continue
-
             depth = -1
             for idx in candidates:
                 row = positive.iloc[idx]
                 if row.geometry.contains(pt):
-                    # CRITICAL FIX: If DRVAL1 is NaN, assume general deep water (99.0)
-                    # Normalize negative DRVAL1 (above chart datum) to 0.0
-                    # to match edge depth assignment.
-                    if 'DRVAL1' in row and pd.notnull(row['DRVAL1']):
-                        depth = max(0.0, float(row['DRVAL1']))
+                    if "DRVAL1" in row and pd.notnull(row["DRVAL1"]):
+                        depth = max(0.0, float(row["DRVAL1"]))
                     else:
                         depth = 99.0
                     found += 1
                     break
-            data['node_depth'] = depth
-
-        logger.info(f"Node depth computation complete: {found}/{total} nodes inside DEPARE polygons")
-
-    def _candidates_by_bounds(self, gdf: gpd.GeoDataFrame, geom, margin: float = 0.0) -> gpd.GeoDataFrame:
-        """Use spatial index to find candidate features intersecting the geometry's bounding box."""
-        bounds = geom.bounds
-        if margin:
-            bounds = (bounds[0] - margin, bounds[1] - margin, bounds[2] + margin, bounds[3] + margin)
-        candidates = list(gdf.sindex.intersection(bounds))
-        if candidates:
-            return gdf.iloc[candidates]
-        return gpd.GeoDataFrame()
+            data["node_depth"] = depth
 
     def calculate_edge_attributes(self):
-        """Calculates edge attributes using multiprocessing for all edges."""
         logger.info("Calculating advanced edge attributes (multiprocessing)...")
-
         total_edges = self.graph.number_of_edges()
-        num_workers = max(1, min(int(mp.cpu_count() * 0.8), (total_edges + 999) // 1000))
+        
+        num_workers = max(1, min(int(mp.cpu_count() * 0.8), 4))
 
-        # Collect all edges into a flat list for chunking
-        edge_tuples = []
-        for u, v, data in self.graph.edges(data=True):
-            u_node = self.graph.nodes[u]
-            v_node = self.graph.nodes[v]
-            edge_tuples.append((
-                u, v,
-                u_node['lon'], u_node['lat'],
-                v_node['lon'], v_node['lat'],
-                data.get('edge_type', 'coastal'),
-                u_node.get('resolution', 0.005),
-                v_node.get('resolution', 0.005),
-            ))
+        def edge_generator():
+            for u, v, data in self.graph.edges(data=True):
+                u_node = self.graph.nodes[u]
+                v_node = self.graph.nodes[v]
+                yield (
+                    u, v,
+                    u_node["lon"], u_node["lat"],
+                    v_node["lon"], v_node["lat"],
+                    data.get("edge_type", "coastal"),
+                    u_node.get("resolution", 0.005),
+                    v_node.get("resolution", 0.005),
+                )
 
-        # Interleave chunks for balanced coarse-edge distribution
-        chunks = [[] for _ in range(num_workers)]
-        for i, et in enumerate(edge_tuples):
-            chunks[i % num_workers].append(et)
-        del edge_tuples  # free memory
+        def chunked_iterable(iterable, size):
+            import itertools
+            it = iter(iterable)
+            while True:
+                chunk = tuple(itertools.islice(it, size))
+                if not chunk: break
+                yield chunk
 
-        # Prepare GDF dict for workers (trigger lazy sindex before fork)
+        fw_gdfs = []
+        if not self.gdfs.get("fairways", gpd.GeoDataFrame()).empty: fw_gdfs.append(self.gdfs["fairways"])
+        if not self.gdfs.get("inland_waterways", gpd.GeoDataFrame()).empty: fw_gdfs.append(self.gdfs["inland_waterways"])
+        highways_gdf = pd.concat(fw_gdfs, ignore_index=True) if fw_gdfs else gpd.GeoDataFrame(geometry=[])
+
         worker_gdfs = {
-            'land_metric': self.gdfs_metric.get('land', gpd.GeoDataFrame()),
-            'depth_areas': self.gdfs.get('depth_areas', gpd.GeoDataFrame()),
-            'bridges': self.gdfs.get('bridges', gpd.GeoDataFrame()),
-            'fairways': self.gdfs.get('fairways', gpd.GeoDataFrame()),
-            'locks': self.gdfs.get('locks', gpd.GeoDataFrame()),
-            'obstacles': self.gdfs.get('obstacles', gpd.GeoDataFrame()),
+            "land_metric": self.gdfs_metric.get("land", gpd.GeoDataFrame()),
+            "depth_areas": self.gdfs.get("depth_areas", gpd.GeoDataFrame()),
+            "bridges": self.gdfs.get("bridges", gpd.GeoDataFrame()),
+            "fairways": highways_gdf,
+            "locks": self.gdfs.get("locks", gpd.GeoDataFrame()),
+            "obstacles": self.gdfs.get("obstacles", gpd.GeoDataFrame()),
         }
         for gdf in worker_gdfs.values():
             if not gdf.empty:
-                _ = gdf.sindex  # build R-tree before fork (COW on Linux; on spawn each worker rebuilds)
+                _ = gdf.sindex  
 
         logger.info(f"  Spawning {num_workers} workers for {total_edges} edges...")
-        with mp.Pool(num_workers, initializer=_edge_attr_init,
-                     initargs=(self.geod, worker_gdfs)) as pool:
-            chunk_results = pool.map(_edge_attr_worker, chunks)
-
-        # Merge results back into the graph
         merged = 0
-        for results in chunk_results:
-            for (u, v), attrs in results.items():
-                for key, value in attrs.items():
-                    self.graph.edges[u, v][key] = value
-                merged += 1
+        CHUNK_SIZE = 25000 
 
-        logger.info(f"  Edge attributes merged: {merged}/{total_edges}")
+        with mp.Pool(num_workers, initializer=_edge_attr_init, initargs=(self.geod, worker_gdfs)) as pool:
+            result_iterator = pool.imap_unordered(
+                _edge_attr_worker, 
+                chunked_iterable(edge_generator(), CHUNK_SIZE)
+            )
+            for results in result_iterator:
+                for (u, v), attrs in results.items():
+                    for key, value in attrs.items():
+                        self.graph.edges[u, v][key] = value
+                    merged += 1
+                if merged % 250000 == 0 or merged == total_edges:
+                    logger.info(f"  Edge attributes merged: {merged}/{total_edges} ({(merged/total_edges)*100:.1f}%)")
 
     def _compute_boundary_geometry(self) -> Tuple[str, str]:
-        """Compute bounding box and convex hull boundary from graph nodes.
-
-        Returns (bounding_box_json, boundary_geometry_json).
-        If the graph has fewer than 3 nodes, returns the point/line as a polygon.
-        """
-        nodes = [(data['lon'], data['lat'])
-                 for _, data in self.graph.nodes(data=True)]
+        nodes = [(data["lon"], data["lat"]) for _, data in self.graph.nodes(data=True)]
         if not nodes:
             empty = json.dumps({"type": "Polygon", "coordinates": [[[0, 0], [0, 0], [0, 0], [0, 0]]]})
             return (json.dumps({"min_lat": 0, "min_lon": 0, "max_lat": 0, "max_lon": 0}), empty)
@@ -1461,7 +776,6 @@ class NauticalRoutingPipeline:
         return (bbox, geom_json)
 
     def export_to_sqlite(self):
-        """Exports the nodes, edges, and POIs to a highly compressed SQLite Database."""
         logger.info(f"Exporting data to SQLite database at '{self.db_path}'...")
         
         if os.path.exists(self.db_path):
@@ -1470,7 +784,6 @@ class NauticalRoutingPipeline:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
-            # Create Tables
             cursor.executescript("""
                 CREATE TABLE metadata (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1535,14 +848,12 @@ class NauticalRoutingPipeline:
                     lon REAL
                 );
                 
-                -- Create indices for fast routing queries
                 CREATE INDEX idx_edges_source ON edges(source);
                 CREATE INDEX idx_edges_target ON edges(target);
                 CREATE INDEX idx_nodes_lat_lon ON nodes(lat, lon);
             """)
             
-            # Insert metadata row
-            now_utc = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             bbox_json, boundary_json = self._compute_boundary_geometry()
             cursor.execute(
                 """INSERT INTO metadata
@@ -1554,28 +865,26 @@ class NauticalRoutingPipeline:
             )
             region_id = cursor.lastrowid
             
-            # Insert Nodes (node_type is encoded in the node ID, no separate column)
-            nodes_data = [(n, data['lat'], data['lon'],
-                           data.get('resolution', 0.0),
-                           data.get('node_depth', -1),
+            nodes_data = [(n, data["lat"], data["lon"],
+                           data.get("resolution", 0.0),
+                           data.get("node_depth", -1),
                            region_id)
                           for n, data in self.graph.nodes(data=True)]
             cursor.executemany("INSERT INTO nodes (id, lat, lon, resolution, node_depth, region_id) VALUES (?, ?, ?, ?, ?, ?)", nodes_data)
             
-            # Insert Edges
             edges_data = [(
                 u, v,
-                data.get('distance', 0.0),
-                data.get('min_depth', 99.0),
-                data.get('drval1'),  # may be None
-                data.get('max_air_draft', 999.0),
-                data.get('min_width', 999.0),
-                int(data.get('is_fairway', False)),
-                data.get('distance_to_land', 9999.0),
-                EDGE_TYPE_COASTAL if data.get('edge_type', 'coastal') == 'coastal' else EDGE_TYPE_INLAND,
-                data.get('traffic_mode', TRAFFIC_TWO_WAY),
-                int(data.get('crosses_land', 0)),
-                int(data.get('crosses_obstacle', 0))
+                data.get("distance", 0.0),
+                data.get("min_depth", 99.0),
+                data.get("drval1"),  
+                data.get("max_air_draft", 999.0),
+                data.get("min_width", 999.0),
+                int(data.get("is_fairway", False)),
+                data.get("distance_to_land", 9999.0),
+                EDGE_TYPE_COASTAL if data.get("edge_type", "coastal") == "coastal" else EDGE_TYPE_INLAND,
+                data.get("traffic_mode", TRAFFIC_TWO_WAY),
+                int(data.get("crosses_land", 0)),
+                int(data.get("crosses_obstacle", 0))
             ) for u, v, data in self.graph.edges(data=True)]
             cursor.executemany("""
                 INSERT INTO edges
@@ -1583,13 +892,12 @@ class NauticalRoutingPipeline:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, edges_data)
             
-            # Insert POIs — harvest named locations from multiple layers
             def _poi_name(row) -> str:
-                for col in ('OBJNAM', 'NOBJNM', 'name'):
+                for col in ("OBJNAM", "NOBJNM", "name"):
                     val = row.get(col)
                     if val is not None and not (isinstance(val, float) and np.isnan(val)):
                         return str(val)
-                return ''
+                return ""
 
             def _poi_point(geom):
                 if isinstance(geom, Point):
@@ -1603,43 +911,41 @@ class NauticalRoutingPipeline:
                 return None
 
             POI_TYPE_MAP = {
-                'harbour': POI_TYPE_HARBOUR,
-                'lock': POI_TYPE_LOCK,
-                'bridge': POI_TYPE_BRIDGE,
-                'fairway': POI_TYPE_FAIRWAY,
-                'waterway': POI_TYPE_WATERWAY,
+                "harbour": POI_TYPE_HARBOUR,
+                "lock": POI_TYPE_LOCK,
+                "bridge": POI_TYPE_BRIDGE,
+                "fairway": POI_TYPE_FAIRWAY,
+                "waterway": POI_TYPE_WATERWAY,
             }
 
             def _poi_properties(row, default_type) -> str:
-                """Build JSON properties blob for a POI based on its type."""
                 props = {}
-                if default_type == 'bridge':
+                if default_type == "bridge":
                     is_opening = False
-                    catbrg = _s57_col(row, 'catbrg', 'CATAQA', 'CatBrg')
+                    catbrg = _s57_col(row, "catbrg", "CATAQA", "CatBrg")
                     if catbrg is not None and pd.notnull(catbrg):
                         vals = _parse_catbrg(catbrg)
-                        if any(v in ('3', '4', '5', '6', '7') for v in vals):
+                        if any(v in ("3", "4", "5", "6", "7") for v in vals):
                             is_opening = True
-                    # Fallback: VERCOP present means bridge opens
                     if not is_opening:
-                        vercop = _s57_col(row, 'vercop', 'VERCOP', 'VerCop')
+                        vercop = _s57_col(row, "vercop", "VERCOP", "VerCop")
                         if vercop is not None and pd.notnull(vercop):
                             is_opening = True
                     if is_opening:
-                        props['subtype'] = 'opening'
+                        props["subtype"] = "opening"
                     else:
-                        props['subtype'] = 'fixed'
-                        verclr = _s57_col(row, 'verclr', 'VERCLR', 'VerClr')
+                        props["subtype"] = "fixed"
+                        verclr = _s57_col(row, "verclr", "VERCLR", "VerClr")
                         if verclr is not None and pd.notnull(verclr):
-                            props['height'] = float(verclr)
+                            props["height"] = float(verclr)
                 return json.dumps(props)
 
             poi_layers = [
-                ('pois', 'harbour'),
-                ('locks', 'lock'),
-                ('bridges', 'bridge'),
-                ('fairways', 'fairway'),
-                ('inland_waterways', 'waterway'),
+                ("pois", "harbour"),
+                ("locks", "lock"),
+                ("bridges", "bridge"),
+                ("fairways", "fairway"),
+                ("inland_waterways", "waterway"),
             ]
             poi_data = []
             for layer_key, default_type in poi_layers:
@@ -1663,8 +969,6 @@ class NauticalRoutingPipeline:
                 logger.warning("No named POIs found in any layer")
                 
             conn.commit()
-            
-            # Vacuum the database to compress file size
             cursor.execute("VACUUM;")
         logger.info("Export completed and database vacuumed/compressed.")
 
@@ -1689,19 +993,19 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     data_sources = {
-        'land': os.path.join(args.input_dir, 'land_polygons.geojson'),
-        'coastal_water': os.path.join(args.input_dir, 'coastal_water_polygons.geojson'),
-        'inland_waterways': os.path.join(args.input_dir, 'inland_waterways_lines.geojson'),
-        'depth_areas': os.path.join(args.input_dir, 'depare_polygons.geojson'),
-        'bridges': os.path.join(args.input_dir, 'bridges_polygons.geojson'),
-        'locks': os.path.join(args.input_dir, 'locks_polygons.geojson'),
-        'fairways': os.path.join(args.input_dir, 'fairways_polygons.geojson'),
-        'pois': os.path.join(args.input_dir, 'pois_points.geojson'),
-        'restricted_areas': os.path.join(args.input_dir, 'restricted_areas_polygons.geojson'),
-        'obstructions': os.path.join(args.input_dir, 'obstructions_points.geojson'),
-        'hulks': os.path.join(args.input_dir, 'hulks_polygons.geojson'),
-        'mariculture': os.path.join(args.input_dir, 'mariculture_polygons.geojson'),
-        'caution_areas': os.path.join(args.input_dir, 'caution_areas_polygons.geojson')
+        "land": os.path.join(args.input_dir, "land_polygons.geojson"),
+        "coastal_water": os.path.join(args.input_dir, "coastal_water_polygons.geojson"),
+        "inland_waterways": os.path.join(args.input_dir, "inland_waterways_lines.geojson"),
+        "depth_areas": os.path.join(args.input_dir, "depare_polygons.geojson"),
+        "bridges": os.path.join(args.input_dir, "bridges_polygons.geojson"),
+        "locks": os.path.join(args.input_dir, "locks_polygons.geojson"),
+        "fairways": os.path.join(args.input_dir, "fairways_polygons.geojson"),
+        "pois": os.path.join(args.input_dir, "pois_points.geojson"),
+        "restricted_areas": os.path.join(args.input_dir, "restricted_areas_polygons.geojson"),
+        "obstacles": os.path.join(args.input_dir, "obstructions_points.geojson"),
+        "hulks": os.path.join(args.input_dir, "hulks_polygons.geojson"),
+        "mariculture": os.path.join(args.input_dir, "mariculture_polygons.geojson"),
+        "caution_areas": os.path.join(args.input_dir, "caution_areas_polygons.geojson")
     }
 
     pipeline = NauticalRoutingPipeline(data_paths=data_sources, db_path=args.output,
@@ -1710,4 +1014,3 @@ if __name__ == "__main__":
                                        tags=args.tags, contributor=args.contributor,
                                        url=args.url)
     pipeline.run_pipeline()
-
