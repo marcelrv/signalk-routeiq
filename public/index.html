@@ -1158,7 +1158,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         for (const e of data.edges) {
           const color = e.edge_type_id === 1 ? '#22c55e' : '#34d399';
           const dash = e.traffic_mode !== 0 ? '5,5' : null;
-          const opts = { color, weight: 3, opacity: 0.7, dashArray: dash };
+          const opts = { color, weight: 3, opacity: 0.35, dashArray: dash };
           const line = L.polyline([[e.source_lat, e.source_lon], [e.target_lat, e.target_lon]], opts);
           if (state.editMode) {
             line._edgeData = e;
@@ -1852,7 +1852,11 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       fetch(getApiBase() + '/signalk/v1/api/router/databases/status', { signal: AbortSignal.timeout(5000) })
         .then(function(r) { return r.ok ? r.json() : null; })
         .then(function(status) {
-          if (!status) return;
+          if (!status) {
+            subtitleEl.textContent = 'Waiting for server...';
+            setTimeout(poll, 1500);
+            return;
+          }
           if (status.filenames && status.filenames.length > 0) {
             dbsEl.textContent = status.filenames.join(', ');
           } else {
@@ -1870,7 +1874,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           }
         })
         .catch(function() {
-          // Server not ready yet, try again
+          subtitleEl.textContent = 'Waiting for server...';
           setTimeout(poll, 1500);
         });
     }
