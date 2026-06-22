@@ -681,6 +681,27 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   font-size: 13px;
   color: #6d96c0;
   margin-bottom: 16px;
+  min-height: 1.4em;
+}
+#loading-dots {
+  display: inline-block;
+  min-width: 1.5em;
+}
+#loading-dots.pulse {
+  animation: pulse-dot 1s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+#loading-retry {
+  display: none;
+  font-size: 11px;
+  color: #eab308;
+  margin-top: 4px;
+}
+#loading-retry.visible {
+  display: block;
 }
 #loading-dbs {
   font-size: 12px;
@@ -745,7 +766,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 <div id="loading-overlay">
   <div id="loading-spinner"></div>
   <div id="loading-title">Loading Routing Data</div>
-  <div id="loading-subtitle">Initializing nautical route planner...</div>
+  <div id="loading-subtitle">Initializing nautical route planner... <span id="loading-dots">⏳</span></div>
+  <div id="loading-retry"></div>
   <div id="loading-dbs"></div>
 </div>
 
@@ -1750,7 +1772,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   // URL + "/signalk/v1/api/vessels/self"
   function skSelfUrl() { return getApiBase() + '/signalk/v1/api/vessels/self'; }
 
-  function fetchBoatData() {
+  function fetchBoatData(retryMs) {
     let draft, beam, airDraft;
     let lat, lng, sog, cog;
 
@@ -1783,6 +1805,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         airDraft = airDraft || sr.value?.design?.airHeight?.value;
       }
       showBoatData(lat, lng, sog, cog, draft, beam, airDraft, effectiveDraft, effectiveBeam, effectiveAirDraft);
+      // Retry if vessel endpoint failed (engine not ready yet)
+      if (vr.status === 'rejected') {
+        setTimeout(fetchBoatData, retryMs || 3000, 5000);
+      }
     });
   }
 
@@ -1812,71 +1838,105 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   function doConnect() {
     setConnected(false);
 
-    const attempts = [
-      getApiBase() + '/signalk/v1/api/router/vessel',
-      getApiBase() + '/router/vessel',
-    ];
+    const connectUrl = getApiBase() + '/signalk/v1/api/router/stats';
+    var retryEl = document.getElementById('loading-retry');
+    var subtitleEl = document.getElementById('loading-subtitle');
+    var dotsEl = document.getElementById('loading-dots');
+    var connRetry = 0;
+    var connectOk = false;
 
-    function tryConnect(i) {
-      if (i >= attempts.length) {
-        showToast('Connection failed — server unreachable', 'error');
-        return;
-      }
-      logDebug('CONNECT', attempts[i]);
-      fetch(attempts[i], { signal: AbortSignal.timeout(5000) })
+    function tryConnect() {
+      logDebug('CONNECT', connectUrl);
+      fetch(connectUrl, { signal: AbortSignal.timeout(5000) })
         .then(r => {
-          logDebug('CONNECT', attempts[i], undefined, r);
+          logDebug('CONNECT', connectUrl, undefined, r);
           if (!r.ok) throw new Error('status ' + r.status);
+          connectOk = true;
           setConnected(true);
           showToast('Connected', 'success');
-          return r.json();
-        })
-        .then(() => {
-          fetchBoatData();
+          if (dotsEl) { dotsEl.className = ''; dotsEl.textContent = '⏳'; }
+          if (retryEl) retryEl.classList.remove('visible');
+          subtitleEl.textContent = 'Checking routing data...';
           checkDbStatus();
+          fetchBoatData();
         })
         .catch(err => {
-          console.warn('[connect] try ' + i + ' failed:', attempts[i], err.message);
-          tryConnect(i + 1);
+          if (connectOk) return; // Already connected, ignore late errors
+          connRetry++;
+          var delay = Math.min(1000 * connRetry, 4000);
+          if (retryEl) { retryEl.textContent = 'Connecting... (' + connRetry + ')'; retryEl.classList.add('visible'); }
+          if (dotsEl) { dotsEl.className = 'pulse'; dotsEl.textContent = '⟳'; }
+          if (subtitleEl) subtitleEl.textContent = 'Waiting for server...';
+          setTimeout(tryConnect, delay);
         });
     }
-    tryConnect(0);
+    tryConnect();
   }
 
   function checkDbStatus() {
     var overlay = document.getElementById('loading-overlay');
     var dbsEl = document.getElementById('loading-dbs');
     var subtitleEl = document.getElementById('loading-subtitle');
+    var retryEl = document.getElementById('loading-retry');
+    var dotsEl = document.getElementById('loading-dots');
+    var retryCount = 0;
+    var stopped = false;
+
+    function stop() { stopped = true; overlay = null; dbsEl = null; subtitleEl = null; retryEl = null; dotsEl = null; }
 
     function poll() {
+      if (stopped) return;
       fetch(getApiBase() + '/signalk/v1/api/router/databases/status', { signal: AbortSignal.timeout(5000) })
         .then(function(r) { return r.ok ? r.json() : null; })
         .then(function(status) {
+          if (stopped) return;
+          retryCount = 0;
+          if (retryEl) retryEl.classList.remove('visible');
+          if (dotsEl) { dotsEl.className = ''; dotsEl.textContent = '⏳'; }
           if (!status) {
-            subtitleEl.textContent = 'Waiting for server...';
-            setTimeout(poll, 1500);
+            if (subtitleEl) subtitleEl.textContent = 'Waiting for server...';
+            retryAfter(1500);
             return;
           }
-          if (status.filenames && status.filenames.length > 0) {
-            dbsEl.textContent = status.filenames.join(', ');
-          } else {
-            dbsEl.textContent = 'No databases found';
+          if (dbsEl) {
+            if (status.filenames && status.filenames.length > 0) {
+              dbsEl.textContent = status.filenames.join(', ');
+            } else {
+              dbsEl.textContent = 'No databases found';
+            }
           }
           if (status.loaded) {
-            subtitleEl.textContent = 'Loaded ' + (status.filenames.length || 0) + ' database(s)';
+            if (subtitleEl) subtitleEl.textContent = 'Loaded ' + (status.filenames.length || 0) + ' database(s)';
             setTimeout(function() {
-              overlay.classList.add('hidden');
-              setTimeout(function() { overlay.style.display = 'none'; }, 500);
+              if (overlay) overlay.classList.add('hidden');
+              stop();
+              setTimeout(function() { if (overlay) overlay.style.display = 'none'; }, 500);
             }, 800);
           } else {
-            subtitleEl.textContent = 'Loading routing graph...';
+            if (subtitleEl) subtitleEl.textContent = 'Loading routing graph...';
             setTimeout(poll, 1000);
           }
         })
         .catch(function() {
-          subtitleEl.textContent = 'Waiting for server...';
-          setTimeout(poll, 1500);
+          if (stopped) return;
+          retryCount++;
+          if (retryEl) { retryEl.textContent = 'Retrying... (' + retryCount + ')'; retryEl.classList.add('visible'); }
+          if (dotsEl) { dotsEl.className = 'pulse'; dotsEl.textContent = '⟳'; }
+          if (subtitleEl) subtitleEl.textContent = 'Waiting for server...';
+          retryAfter(1500);
         });
+    }
+    function retryAfter(ms) {
+      if (stopped) return;
+      var elapsed = 0;
+      function tick() {
+        if (stopped) return;
+        if (elapsed >= ms) { poll(); return; }
+        elapsed += 250;
+        if (dotsEl) dotsEl.textContent = '⟳ ' + (Math.ceil((ms - elapsed) / 100) / 10) + 's';
+        setTimeout(tick, 250);
+      }
+      tick();
     }
     poll();
   }
