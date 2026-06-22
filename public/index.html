@@ -1156,7 +1156,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       .then(data => {
         if (!data || !data.edges) return;
         for (const e of data.edges) {
-          const color = e.edge_type_id === 1 ? '#a855f7' : '#22d3ee';
+          const color = e.edge_type_id === 1 ? '#22c55e' : '#34d399';
           const dash = e.traffic_mode !== 0 ? '5,5' : null;
           const opts = { color, weight: 3, opacity: 0.7, dashArray: dash };
           const line = L.polyline([[e.source_lat, e.source_lon], [e.target_lat, e.target_lon]], opts);
@@ -2081,10 +2081,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     document.querySelectorAll('#route-nodes .route-leg').forEach(function (el) {
       const f = parseInt(el.dataset.coordFrom, 10);
       const t = parseInt(el.dataset.coordTo, 10);
-      if (f <= toIdx && t >= fromIdx) {
+      if (f >= fromIdx && t <= toIdx) {
         el.classList.add('highlighted');
         const prev = el.previousElementSibling;
         if (prev && prev.classList.contains('route-node')) prev.classList.add('highlighted');
+        const next = el.nextElementSibling;
+        if (next && next.classList.contains('route-node')) next.classList.add('highlighted');
       }
     });
   }
@@ -2748,11 +2750,11 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   }
 
   function mapSegmentsToCoordRanges(segments) {
-    // Each segment corresponds to exactly one coordinate interval:
-    // segment[i] connects coordinates[i] → coordinates[i+1]
+    // Each segment corresponds to exactly one 2-coordinate Feature from the API.
+    // Features are concatenated, so segment[i] connects coords[2i] → coords[2i+1]
     return segments.map((seg, i) => ({
-      startIdx: i,
-      endIdx: i + 1,
+      startIdx: i * 2,
+      endIdx: i * 2 + 1,
       distance: seg.distance,
       minDepth: seg.minDepth,
       maxAirDraft: seg.maxAirDraft,

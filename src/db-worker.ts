@@ -45,6 +45,7 @@ let hasCrossesLand = false;
 let hasCrossesObstacle = false;
 let hasNodeDepth = false;
 let hasRegionId = false;
+let overlayHandle: DbHandle | null = null;
 
 if (!parentPort) {
   throw new Error('db-worker must be run as a worker thread');
@@ -98,6 +99,44 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
           break;
         }
         parentPort!.postMessage({ id, type, result: { hasCrossesLand, hasCrossesObstacle, hasNodeDepth, hasRegionId, filenames: loadedFilenames } });
+        break;
+      }
+      case 'openOverlay': {
+        const { overlayPath } = payload!;
+        try {
+          const db = new DatabaseSync(overlayPath, { open: true });
+          db.prepare(`CREATE TABLE IF NOT EXISTS nodes (
+            id INTEGER PRIMARY KEY, lat REAL, lon REAL,
+            node_depth REAL DEFAULT -1, resolution REAL DEFAULT 0
+          )`).run();
+          db.prepare(`CREATE TABLE IF NOT EXISTS edges (
+            source INTEGER, target INTEGER,
+            distance REAL DEFAULT 0, min_depth REAL DEFAULT -1,
+            max_air_draft REAL DEFAULT -1, min_width REAL DEFAULT -1,
+            is_fairway INTEGER DEFAULT 0, distance_to_land REAL DEFAULT 0,
+            edge_type_id INTEGER DEFAULT 0, traffic_mode INTEGER DEFAULT 0,
+            PRIMARY KEY (source, target)
+          )`).run();
+          db.prepare('CREATE TABLE IF NOT EXISTS deleted_nodes (node_id INTEGER PRIMARY KEY)').run();
+          db.prepare('CREATE TABLE IF NOT EXISTS deleted_edges (source INTEGER, target INTEGER, PRIMARY KEY (source, target))').run();
+          overlayHandle = { db, path: overlayPath };
+          console.log(`[db-worker] Overlay opened: ${overlayPath}`);
+          parentPort!.postMessage({ id, type, result: { success: true } });
+        } catch (err: any) {
+          parentPort!.postMessage({ id, type, error: err.message ?? String(err) });
+        }
+        break;
+      }
+      case 'getDeletedNodeIds': {
+        if (!overlayHandle) { parentPort!.postMessage({ id, type, result: [] }); break; }
+        const rows = overlayHandle.db.prepare('SELECT node_id FROM deleted_nodes').all() as { node_id: number }[];
+        parentPort!.postMessage({ id, type, result: rows.map(r => r.node_id) });
+        break;
+      }
+      case 'getDeletedEdgePairs': {
+        if (!overlayHandle) { parentPort!.postMessage({ id, type, result: [] }); break; }
+        const rows = overlayHandle.db.prepare('SELECT source, target FROM deleted_edges').all() as { source: number; target: number }[];
+        parentPort!.postMessage({ id, type, result: rows });
         break;
       }
       case 'loadNodes': {
@@ -215,18 +254,26 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         break;
       }
       case 'updateNode': {
-        const { dbIndex, nodeId, node_depth, resolution } = payload!;
-        const h = handles[dbIndex];
-        if (!h) throw new Error(`Database index ${dbIndex} not found`);
-        const stmt = h.db.prepare('UPDATE nodes SET node_depth = ?, resolution = ? WHERE id = ?');
-        stmt.run(node_depth, resolution, nodeId);
+        if (!overlayHandle) throw new Error('Overlay not open');
+        const { nodeId, node_depth, resolution } = payload!;
+        // Ensure node exists in overlay (copy from region DB if needed)
+        overlayHandle.db.prepare(
+          'INSERT OR IGNORE INTO nodes (id, lat, lon, node_depth, resolution) VALUES (?, ?, ?, ?, ?)'
+        ).run(nodeId, payload!.lat ?? 0, payload!.lon ?? 0, -1, 0);
+        overlayHandle.db.prepare('UPDATE nodes SET node_depth = ?, resolution = ? WHERE id = ?')
+          .run(node_depth ?? -1, resolution ?? 0, nodeId);
         parentPort!.postMessage({ id, type, result: { success: true } });
         break;
       }
       case 'updateEdge': {
-        const { dbIndex, source, target, distance, min_depth, max_air_draft, min_width, traffic_mode, is_fairway } = payload!;
-        const h = handles[dbIndex];
-        if (!h) throw new Error(`Database index ${dbIndex} not found`);
+        if (!overlayHandle) throw new Error('Overlay not open');
+        const { source, target, distance, min_depth, max_air_draft, min_width, traffic_mode, is_fairway, distance_to_land, edge_type_id } = payload!;
+        // First ensure the edge exists in the overlay (copy defaults)
+        overlayHandle.db.prepare(
+          `INSERT OR IGNORE INTO edges (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, distance_to_land, edge_type_id, traffic_mode)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(source, target, distance ?? 0, min_depth ?? -1, max_air_draft ?? -1, min_width ?? -1, is_fairway ?? 0, distance_to_land ?? 0, edge_type_id ?? 0, traffic_mode ?? 0);
+        // Then UPDATE only the fields that were actually provided
         const cols: string[] = [];
         const vals: any[] = [];
         if (distance !== undefined) { cols.push('distance = ?'); vals.push(distance); }
@@ -235,46 +282,46 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         if (min_width !== undefined) { cols.push('min_width = ?'); vals.push(min_width); }
         if (traffic_mode !== undefined) { cols.push('traffic_mode = ?'); vals.push(traffic_mode); }
         if (is_fairway !== undefined) { cols.push('is_fairway = ?'); vals.push(is_fairway); }
-        if (cols.length === 0) throw new Error('No fields to update');
-        vals.push(source, target);
-        const stmt = h.db.prepare(`UPDATE edges SET ${cols.join(', ')} WHERE source = ? AND target = ?`);
-        stmt.run(...vals);
+        if (cols.length > 0) {
+          vals.push(source, target);
+          overlayHandle.db.prepare(`UPDATE edges SET ${cols.join(', ')} WHERE source = ? AND target = ?`).run(...vals);
+        }
         parentPort!.postMessage({ id, type, result: { success: true } });
         break;
       }
       case 'deleteNode': {
-        const { dbIndex, nodeId } = payload!;
-        const h = handles[dbIndex];
-        if (!h) throw new Error(`Database index ${dbIndex} not found`);
-        h.db.prepare('DELETE FROM edges WHERE source = ? OR target = ?').run(nodeId, nodeId);
-        h.db.prepare('DELETE FROM nodes WHERE id = ?').run(nodeId);
+        if (!overlayHandle) throw new Error('Overlay not open');
+        const { nodeId } = payload!;
+        overlayHandle.db.prepare('INSERT OR IGNORE INTO deleted_nodes (node_id) VALUES (?)').run(nodeId);
+        overlayHandle.db.prepare('DELETE FROM nodes WHERE id = ?').run(nodeId);
+        overlayHandle.db.prepare('DELETE FROM edges WHERE source = ? OR target = ?').run(nodeId, nodeId);
         parentPort!.postMessage({ id, type, result: { success: true } });
         break;
       }
       case 'deleteEdge': {
-        const { dbIndex, source, target } = payload!;
-        const h = handles[dbIndex];
-        if (!h) throw new Error(`Database index ${dbIndex} not found`);
-        h.db.prepare('DELETE FROM edges WHERE source = ? AND target = ?').run(source, target);
+        if (!overlayHandle) throw new Error('Overlay not open');
+        const { source: delSource, target: delTarget } = payload!;
+        overlayHandle.db.prepare('INSERT OR IGNORE INTO deleted_edges (source, target) VALUES (?, ?)').run(delSource, delTarget);
+        overlayHandle.db.prepare('DELETE FROM edges WHERE source = ? AND target = ?').run(delSource, delTarget);
         parentPort!.postMessage({ id, type, result: { success: true } });
         break;
       }
       case 'insertNode': {
-        const { dbIndex, id: nodeId, lat, lon, node_depth, resolution } = payload!;
-        const h = handles[dbIndex];
-        if (!h) throw new Error(`Database index ${dbIndex} not found`);
-        h.db.prepare('INSERT INTO nodes (id, lat, lon, node_depth, resolution) VALUES (?, ?, ?, ?, ?)').run(nodeId, lat, lon, node_depth ?? -1, resolution ?? 0);
+        if (!overlayHandle) throw new Error('Overlay not open');
+        const { id: nodeId, lat, lon, node_depth, resolution } = payload!;
+        overlayHandle.db.prepare(
+          'INSERT OR REPLACE INTO nodes (id, lat, lon, node_depth, resolution) VALUES (?, ?, ?, ?, ?)'
+        ).run(nodeId, lat, lon, node_depth ?? -1, resolution ?? 0);
         parentPort!.postMessage({ id, type, result: { success: true } });
         break;
       }
       case 'insertEdge': {
-        const { dbIndex, source, target, distance, min_depth, max_air_draft, min_width, is_fairway, distance_to_land, edge_type_id, traffic_mode } = payload!;
-        const h = handles[dbIndex];
-        if (!h) throw new Error(`Database index ${dbIndex} not found`);
-        h.db.prepare(
+        if (!overlayHandle) throw new Error('Overlay not open');
+        const { source: insSource, target: insTarget, distance: insDist, min_depth: insMd, max_air_draft: insAd, min_width: insMw, is_fairway: insFw, distance_to_land: insDtl, edge_type_id: insEt, traffic_mode: insTm } = payload!;
+        overlayHandle.db.prepare(
           `INSERT OR REPLACE INTO edges (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, distance_to_land, edge_type_id, traffic_mode)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).run(source, target, distance ?? 0, min_depth ?? -1, max_air_draft ?? -1, min_width ?? -1, is_fairway ?? 0, distance_to_land ?? 0, edge_type_id ?? 0, traffic_mode ?? 0);
+        ).run(insSource, insTarget, insDist ?? 0, insMd ?? -1, insAd ?? -1, insMw ?? -1, insFw ?? 0, insDtl ?? 0, insEt ?? 0, insTm ?? 0);
         parentPort!.postMessage({ id, type, result: { success: true } });
         break;
       }
@@ -284,6 +331,10 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         }
         handles.length = 0;
         filenames.length = 0;
+        if (overlayHandle) {
+          try { overlayHandle.db.close(); } catch { }
+          overlayHandle = null;
+        }
         parentPort!.postMessage({ id, type, result: null });
         break;
       }

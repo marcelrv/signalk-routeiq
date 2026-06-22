@@ -112,7 +112,7 @@ export class RoutingDatabase {
   async init(): Promise<void> {
     let files: string[];
     try {
-      files = readdirSync(this.dbDir).filter(f => f.endsWith('.sqlite'));
+      files = readdirSync(this.dbDir).filter(f => f.endsWith('.sqlite') && f !== 'user-edits.sqlite');
     } catch (err: any) {
       throw new Error(`Cannot read routing data directory "${this.dbDir}": ${err.message}`);
     }
@@ -173,6 +173,11 @@ export class RoutingDatabase {
       filename: this.loadedDbFilenames[i] || p.split('/').pop() || '',
       path: p,
     }));
+
+    // Open overlay (user-edits.sqlite) — created if not exists
+    const overlayPath = join(this.dbDir, 'user-edits.sqlite');
+    await this.sendMessage('openOverlay', { overlayPath });
+    console.log(`[autoroute] User-edits overlay ready: ${overlayPath}`);
   }
 
   private regionIdCol(): string {
@@ -221,7 +226,7 @@ export class RoutingDatabase {
   async reloadMetadata(): Promise<void> {
     let files: string[];
     try {
-      files = readdirSync(this.dbDir).filter(f => f.endsWith('.sqlite'));
+      files = readdirSync(this.dbDir).filter(f => f.endsWith('.sqlite') && f !== 'user-edits.sqlite');
     } catch {
       this.metadataCache = [];
       return;
@@ -279,10 +284,21 @@ export class RoutingDatabase {
     for (const n of allNodes) {
       this.nodes.set(n.id, { lat: n.lat, lon: n.lon, regionId: n.region_id ?? 0, nodeDepth: n.node_depth, resolution: n.resolution });
     }
-    this.buildSpatialIndex();
+
+    // Apply overlay deletions — remove nodes/edges the user deleted
+    const deletedNodeIds: number[] = await this.sendMessage('getDeletedNodeIds');
+    const deletedEdges: Array<{ source: number; target: number }> = await this.sendMessage('getDeletedEdgePairs');
+
+    for (const nid of deletedNodeIds) {
+      this.nodes.delete(nid);
+    }
 
     const allEdges: Array<EdgeRow> = await this.sendMessage('loadEdges');
     for (const edge of allEdges) {
+      // Skip if source or target was deleted
+      if (deletedNodeIds.includes(edge.source) || deletedNodeIds.includes(edge.target)) continue;
+      // Skip if this specific edge was deleted
+      if (deletedEdges.some(d => d.source === edge.source && d.target === edge.target)) continue;
       const s = this.nodes.get(edge.source);
       const t = this.nodes.get(edge.target);
       if (!s || !t) continue;
@@ -295,6 +311,8 @@ export class RoutingDatabase {
       }
       this.edgesBySource.get(edge.source)!.push(edge as any);
     }
+
+    this.buildSpatialIndex();
 
     const allPois: Array<{ id: number; name: string; type_id: number; properties: string | null; lat: number; lon: number }> = await this.sendMessage('loadPois');
     this.pois.push(...allPois);
@@ -795,7 +813,7 @@ export class RoutingDatabase {
     if (!cur) throw new Error(`Node ${nodeId} not found`);
     const node_depth = updates.node_depth ?? cur.nodeDepth;
     const resolution = updates.resolution ?? cur.resolution;
-    await this.sendMessage('updateNode', { dbIndex, nodeId, node_depth, resolution });
+    await this.sendMessage('updateNode', { dbIndex, nodeId, lat: cur.lat, lon: cur.lon, node_depth, resolution });
     cur.nodeDepth = node_depth;
     cur.resolution = resolution;
   }
@@ -815,7 +833,13 @@ export class RoutingDatabase {
         updates.distance = Math.round(this.haversineDistance(s.lat, s.lon, t.lat, t.lon));
       }
     }
-    await this.sendMessage('updateEdge', { dbIndex, source, target, ...updates });
+    // Send full edge context so the overlay can store a complete row
+    await this.sendMessage('updateEdge', {
+      dbIndex, source, target,
+      distance_to_land: edge.distance_to_land ?? 0,
+      edge_type_id: edge.edge_type_id ?? 0,
+      ...updates,
+    });
     if (updates.distance !== undefined) edge.distance = updates.distance;
     if (updates.min_depth !== undefined) edge.min_depth = updates.min_depth;
     if (updates.max_air_draft !== undefined) edge.max_air_draft = updates.max_air_draft;
