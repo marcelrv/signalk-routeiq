@@ -822,7 +822,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   <div id="route-pane-inner">
     <div class="panel-title">Route</div>
     <div id="hint-line" class="info-line" style="color:#9bb8da;font-size:11px;padding-bottom:2px;border-bottom:1px solid rgba(79,148,212,0.2);margin-bottom:2px">
-      Click map to set <span id="hint-action" style="color:#7ab8f0;font-weight:600">START</span>
+      <span id="hint-action">Click map: 1st=Start, 2nd=Dest, 3rd+=Via</span>
     </div>
     <div id="start-info" class="info-line"><span class="label">START</span><span class="coords">—</span></div>
     <div id="dest-info" class="info-line"><span class="label">DEST</span><span class="coords">—</span></div>
@@ -1627,18 +1627,18 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         })
         .catch(function (r) { editorFetchError(r, 'Add node'); });
     } else {
-      // Set start/dest on left-click (when not in editor add-node mode)
       var ll = e.latlng;
-      if (state.waypointNext === 'start') {
+      if (!state.startLatLng) {
         state.startLatLng = ll;
         state.startPoiName = '';
-        state.waypointNext = 'dest';
         lookupNearestPoi(ll.lat, ll.lng, 'start');
-      } else {
+      } else if (!state.destLatLng) {
         state.destLatLng = ll;
         state.destPoiName = '';
-        state.waypointNext = 'start';
         lookupNearestPoi(ll.lat, ll.lng, 'dest');
+      } else {
+        state.viaPoints.push(ll);
+        state.viaPoints = sortViasByRoutePosition(state.viaPoints);
       }
       applyWaypoints();
     }
@@ -1653,6 +1653,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   document.getElementById('editor-deselect-btn').addEventListener('click', clearEditorSelection);
 
   routeLayers.on('click', function (e) {
+    L.DomEvent.stopPropagation(e);
     if (state.startLatLng && state.destLatLng) {
       state.viaPoints.push(e.latlng);
       state.viaPoints = sortViasByRoutePosition(state.viaPoints);
@@ -2275,8 +2276,6 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       state.viaPoints.length
         ? state.viaPoints.map(v => fmtLatLng(v)).join('  |  ')
         : '—';
-    document.getElementById('hint-action').textContent =
-      state.waypointNext === 'start' ? 'START' : 'DESTINATION';
   }
 
   function fmtLatLng(ll) {
@@ -2359,11 +2358,6 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
   // Right-click: no longer sets start/dest (left-click does that).
   // The contextmenu preventDefault is handled in the panning setup above.
-
-  // also suppress browser context menu on the map container
-  document.getElementById('map').addEventListener('contextmenu', function (e) {
-    e.preventDefault();
-  });
 
   // ---- clear route ----
   document.getElementById('clear-btn').addEventListener('click', function () {

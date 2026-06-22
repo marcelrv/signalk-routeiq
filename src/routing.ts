@@ -503,57 +503,67 @@ export class RoutingEngine {
     };
     if (coords.length === 0) return;
 
-    // Try edge-snapped projection for smoother entry/exit
-    const edgeSnap = await this.db.findNearestEdge(userPoint.latitude, userPoint.longitude);
-
     if (position === 'start') {
       const firstCoord = coords[0];
       const directDist = this.haversineDistance(userPoint.latitude, userPoint.longitude, firstCoord[1], firstCoord[0]);
       if (directDist <= 1) return;
 
-      if (edgeSnap && edgeSnap.distance < directDist && edgeSnap.fraction > 0.01 && edgeSnap.fraction < 0.99) {
-        // Use edge projection: user → projected → graph_node
-        const snapToNode = this.haversineDistance(
-          edgeSnap.point.lat, edgeSnap.point.lon,
-          firstCoord[1], firstCoord[0],
+      // Project user onto the first route edge (coords[0] → coords[1])
+      // and split the edge at that point so the connection doesn't backtrack.
+      let didSplit = false;
+      if (coords.length >= 2) {
+        const secondCoord = coords[1];
+        const proj = this.db.projectOnEdge(
+          firstCoord[0], firstCoord[1],
+          secondCoord[0], secondCoord[1],
+          userPoint.longitude, userPoint.latitude,
         );
-        const edgePortion = edgeSnap.fraction <= 0.5
-          ? edgeSnap.edge.distance * edgeSnap.fraction
-          : edgeSnap.edge.distance * (1 - edgeSnap.fraction);
 
-        coords.unshift(
-          [edgeSnap.point.lon, edgeSnap.point.lat],
-          [userPoint.longitude, userPoint.latitude],
-        );
-        segments.unshift(
-          {
+        if (proj.distance < directDist && proj.fraction > 0.01 && proj.fraction < 0.99) {
+          const firstSeg = segments[0];
+          const portionDist = firstSeg ? Math.round(firstSeg.distance * (1 - proj.fraction)) : 0;
+
+          // Replace the first route coordinate with the projection point P
+          coords[0] = [proj.point.lon, proj.point.lat];
+          // Prepend user position
+          coords.unshift([userPoint.longitude, userPoint.latitude]);
+
+          // Replace first segment with the edge portion P → secondCoord
+          segments[0] = {
+            from: -1, to: firstSeg?.to ?? -1,
+            distance: portionDist,
+            minDepth: firstSeg?.minDepth ?? -1,
+            maxAirDraft: firstSeg?.maxAirDraft ?? -1,
+            isFairway: firstSeg?.isFairway ?? false,
+            trafficMode: firstSeg?.trafficMode ?? TRAFFIC_TWO_WAY,
+            edgeTypeId: firstSeg?.edgeTypeId,
+          };
+          // Prepend over-land segment user → P
+          segments.unshift({
             from: -1, to: -1,
-            distance: Math.round(edgePortion + snapToNode),
-            minDepth: edgeSnap.edge.min_depth,
-            maxAirDraft: edgeSnap.edge.max_air_draft,
-            isFairway: edgeSnap.edge.is_fairway === 1,
-            trafficMode: edgeSnap.edge.traffic_mode,
-            edgeTypeId: edgeSnap.edge.edge_type_id,
-          },
-          {
-            from: -1, to: -1,
-            distance: Math.round(edgeSnap.distance),
+            distance: Math.round(proj.distance),
             minDepth: -1, maxAirDraft: -1,
             isFairway: false,
             trafficMode: TRAFFIC_TWO_WAY,
-          },
-        );
-        markOverland(0, userPoint.longitude, userPoint.latitude, edgeSnap.point.lon, edgeSnap.point.lat);
-        route.features[0].properties.totalDistance! += Math.round(edgeSnap.distance + edgePortion + snapToNode);
-        if (!route.warnings) route.warnings = [];
-        route.warnings.push({
-          type: 'start_connecting',
-          message: `${Math.round(edgeSnap.distance)}m from start position to the nearest waterway edge, then ${Math.round(edgePortion + snapToNode)}m along the waterway.`,
-          from: { latitude: userPoint.latitude, longitude: userPoint.longitude },
-          to: { latitude: firstCoord[1], longitude: firstCoord[0] },
-          distanceMeters: Math.round(edgeSnap.distance),
-        });
-      } else {
+          });
+
+          markOverland(0, userPoint.longitude, userPoint.latitude, proj.point.lon, proj.point.lat);
+          route.features[0].properties.totalDistance! += Math.round(proj.distance);
+
+          if (!route.warnings) route.warnings = [];
+          route.warnings.push({
+            type: 'start_connecting',
+            message: `${Math.round(proj.distance)}m from start to the nearest waterway edge.`,
+            from: { latitude: userPoint.latitude, longitude: userPoint.longitude },
+            to: { latitude: secondCoord[1], longitude: secondCoord[0] },
+            distanceMeters: Math.round(proj.distance),
+          });
+
+          didSplit = true;
+        }
+      }
+
+      if (!didSplit) {
         // Fall back to straight line
         coords.unshift([userPoint.longitude, userPoint.latitude]);
         segments.unshift({
@@ -638,6 +648,7 @@ export class RoutingEngine {
         }
       }
 
+      const edgeSnap = await this.db.findNearestEdge(userPoint.latitude, userPoint.longitude);
       if (!didTruncate && edgeSnap && edgeSnap.distance < directDist && edgeSnap.fraction > 0.01 && edgeSnap.fraction < 0.99) {
         // ── Append path (existing fallback) ──────────────────────────────
         const nodeToSnap = this.haversineDistance(
