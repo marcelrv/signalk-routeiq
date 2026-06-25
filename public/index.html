@@ -1018,8 +1018,13 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
   function evalFormula(formula, value) {
     if (!formula) return value;
+    // Unit formulas from SK are always "value", or "value OP number" (e.g. "value * 1.94384").
+    // Reject anything that doesn't match that shape before evaluating, so a compromised
+    // API response can't run arbitrary JS via the Function constructor.
+    if (!/^value(\s*[+\-*/]\s*[\d.e+\-]+)?\s*$/.test(formula.trim())) return value;
     try {
-      return Function('"use strict"; return (' + formula.replace(/value/g, value) + ')')();
+      // Pass value as a parameter — never interpolate it into the formula string.
+      return (new Function('value', '"use strict"; return (' + formula + ');'))(value);
     } catch { return value; }
   }
 
@@ -1356,9 +1361,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       clearEditorSelection();
       state.selectedItem = null;
       state.selectedLayer = null;
+      if (state.editAddMode) document.getElementById('editor-cancel-btn').style.display = 'none';
       state.editAddMode = null;
       state.editAddSource = null;
-      if (state.editAddMode) document.getElementById('editor-cancel-btn').style.display = 'none';
       fetchGraphNodes();
       fetchEdges();
     }
@@ -1653,10 +1658,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       if (!state.startLatLng) {
         state.startLatLng = ll;
         state.startPoiName = '';
+        state.waypointNext = 'dest';
         lookupNearestPoi(ll.lat, ll.lng, 'start');
       } else if (!state.destLatLng) {
         state.destLatLng = ll;
         state.destPoiName = '';
+        state.waypointNext = 'start';
         lookupNearestPoi(ll.lat, ll.lng, 'dest');
       } else {
         state.viaPoints.push(ll);
@@ -2046,18 +2053,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   function geoJsonToLRM(geojson, originalWpts) {
     if (!geojson) return null;
 
-    let coords = [];
-    if (geojson.type === 'FeatureCollection' && Array.isArray(geojson.features)) {
-      for (const f of geojson.features) {
-        const c = extractCoords(f.geometry);
-        coords = coords.concat(c);
-      }
-    } else if (geojson.type === 'Feature') {
-      coords = extractCoords(geojson.geometry);
-    } else if (geojson.type === 'LineString' || geojson.type === 'MultiLineString') {
-      coords = extractCoords(geojson);
-    }
-
+    const coords = getAllCoords(geojson);
     if (coords.length < 2) return null;
 
     const latLngs = coords.map(c => L.latLng(c[1], c[0]));
@@ -2093,25 +2089,35 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     return [];
   }
 
+  // Flatten any RouteResult GeoJSON shape into a single coordinate array.
+  // Handles FeatureCollection, Feature, LineString, and MultiLineString.
+  function getAllCoords(geoJson) {
+    if (!geoJson) return [];
+    if (geoJson.type === 'FeatureCollection' && Array.isArray(geoJson.features)) {
+      let out = [];
+      for (const f of geoJson.features) out = out.concat(extractCoords(f.geometry));
+      return out;
+    }
+    if (geoJson.type === 'Feature') return extractCoords(geoJson.geometry);
+    return extractCoords(geoJson);
+  }
+
   function closestCoordIndex(coords, lat, lng) {
+    // Apply a cosine-latitude correction so that 1° of longitude is weighted
+    // correctly relative to 1° of latitude (especially important above ~50°N/S).
+    const cosLat = Math.cos(lat * Math.PI / 180);
     let minD = Infinity, minI = 0;
     for (let i = 0; i < coords.length; i++) {
-      const d = (coords[i][1] - lat) ** 2 + (coords[i][0] - lng) ** 2;
+      const dlat = coords[i][1] - lat;
+      const dlng = (coords[i][0] - lng) * cosLat;
+      const d = dlat * dlat + dlng * dlng;
       if (d < minD) { minD = d; minI = i; }
     }
     return minI;
   }
 
   function getRouteCoords(geoJson) {
-    if (!geoJson) return null;
-    let coords = [];
-    if (geoJson.type === 'FeatureCollection' && Array.isArray(geoJson.features)) {
-      for (const f of geoJson.features) coords = coords.concat(extractCoords(f.geometry));
-    } else if (geoJson.type === 'Feature') {
-      coords = extractCoords(geoJson.geometry);
-    } else {
-      coords = extractCoords(geoJson);
-    }
+    const coords = getAllCoords(geoJson);
     return coords.length >= 2 ? coords : null;
   }
 
@@ -2199,16 +2205,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       ? geoJson.features
       : (geoJson.type === 'Feature' ? [geoJson] : []);
 
-    let coords = [];
-    if (geoJson.type === 'FeatureCollection' && Array.isArray(geoJson.features)) {
-      for (const f of geoJson.features) {
-        coords = coords.concat(extractCoords(f.geometry));
-      }
-    } else if (geoJson.type === 'Feature') {
-      coords = extractCoords(geoJson.geometry);
-    } else {
-      coords = extractCoords(geoJson);
-    }
+    const coords = getAllCoords(geoJson);
     if (coords.length < 2) return;
 
     const latLngs = coords.map(c => L.latLng(c[1], c[0]));
@@ -2247,7 +2244,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       for (let j = 0; j < fc.length - 1; j++) {
         if (coordCursor + j < coordWarn.length) coordWarn[coordCursor + j] = w;
       }
-      coordCursor += fc.length;
+      coordCursor += fc.length - 1; // features share endpoint coords; don't double-count
     }
 
     // A coord is "in a warning" if either adjacent segment is a warning.
@@ -2644,34 +2641,15 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     }
   });
 
-  // ---- build RouteResult GeoJSON from LRM route ----
-  function lrmRouteToGeoJson(lrmRoute, name) {
-    const coords = lrmRoute.waypoints.map(wp => [wp.latLng.lng, wp.latLng.lat]);
-    const totalDist = lrmRoute.summary ? lrmRoute.summary.totalDistance : 0;
-    return {
-      type: 'FeatureCollection',
-      features: [{
-        type: 'Feature',
-        geometry: { type: 'LineString', coordinates: coords },
-        properties: {
-          name: name || 'Autoroute',
-          totalDistance: totalDist,
-          totalCost: totalDist,
-          segments: [],
-        },
-      }],
-    };
-  }
-
   // ---- export GPX ----
   document.getElementById('gpx-btn').addEventListener('click', function () {
-    if (!state.latestRoute) {
+    if (!state.lastGeoJson) {
       showToast('No route to export — calculate a route first', 'error');
       return;
     }
     const routeName = state.routeName || 'Autoroute';
     showToast('Downloading GPX…', '');
-    const body = { route: lrmRouteToGeoJson(state.latestRoute, routeName), name: routeName };
+    const body = { route: state.lastGeoJson, name: routeName };
     logDebug('GPX', gpxUrl(), body);
     fetch(gpxUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(r => {
@@ -2698,13 +2676,13 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
   // ---- push to Signal K ----
   document.getElementById('push-btn').addEventListener('click', function () {
-    if (!state.latestRoute) {
+    if (!state.lastGeoJson) {
       showToast('No route to save — calculate a route first', 'error');
       return;
     }
     const routeName = state.routeName || 'Autoroute Route';
     showToast('Saving route to Signal K…', '');
-    const body = { route: lrmRouteToGeoJson(state.latestRoute, routeName), name: routeName };
+    const body = { route: state.lastGeoJson, name: routeName };
     logDebug('PUSH', pushUrl(), body);
     fetch(pushUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(r => {
@@ -2813,18 +2791,30 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     });
   }
 
-  function mapSegmentsToCoordRanges(segments) {
-    // Each segment corresponds to exactly one 2-coordinate Feature from the API.
-    // Features are concatenated, so segment[i] connects coords[2i] → coords[2i+1]
-    return segments.map((seg, i) => ({
-      startIdx: i * 2,
-      endIdx: i * 2 + 1,
-      distance: seg.distance,
-      minDepth: seg.minDepth,
-      maxAirDraft: seg.maxAirDraft,
-      minWidth: seg.minWidth,
-      isFairway: seg.isFairway,
-    }));
+  function mapSegmentsToCoordRanges(segments, features) {
+    // FORMAT 1 (segments embedded in first feature's properties):
+    //   Each segment is one graph edge; the LineString shares endpoints between
+    //   consecutive edges, so segment[i] covers coords[i] → coords[i+1].
+    //
+    // FORMAT 2 (one Feature per segment):
+    //   Each feature has its own geometry of arbitrary length. Features share
+    //   endpoint coords (end of feature[i] == start of feature[i+1]), so we
+    //   advance the cursor by fc.length-1 per feature (same logic as renderCustomRoute).
+    const ranges = [];
+    if (features && features.length > 1) {
+      let cursor = 0;
+      for (let i = 0; i < segments.length && i < features.length; i++) {
+        const fc = extractCoords(features[i].geometry);
+        const span = Math.max(1, fc.length - 1);
+        ranges.push({ startIdx: cursor, endIdx: cursor + span, ...segments[i] });
+        cursor += span;
+      }
+    } else {
+      for (let i = 0; i < segments.length; i++) {
+        ranges.push({ startIdx: i, endIdx: i + 1, ...segments[i] });
+      }
+    }
+    return ranges;
   }
 
   function getSegmentsForLeg(segRanges, fromIdx, toIdx) {
@@ -2909,14 +2899,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
     if (!geoJson) { clearRoutePane(); return; }
 
-    let coords = [];
-    if (geoJson.type === 'FeatureCollection' && Array.isArray(geoJson.features)) {
-      for (const f of geoJson.features) coords = coords.concat(extractCoords(f.geometry));
-    } else if (geoJson.type === 'Feature') {
-      coords = extractCoords(geoJson.geometry);
-    } else {
-      coords = extractCoords(geoJson);
-    }
+    const coords = getAllCoords(geoJson);
     if (coords.length < 2) { clearRoutePane(); return; }
 
     const totalDistM = geoJson.totalDistance ||
@@ -2939,7 +2922,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       }
     }
     const nodes = extractMajorNodes(coords);
-    const segRanges = mapSegmentsToCoordRanges(segments);
+    // Pass features only in the multi-feature (format 2) case so the function
+    // can walk actual geometry lengths instead of assuming 1 coord per segment.
+    const segFeatures = (geoJson.features && geoJson.features.length > 1) ? geoJson.features : null;
+    const segRanges = mapSegmentsToCoordRanges(segments, segFeatures);
 
     // Overall warnings
     warningsEl.innerHTML = '';

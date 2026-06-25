@@ -47,11 +47,20 @@ export class ApiHandler {
   }
 
   private setupRoutes(): void {
-    // CORS headers for sandbox cross-origin requests
+    // CORS for sandbox/cross-origin dev access.
+    // Wildcard is restricted to safe (read-only) routes only.
+    // Mutation routes (vessel update, graph edits, database download) deliberately
+    // omit ACAO so browsers block unauthenticated cross-origin writes.
+    const CORS_SAFE_POSTS = new Set(['/route', '/export/gpx', '/push']);
     this.router.use((_req, res, next) => {
-      res.header('Access-Control-Allow-Origin', '*');
-      res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-      res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      const allowCors = _req.method === 'GET'
+        || _req.method === 'OPTIONS'
+        || (_req.method === 'POST' && CORS_SAFE_POSTS.has(_req.path));
+      if (allowCors) {
+        res.header('Access-Control-Allow-Origin', '*');
+        res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      }
       if (_req.method === 'OPTIONS') { res.sendStatus(204); return; }
       next();
     });
@@ -156,8 +165,8 @@ export class ApiHandler {
       const message = error instanceof Error ? error.message : 'Unknown error';
       // Use 422 (Unprocessable Entity) so clients can distinguish a routing
       // failure (constraint/graph issue) from a server error (500).
+      // Do not call next(error) — the response is already sent.
       res.status(422).json({ error: message, code: 'ROUTE_NOT_FOUND' });
-      next(error);
     }
   }
 
@@ -407,13 +416,24 @@ export class ApiHandler {
   }
 
   /**
-   * Simple auth check — verifies the SK auth cookie is present.
-   * The SK server sets the `JAUTHENTICATION` cookie on login.
+   * Auth check for graph-editor mutations.
+   *
+   * Signal K's tokensecurity middleware runs before plugin routes and sets
+   * `req.skIsAuthenticated` (bool) and `req.skPrincipal.permissions` after
+   * validating the JWT from the JAUTHENTICATION cookie or Bearer header.
+   * Checking the cookie string directly does NOT validate the token.
+   *
+   * Requires admin permission because graph edits are destructive.
+   * When security is disabled, skIsAuthenticated is set to true by SK.
    */
   private requireAuth(req: Request, res: Response): boolean {
-    const cookies = req.headers.cookie || '';
-    if (!cookies.includes('JAUTHENTICATION=')) {
+    const skReq = req as any;
+    if (skReq.skIsAuthenticated !== true) {
       res.status(401).json({ error: 'Authentication required. Please log into the Signal K admin UI.' });
+      return false;
+    }
+    if (skReq.skPrincipal && skReq.skPrincipal.permissions !== 'admin') {
+      res.status(403).json({ error: 'Admin permission required for graph editing.' });
       return false;
     }
     return true;
@@ -691,6 +711,23 @@ export class ApiHandler {
         return;
       }
 
+      // Validate that the download URL comes from the configured catalog origin (SSRF prevention)
+      if (!this.config.catalogUrl) {
+        res.status(400).json({ error: 'No catalog URL configured; cannot validate download origin' });
+        return;
+      }
+      try {
+        const allowedOrigin = new URL(this.config.catalogUrl).origin;
+        const reqOrigin = new URL(url).origin;
+        if (reqOrigin !== allowedOrigin) {
+          res.status(400).json({ error: `Download URL must originate from the configured catalog server (${allowedOrigin})` });
+          return;
+        }
+      } catch {
+        res.status(400).json({ error: 'Invalid download URL' });
+        return;
+      }
+
       // Ensure data directory exists
       try { fs.mkdirSync(dataDir, { recursive: true }); } catch { /* ignore */ }
 
@@ -712,6 +749,18 @@ export class ApiHandler {
         console.log(`[autoroute] Decompressed ${filename} -> ${saveFilename} (${buffer.length} -> ${saveBuffer.length} bytes)`);
       }
 
+      // Reject filenames that could escape the data directory (path traversal)
+      if (!/^[\w\-\.]+\.sqlite$/.test(saveFilename) || saveFilename.includes('..')) {
+        res.status(400).json({ error: 'Invalid filename: must be a plain .sqlite filename with no path components' });
+        return;
+      }
+      const destPath = path.resolve(dataDir, saveFilename);
+      const resolvedDataDir = path.resolve(dataDir);
+      if (!destPath.startsWith(resolvedDataDir + path.sep) && destPath !== resolvedDataDir) {
+        res.status(400).json({ error: 'Invalid filename: path escapes data directory' });
+        return;
+      }
+
       // Remove all old .sqlite files before writing the new one
       const oldFiles = fs.readdirSync(dataDir).filter(f => f.endsWith('.sqlite') && f !== saveFilename);
       for (const f of oldFiles) {
@@ -722,8 +771,6 @@ export class ApiHandler {
           console.warn(`[autoroute] Failed to remove old database ${f}: ${e}`);
         }
       }
-
-      const destPath = path.join(dataDir, saveFilename);
       fs.writeFileSync(destPath, saveBuffer);
 
       console.log(`[autoroute] Database saved: ${saveFilename} (${saveBuffer.length} bytes)`);
