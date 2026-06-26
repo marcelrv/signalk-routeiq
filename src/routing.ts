@@ -538,7 +538,7 @@ export class RoutingEngine {
             distance: portionDist,
             minDepth: firstSeg?.minDepth ?? -1,
             maxAirDraft: firstSeg?.maxAirDraft ?? -1,
-            isFairway: firstSeg?.isFairway ?? false,
+            costFactor: firstSeg?.costFactor ?? 1.2,
             trafficMode: firstSeg?.trafficMode ?? TRAFFIC_TWO_WAY,
             edgeTypeId: firstSeg?.edgeTypeId,
           };
@@ -547,7 +547,7 @@ export class RoutingEngine {
             from: -1, to: -1,
             distance: Math.round(proj.distance),
             minDepth: -1, maxAirDraft: -1,
-            isFairway: false,
+            costFactor: 1.2,
             trafficMode: TRAFFIC_TWO_WAY,
           });
 
@@ -574,7 +574,7 @@ export class RoutingEngine {
           from: -1, to: -1,
           distance: Math.round(directDist),
           minDepth: -1, maxAirDraft: -1,
-          isFairway: false,
+          costFactor: 1.2,
           trafficMode: TRAFFIC_TWO_WAY,
         });
         markOverland(0, userPoint.longitude, userPoint.latitude, firstCoord[0], firstCoord[1]);
@@ -622,7 +622,7 @@ export class RoutingEngine {
                 distance: truncatedDist,
                 minDepth: lastSeg.minDepth,
                 maxAirDraft: lastSeg.maxAirDraft,
-                isFairway: lastSeg.isFairway,
+                costFactor: lastSeg.costFactor,
                 trafficMode: lastSeg.trafficMode,
                 edgeTypeId: lastSeg.edgeTypeId,
               };
@@ -631,7 +631,7 @@ export class RoutingEngine {
                 from: -1, to: -1,
                 distance: Math.round(proj.distance),
                 minDepth: -1, maxAirDraft: -1,
-                isFairway: false,
+                costFactor: 1.2,
                 trafficMode: TRAFFIC_TWO_WAY,
               });
               markOverland(segments.length - 1, proj.point.lon, proj.point.lat, userPoint.longitude, userPoint.latitude);
@@ -673,7 +673,7 @@ export class RoutingEngine {
             distance: Math.round(nodeToSnap + edgePortion),
             minDepth: edgeSnap.edge.min_depth,
             maxAirDraft: edgeSnap.edge.max_air_draft,
-            isFairway: edgeSnap.edge.is_fairway === 1,
+            costFactor: edgeSnap.edge.cost_factor,
             trafficMode: edgeSnap.edge.traffic_mode,
             edgeTypeId: edgeSnap.edge.edge_type_id,
           },
@@ -681,7 +681,7 @@ export class RoutingEngine {
             from: -1, to: -1,
             distance: Math.round(edgeSnap.distance),
             minDepth: -1, maxAirDraft: -1,
-            isFairway: false,
+            costFactor: 1.2,
             trafficMode: TRAFFIC_TWO_WAY,
           },
         );
@@ -704,7 +704,7 @@ export class RoutingEngine {
           from: -1, to: -1,
           distance: Math.round(directDist),
           minDepth: -1, maxAirDraft: -1,
-          isFairway: false,
+          costFactor: 1.2,
           trafficMode: TRAFFIC_TWO_WAY,
         });
         markOverland(segments.length - 1, lastCoord[0], lastCoord[1], userPoint.longitude, userPoint.latitude);
@@ -854,12 +854,8 @@ export class RoutingEngine {
     const parent = new Map<number, number | null>();
 
     // Minimum possible cost multiplier — ensures A* heuristic never overestimates.
-    // The heuristic is multiplied by this value so it is ≤ any actual edge cost.
-    const minMultiplier = Math.min(
-      this.config.fairwayMultiplier,
-      this.config.openWaterMultiplier,
-      1.0,
-    );
+    // 0.8 is the fairway cost_factor floor; if custom edges go lower, update this.
+    const minMultiplier = 0.8;
 
     // Initialize
     gScore.set(startNode, 0);
@@ -1036,16 +1032,10 @@ export class RoutingEngine {
   
   /**
    * Calculate the cost for an edge using the multi-layered cost function
-   * Cost = Distance × FairwayMultiplier × DirectionalPenalty × OneWayPenalty
+   * Cost = Distance × CostFactor × OneWayPenalty
    */
   private calculateEdgeCost(edge: EdgeRow & { lat: number; lon: number }): number {
-    let cost = edge.distance; // Base cost is distance in meters
-
-    // Fairway multiplier: prefer official buoyed waterways
-    const fairwayMultiplier = edge.is_fairway
-      ? this.config.fairwayMultiplier
-      : this.config.openWaterMultiplier;
-    cost *= fairwayMultiplier;
+    let cost = edge.distance * edge.cost_factor;
 
     // One-way penalty: traffic_mode=2 means only reverse direction (target→source)
     // is allowed, so traversing source→target is wrong-way.
@@ -1110,7 +1100,7 @@ export class RoutingEngine {
       const segmentProps: Record<string, any> = {
         minDepth: seg.minDepth,
         maxAirDraft: seg.maxAirDraft,
-        isFairway: seg.isFairway,
+        costFactor: seg.costFactor,
         trafficMode: seg.trafficMode,
         edgeTypeId: seg.edgeTypeId,
         distance: seg.distance,
@@ -1167,7 +1157,7 @@ export class RoutingEngine {
             distance: edge.distance,
             minDepth: edge.min_depth,
             maxAirDraft: edge.max_air_draft,
-            isFairway: edge.is_fairway === 1,
+            costFactor: edge.cost_factor,
             trafficMode: edge.traffic_mode,
             edgeTypeId: edge.edge_type_id,
           });
@@ -1186,7 +1176,7 @@ export class RoutingEngine {
               distance: dist,
               minDepth: -1,
               maxAirDraft: -1,
-              isFairway: false,
+              costFactor: 1.2,
               trafficMode: TRAFFIC_TWO_WAY,
             });
           }

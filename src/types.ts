@@ -35,7 +35,7 @@ export interface EdgeAttributes {
   minDepth: number; // meters
   maxAirDraft: number; // meters
   minWidth: number; // meters
-  isFairway: boolean;
+  costFactor: number; // routing cost multiplier: 0.8=fairway (preferred), 1.2=open water, higher=penalized
   distanceToLand: number; // meters
   trafficMode: number; // 0=two-way, 1=one-way fwd, 2=one-way rev
   edgeTypeId: number; // 0=coastal, 1=inland
@@ -86,7 +86,7 @@ export interface RouteResult {
       distance?: number; // segment distance (only per-segment features)
       minDepth?: number; // meters (only per-segment features)
       maxAirDraft?: number; // meters (only per-segment features)
-      isFairway?: boolean;
+      costFactor?: number;
       trafficMode?: number;
       edgeTypeId?: number;
       segments?: Array<{
@@ -95,7 +95,7 @@ export interface RouteResult {
         distance: number; // meters
         minDepth: number; // meters
         maxAirDraft: number; // meters
-        isFairway: boolean;
+        costFactor: number;
         trafficMode: number;
         edgeTypeId?: number;
       }>;
@@ -129,8 +129,6 @@ export interface PluginConfig {
   safetyMarginAirDraft: number;  // meters, added to design air draft
   safetyMarginBeam: number;      // meters, added to design beam
   defaultCoastDistance: number;
-  fairwayMultiplier: number;
-  openWaterMultiplier: number;
   wrongWayPenalty: number;
   routingBBoxMargin: number;        // degrees, default 1.0 (~111km)
   routingBBoxMaxExtent: number;     // degrees, default 10.0
@@ -147,8 +145,6 @@ export const DEFAULT_CONFIG: PluginConfig = {
   safetyMarginAirDraft: 1.5,
   safetyMarginBeam: 2.0,
   defaultCoastDistance: 0.5,
-  fairwayMultiplier: 0.8,
-  openWaterMultiplier: 1.2,
   wrongWayPenalty: 5.0,
   routingBBoxMargin: 1.0,
   routingBBoxMaxExtent: 10.0,

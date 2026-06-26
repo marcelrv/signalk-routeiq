@@ -167,18 +167,6 @@ export function pluginConstructor(app: ServerAPI) {
             description: 'Default minimum distance from coastline in nautical miles',
             default: DEFAULT_CONFIG.defaultCoastDistance,
           },
-          fairwayMultiplier: {
-            type: 'number',
-            title: 'Fairway Multiplier',
-            description: 'Cost multiplier for fairway edges (lower = preferred)',
-            default: DEFAULT_CONFIG.fairwayMultiplier,
-          },
-          openWaterMultiplier: {
-            type: 'number',
-            title: 'Open Water Multiplier',
-            description: 'Cost multiplier for open water edges (higher = less preferred)',
-            default: DEFAULT_CONFIG.openWaterMultiplier,
-          },
           wrongWayPenalty: {
             type: 'number',
             title: 'Wrong Way Penalty',

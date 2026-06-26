@@ -493,13 +493,13 @@ export class ApiHandler {
     try {
       const source = parseInt(req.params.source, 10);
       const target = parseInt(req.params.target, 10);
-      const { dbIndex, distance, min_depth, max_air_draft, min_width, traffic_mode, is_fairway, distance_to_land, edge_type_id } = req.body;
+      const { dbIndex, distance, min_depth, max_air_draft, min_width, traffic_mode, cost_factor, distance_to_land, edge_type_id } = req.body;
       if (dbIndex === undefined) { res.status(400).json({ error: 'Missing dbIndex' }); return; }
       // Try update first; if edge doesn't exist in memory, create it
       try {
-        await this.db!.updateEdge(dbIndex, source, target, { distance, min_depth, max_air_draft, min_width, traffic_mode, is_fairway });
+        await this.db!.updateEdge(dbIndex, source, target, { distance, min_depth, max_air_draft, min_width, traffic_mode, cost_factor });
       } catch {
-        await this.db!.addEdge(dbIndex, { source, target, distance, min_depth, max_air_draft, min_width, traffic_mode, is_fairway, distance_to_land, edge_type_id });
+        await this.db!.addEdge(dbIndex, { source, target, distance, min_depth, max_air_draft, min_width, traffic_mode, cost_factor, distance_to_land, edge_type_id });
       }
       res.json({ success: true });
     } catch (error) {

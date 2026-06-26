@@ -17,7 +17,7 @@ interface EdgeRow {
   min_depth: number;
   max_air_draft: number;
   min_width: number;
-  is_fairway: number;
+  cost_factor: number;
   distance_to_land: number;
   edge_type_id: number;
   traffic_mode: number;
@@ -43,6 +43,7 @@ const handles: DbHandle[] = [];
 const filenames: string[] = [];
 let hasCrossesLand = false;
 let hasCrossesObstacle = false;
+let hasCostFactor = false;
 let hasNodeDepth = false;
 let hasRegionId = false;
 let overlayHandle: DbHandle | null = null;
@@ -59,6 +60,7 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         const { dbPaths } = payload!;
         hasCrossesLand = false;
         hasCrossesObstacle = false;
+        hasCostFactor = false;
         hasNodeDepth = false;
         hasRegionId = false;
         handles.length = 0;
@@ -81,6 +83,7 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
             // Merge schema flags across all valid databases
             hasCrossesLand = hasCrossesLand || edgeCols.some(c => c.name === 'crosses_land');
             hasCrossesObstacle = hasCrossesObstacle || edgeCols.some(c => c.name === 'crosses_obstacle');
+            hasCostFactor = hasCostFactor || edgeCols.some(c => c.name === 'cost_factor');
             const nodeCols = db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>;
             hasNodeDepth = hasNodeDepth || nodeCols.some(c => c.name === 'node_depth');
             hasRegionId = hasRegionId || nodeCols.some(c => c.name === 'region_id');
@@ -113,7 +116,7 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
             source INTEGER, target INTEGER,
             distance REAL DEFAULT 0, min_depth REAL DEFAULT -1,
             max_air_draft REAL DEFAULT -1, min_width REAL DEFAULT -1,
-            is_fairway INTEGER DEFAULT 0, distance_to_land REAL DEFAULT 0,
+            cost_factor REAL DEFAULT 1.2, distance_to_land REAL DEFAULT 0,
             edge_type_id INTEGER DEFAULT 0, traffic_mode INTEGER DEFAULT 0,
             PRIMARY KEY (source, target)
           )`).run();
@@ -151,11 +154,15 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
       case 'loadEdges': {
         const crossesCol = hasCrossesLand ? ', crosses_land' : '';
         const obstacleCol = hasCrossesObstacle ? ', crosses_obstacle' : '';
+        // Backward compatibility: old databases have is_fairway INTEGER instead of cost_factor REAL
+        const costCol = hasCostFactor
+          ? 'cost_factor'
+          : 'CASE WHEN is_fairway = 1 THEN 0.8 ELSE 1.2 END AS cost_factor';
         let allEdges: EdgeRow[] = [];
         for (const h of handles) {
           const edges = h.db.prepare(
             `SELECT source, target, distance, min_depth, max_air_draft, min_width,
-                    is_fairway, distance_to_land,
+                    ${costCol}, distance_to_land,
                     edge_type_id, traffic_mode${crossesCol}${obstacleCol}
              FROM edges`
           ).all() as unknown as EdgeRow[];
@@ -267,12 +274,12 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
       }
       case 'updateEdge': {
         if (!overlayHandle) throw new Error('Overlay not open');
-        const { source, target, distance, min_depth, max_air_draft, min_width, traffic_mode, is_fairway, distance_to_land, edge_type_id } = payload!;
+        const { source, target, distance, min_depth, max_air_draft, min_width, traffic_mode, cost_factor, distance_to_land, edge_type_id } = payload!;
         // First ensure the edge exists in the overlay (copy defaults)
         overlayHandle.db.prepare(
-          `INSERT OR IGNORE INTO edges (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, distance_to_land, edge_type_id, traffic_mode)
+          `INSERT OR IGNORE INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).run(source, target, distance ?? 0, min_depth ?? -1, max_air_draft ?? -1, min_width ?? -1, is_fairway ?? 0, distance_to_land ?? 0, edge_type_id ?? 0, traffic_mode ?? 0);
+        ).run(source, target, distance ?? 0, min_depth ?? -1, max_air_draft ?? -1, min_width ?? -1, cost_factor ?? 1.2, distance_to_land ?? 0, edge_type_id ?? 0, traffic_mode ?? 0);
         // Then UPDATE only the fields that were actually provided
         const cols: string[] = [];
         const vals: any[] = [];
@@ -281,7 +288,7 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         if (max_air_draft !== undefined) { cols.push('max_air_draft = ?'); vals.push(max_air_draft); }
         if (min_width !== undefined) { cols.push('min_width = ?'); vals.push(min_width); }
         if (traffic_mode !== undefined) { cols.push('traffic_mode = ?'); vals.push(traffic_mode); }
-        if (is_fairway !== undefined) { cols.push('is_fairway = ?'); vals.push(is_fairway); }
+        if (cost_factor !== undefined) { cols.push('cost_factor = ?'); vals.push(cost_factor); }
         if (cols.length > 0) {
           vals.push(source, target);
           overlayHandle.db.prepare(`UPDATE edges SET ${cols.join(', ')} WHERE source = ? AND target = ?`).run(...vals);
@@ -317,11 +324,11 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
       }
       case 'insertEdge': {
         if (!overlayHandle) throw new Error('Overlay not open');
-        const { source: insSource, target: insTarget, distance: insDist, min_depth: insMd, max_air_draft: insAd, min_width: insMw, is_fairway: insFw, distance_to_land: insDtl, edge_type_id: insEt, traffic_mode: insTm } = payload!;
+        const { source: insSource, target: insTarget, distance: insDist, min_depth: insMd, max_air_draft: insAd, min_width: insMw, cost_factor: insCf, distance_to_land: insDtl, edge_type_id: insEt, traffic_mode: insTm } = payload!;
         overlayHandle.db.prepare(
-          `INSERT OR REPLACE INTO edges (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, distance_to_land, edge_type_id, traffic_mode)
+          `INSERT OR REPLACE INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).run(insSource, insTarget, insDist ?? 0, insMd ?? -1, insAd ?? -1, insMw ?? -1, insFw ?? 0, insDtl ?? 0, insEt ?? 0, insTm ?? 0);
+        ).run(insSource, insTarget, insDist ?? 0, insMd ?? -1, insAd ?? -1, insMw ?? -1, insCf ?? 1.2, insDtl ?? 0, insEt ?? 0, insTm ?? 0);
         parentPort!.postMessage({ id, type, result: { success: true } });
         break;
       }

@@ -30,7 +30,7 @@ export class GpxExporter {
       <extensions>
         <ar:minDepth>${seg.minDepth.toFixed(1)}m</ar:minDepth>
         <ar:maxAirDraft>${seg.maxAirDraft.toFixed(1)}m</ar:maxAirDraft>
-        <ar:isFairway>${seg.isFairway ? 'true' : 'false'}</ar:isFairway>
+        <ar:costFactor>${seg.costFactor.toFixed(2)}</ar:costFactor>
       </extensions>`;
       }
 
@@ -72,7 +72,7 @@ export class GpxExporter {
             distance: s.distance,
             minDepth: s.minDepth,
             maxAirDraft: s.maxAirDraft,
-            isFairway: s.isFairway,
+            costFactor: s.costFactor,
             trafficMode: s.trafficMode,
             edgeTypeId: s.edgeTypeId,
           })),
@@ -91,7 +91,7 @@ export class GpxExporter {
     coords: Array<[number, number]>;
     segments: Array<{
       from?: number; to?: number; distance: number;
-      minDepth: number; maxAirDraft: number; isFairway: boolean;
+      minDepth: number; maxAirDraft: number; costFactor: number;
       trafficMode?: number; edgeTypeId?: number;
     }>;
   } {
@@ -124,7 +124,7 @@ export class GpxExporter {
           distance: f.properties.distance ?? 0,
           minDepth: f.properties.minDepth ?? -1,
           maxAirDraft: f.properties.maxAirDraft ?? -1,
-          isFairway: f.properties.isFairway ?? false,
+          costFactor: f.properties.costFactor ?? 1.2,
           trafficMode: f.properties.trafficMode,
           edgeTypeId: f.properties.edgeTypeId,
         });

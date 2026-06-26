@@ -36,7 +36,7 @@ export interface EdgeRow {
   min_depth: number;
   max_air_draft: number;
   min_width: number;
-  is_fairway: number;
+  cost_factor: number;
   distance_to_land: number;
   edge_type_id: number;
   traffic_mode: number;
@@ -594,7 +594,7 @@ export class RoutingDatabase {
     target_lat: number; target_lon: number;
     distance: number; min_depth: number; max_air_draft: number; min_width: number;
     edge_type_id: number; traffic_mode: number;
-    is_fairway: number;
+    cost_factor: number;
   }>> {
     const results: Array<{
       source: number; target: number;
@@ -602,7 +602,7 @@ export class RoutingDatabase {
       target_lat: number; target_lon: number;
       distance: number; min_depth: number; max_air_draft: number; min_width: number;
       edge_type_id: number; traffic_mode: number;
-      is_fairway: number;
+      cost_factor: number;
     }> = [];
     for (const [, edges] of this.edgesBySource) {
       for (const e of edges) {
@@ -617,7 +617,7 @@ export class RoutingDatabase {
             distance: e.distance, min_depth: e.min_depth,
             max_air_draft: e.max_air_draft, min_width: e.min_width,
             edge_type_id: e.edge_type_id, traffic_mode: e.traffic_mode,
-            is_fairway: e.is_fairway,
+            cost_factor: e.cost_factor,
           });
           if (results.length >= limit) break;
         }
@@ -777,7 +777,7 @@ export class RoutingDatabase {
     let minDepth = Infinity;
     let maxAirDraft = -Infinity;
     let minWidth = Infinity;
-    let isFairway = false;
+    let weightedCostFactor = 0;
     let trafficMode = TRAFFIC_TWO_WAY;
     let edgeTypeId = EDGE_TYPE_COASTAL;
     let crossesLand = 0;
@@ -790,7 +790,7 @@ export class RoutingDatabase {
         if (typeof edge.min_depth === 'number' && edge.min_depth >= 0) minDepth = Math.min(minDepth, edge.min_depth);
         if (typeof edge.max_air_draft === 'number' && edge.max_air_draft >= 0) maxAirDraft = Math.min(maxAirDraft, edge.max_air_draft);
         if (typeof edge.min_width === 'number' && edge.min_width >= 0) minWidth = Math.min(minWidth, edge.min_width);
-        if (edge.is_fairway) isFairway = true;
+        weightedCostFactor += edge.cost_factor * edge.distance;
         // Preserve the most restrictive traffic direction across sub-edges.
         // REV (2) beats FWD (1) beats TWO_WAY (0) — never collapse to two-way.
         if (edge.traffic_mode === TRAFFIC_ONE_WAY_REV) trafficMode = TRAFFIC_ONE_WAY_REV;
@@ -809,7 +809,7 @@ export class RoutingDatabase {
       min_depth: minDepth === Infinity ? -1 : minDepth,
       max_air_draft: maxAirDraft === -Infinity ? -1 : maxAirDraft,
       min_width: minWidth === Infinity ? -1 : minWidth,
-      is_fairway: isFairway ? 1 : 0,
+      cost_factor: totalDist > 0 ? weightedCostFactor / totalDist : 1.2,
       distance_to_land: 0,
       edge_type_id: edgeTypeId,
       traffic_mode: trafficMode,
@@ -836,7 +836,7 @@ export class RoutingDatabase {
 
   async updateEdge(dbIndex: number, source: number, target: number, updates: {
     distance?: number; min_depth?: number; max_air_draft?: number;
-    min_width?: number; traffic_mode?: number; is_fairway?: number;
+    min_width?: number; traffic_mode?: number; cost_factor?: number;
   }): Promise<void> {
     const edges = this.edgesBySource.get(source);
     if (!edges) throw new Error(`No edges from source ${source}`);
@@ -861,7 +861,7 @@ export class RoutingDatabase {
     if (updates.max_air_draft !== undefined) edge.max_air_draft = updates.max_air_draft;
     if (updates.min_width !== undefined) edge.min_width = updates.min_width;
     if (updates.traffic_mode !== undefined) edge.traffic_mode = updates.traffic_mode;
-    if (updates.is_fairway !== undefined) edge.is_fairway = updates.is_fairway;
+    if (updates.cost_factor !== undefined) edge.cost_factor = updates.cost_factor;
   }
 
   async deleteNode(dbIndex: number, nodeId: number): Promise<void> {
@@ -897,7 +897,7 @@ export class RoutingDatabase {
   async addEdge(dbIndex: number, edge: {
     source: number; target: number; distance: number;
     min_depth?: number; max_air_draft?: number; min_width?: number;
-    is_fairway?: number; distance_to_land?: number;
+    cost_factor?: number; distance_to_land?: number;
     edge_type_id?: number; traffic_mode?: number;
   }): Promise<void> {
     const s = this.nodes.get(edge.source);
@@ -916,7 +916,7 @@ export class RoutingDatabase {
       min_depth: edge.min_depth ?? -1,
       max_air_draft: edge.max_air_draft ?? -1,
       min_width: edge.min_width ?? -1,
-      is_fairway: edge.is_fairway ?? 0,
+      cost_factor: edge.cost_factor ?? 1.2,
       distance_to_land: edge.distance_to_land ?? 0,
       edge_type_id: edge.edge_type_id ?? 0,
       traffic_mode: edge.traffic_mode ?? 0,
