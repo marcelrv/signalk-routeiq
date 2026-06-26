@@ -2211,14 +2211,15 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     const latLngs = coords.map(c => L.latLng(c[1], c[0]));
 
     // Resolve vessel thresholds (with sensible fallbacks)
-    const draftEl = document.getElementById('boat-draft');
-    const airDraftEl = document.getElementById('boat-airdraft');
-    const draftStr = draftEl ? (draftEl.querySelector('.value') || {}).textContent : '';
-    const airDraftStr = airDraftEl ? (airDraftEl.querySelector('.value') || {}).textContent : '';
-    const vesselDraft = parseFloat(draftStr) || 2.0;
-    const vesselAirDraft = parseFloat(airDraftStr) || 10.0;
-    const SAFETY_MARGIN_DRAFT = 0.3;
-    const SAFETY_MARGIN_AIRDRAFT = 1.5;
+    // Use raw design values from lastBoat so we can apply the correct margin
+    // exactly once. Reading effectiveDraft from the DOM would double-count the
+    // safety margin that the server already added.
+    const vesselDraft = (lastBoat && lastBoat.draft != null) ? lastBoat.draft : 2.0;
+    const vesselAirDraft = (lastBoat && lastBoat.airDraft != null) ? lastBoat.airDraft : 10.0;
+    const SAFETY_MARGIN_DRAFT = (lastBoat && lastBoat.effectiveDraft != null && lastBoat.draft != null)
+      ? lastBoat.effectiveDraft - lastBoat.draft : 0.3;
+    const SAFETY_MARGIN_AIRDRAFT = (lastBoat && lastBoat.effectiveAirDraft != null && lastBoat.airDraft != null)
+      ? lastBoat.effectiveAirDraft - lastBoat.airDraft : 1.5;
     const shallowThreshold = vesselDraft + SAFETY_MARGIN_DRAFT;
     const airDraftThreshold = vesselAirDraft + SAFETY_MARGIN_AIRDRAFT;
 
@@ -2997,7 +2998,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     }
 
     // Crossings mapped to legs (used in both collapsed node icons and expanded leg details)
-    const crossings = (firstProps && firstProps.crossings) || [];
+    const crossings = geoJson.crossings || [];
     const crossingLegMap = mapCrossingsToLegs(crossings, coords, nodes);
 
     // Nodes + legs
@@ -3097,9 +3098,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           let legDist = 0;
           
           // Get the current vessel draft from the UI panel, fallback to 2.0m
-          const draftStr = document.getElementById('boat-draft').querySelector('.value').textContent;
-          const vesselDraft = parseFloat(draftStr) || 2.0;
-          const shallowThreshold = vesselDraft + 0.3; // Warn if clearance is less than 30cm
+          const vesselDraft = (lastBoat && lastBoat.draft != null) ? lastBoat.draft : 2.0;
+          const safetyMargin = (lastBoat && lastBoat.effectiveDraft != null && lastBoat.draft != null)
+            ? lastBoat.effectiveDraft - lastBoat.draft : 0.3;
+          const shallowThreshold = vesselDraft + safetyMargin;
 
           for (const s of legSegs) {
             if (s.minDepth !== null && s.minDepth !== undefined && s.minDepth >= 0) minDepth = Math.min(minDepth, s.minDepth);

@@ -141,19 +141,15 @@ export class RoutingEngine {
     const { start, end, via = [], minCoastDistance, draft, beam, airDraft } = request;
     const effectiveCoastDistance = minCoastDistance ?? this.config.defaultCoastDistance;
 
-    // Apply per-request vessel dimension overrides (do not mutate engine state)
-    const savedDims = { ...this.vesselDimensions };
-    if (draft !== undefined || beam !== undefined || airDraft !== undefined) {
-      this.vesselDimensions = {
-        ...this.vesselDimensions,
-        ...(draft !== undefined && { draft }),
-        ...(beam !== undefined && { beam }),
-        ...(airDraft !== undefined && { airDraft }),
-      };
-    }
+    // Build per-request effective dimensions without mutating shared engine state.
+    // Concurrent requests each get their own local copy, avoiding race conditions.
+    const effectiveDims: VesselDimensions = {
+      draft:    draft    !== undefined ? draft    : this.vesselDimensions.draft,
+      beam:     beam     !== undefined ? beam     : this.vesselDimensions.beam,
+      airDraft: airDraft !== undefined ? airDraft : this.vesselDimensions.airDraft,
+    };
 
-    try {
-      const coastDistanceMeters = effectiveCoastDistance * 1852;
+    const coastDistanceMeters = effectiveCoastDistance * 1852;
 
       // Find nearest graph nodes to start/end
       const startNode = await this.db.findNearestNode(start.latitude, start.longitude);
@@ -166,7 +162,7 @@ export class RoutingEngine {
       const bboxWarnings: RouteWarning[] = [];
 
       if (via.length > 0) {
-        return await this.routeViaPoints(start, end, via, coastDistanceMeters, bboxWarnings);
+        return await this.routeViaPoints(start, end, via, coastDistanceMeters, effectiveDims, bboxWarnings);
       }
       // Fall through for non-via routes (bbox search below)
 
@@ -182,6 +178,7 @@ export class RoutingEngine {
             start.latitude, start.longitude,
             end.latitude, end.longitude,
             coastDistanceMeters,
+            effectiveDims,
             bbox,
           );
 
@@ -191,7 +188,7 @@ export class RoutingEngine {
 
           // Check for constraint violations (draft, beam, air draft) on the found path
           const violationWarnings: RouteWarning[] = [];
-          this.addViolationWarnings(result, violationWarnings, 'destination', start, end);
+          this.addViolationWarnings(result, violationWarnings, 'destination', start, end, effectiveDims);
 
           // Attach any warning types
           result.warnings = [
@@ -218,11 +215,8 @@ export class RoutingEngine {
 
       // All bbox attempts failed — try fallback routing (unconstrained graph)
       return await this.fallbackRoute(
-        startNode, endNode, start, end, coastDistanceMeters, via,
+        startNode, endNode, start, end, coastDistanceMeters, via, effectiveDims,
       );
-    } finally {
-      this.vesselDimensions = savedDims;
-    }
   }
 
   /**
@@ -235,7 +229,8 @@ export class RoutingEngine {
     start: { latitude: number; longitude: number },
     end: { latitude: number; longitude: number },
     coastDistanceMeters: number,
-    _via: Array<{ latitude: number; longitude: number }>
+    _via: Array<{ latitude: number; longitude: number }>,
+    dims: VesselDimensions,
   ): Promise<RouteResult> {
     const warnings: RouteWarning[] = [];
     const reachableFromStart = this.db.getReachableNodes(startNode);
@@ -272,7 +267,8 @@ export class RoutingEngine {
           route = await this.astarSearch(
             entry.lat, entry.lon,
             exit.lat, exit.lon,
-            coastDistanceMeters
+            coastDistanceMeters,
+            dims,
           );
         } catch {
           throw new Error(
@@ -304,12 +300,15 @@ export class RoutingEngine {
     end: { latitude: number; longitude: number },
     via: Array<{ latitude: number; longitude: number }>,
     coastDistanceMeters: number,
+    dims: VesselDimensions,
     globalWarnings?: RouteWarning[],
   ): Promise<RouteResult> {
     let currentStart = start;
     const allSegments: RouteResult['features'][0]['properties']['segments'] = [];
     const allCoordinates: [number, number][] = [];
     const warnings: RouteWarning[] = [];
+    let totalDistanceMeters = 0;
+    let totalCostAccum = 0;
 
     // Compute an adaptive margin from the overall span of all waypoints.
     // Water routes can make large lat/lon excursions (e.g. Lisbon→Italy via
@@ -341,7 +340,7 @@ export class RoutingEngine {
         currentStart.latitude, currentStart.longitude,
         nextPoint.latitude, nextPoint.longitude,
         coastDistanceMeters,
-        i, warnings,
+        i, warnings, dims,
         segmentBbox,
       );
       if (!segmentResult) {
@@ -366,6 +365,8 @@ export class RoutingEngine {
       }
 
       allSegments.push(...segmentResult.features[0].properties.segments!);
+      totalDistanceMeters += segmentResult.features[0].properties.totalDistance ?? 0;
+      totalCostAccum += segmentResult.features[0].properties.totalCost ?? 0;
       currentStart = nextPoint;
     }
 
@@ -377,7 +378,7 @@ export class RoutingEngine {
       currentStart.latitude, currentStart.longitude,
       end.latitude, end.longitude,
       coastDistanceMeters,
-      -1, warnings,
+      -1, warnings, dims,
       finalBbox,
     );
 
@@ -394,6 +395,8 @@ export class RoutingEngine {
       allCoordinates.push(...finalResult.features[0].geometry.coordinates.slice(1));
     }
     allSegments.push(...finalResult.features[0].properties.segments!);
+    totalDistanceMeters += finalResult.features[0].properties.totalDistance ?? 0;
+    totalCostAccum += finalResult.features[0].properties.totalCost ?? 0;
 
     const allWarnings = [...warnings, ...(globalWarnings || [])];
 
@@ -403,8 +406,8 @@ export class RoutingEngine {
         type: 'Feature',
         geometry: { type: 'LineString', coordinates: allCoordinates },
         properties: {
-          totalDistance: finalResult.features[0].properties.totalDistance,
-          totalCost: finalResult.features[0].properties.totalCost,
+          totalDistance: totalDistanceMeters,
+          totalCost: totalCostAccum,
           segments: allSegments,
         },
       }],
@@ -429,6 +432,7 @@ export class RoutingEngine {
     coastDistanceMeters: number,
     viaIndex: number,
     warnings: RouteWarning[],
+    dims: VesselDimensions,
     bbox?: BBox,
   ): Promise<RouteResult | null> {
     const label = viaIndex >= 0 ? `Via point ${viaIndex + 1}` : 'Destination';
@@ -441,8 +445,8 @@ export class RoutingEngine {
     while (currentMargin <= segmentMaxMargin) {
       const segmentBbox = bbox ?? bboxFromPoints(startPt, endPt, currentMargin);
       try {
-        const result = await this.astarSearch(startLat, startLon, endLat, endLon, coastDistanceMeters, segmentBbox);
-        this.addViolationWarnings(result, warnings, label, startPt, endPt);
+        const result = await this.astarSearch(startLat, startLon, endLat, endLon, coastDistanceMeters, dims, segmentBbox);
+        this.addViolationWarnings(result, warnings, label, startPt, endPt, dims);
         return result;
       } catch {
         bbox = undefined;
@@ -466,7 +470,7 @@ export class RoutingEngine {
         to: endPt,
       });
       try {
-        const fallback = await this.fallbackRoute(startNode, endNode, startPt, endPt, coastDistanceMeters, []);
+        const fallback = await this.fallbackRoute(startNode, endNode, startPt, endPt, coastDistanceMeters, [], dims);
         if (fallback.warnings) {
           warnings.push(...fallback.warnings);
           fallback.warnings = undefined;
@@ -682,14 +686,16 @@ export class RoutingEngine {
           },
         );
         markOverland(segments.length - 1, edgeSnap.point.lon, edgeSnap.point.lat, userPoint.longitude, userPoint.latitude);
-        route.features[0].properties.totalDistance! += Math.round(edgeSnap.distance + edgePortion + nodeToSnap);
+        // Delta = travel from last route node to snap point + snap point to user.
+        // edgePortion (fraction of the last edge) is already counted in the route cost; don't add it again.
+        route.features[0].properties.totalDistance! += Math.round(edgeSnap.distance + nodeToSnap);
         if (!route.warnings) route.warnings = [];
         route.warnings.push({
           type: 'end_connecting',
           message: `${Math.round(edgeSnap.distance)}m from nearest waterway edge to destination (via edge projection).`,
           from: { latitude: lastCoord[1], longitude: lastCoord[0] },
           to: { latitude: userPoint.latitude, longitude: userPoint.longitude },
-          distanceMeters: Math.round(nodeToSnap + edgePortion),
+          distanceMeters: Math.round(nodeToSnap),
         });
       } else if (!didTruncate) {
         // Fall back to straight line
@@ -743,6 +749,7 @@ export class RoutingEngine {
     endLat: number,
     endLon: number,
     minCoastDistanceMeters: number,
+    dims: VesselDimensions,
     bbox?: BBox,
   ): Promise<RouteResult> {
     let startNode = await this.db.findNearestNode(startLat, startLon);
@@ -752,7 +759,7 @@ export class RoutingEngine {
       throw new Error('Could not find routing nodes near start or end point');
     }
 
-    const minDepth = (this.vesselDimensions.draft || 2.0) + this.config.safetyMarginDraft;
+    const minDepth = (dims.draft || 2.0) + this.config.safetyMarginDraft;
 
     const bearingDeg = (fromLat: number, fromLon: number, toLat: number, toLon: number): number => {
       const dLon = (toLon - fromLon) * Math.PI / 180;
@@ -906,7 +913,7 @@ export class RoutingEngine {
         }
 
         // Apply soft safety constraints
-        const penalty = this.getEdgePenalty(edge, minCoastDistanceMeters);
+        const penalty = this.getEdgePenalty(edge, minCoastDistanceMeters, dims);
         if (penalty === -1) {
           continue;
         }
@@ -940,7 +947,7 @@ export class RoutingEngine {
     if (!goalReached) {
       throw new Error(
         `No route found between the given points with current constraints. ` +
-        `Try reducing minCoastDistance or checking vessel dimensions (draft=${this.vesselDimensions.draft}m, beam=${this.vesselDimensions.beam}m, airDraft=${this.vesselDimensions.airDraft}m).`
+        `Try reducing minCoastDistance or checking vessel dimensions (draft=${dims.draft}m, beam=${dims.beam}m, airDraft=${dims.airDraft}m).`
       );
     }
 
@@ -962,19 +969,19 @@ export class RoutingEngine {
     return await this.buildRouteResult(smoothedPath, path, gScore.get(endNode) || 0);
   }
 
-  private getEdgePenalty(edge: EdgeRow & { lat: number; lon: number }, minCoastDistanceMeters: number): number {
+  private getEdgePenalty(edge: EdgeRow & { lat: number; lon: number }, minCoastDistanceMeters: number, dims: VesselDimensions): number {
     if (edge.crosses_land === 1) return -1;
     if (edge.crosses_obstacle === 1) return -1;
 
     let penalty = 0;
 
-    if (typeof edge.max_air_draft === 'number' && edge.max_air_draft >= 0 && edge.max_air_draft < (this.vesselDimensions.airDraft || 0) + this.config.safetyMarginAirDraft) {
+    if (typeof edge.max_air_draft === 'number' && edge.max_air_draft >= 0 && edge.max_air_draft < (dims.airDraft || 0) + this.config.safetyMarginAirDraft) {
       penalty += 1000000;
     }
 
-    const minDepth = (this.vesselDimensions.draft || 2.0) + this.config.safetyMarginDraft;
+    const minDepth = (dims.draft || 2.0) + this.config.safetyMarginDraft;
     if (typeof edge.min_depth === 'number' && edge.min_depth >= 0 && edge.min_depth < minDepth) penalty += 1000000;
-    if (typeof edge.min_width === 'number' && edge.min_width >= 0 && edge.min_width < (this.vesselDimensions.beam || 4.0) + this.config.safetyMarginBeam) penalty += 1000000;
+    if (typeof edge.min_width === 'number' && edge.min_width >= 0 && edge.min_width < (dims.beam || 4.0) + this.config.safetyMarginBeam) penalty += 1000000;
     if (edge.edge_type_id === EDGE_TYPE_COASTAL && edge.distance_to_land < minCoastDistanceMeters) penalty += 50000;
 
     return penalty;
@@ -1003,15 +1010,21 @@ export class RoutingEngine {
     }
     const dist = this.haversineDistance(lat1, lon1, lat2, lon2);
 
-    const numSamples = Math.max(3, Math.ceil(dist / 50));
+    // Cap samples so very long LOS candidates don't stall the smoother.
+    // 50m spacing gives fine resolution; 60 samples caps at ~3 km per check.
+    const numSamples = Math.min(60, Math.max(3, Math.ceil(dist / 50)));
 
     if ((this.db as any).isLineCrossingLand && (this.db as any).isLineCrossingLand(lat1, lon1, lat2, lon2, numSamples)) {
-        return false; 
+        return false;
     }
 
     const searchRadius = this.config.lineOfSightSearchRadius;
     for (let i = 1; i < numSamples; i++) {
       const t = i / numSamples;
+      // Pure linear interpolation in degree-space: this correctly places points
+      // along the straight segment between the two graph nodes. Cosine correction
+      // belongs only in distance measurement (haversineDistance), not here —
+      // applying it to lon would displace samples off the actual path.
       const lat = lat1 + (lat2 - lat1) * t;
       const lon = lon1 + (lon2 - lon1) * t;
       if (!this.db.hasNodeWithinRadius(lat, lon, searchRadius)) {
@@ -1084,7 +1097,7 @@ export class RoutingEngine {
     const coords = feature.geometry.coordinates;
     const totalDistance = feature.properties.totalDistance!;
     const totalCost = feature.properties.totalCost!;
-    const crossings = feature.properties.crossings;
+    const crossings = route.crossings;
 
     const segmentFeatures: RouteResult['features'] = [];
 
@@ -1103,10 +1116,6 @@ export class RoutingEngine {
         distance: seg.distance,
       };
 
-      if (i === 0 && crossings) {
-        segmentProps.crossings = crossings;
-      }
-
       segmentFeatures.push({
         type: 'Feature',
         geometry: {
@@ -1120,6 +1129,7 @@ export class RoutingEngine {
     route.features = segmentFeatures;
     route.totalDistance = totalDistance;
     route.totalCost = totalCost;
+    if (crossings) route.crossings = crossings;
   }
 
   /**
@@ -1188,6 +1198,7 @@ export class RoutingEngine {
 
     return {
       type: 'FeatureCollection',
+      crossings: crossings.length > 0 ? crossings : undefined,
       features: [
         {
           type: 'Feature',
@@ -1199,7 +1210,6 @@ export class RoutingEngine {
             totalDistance,
             totalCost,
             segments,
-            crossings,
           },
         },
       ],
@@ -1274,13 +1284,14 @@ export class RoutingEngine {
     warnings: RouteWarning[],
     label: string,
     startPt: { latitude: number; longitude: number },
-    endPt: { latitude: number; longitude: number }
+    endPt: { latitude: number; longitude: number },
+    dims: VesselDimensions,
   ) {
     if (!result.features[0] || !result.features[0].properties.segments) return;
     const coords = result.features[0].geometry.coordinates;
     const segments = result.features[0].properties.segments!;
-    const minDepth = (this.vesselDimensions.draft || 2.0) + this.config.safetyMarginDraft;
-    const airDraft = (this.vesselDimensions.airDraft || 0) + this.config.safetyMarginAirDraft;
+    const minDepth = (dims.draft || 2.0) + this.config.safetyMarginDraft;
+    const airDraft = (dims.airDraft || 0) + this.config.safetyMarginAirDraft;
 
     let totalViolationSegments = 0;
     let totalViolationDist = 0;
@@ -1295,18 +1306,9 @@ export class RoutingEngine {
       const airDraftViolation = seg.maxAirDraft >= 0 && seg.maxAirDraft < airDraft;
 
       if (depthViolation || airDraftViolation) {
-        const reasons: string[] = [];
-        if (depthViolation) reasons.push(`depth ${seg.minDepth}m < required ${minDepth}m`);
-        if (airDraftViolation) reasons.push(`air draft ${seg.maxAirDraft}m < required ${airDraft}m`);
         const fromCoord = coords[i];
         const toCoord = coords[i + 1];
         if (!fromCoord || !toCoord) continue;
-        warnings.push({
-          type: 'via_constrained',
-          message: `Route to ${label}: ${reasons.join('; ')}`,
-          from: { latitude: fromCoord[1], longitude: fromCoord[0] },
-          to: { latitude: toCoord[1], longitude: toCoord[0] },
-        });
 
         totalViolationSegments++;
         totalViolationDist += seg.distance || 0;
@@ -1413,8 +1415,13 @@ private async smoothPath(path: number[]): Promise<number[]> {
       nodeMap.set(id, n);
     }
 
+    // Lookahead cap: any LOS shortcut spanning > 300 graph nodes covers hundreds
+    // of km and is very unlikely to be valid. Capping avoids O(N²) worst case.
+    const MAX_LOOKAHEAD = 300;
+
     while (i < path.length - 1) {
-      let j = path.length - 1;
+      const maxJ = Math.min(path.length - 1, i + MAX_LOOKAHEAD);
+      let j = maxJ;
       while (j > i + 1) {
         let skippingInland = false;
         for (let k = i + 1; k < j; k++) {

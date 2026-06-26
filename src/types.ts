@@ -73,6 +73,7 @@ export interface RouteResult {
   warnings?: RouteWarning[];
   totalDistance?: number;
   totalCost?: number;
+  crossings?: RouteCrossing[];
   features: Array<{
     type: 'Feature';
     geometry: {
@@ -98,7 +99,6 @@ export interface RouteResult {
         trafficMode: number;
         edgeTypeId?: number;
       }>;
-      crossings?: RouteCrossing[];
     };
   }>;
 }

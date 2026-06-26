@@ -293,12 +293,15 @@ export class RoutingDatabase {
       this.nodes.delete(nid);
     }
 
+    const deletedNodeSet = new Set(deletedNodeIds);
+    const deletedEdgeSet = new Set(deletedEdges.map(d => `${d.source}:${d.target}`));
+
     const allEdges: Array<EdgeRow> = await this.sendMessage('loadEdges');
     for (const edge of allEdges) {
       // Skip if source or target was deleted
-      if (deletedNodeIds.includes(edge.source) || deletedNodeIds.includes(edge.target)) continue;
+      if (deletedNodeSet.has(edge.source) || deletedNodeSet.has(edge.target)) continue;
       // Skip if this specific edge was deleted
-      if (deletedEdges.some(d => d.source === edge.source && d.target === edge.target)) continue;
+      if (deletedEdgeSet.has(`${edge.source}:${edge.target}`)) continue;
       const s = this.nodes.get(edge.source);
       const t = this.nodes.get(edge.target);
       if (!s || !t) continue;
@@ -431,7 +434,7 @@ export class RoutingDatabase {
     const centerCol = Math.floor(longitude / cellSize);
     const centerRow = Math.floor(latitude / cellSize);
 
-    const visitedEdges = new Set<number>();
+    const visitedEdges = new Set<string>();
     let best: EdgeSnapResult | null = null;
     let bestDist = maxDistMeters;
 
@@ -446,7 +449,7 @@ export class RoutingDatabase {
           if (!edges) continue;
 
           for (const edge of edges) {
-            const edgeKey = edge.source * 1000000 + edge.target;
+            const edgeKey = `${edge.source}:${edge.target}`;
             if (visitedEdges.has(edgeKey)) continue;
             visitedEdges.add(edgeKey);
 
@@ -479,21 +482,29 @@ export class RoutingDatabase {
     bx: number, by: number,
     px: number, py: number,
   ): { fraction: number; point: { lat: number; lon: number }; distance: number } {
-    const dx = bx - ax;
+    // Scale longitude differences by cos(midLat) so that 1° lon and 1° lat
+    // have equal weight in the projection. Without this correction the result
+    // is distorted above ~40° latitude (1° lon < 1° lat in real distance).
+    const midLat = ((ay + by) / 2) * Math.PI / 180;
+    const cosLat = Math.cos(midLat);
+
+    const dx = (bx - ax) * cosLat;
     const dy = by - ay;
     const lenSq = dx * dx + dy * dy;
 
     if (lenSq < 1e-12) {
-      const d = this.haversineDistance(py, px, ay, ax);
+      const d = this.haversineMeters(py, px, ay, ax);
       return { fraction: 0, point: { lat: ay, lon: ax }, distance: d };
     }
 
-    let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
-    t = Math.max(0, Math.min(1, t));
+    const qx = (px - ax) * cosLat;
+    const qy = py - ay;
+    const t = Math.max(0, Math.min(1, (qx * dx + qy * dy) / lenSq));
 
-    const projLon = ax + t * dx;
-    const projLat = ay + t * dy;
-    const dist = this.haversineDistance(py, px, projLat, projLon);
+    // Back-project to geographic coordinates
+    const projLon = ax + t * (bx - ax);
+    const projLat = ay + t * (by - ay);
+    const dist = this.haversineMeters(py, px, projLat, projLon);
 
     return { fraction: t, point: { lat: projLat, lon: projLon }, distance: dist };
   }
@@ -510,6 +521,9 @@ export class RoutingDatabase {
       const edges = this.edgesBySource.get(current);
       if (edges) {
         for (const edge of edges) {
+          // TRAFFIC_ONE_WAY_REV (=2) means only target→source is legal;
+          // do not follow it source→target or reachability is wrong.
+          if (edge.traffic_mode === TRAFFIC_ONE_WAY_REV) continue;
           if (!visited.has(edge.target)) {
             visited.add(edge.target);
             queue.push(edge.target);
@@ -522,21 +536,20 @@ export class RoutingDatabase {
 
   async searchPois(query: string, maxResults: number = 20): Promise<PoiResult[]> {
     const pattern = query.toLowerCase();
-    const results: PoiResult[] = [];
-    for (const row of this.pois) {
-      if (row.name.toLowerCase().includes(pattern)) {
-        results.push({
-          id: row.id,
-          name: row.name,
-          typeId: row.type_id,
-          properties: row.properties ? JSON.parse(row.properties) : {},
-          latitude: row.lat,
-          longitude: row.lon,
-        });
-        if (results.length >= maxResults) break;
-      }
-    }
-    return results.sort((a, b) => a.name.localeCompare(b.name));
+    // Sort before slicing so results are alphabetically consistent regardless
+    // of the order rows were inserted into the database.
+    return this.pois
+      .filter(row => row.name.toLowerCase().includes(pattern))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .slice(0, maxResults)
+      .map(row => ({
+        id: row.id,
+        name: row.name,
+        typeId: row.type_id,
+        properties: row.properties ? JSON.parse(row.properties) : {},
+        latitude: row.lat,
+        longitude: row.lon,
+      }));
   }
 
   async getStats(): Promise<{ nodes: number; edges: number; pois: number }> {
@@ -778,7 +791,10 @@ export class RoutingDatabase {
         if (typeof edge.max_air_draft === 'number' && edge.max_air_draft >= 0) maxAirDraft = Math.min(maxAirDraft, edge.max_air_draft);
         if (typeof edge.min_width === 'number' && edge.min_width >= 0) minWidth = Math.min(minWidth, edge.min_width);
         if (edge.is_fairway) isFairway = true;
-        trafficMode = Math.min(trafficMode, edge.traffic_mode);
+        // Preserve the most restrictive traffic direction across sub-edges.
+        // REV (2) beats FWD (1) beats TWO_WAY (0) — never collapse to two-way.
+        if (edge.traffic_mode === TRAFFIC_ONE_WAY_REV) trafficMode = TRAFFIC_ONE_WAY_REV;
+        else if (edge.traffic_mode === TRAFFIC_ONE_WAY_FWD && trafficMode !== TRAFFIC_ONE_WAY_REV) trafficMode = TRAFFIC_ONE_WAY_FWD;
         edgeTypeId = edge.edge_type_id;
         if (edge.crosses_land === 1) crossesLand = 1;
         if (edge.crosses_obstacle === 1) crossesObstacle = 1;
@@ -850,9 +866,9 @@ export class RoutingDatabase {
 
   async deleteNode(dbIndex: number, nodeId: number): Promise<void> {
     this.edgesBySource.delete(nodeId);
-    for (const [, edges] of this.edgesBySource) {
-      const idx = edges.findIndex(e => e.target === nodeId);
-      if (idx >= 0) edges.splice(idx, 1);
+    for (const [src, edges] of this.edgesBySource) {
+      const filtered = edges.filter(e => e.target !== nodeId);
+      if (filtered.length !== edges.length) this.edgesBySource.set(src, filtered);
     }
     this.nodes.delete(nodeId);
     await this.sendMessage('deleteNode', { dbIndex, nodeId });
