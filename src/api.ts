@@ -104,6 +104,9 @@ export class ApiHandler {
     // GET /signalk/v1/api/router/graph/databases — list loaded DB filenames for editing
     this.router.get('/graph/databases', this.handleGraphDatabases.bind(this));
 
+    // GET /signalk/v1/api/router/graph/overlay/stats — overlay edit counts
+    this.router.get('/graph/overlay/stats', this.handleOverlayStats.bind(this));
+
     // Graph editor endpoints (all POST with manual auth check)
     this.router.post('/graph/nodes/:id', this.handleUpsertNode.bind(this));
     this.router.post('/graph/nodes/:id/delete', this.handleDeleteNode.bind(this));
@@ -408,6 +411,22 @@ export class ApiHandler {
     try {
       const list = await this.db!.getDatabaseList();
       res.json({ databases: list });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: message });
+      next(error);
+    }
+  }
+
+  /**
+   * Return overlay edit counts for the editor status bar.
+   * GET /signalk/v1/api/router/graph/overlay/stats
+   */
+  private async handleOverlayStats(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+    try {
+      const stats = await this.db!.getOverlayStats();
+      res.json(stats);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: message });

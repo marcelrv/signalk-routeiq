@@ -552,6 +552,10 @@ export class RoutingDatabase {
       }));
   }
 
+  async getOverlayStats(): Promise<{ nodes: number; edges: number; deletedNodes: number; deletedEdges: number }> {
+    return this.sendMessage('getOverlayStats');
+  }
+
   async getStats(): Promise<{ nodes: number; edges: number; pois: number }> {
     let edgeCount = 0;
     for (const edges of this.edgesBySource.values()) {
@@ -568,14 +572,15 @@ export class RoutingDatabase {
     minLat: number, minLon: number,
     maxLat: number, maxLon: number,
     limit: number = 5000,
-  ): Promise<Array<{ id: number; lat: number; lon: number; resolution: number; min_depth: number }>> {
-    const results: Array<{ id: number; lat: number; lon: number; resolution: number; min_depth: number }> = [];
+  ): Promise<Array<{ id: number; lat: number; lon: number; resolution: number; min_depth: number; region_id: number }>> {
+    const results: Array<{ id: number; lat: number; lon: number; resolution: number; min_depth: number; region_id: number }> = [];
     for (const [id, c] of this.nodes) {
       if (c.lat >= minLat && c.lat <= maxLat && c.lon >= minLon && c.lon <= maxLon) {
         results.push({
           id, lat: c.lat, lon: c.lon,
           resolution: c.resolution,
           min_depth: c.nodeDepth,
+          region_id: c.regionId,
         });
         if (results.length >= limit) break;
       }

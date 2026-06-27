@@ -139,11 +139,30 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         parentPort!.postMessage({ id, type, result: rows });
         break;
       }
+      case 'getOverlayStats': {
+        if (!overlayHandle) {
+          parentPort!.postMessage({ id, type, result: { nodes: 0, edges: 0, deletedNodes: 0, deletedEdges: 0 } });
+          break;
+        }
+        const oNodes = (overlayHandle.db.prepare('SELECT COUNT(*) as c FROM nodes').get() as { c: number }).c;
+        const oEdges = (overlayHandle.db.prepare('SELECT COUNT(*) as c FROM edges').get() as { c: number }).c;
+        const oDelNodes = (overlayHandle.db.prepare('SELECT COUNT(*) as c FROM deleted_nodes').get() as { c: number }).c;
+        const oDelEdges = (overlayHandle.db.prepare('SELECT COUNT(*) as c FROM deleted_edges').get() as { c: number }).c;
+        parentPort!.postMessage({ id, type, result: { nodes: oNodes, edges: oEdges, deletedNodes: oDelNodes, deletedEdges: oDelEdges } });
+        break;
+      }
       case 'loadNodes': {
         const regionIdCol = hasRegionId ? 'region_id' : '0 AS region_id';
         const allNodes: NodeRow[] = [];
         for (const h of handles) {
           allNodes.push(...h.db.prepare(`SELECT id, lat, lon, node_depth, resolution, ${regionIdCol} FROM nodes`).all() as unknown as NodeRow[]);
+        }
+        // Merge in overlay-added nodes (region_id = 0)
+        if (overlayHandle) {
+          const overlayNodes = overlayHandle.db.prepare('SELECT id, lat, lon, node_depth, resolution FROM nodes').all() as unknown as Array<{ id: number; lat: number; lon: number; node_depth: number; resolution: number }>;
+          for (const n of overlayNodes) {
+            allNodes.push({ ...n, region_id: 0 } as NodeRow);
+          }
         }
         parentPort!.postMessage({ id, type, result: allNodes });
         break;
@@ -160,6 +179,15 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
              FROM edges`
           ).all() as unknown as EdgeRow[];
           allEdges = allEdges.concat(edges);
+        }
+        // Merge in overlay-added edges
+        if (overlayHandle) {
+          const overlayEdges = overlayHandle.db.prepare(
+            `SELECT source, target, distance, min_depth, max_air_draft, min_width,
+                    cost_factor, distance_to_land, edge_type_id, traffic_mode
+             FROM edges`
+          ).all() as unknown as EdgeRow[];
+          allEdges = allEdges.concat(overlayEdges);
         }
         const CHUNK = 50000;
         for (let i = 0; i < allEdges.length; i += CHUNK) {

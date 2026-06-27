@@ -912,15 +912,15 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 <!-- Graph Editor Panel (floating) -->
 <div id="editor-panel" class="panel" style="display:none;bottom:80px;right:20px;width:320px;max-height:50vh;overflow-y:auto;z-index:2001">
   <div class="panel-title">Graph Editor</div>
-  <div id="editor-db-select" style="margin-bottom:8px">
-    <label style="font-size:11px;color:#6d96c0">Database</label>
-    <select id="editor-db-selector" style="width:100%;background:rgba(255,255,255,0.07);border:1px solid rgba(79,148,212,0.4);border-radius:4px;padding:5px 8px;color:#e0edf5;font-size:12px;outline:none;margin-top:2px"></select>
+  <div id="editor-overlay-info" style="margin-bottom:8px;padding:5px 8px;background:rgba(139,92,246,0.12);border:1px solid rgba(139,92,246,0.3);border-radius:5px;font-size:11px;color:#c4b5fd">
+    <span style="font-weight:600">&#x270F; user-edits.sqlite</span>
+    <span id="editor-overlay-stats" style="margin-left:6px;color:#9bb8da"></span>
   </div>
   <div id="editor-status" style="font-size:11px;color:#6d96c0;margin-bottom:6px;padding:4px 0">&mdash;</div>
   <div id="editor-toolbar" style="display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap">
     <button id="editor-add-node-btn" class="editor-btn">+ Node</button>
     <button id="editor-add-edge-btn" class="editor-btn">+ Edge</button>
-    <button id="editor-cancel-btn" class="editor-btn" style="display:none">Cancel</button>
+    <button id="editor-cancel-btn" class="editor-btn" style="display:none">&#x2715; Cancel</button>
   </div>
   <div id="editor-props" style="display:none;border-top:1px solid rgba(79,148,212,0.15);padding-top:8px">
     <div id="editor-props-header" style="font-size:11px;font-weight:600;color:#9bb8da;margin-bottom:6px"></div>
@@ -1066,8 +1066,6 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     routeName:    '',         // computed route name for display/export
     // Graph editor state
     editMode:     false,
-    editDatabases: [],        // { index, filename }
-    editDbIndex:  0,
     selectedItem: null,       // { type: 'node'|'edge', data: ... }
     selectedLayer: null,      // Leaflet layer for highlight
     editAddMode:  null,       // 'node' | 'edge' | null
@@ -1155,11 +1153,19 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       .then(data => {
         if (!data || !data.nodes) return;
         for (const n of data.nodes) {
-          const color = n.min_depth > 2 ? '#3b8fd4' : n.min_depth >= 1.2 ? '#eab308' : n.min_depth >= 0 ? '#ef4444' : '#888888';
+          const isOverlay = n.region_id === 0 && state.editMode;
+          const color = isOverlay ? '#8b5cf6'
+            : n.min_depth > 2 ? '#3b8fd4' : n.min_depth >= 1.2 ? '#eab308' : n.min_depth >= 0 ? '#ef4444' : '#888888';
           const radius = n.resolution > 0 ? Math.max(3, Math.min(8, n.resolution * 1000)) : 5;
-          const marker = L.circleMarker([n.lat, n.lon], {
-            radius, color, fillColor: color, fillOpacity: 0.6, weight: 1.5, opacity: 0.8,
-          });
+          const marker = isOverlay
+            ? L.marker([n.lat, n.lon], { icon: L.divIcon({
+                className: '',
+                html: '<div style="width:18px;height:18px;background:#8b5cf6;border:2px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.5)">O</div>',
+                iconSize: [18, 18], iconAnchor: [9, 9],
+              }) })
+            : L.circleMarker([n.lat, n.lon], {
+                radius, color, fillColor: color, fillOpacity: 0.6, weight: 1.5, opacity: 0.8,
+              });
           if (state.editMode) {
             marker._nodeData = n;
             marker.on('click', function (e) {
@@ -1356,7 +1362,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       graphVisible = true;
       document.getElementById('edges-cb').checked = true;
       edgesVisible = true;
-      fetchDatabases();
+      fetchOverlayStats();
       fetchGraphNodes();
       fetchEdges();
     } else {
@@ -1372,24 +1378,17 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     }
   }
 
-  function fetchDatabases() {
-    fetch(getApiBase() + '/signalk/v1/api/router/graph/databases')
+  function fetchOverlayStats() {
+    fetch(getApiBase() + '/signalk/v1/api/router/graph/overlay/stats')
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
-        if (!data || !data.databases) return;
-        state.editDatabases = data.databases;
-        var sel = document.getElementById('editor-db-selector');
-        sel.innerHTML = data.databases.map(function (d, i) {
-          return '<option value="' + i + '">' + d.filename + '</option>';
-        }).join('');
-        if (data.databases.length > 1) {
-          var statusEl = document.getElementById('editor-status');
-          statusEl.textContent = 'Multiple databases loaded. Select one to edit.';
-        }
-        sel.addEventListener('change', function () {
-          state.editDbIndex = parseInt(this.value, 10);
-          clearEditorSelection();
-        });
+        if (!data) return;
+        var parts = [];
+        if (data.nodes > 0) parts.push(data.nodes + ' node' + (data.nodes !== 1 ? 's' : '') + ' added');
+        if (data.edges > 0) parts.push(data.edges + ' edge' + (data.edges !== 1 ? 's' : '') + ' added');
+        if (data.deletedNodes > 0) parts.push(data.deletedNodes + ' deleted');
+        var el = document.getElementById('editor-overlay-stats');
+        el.textContent = parts.length > 0 ? '(' + parts.join(', ') + ')' : '(no edits yet)';
       })
       .catch(function () {});
   }
@@ -1467,11 +1466,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         '<option value="1"' + (edgeData.traffic_mode === 1 ? ' selected' : '') + '>One-way fwd</option>' +
         '<option value="2"' + (edgeData.traffic_mode === 2 ? ' selected' : '') + '>One-way rev</option>' +
       '</select>' +
-      '<label>Is Fairway</label>' +
-      '<select id="edit-edge-fairway">' +
-        '<option value="0"' + (!edgeData.is_fairway ? ' selected' : '') + '>No</option>' +
-        '<option value="1"' + (edgeData.is_fairway ? ' selected' : '') + '>Yes</option>' +
-      '</select>' +
+      '<label title="0.8=fairway (preferred), 1.2=open water, higher=penalise">Cost Factor</label>' +
+      '<input id="edit-edge-cost" type="number" step="0.1" min="0.1" value="' + (edgeData.cost_factor != null ? edgeData.cost_factor : 1.2) + '" />' +
       '<label style="margin-top:6px;color:#5f7a9a">Source</label><input type="text" value="' + edgeData.source + '" readonly style="color:#6d96c0" />' +
       '<label style="color:#5f7a9a">Target</label><input type="text" value="' + edgeData.target + '" readonly style="color:#6d96c0" />';
     document.getElementById('editor-props').style.display = '';
@@ -1489,12 +1485,11 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   function saveEditedItem() {
     var item = state.selectedItem;
     if (!item) return;
-    var dbIndex = state.editDbIndex;
     if (item.type === 'node') {
       var depth = parseFloat(document.getElementById('edit-node-depth').value);
       var res = parseFloat(document.getElementById('edit-node-res').value);
       fetch(getApiBase() + '/signalk/v1/api/router/graph/nodes/' + item.data.id, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dbIndex: dbIndex, node_depth: isNaN(depth) ? -1 : depth, resolution: isNaN(res) ? 0 : res }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dbIndex: 0, node_depth: isNaN(depth) ? -1 : depth, resolution: isNaN(res) ? 0 : res }),
       })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
         .then(function () {
@@ -1506,13 +1501,13 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         .catch(function (r) { editorFetchError(r, 'Save'); });
     } else if (item.type === 'edge') {
       var body = {
-        dbIndex: dbIndex,
+        dbIndex: 0,
         distance: parseFloat(document.getElementById('edit-edge-dist').value),
         min_depth: parseFloat(document.getElementById('edit-edge-depth').value),
         max_air_draft: parseFloat(document.getElementById('edit-edge-air').value),
         min_width: parseFloat(document.getElementById('edit-edge-width').value),
         traffic_mode: parseInt(document.getElementById('edit-edge-traffic').value, 10),
-        is_fairway: parseInt(document.getElementById('edit-edge-fairway').value, 10),
+        cost_factor: parseFloat(document.getElementById('edit-edge-cost').value),
       };
       fetch(getApiBase() + '/signalk/v1/api/router/graph/edges/' + item.data.source + '/' + item.data.target, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -1530,11 +1525,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   function deleteEditedItem() {
     var item = state.selectedItem;
     if (!item) return;
-    var dbIndex = state.editDbIndex;
     if (!confirm('Delete this ' + item.type + '?')) return;
     if (item.type === 'node') {
       fetch(getApiBase() + '/signalk/v1/api/router/graph/nodes/' + item.data.id + '/delete', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dbIndex: dbIndex }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dbIndex: 0 }),
       })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
         .then(function () {
@@ -1542,17 +1536,19 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           clearEditorSelection();
           fetchGraphNodes();
           fetchEdges();
+          fetchOverlayStats();
         })
         .catch(function (r) { editorFetchError(r, 'Delete'); });
     } else if (item.type === 'edge') {
       fetch(getApiBase() + '/signalk/v1/api/router/graph/edges/' + item.data.source + '/' + item.data.target + '/delete', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dbIndex: dbIndex }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dbIndex: 0 }),
       })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
         .then(function () {
           setEditorStatus('Edge deleted');
           clearEditorSelection();
           fetchEdges();
+          fetchOverlayStats();
         })
         .catch(function (r) { editorFetchError(r, 'Delete'); });
     }
@@ -1594,34 +1590,22 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         setEditorStatus('Source and target must be different');
         return;
       }
-      var dbIndex = state.editDbIndex;
-      var body = {
-        dbIndex: dbIndex,
-        source: sourceId,
-        target: targetId,
-        distance: 0,
-        min_depth: -1,
-        max_air_draft: -1,
-        min_width: -1,
-        is_fairway: 0,
-        distance_to_land: 0,
-        edge_type_id: 0,
-        traffic_mode: 0,
-      };
+      if (state.selectedLayer && state.selectedLayer.setStyle && state.selectedLayer._editOrigStyle) {
+        state.selectedLayer.setStyle(state.selectedLayer._editOrigStyle);
+        state.selectedLayer = null;
+      }
       fetch(getApiBase() + '/signalk/v1/api/router/graph/edges/' + sourceId + '/' + targetId, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dbIndex: dbIndex, distance: 0, min_depth: -1, max_air_draft: -1, min_width: -1, is_fairway: 0, distance_to_land: 0, edge_type_id: 0, traffic_mode: 0 }),
+        body: JSON.stringify({ dbIndex: 0, distance: 0, min_depth: -1, max_air_draft: -1, min_width: -1, cost_factor: 1.2, distance_to_land: 0, edge_type_id: 0, traffic_mode: 0 }),
       })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
         .then(function () {
-          setEditorStatus('Edge ' + sourceId + '\u2192' + targetId + ' added');
-          cancelAddMode();
-          if (state.selectedLayer && state.selectedLayer.setStyle && state.selectedLayer._editOrigStyle) {
-            state.selectedLayer.setStyle(state.selectedLayer._editOrigStyle);
-            state.selectedLayer = null;
-          }
+          setEditorStatus('Edge ' + sourceId + '\u2192' + targetId + ' added \u2014 click next source node');
+          // Stay in add-edge mode; reset source so user can immediately add another edge
+          state.editAddSource = null;
           fetchEdges();
+          fetchOverlayStats();
         })
         .catch(function (r) { editorFetchError(r, 'Add edge'); });
     }
@@ -1630,30 +1614,21 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   // Map click: add-node mode or set start/dest
   map.on('click', function (e) {
     if (state.editAddMode === 'node') {
-      var dbIndex = state.editDbIndex;
       var lat = e.latlng.lat;
       var lon = e.latlng.lng;
       var latInt = Math.round((Math.round(lat * 100000) / 100000 + 90) * 100000);
       var lonInt = Math.round((Math.round(lon * 100000) / 100000 + 180) * 100000);
       var nodeId = 0 + (latInt * 36000000) + lonInt;
-      var body = {
-        dbIndex: dbIndex,
-        id: nodeId,
-        lat: lat,
-        lon: lon,
-        node_depth: -1,
-        resolution: 0,
-      };
       fetch(getApiBase() + '/signalk/v1/api/router/graph/nodes/' + nodeId, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dbIndex: dbIndex, lat: lat, lon: lon, node_depth: -1, resolution: 0 }),
+        body: JSON.stringify({ dbIndex: 0, lat: lat, lon: lon, node_depth: -1, resolution: 0 }),
       })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
         .then(function () {
-          setEditorStatus('Node ' + nodeId + ' added');
-          cancelAddMode();
+          setEditorStatus('Node placed — click to place another (Cancel to stop)');
           fetchGraphNodes();
+          fetchOverlayStats();
         })
         .catch(function (r) { editorFetchError(r, 'Add node'); });
     } else {
