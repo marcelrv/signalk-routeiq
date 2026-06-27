@@ -896,6 +896,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         <div id="dm-error" style="display:none;color:#e07070;font-size:13px;padding:12px;background:rgba(200,70,70,0.1);border-radius:6px"></div>
       </div>
       <div id="dm-tab-installed" style="display:none">
+        <div id="dm-installed-minimap" style="margin-bottom:12px;border-radius:8px;overflow:hidden;background:#0b1a2b;height:100px;position:relative">
+          <canvas id="dm-installed-map-canvas" width="660" height="100" style="width:100%;height:100%"></canvas>
+        </div>
         <div id="dm-installed-loading" style="color:#6d96c0;font-size:13px;padding:20px 0;text-align:center">Loading installed databases...</div>
         <div id="dm-installed-list" style="display:none"></div>
         <div id="dm-installed-note" style="display:none;margin-top:12px;padding:8px 12px;background:rgba(59,143,212,0.08);border-radius:6px;font-size:12px;color:#6d96c0;border:1px solid rgba(79,148,212,0.2)">
@@ -3334,8 +3337,30 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   var dmError = document.getElementById('dm-error');
   var dmFilter = document.getElementById('dm-filter');
   var dmCanvas = document.getElementById('dm-map-canvas');
+  var dmInstalledCanvas = document.getElementById('dm-installed-map-canvas');
   var dmAvailableRegions = []; // cached catalog regions
   var dmInstalledRegions = []; // cached installed databases
+
+  // Bundled world-countries backdrop (drawn behind region polygons in the minimap).
+  // Loaded once from the plugin's own public dir, so it works fully offline.
+  var dmCoastline = null;        // parsed GeoJSON FeatureCollection, or null until loaded
+  var dmCoastlineLoading = false;
+  function dmLoadCoastline() {
+    if (dmCoastline || dmCoastlineLoading) return;
+    dmCoastlineLoading = true;
+    var url = (PLUGIN_PATH || '.') + '/world-countries.json';
+    fetch(url, { signal: AbortSignal.timeout(15000) })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(geo) {
+        dmCoastlineLoading = false;
+        if (!geo || !geo.features) return;
+        dmCoastline = geo;
+        // Re-render whichever minimaps already have data, now with the backdrop
+        if (dmAvailableRegions.length > 0) dmRenderMiniMap(dmCanvas, dmAvailableRegions);
+        if (dmInstalledRegions.length > 0) dmRenderMiniMap(dmInstalledCanvas, dmInstalledRegions);
+      })
+      .catch(function() { dmCoastlineLoading = false; }); // backdrop is optional; ignore failures
+  }
 
   function getCatalogUrl() {
     return getApiBase() + '/signalk/v1/api/router/databases/available';
@@ -3347,16 +3372,27 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
   var DM_COLORS = ['#3b8fd4','#22c55e','#f59e0b','#ef4444','#8b5cf6','#14b8a6','#ec4899','#f97316','#06b6d4','#a855f7'];
 
-  function dmRenderMiniMap(regions) {
-    var ctx = dmCanvas.getContext('2d');
-    var w = dmCanvas.width, h = dmCanvas.height;
+  // Normalize a region/db record to a common { bbox, geom } shape.
+  // Catalog (Available) uses snake_case (bounding_box / boundary_geometry);
+  // installed DBs use camelCase (boundingBox / boundaryGeometry).
+  function dmRegionGeo(r) {
+    return {
+      bbox: r.bounding_box || r.boundingBox || null,
+      geom: r.boundary_geometry || r.boundaryGeometry || null,
+    };
+  }
+
+  function dmRenderMiniMap(canvas, regions) {
+    if (!canvas) return;
+    var ctx = canvas.getContext('2d');
+    var w = canvas.width, h = canvas.height;
     ctx.clearRect(0, 0, w, h);
     if (!regions || regions.length === 0) return;
 
     // Determine world bounds from data (with padding)
     var minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
     for (var i = 0; i < regions.length; i++) {
-      var bb = regions[i].bounding_box;
+      var bb = dmRegionGeo(regions[i]).bbox;
       if (!bb) continue;
       if (bb.min_lat < minLat) minLat = bb.min_lat;
       if (bb.max_lat > maxLat) maxLat = bb.max_lat;
@@ -3364,32 +3400,62 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       if (bb.max_lon > maxLon) maxLon = bb.max_lon;
     }
     if (minLat === 90) return;
-    var padLon = (maxLon - minLon) * 0.05 || 1;
-    var padLat = (maxLat - minLat) * 0.05 || 1;
+    // Pad generously so neighbouring land is visible for geographic context
+    var padLon = (maxLon - minLon) * 0.4 || 2;
+    var padLat = (maxLat - minLat) * 0.4 || 2;
     minLon -= padLon; maxLon += padLon;
     minLat -= padLat; maxLat += padLat;
 
     function x(lon) { return (lon - minLon) / (maxLon - minLon) * w; }
     function y(lat) { return h - (lat - minLat) / (maxLat - minLat) * h; }
 
-    // Draw land background (simple grid for reference)
-    ctx.strokeStyle = 'rgba(79,148,212,0.06)';
-    ctx.lineWidth = 0.5;
-    for (var lon = Math.ceil(minLon / 10) * 10; lon <= maxLon; lon += 10) {
-      ctx.beginPath(); ctx.moveTo(x(lon), 0); ctx.lineTo(x(lon), h); ctx.stroke();
-    }
-    for (var lat = Math.ceil(minLat / 10) * 10; lat <= maxLat; lat += 10) {
-      ctx.beginPath(); ctx.moveTo(0, y(lat)); ctx.lineTo(w, y(lat)); ctx.stroke();
+    // Draw country/coastline backdrop (filled land + faint borders) if loaded
+    ctx.globalAlpha = 1;
+    if (dmCoastline && dmCoastline.features) {
+      ctx.fillStyle = '#1c3047';      // land fill, slightly lighter than the water bg
+      ctx.strokeStyle = 'rgba(120,170,210,0.35)'; // country borders
+      ctx.lineWidth = 0.5;
+      for (var fi = 0; fi < dmCoastline.features.length; fi++) {
+        var g = dmCoastline.features[fi].geometry;
+        if (!g) continue;
+        var polys = g.type === 'Polygon' ? [g.coordinates]
+                  : g.type === 'MultiPolygon' ? g.coordinates : [];
+        for (var pi = 0; pi < polys.length; pi++) {
+          var rings = polys[pi];
+          ctx.beginPath();
+          for (var ri = 0; ri < rings.length; ri++) {
+            var ring = rings[ri];
+            for (var k = 0; k < ring.length; k++) {
+              var px = x(ring[k][0]), py = y(ring[k][1]);
+              if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            }
+            ctx.closePath();
+          }
+          ctx.fill('evenodd');
+          ctx.stroke();
+        }
+      }
+    } else {
+      // Fallback reference grid until the backdrop loads
+      ctx.strokeStyle = 'rgba(79,148,212,0.06)';
+      ctx.lineWidth = 0.5;
+      for (var lon = Math.ceil(minLon / 10) * 10; lon <= maxLon; lon += 10) {
+        ctx.beginPath(); ctx.moveTo(x(lon), 0); ctx.lineTo(x(lon), h); ctx.stroke();
+      }
+      for (var lat = Math.ceil(minLat / 10) * 10; lat <= maxLat; lat += 10) {
+        ctx.beginPath(); ctx.moveTo(0, y(lat)); ctx.lineTo(w, y(lat)); ctx.stroke();
+      }
     }
 
     // Draw region polygons or bboxes
     for (var i = 0; i < regions.length; i++) {
       var r = regions[i];
+      var rg = dmRegionGeo(r);
       var color = DM_COLORS[i % DM_COLORS.length];
       ctx.fillStyle = color;
       ctx.globalAlpha = 0.3;
 
-      var geom = r.boundary_geometry;
+      var geom = rg.geom;
       if (geom && geom.type === 'Polygon') {
         ctx.beginPath();
         var coords = geom.coordinates[0];
@@ -3403,8 +3469,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.5;
         ctx.stroke();
-      } else if (r.bounding_box) {
-        var bb = r.bounding_box;
+      } else if (rg.bbox) {
+        var bb = rg.bbox;
         ctx.fillRect(x(bb.min_lon), y(bb.max_lat), x(bb.max_lon) - x(bb.min_lon), y(bb.min_lat) - y(bb.max_lat));
         ctx.globalAlpha = 1;
         ctx.strokeStyle = color;
@@ -3507,11 +3573,13 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     dmInstalledList.style.display = '';
 
     if (!list || list.length === 0) {
+      if (dmInstalledCanvas) dmInstalledCanvas.getContext('2d').clearRect(0, 0, dmInstalledCanvas.width, dmInstalledCanvas.height);
       dmInstalledList.innerHTML = '<div style="color:#6d96c0;font-size:13px;padding:12px 0;text-align:center">No routing databases are currently installed.</div>';
       dmInstalledNote.style.display = 'none';
       return;
     }
 
+    dmRenderMiniMap(dmInstalledCanvas, list);
     dmInstalledNote.style.display = '';
     dmInstalledList.innerHTML = '';
     for (var i = 0; i < list.length; i++) {
@@ -3655,7 +3723,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       })
       .then(function(catalog) {
         dmAvailableRegions = catalog.regions || [];
-        dmRenderMiniMap(dmAvailableRegions);
+        dmRenderMiniMap(dmCanvas, dmAvailableRegions);
         dmRenderAvailable(dmFilter.value);
       })
       .catch(function(err) {
@@ -3688,6 +3756,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   // Modal open/close
   document.getElementById('manage-data-btn').addEventListener('click', function() {
     document.getElementById('data-manager-modal').style.display = '';
+    dmLoadCoastline();
     dmFetchAvailable();
     dmFetchInstalled();
   });

@@ -43,7 +43,6 @@ const handles: DbHandle[] = [];
 const filenames: string[] = [];
 let hasCrossesLand = false;
 let hasCrossesObstacle = false;
-let hasCostFactor = false;
 let hasNodeDepth = false;
 let hasRegionId = false;
 let overlayHandle: DbHandle | null = null;
@@ -60,7 +59,6 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         const { dbPaths } = payload!;
         hasCrossesLand = false;
         hasCrossesObstacle = false;
-        hasCostFactor = false;
         hasNodeDepth = false;
         hasRegionId = false;
         handles.length = 0;
@@ -83,7 +81,6 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
             // Merge schema flags across all valid databases
             hasCrossesLand = hasCrossesLand || edgeCols.some(c => c.name === 'crosses_land');
             hasCrossesObstacle = hasCrossesObstacle || edgeCols.some(c => c.name === 'crosses_obstacle');
-            hasCostFactor = hasCostFactor || edgeCols.some(c => c.name === 'cost_factor');
             const nodeCols = db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>;
             hasNodeDepth = hasNodeDepth || nodeCols.some(c => c.name === 'node_depth');
             hasRegionId = hasRegionId || nodeCols.some(c => c.name === 'region_id');
@@ -154,15 +151,11 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
       case 'loadEdges': {
         const crossesCol = hasCrossesLand ? ', crosses_land' : '';
         const obstacleCol = hasCrossesObstacle ? ', crosses_obstacle' : '';
-        // Backward compatibility: old databases have is_fairway INTEGER instead of cost_factor REAL
-        const costCol = hasCostFactor
-          ? 'cost_factor'
-          : 'CASE WHEN is_fairway = 1 THEN 0.8 ELSE 1.2 END AS cost_factor';
         let allEdges: EdgeRow[] = [];
         for (const h of handles) {
           const edges = h.db.prepare(
             `SELECT source, target, distance, min_depth, max_air_draft, min_width,
-                    ${costCol}, distance_to_land,
+                    cost_factor, distance_to_land,
                     edge_type_id, traffic_mode${crossesCol}${obstacleCol}
              FROM edges`
           ).all() as unknown as EdgeRow[];
