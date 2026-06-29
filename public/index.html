@@ -276,13 +276,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   transition: background 0.12s;
 }
 .editor-btn:hover { background: rgba(79,148,212,0.35); }
-.editor-btn-primary { background: #1f6391; border-color: #3b8fd4; color: #fff; }
-.editor-btn-primary:hover { background: #2a7ab5; }
-.editor-btn-danger { background: rgba(200,70,70,0.25); border-color: rgba(200,70,70,0.5); color: #f0a0a0; }
-.editor-btn-danger:hover { background: rgba(200,70,70,0.4); }
 #editor-props-form label { display: block; font-size: 11px; color: #6d96c0; margin-top: 4px; }
 #editor-props-form input, #editor-props-form select {
   width: 100%;
+  box-sizing: border-box;
   background: rgba(255,255,255,0.07);
   border: 1px solid rgba(79,148,212,0.4);
   border-radius: 4px;
@@ -293,19 +290,39 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   margin-top: 1px;
   font-family: 'SF Mono', 'Cascadia Code', monospace;
 }
-#editor-props-form input:focus, #editor-props-form select:focus {
-  border-color: #3b8fd4;
+#editor-props-form input[readonly] { color: #5f7a9a; border-color: rgba(79,148,212,0.2); background: transparent; }
+#editor-props-form input:focus, #editor-props-form select:focus { border-color: #3b8fd4; }
+/* Two-column layout for paired fields */
+.editor-form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 10px;
 }
-#editor-node-highlight {
-  fill-opacity: 0.8;
-  stroke: #f59e0b;
-  stroke-width: 2;
+/* Trash delete icon in props header */
+#editor-trash-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 15px;
+  color: #6d96c0;
+  padding: 0 2px;
+  line-height: 1;
+  transition: color 0.15s;
+  flex-shrink: 0;
 }
-#editor-edge-highlight {
-  color: #f59e0b;
-  weight: 3;
-  opacity: 0.9;
-}
+#editor-trash-btn:hover { color: #ef4444; }
+#editor-trash-btn.confirm { color: #ef4444; animation: editor-trash-pulse 0.3s ease; }
+@keyframes editor-trash-pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.3)} }
+/* Saved flash */
+@keyframes editor-saved-flash { 0%{color:#22c55e} 100%{color:#6d96c0} }
+.editor-saved { animation: editor-saved-flash 1.4s ease forwards; }
+#editor-node-highlight { fill-opacity: 0.8; stroke: #f59e0b; stroke-width: 2; }
+#editor-edge-highlight { color: #f59e0b; opacity: 0.9; }
+/* Crosshair cursor when placing nodes/edges */
+.editor-cursor-place { cursor: crosshair !important; }
+.editor-cursor-place .leaflet-interactive { cursor: crosshair !important; }
+.editor-cursor-target { cursor: cell !important; }
+.editor-cursor-target .leaflet-interactive { cursor: cell !important; }
 
 #url-history-list {
   margin-top: 4px;
@@ -769,6 +786,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   <div id="loading-subtitle">Initializing nautical route planner... <span id="loading-dots">⏳</span></div>
   <div id="loading-retry"></div>
   <div id="loading-dbs"></div>
+  <div id="loading-error-detail" style="display:none;margin-top:10px;max-width:420px;padding:10px 14px;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.4);border-radius:6px;font-size:12px;color:#fca5a5;text-align:left;word-break:break-word"></div>
+  <button id="loading-dismiss" style="display:none;margin-top:16px;padding:8px 20px;background:rgba(59,143,212,0.2);border:1px solid rgba(59,143,212,0.5);border-radius:6px;color:#e0edf5;font-size:13px;cursor:pointer">Continue without routing</button>
 </div>
 
 <!-- Search -->
@@ -910,26 +929,24 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 </div>
 
 <!-- Graph Editor Panel (floating) -->
-<div id="editor-panel" class="panel" style="display:none;bottom:80px;right:20px;width:320px;max-height:50vh;overflow-y:auto;z-index:2001">
+<div id="editor-panel" class="panel" style="display:none;bottom:60px;right:20px;width:340px;z-index:2001">
   <div class="panel-title">Graph Editor</div>
-  <div id="editor-overlay-info" style="margin-bottom:8px;padding:5px 8px;background:rgba(139,92,246,0.12);border:1px solid rgba(139,92,246,0.3);border-radius:5px;font-size:11px;color:#c4b5fd">
-    <span style="font-weight:600">&#x270F; user-edits.sqlite</span>
-    <span id="editor-overlay-stats" style="margin-left:6px;color:#9bb8da"></span>
+  <div id="editor-overlay-info" style="margin-bottom:8px;padding:5px 8px;background:rgba(139,92,246,0.12);border:1px solid rgba(139,92,246,0.3);border-radius:5px;font-size:11px;color:#c4b5fd;display:flex;align-items:center;gap:6px">
+    <span>&#x270F; Your map edits</span>
+    <span id="editor-overlay-stats" style="color:#9bb8da;font-size:10px"></span>
   </div>
-  <div id="editor-status" style="font-size:11px;color:#6d96c0;margin-bottom:6px;padding:4px 0">&mdash;</div>
-  <div id="editor-toolbar" style="display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap">
+  <div id="editor-status" style="font-size:11px;color:#6d96c0;margin-bottom:6px;padding:2px 0;min-height:16px">&mdash;</div>
+  <div id="editor-toolbar" style="display:flex;gap:4px;margin-bottom:8px">
     <button id="editor-add-node-btn" class="editor-btn">+ Node</button>
     <button id="editor-add-edge-btn" class="editor-btn">+ Edge</button>
     <button id="editor-cancel-btn" class="editor-btn" style="display:none">&#x2715; Cancel</button>
   </div>
   <div id="editor-props" style="display:none;border-top:1px solid rgba(79,148,212,0.15);padding-top:8px">
-    <div id="editor-props-header" style="font-size:11px;font-weight:600;color:#9bb8da;margin-bottom:6px"></div>
-    <div id="editor-props-form"></div>
-    <div style="display:flex;gap:4px;margin-top:8px">
-      <button id="editor-save-btn" class="editor-btn editor-btn-primary">Save</button>
-      <button id="editor-delete-btn" class="editor-btn editor-btn-danger">Delete</button>
-      <button id="editor-deselect-btn" class="editor-btn">Deselect</button>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+      <div id="editor-props-title" style="font-size:12px;font-weight:600;color:#e0edf5"></div>
+      <button id="editor-trash-btn" title="Delete (click twice to confirm)">&#x1F5D1;</button>
     </div>
+    <div id="editor-props-form"></div>
   </div>
 </div>
 
@@ -1066,10 +1083,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     routeName:    '',         // computed route name for display/export
     // Graph editor state
     editMode:     false,
-    selectedItem: null,       // { type: 'node'|'edge', data: ... }
-    selectedLayer: null,      // Leaflet layer for highlight
-    editAddMode:  null,       // 'node' | 'edge' | null
-    editAddSource: null,      // source node id when adding edge
+    selectedItem: null,        // { type: 'node'|'edge', data: ... }
+    selectedLayer: null,       // Leaflet layer for highlight
+    editAddMode:  null,        // 'node' | 'edge' | null
+    editAddSource: null,       // source node id when adding edge
+    deleteConfirmPending: false,
+    deleteConfirmTimer: null,
   };
 
   const map = L.map('map', {
@@ -1368,9 +1387,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     } else {
       panel.style.display = 'none';
       clearEditorSelection();
-      state.selectedItem = null;
-      state.selectedLayer = null;
-      if (state.editAddMode) document.getElementById('editor-cancel-btn').style.display = 'none';
+      if (state.editAddMode) {
+        document.getElementById('editor-cancel-btn').style.display = 'none';
+        map.getContainer().style.cursor = '';
+      }
       state.editAddMode = null;
       state.editAddSource = null;
       fetchGraphNodes();
@@ -1384,11 +1404,37 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       .then(function (data) {
         if (!data) return;
         var parts = [];
-        if (data.nodes > 0) parts.push(data.nodes + ' node' + (data.nodes !== 1 ? 's' : '') + ' added');
-        if (data.edges > 0) parts.push(data.edges + ' edge' + (data.edges !== 1 ? 's' : '') + ' added');
-        if (data.deletedNodes > 0) parts.push(data.deletedNodes + ' deleted');
+        if (data.nodes > 0) parts.push(data.nodes + ' node' + (data.nodes !== 1 ? 's' : ''));
+        if (data.edges > 0) parts.push(data.edges + ' edge' + (data.edges !== 1 ? 's' : ''));
+        if (data.deletedNodes > 0) parts.push(data.deletedNodes + ' deletion' + (data.deletedNodes !== 1 ? 's' : ''));
+        if (data.deletedEdges > 0) parts.push(data.deletedEdges + ' hidden edge' + (data.deletedEdges !== 1 ? 's' : ''));
         var el = document.getElementById('editor-overlay-stats');
-        el.textContent = parts.length > 0 ? '(' + parts.join(', ') + ')' : '(no edits yet)';
+        el.textContent = parts.length > 0 ? '· ' + parts.join(' · ') : '· no edits yet';
+        // Show repair button if hidden edges exist
+        var repairEl = document.getElementById('editor-repair-btn');
+        if (!repairEl) {
+          repairEl = document.createElement('button');
+          repairEl.id = 'editor-repair-btn';
+          repairEl.title = 'Restore hidden edges so routing can use all your drawn edges';
+          repairEl.style.cssText = 'margin-top:6px;width:100%;padding:5px;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.4);border-radius:4px;color:#fca5a5;cursor:pointer;font-size:11px;display:none';
+          document.getElementById('editor-overlay-info').after(repairEl);
+          repairEl.addEventListener('click', function () {
+            repairEl.disabled = true;
+            repairEl.textContent = 'Restoring…';
+            fetch(getApiBase() + '/signalk/v1/api/router/graph/overlay/repair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+              .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+              .then(function (d) {
+                repairEl.textContent = '✓ Restored ' + (d.restored || 0) + ' edge(s)';
+                repairEl.style.color = '#4ade80';
+                fetchEdges();
+                fetchOverlayStats();
+              })
+              .catch(function () { repairEl.textContent = '✗ Repair failed'; repairEl.disabled = false; });
+          });
+        }
+        repairEl.style.display = data.deletedEdges > 0 ? '' : 'none';
+        repairEl.textContent = '⚠ ' + data.deletedEdges + ' hidden edge' + (data.deletedEdges !== 1 ? 's' : '') + ' — click to restore for routing';
+        repairEl.disabled = false;
       })
       .catch(function () {});
   }
@@ -1404,24 +1450,56 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
   function clearEditorSelection() {
     if (state.selectedLayer) {
-      if (state.selectedLayer.setStyle) {
-        if (state.selectedLayer._editOrigStyle) {
-          state.selectedLayer.setStyle(state.selectedLayer._editOrigStyle);
-        }
-      } else if (state.selectedLayer.setIcon) {
-        if (state.selectedLayer._editOrigIcon) {
-          state.selectedLayer.setIcon(state.selectedLayer._editOrigIcon);
-        }
+      if (state.selectedLayer.setStyle && state.selectedLayer._editOrigStyle) {
+        state.selectedLayer.setStyle(state.selectedLayer._editOrigStyle);
+      } else if (state.selectedLayer.setIcon && state.selectedLayer._editOrigIcon) {
+        state.selectedLayer.setIcon(state.selectedLayer._editOrigIcon);
       }
     }
     state.selectedLayer = null;
+    state.selectedItem = null;
+    // Reset any pending delete confirm
+    state.deleteConfirmPending = false;
+    clearTimeout(state.deleteConfirmTimer);
+    var tb = document.getElementById('editor-trash-btn');
+    if (tb) { tb.classList.remove('confirm'); tb.title = 'Delete (click twice to confirm)'; }
     document.getElementById('editor-props').style.display = 'none';
     setEditorStatus('');
   }
 
-  function setEditorStatus(msg) {
+  function setEditorStatus(msg, flash) {
     var el = document.getElementById('editor-status');
+    el.className = flash ? 'editor-saved' : '';
     el.textContent = msg || '\u2014';
+    if (flash) {
+      setTimeout(function() { if (el) { el.className = ''; el.textContent = '\u2014'; } }, 1500);
+    }
+  }
+
+  // Map a cost_factor number to the nearest named preset value
+  var COST_PRESETS = [
+    { value: 0.8,  label: '\u2605 Preferred (fairway)' },
+    { value: 1.2,  label: '\u25cb Normal water' },
+    { value: 5.0,  label: '\u26a0 Avoid if possible' },
+    { value: 999,  label: '\u26d4 Block (impassable)' },
+  ];
+  function costPresetOptions(current) {
+    var val = current != null ? current : 1.2;
+    var matched = COST_PRESETS.some(function(p) { return Math.abs(p.value - val) < 0.01; });
+    var html = COST_PRESETS.map(function(p) {
+      var sel = Math.abs(p.value - val) < 0.01 ? ' selected' : '';
+      return '<option value="' + p.value + '"' + sel + '>' + p.label + '</option>';
+    }).join('');
+    if (!matched) {
+      html = '<option value="' + val + '" selected>Custom (' + val + ')</option>' + html;
+    }
+    return html;
+  }
+
+  function attachAutoSave(form) {
+    form.querySelectorAll('input:not([readonly]), select').forEach(function(el) {
+      el.addEventListener('change', saveEditedItem);
+    });
   }
 
   function selectNode(nodeData, layer) {
@@ -1431,17 +1509,55 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     if (layer && layer.setStyle) {
       layer._editOrigStyle = { color: layer.options.color, fillColor: layer.options.fillColor, weight: layer.options.weight, radius: layer.options.radius };
       layer.setStyle({ color: '#f59e0b', fillColor: '#f59e0b', weight: 2, radius: layer.options.radius + 2 });
+    } else if (layer && layer.setIcon) {
+      layer._editOrigIcon = layer.options.icon;
+      layer.setIcon(L.divIcon({
+        className: '',
+        html: '<div style="width:18px;height:18px;background:#f59e0b;border:2px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.5)">O</div>',
+        iconSize: [18, 18], iconAnchor: [9, 9],
+      }));
     }
-    var header = document.getElementById('editor-props-header');
-    header.textContent = 'Node ' + nodeData.id;
+    // Human-readable header: coordinates not internal ID
+    var lat = nodeData.lat, lon = nodeData.lon || nodeData.lng;
+    document.getElementById('editor-props-title').textContent =
+      '\ud83d\udccd ' + Math.abs(lat).toFixed(4) + '\u00b0' + (lat >= 0 ? 'N' : 'S') +
+      ' \u00b7 ' + Math.abs(lon).toFixed(4) + '\u00b0' + (lon >= 0 ? 'E' : 'W');
     var form = document.getElementById('editor-props-form');
+    var isOverlayNode = nodeData.region_id === 0;
+    // #6: no Resolution field; #5: coords as read-only info line
     form.innerHTML =
-      '<label>Depth (m)</label><input id="edit-node-depth" type="number" step="0.1" value="' + (nodeData.min_depth != null ? nodeData.min_depth : '') + '" />' +
-      '<label>Resolution</label><input id="edit-node-res" type="number" step="0.0001" value="' + (nodeData.resolution != null ? nodeData.resolution : '') + '" />' +
-      '<label style="margin-top:6px;color:#5f7a9a">Lat</label><input type="text" value="' + nodeData.lat.toFixed(5) + '" readonly style="color:#6d96c0" />' +
-      '<label style="color:#5f7a9a">Lon</label><input type="text" value="' + (nodeData.lon || nodeData.lng).toFixed(5) + '" readonly style="color:#6d96c0" />';
+      '<label>Water depth (m)</label>' +
+      '<input id="edit-node-depth" type="number" step="0.1" value="' + (nodeData.min_depth != null && nodeData.min_depth >= 0 ? nodeData.min_depth : '') + '" placeholder="unknown" />' +
+      '<div style="display:flex;gap:8px;margin-top:6px">' +
+        '<div style="flex:1"><label style="color:#4a6a8a">Latitude</label><input type="text" value="' + lat.toFixed(5) + '" readonly /></div>' +
+        '<div style="flex:1"><label style="color:#4a6a8a">Longitude</label><input type="text" value="' + lon.toFixed(5) + '" readonly /></div>' +
+      '</div>' +
+      (isOverlayNode ? '<button id="editor-connect-btn" style="margin-top:8px;width:100%;padding:5px;background:rgba(139,92,246,0.15);border:1px solid rgba(139,92,246,0.4);border-radius:4px;color:#c4b5fd;cursor:pointer;font-size:11px">⚡ Connect to nearest graph nodes</button>' : '');
     document.getElementById('editor-props').style.display = '';
-    setEditorStatus('Node selected');
+    attachAutoSave(form);
+    if (isOverlayNode) {
+      document.getElementById('editor-connect-btn').addEventListener('click', function () {
+        var btn = this;
+        btn.disabled = true;
+        btn.textContent = 'Connecting…';
+        // Re-POST the node to trigger auto-connect logic on the backend
+        fetch(getApiBase() + '/signalk/v1/api/router/graph/nodes/' + nodeData.id, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dbIndex: 0, lat: lat, lon: lon, node_depth: nodeData.node_depth ?? -1, resolution: nodeData.resolution ?? 0 }),
+        })
+          .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+          .then(function (data) {
+            var n = data && data.autoConnected ? data.autoConnected : 0;
+            btn.textContent = n > 0 ? '✓ Connected to ' + n + ' nodes' : '⚠ No nearby graph nodes found';
+            btn.style.color = n > 0 ? '#4ade80' : '#fbbf24';
+            fetchEdges();
+            fetchOverlayStats();
+          })
+          .catch(function () { btn.textContent = '✗ Connection failed'; btn.style.color = '#ef4444'; btn.disabled = false; });
+      });
+    }
+    setEditorStatus('');
   }
 
   function selectEdge(edgeData, layer) {
@@ -1452,26 +1568,38 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       layer._editOrigStyle = { color: layer.options.color, weight: layer.options.weight, opacity: layer.options.opacity, dashArray: layer.options.dashArray };
       layer.setStyle({ color: '#f59e0b', weight: 3, opacity: 0.9, dashArray: null });
     }
-    var header = document.getElementById('editor-props-header');
-    header.textContent = 'Edge ' + edgeData.source + '\u2192' + edgeData.target;
+    // #5: human header \u2014 distance + direction symbol
+    var dist = edgeData.distance != null ? Math.round(edgeData.distance) + '\u202fm' : '?m';
+    var dirSymbol = edgeData.traffic_mode === 1 ? '\u2192' : edgeData.traffic_mode === 2 ? '\u2190' : '\u2194';
+    document.getElementById('editor-props-title').textContent = '\u2015 Edge \u00b7 ' + dist + ' ' + dirSymbol;
     var form = document.getElementById('editor-props-form');
+    // #7: distance read-only; #12: arrow labels; #8: cost presets; two-column rows
     form.innerHTML =
-      '<label>Distance (m)</label><input id="edit-edge-dist" type="number" step="0.1" value="' + (edgeData.distance != null ? edgeData.distance : '') + '" />' +
-      '<label>Min Depth (m)</label><input id="edit-edge-depth" type="number" step="0.1" value="' + (edgeData.min_depth != null ? edgeData.min_depth : '') + '" />' +
-      '<label>Max Air Draft (m)</label><input id="edit-edge-air" type="number" step="0.1" value="' + (edgeData.max_air_draft != null ? edgeData.max_air_draft : '') + '" />' +
-      '<label>Min Width (m)</label><input id="edit-edge-width" type="number" step="0.1" value="' + (edgeData.min_width != null ? edgeData.min_width : '') + '" />' +
-      '<label>Traffic Mode</label>' +
-      '<select id="edit-edge-traffic">' +
-        '<option value="0"' + (edgeData.traffic_mode === 0 ? ' selected' : '') + '>Two-way</option>' +
-        '<option value="1"' + (edgeData.traffic_mode === 1 ? ' selected' : '') + '>One-way fwd</option>' +
-        '<option value="2"' + (edgeData.traffic_mode === 2 ? ' selected' : '') + '>One-way rev</option>' +
-      '</select>' +
-      '<label title="0.8=fairway (preferred), 1.2=open water, higher=penalise">Cost Factor</label>' +
-      '<input id="edit-edge-cost" type="number" step="0.1" min="0.1" value="' + (edgeData.cost_factor != null ? edgeData.cost_factor : 1.2) + '" />' +
-      '<label style="margin-top:6px;color:#5f7a9a">Source</label><input type="text" value="' + edgeData.source + '" readonly style="color:#6d96c0" />' +
-      '<label style="color:#5f7a9a">Target</label><input type="text" value="' + edgeData.target + '" readonly style="color:#6d96c0" />';
+      // Distance \u2014 informational only (#7)
+      '<label style="color:#4a6a8a">Distance (computed)</label>' +
+      '<input type="text" value="' + (edgeData.distance != null ? Math.round(edgeData.distance) + ' m' : 'unknown') + '" readonly />' +
+      // Depth + Air Draft on one row (#9)
+      '<div class="editor-form-row" style="margin-top:4px">' +
+        '<div><label>Min Depth (m)</label><input id="edit-edge-depth" type="number" step="0.1" value="' + (edgeData.min_depth != null ? edgeData.min_depth : '') + '" placeholder="-1" /></div>' +
+        '<div><label>Max Air Draft (m)</label><input id="edit-edge-air" type="number" step="0.1" value="' + (edgeData.max_air_draft != null ? edgeData.max_air_draft : '') + '" placeholder="-1" /></div>' +
+      '</div>' +
+      // Width + Traffic on one row (#9, #12)
+      '<div class="editor-form-row" style="margin-top:4px">' +
+        '<div><label>Min Width (m)</label><input id="edit-edge-width" type="number" step="0.1" value="' + (edgeData.min_width != null ? edgeData.min_width : '') + '" placeholder="-1" /></div>' +
+        '<div><label>Direction</label>' +
+          '<select id="edit-edge-traffic">' +
+            '<option value="0"' + (edgeData.traffic_mode === 0 ? ' selected' : '') + '>\u2194 Two-way</option>' +
+            '<option value="1"' + (edgeData.traffic_mode === 1 ? ' selected' : '') + '>\u2192 One direction</option>' +
+            '<option value="2"' + (edgeData.traffic_mode === 2 ? ' selected' : '') + '>\u2190 Reverse only</option>' +
+          '</select>' +
+        '</div>' +
+      '</div>' +
+      // Cost preset (#8)
+      '<label style="margin-top:4px">Routing preference</label>' +
+      '<select id="edit-edge-cost">' + costPresetOptions(edgeData.cost_factor) + '</select>';
     document.getElementById('editor-props').style.display = '';
-    setEditorStatus('Edge selected');
+    attachAutoSave(form);
+    setEditorStatus('');
   }
 
   function editorFetchError(r, label) {
@@ -1486,28 +1614,32 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     var item = state.selectedItem;
     if (!item) return;
     if (item.type === 'node') {
-      var depth = parseFloat(document.getElementById('edit-node-depth').value);
-      var res = parseFloat(document.getElementById('edit-node-res').value);
+      var depthEl = document.getElementById('edit-node-depth');
+      if (!depthEl) return;
+      var depth = parseFloat(depthEl.value);
       fetch(getApiBase() + '/signalk/v1/api/router/graph/nodes/' + item.data.id, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dbIndex: 0, node_depth: isNaN(depth) ? -1 : depth, resolution: isNaN(res) ? 0 : res }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dbIndex: 0, node_depth: isNaN(depth) ? -1 : depth, resolution: item.data.resolution || 0 }),
       })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
         .then(function () {
-          item.data.min_depth = depth;
-          item.data.resolution = res;
-          setEditorStatus('Node saved');
+          item.data.min_depth = isNaN(depth) ? -1 : depth;
+          setEditorStatus('✓ Saved', true);
           fetchGraphNodes();
         })
         .catch(function (r) { editorFetchError(r, 'Save'); });
     } else if (item.type === 'edge') {
+      var depthE = parseFloat(document.getElementById('edit-edge-depth').value);
+      var airE   = parseFloat(document.getElementById('edit-edge-air').value);
+      var widthE = parseFloat(document.getElementById('edit-edge-width').value);
       var body = {
         dbIndex: 0,
-        distance: parseFloat(document.getElementById('edit-edge-dist').value),
-        min_depth: parseFloat(document.getElementById('edit-edge-depth').value),
-        max_air_draft: parseFloat(document.getElementById('edit-edge-air').value),
-        min_width: parseFloat(document.getElementById('edit-edge-width').value),
+        distance: item.data.distance || 0,  // keep original computed distance
+        min_depth:    isNaN(depthE) ? -1 : depthE,
+        max_air_draft: isNaN(airE)  ? -1 : airE,
+        min_width:    isNaN(widthE) ? -1 : widthE,
         traffic_mode: parseInt(document.getElementById('edit-edge-traffic').value, 10),
-        cost_factor: parseFloat(document.getElementById('edit-edge-cost').value),
+        cost_factor:  parseFloat(document.getElementById('edit-edge-cost').value),
       };
       fetch(getApiBase() + '/signalk/v1/api/router/graph/edges/' + item.data.source + '/' + item.data.target, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -1515,7 +1647,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
         .then(function () {
           Object.assign(item.data, body);
-          setEditorStatus('Edge saved');
+          // Update header direction symbol live
+          var dirSymbol = body.traffic_mode === 1 ? '→' : body.traffic_mode === 2 ? '←' : '↔';
+          var dist = item.data.distance != null ? Math.round(item.data.distance) + ' m' : '?m';
+          var titleEl = document.getElementById('editor-props-title');
+          if (titleEl) titleEl.textContent = '― Edge · ' + dist + ' ' + dirSymbol;
+          setEditorStatus('✓ Saved', true);
           fetchEdges();
         })
         .catch(function (r) { editorFetchError(r, 'Save'); });
@@ -1525,15 +1662,14 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   function deleteEditedItem() {
     var item = state.selectedItem;
     if (!item) return;
-    if (!confirm('Delete this ' + item.type + '?')) return;
     if (item.type === 'node') {
       fetch(getApiBase() + '/signalk/v1/api/router/graph/nodes/' + item.data.id + '/delete', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dbIndex: 0 }),
       })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
         .then(function () {
-          setEditorStatus('Node deleted');
           clearEditorSelection();
+          setEditorStatus('Node deleted');
           fetchGraphNodes();
           fetchEdges();
           fetchOverlayStats();
@@ -1545,8 +1681,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
         .then(function () {
-          setEditorStatus('Edge deleted');
           clearEditorSelection();
+          setEditorStatus('Edge deleted');
           fetchEdges();
           fetchOverlayStats();
         })
@@ -1555,29 +1691,37 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   }
 
   function startAddNode() {
+    clearEditorSelection();
     state.editAddMode = 'node';
     document.getElementById('editor-cancel-btn').style.display = '';
-    setEditorStatus('Click on the map to place a new node');
+    map.getContainer().classList.add('editor-cursor-place');
+    setEditorStatus('Click map to place node — Cancel or Esc to stop');
   }
 
   function startAddEdge() {
+    clearEditorSelection();
     state.editAddMode = 'edge';
     state.editAddSource = null;
     document.getElementById('editor-cancel-btn').style.display = '';
-    setEditorStatus('Click a source node, then a target node');
+    map.getContainer().classList.add('editor-cursor-place');
+    setEditorStatus('Click a source node on the map');
   }
 
   function cancelAddMode() {
     state.editAddMode = null;
     state.editAddSource = null;
     document.getElementById('editor-cancel-btn').style.display = 'none';
+    map.getContainer().classList.remove('editor-cursor-place', 'editor-cursor-target');
     setEditorStatus('');
   }
 
   function handleAddEdgeClick(nodeData, layer) {
     if (!state.editAddSource) {
       state.editAddSource = nodeData.id;
-      setEditorStatus('Source node ' + nodeData.id + ' set. Click target node.');
+      var srcLat = nodeData.lat.toFixed(3), srcLon = (nodeData.lon || nodeData.lng).toFixed(3);
+      setEditorStatus('From (' + srcLat + ', ' + srcLon + ') — now click target node');
+      map.getContainer().classList.remove('editor-cursor-place');
+      map.getContainer().classList.add('editor-cursor-target');
       if (layer && layer.setStyle) {
         layer._editOrigStyle = { color: layer.options.color, fillColor: layer.options.fillColor, weight: layer.options.weight, radius: layer.options.radius };
         layer.setStyle({ color: '#f59e0b', fillColor: '#f59e0b', weight: 2, radius: layer.options.radius + 2 });
@@ -1601,9 +1745,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
         .then(function () {
-          setEditorStatus('Edge ' + sourceId + '\u2192' + targetId + ' added \u2014 click next source node');
-          // Stay in add-edge mode; reset source so user can immediately add another edge
+          setEditorStatus('Edge added \u2014 click next source node');
           state.editAddSource = null;
+          map.getContainer().classList.remove('editor-cursor-target');
+          map.getContainer().classList.add('editor-cursor-place');
           fetchEdges();
           fetchOverlayStats();
         })
@@ -1625,8 +1770,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         body: JSON.stringify({ dbIndex: 0, lat: lat, lon: lon, node_depth: -1, resolution: 0 }),
       })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
-        .then(function () {
-          setEditorStatus('Node placed — click to place another (Cancel to stop)');
+        .then(function (data) {
+          var conn = data && data.autoConnected ? ' (connected to ' + data.autoConnected + ' nearby nodes)' : ' (no nearby nodes to connect — add edges manually)';
+          setEditorStatus('Node placed' + conn + ' — click to place another');
           fetchGraphNodes();
           fetchOverlayStats();
         })
@@ -1651,13 +1797,61 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     }
   });
 
-  // Editor button handlers
+  // Editor toolbar buttons
   document.getElementById('editor-add-node-btn').addEventListener('click', startAddNode);
   document.getElementById('editor-add-edge-btn').addEventListener('click', startAddEdge);
   document.getElementById('editor-cancel-btn').addEventListener('click', cancelAddMode);
-  document.getElementById('editor-save-btn').addEventListener('click', saveEditedItem);
-  document.getElementById('editor-delete-btn').addEventListener('click', deleteEditedItem);
-  document.getElementById('editor-deselect-btn').addEventListener('click', clearEditorSelection);
+
+  // Trash icon: two-click confirm (#4)
+  document.getElementById('editor-trash-btn').addEventListener('click', function() {
+    if (!state.selectedItem) return;
+    if (state.deleteConfirmPending) {
+      clearTimeout(state.deleteConfirmTimer);
+      state.deleteConfirmPending = false;
+      this.classList.remove('confirm');
+      this.title = 'Delete (click twice to confirm)';
+      deleteEditedItem();
+    } else {
+      state.deleteConfirmPending = true;
+      this.classList.add('confirm');
+      this.title = 'Click again to confirm delete';
+      setEditorStatus('Click 🗑 again to confirm delete');
+      var btn = this;
+      state.deleteConfirmTimer = setTimeout(function() {
+        state.deleteConfirmPending = false;
+        btn.classList.remove('confirm');
+        btn.title = 'Delete (click twice to confirm)';
+        setEditorStatus('');
+      }, 2500);
+    }
+  });
+
+  // Map click: deselect when in edit mode and nothing else active (#2)
+  map.on('click', function() {
+    if (state.editMode && !state.editAddMode && state.selectedItem) {
+      clearEditorSelection();
+    }
+  });
+
+  // Keyboard shortcuts (#11)
+  document.addEventListener('keydown', function(e) {
+    var tag = document.activeElement ? document.activeElement.tagName : '';
+    var inInput = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
+    if (e.key === 'Escape') {
+      if (state.editAddMode) {
+        cancelAddMode();
+      } else if (state.editMode && state.selectedItem) {
+        clearEditorSelection();
+      }
+    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !inInput && state.editMode && state.selectedItem) {
+      e.preventDefault();
+      document.getElementById('editor-trash-btn').click();
+    }
+    if (e.key === 'Enter' && inInput && state.editMode && state.selectedItem) {
+      document.activeElement.blur(); // blur triggers change → auto-save
+    }
+  });
 
   routeLayers.on('click', function (e) {
     L.DomEvent.stopPropagation(e);
@@ -1864,10 +2058,55 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     var subtitleEl = document.getElementById('loading-subtitle');
     var retryEl = document.getElementById('loading-retry');
     var dotsEl = document.getElementById('loading-dots');
+    var spinnerEl = document.getElementById('loading-spinner');
+    var titleEl = document.getElementById('loading-title');
+    var errorDetailEl = document.getElementById('loading-error-detail');
+    var dismissBtn = document.getElementById('loading-dismiss');
     var retryCount = 0;
     var stopped = false;
 
-    function stop() { stopped = true; overlay = null; dbsEl = null; subtitleEl = null; retryEl = null; dotsEl = null; }
+    function stop() {
+      stopped = true;
+      overlay = null; dbsEl = null; subtitleEl = null; retryEl = null;
+      dotsEl = null; spinnerEl = null; titleEl = null; errorDetailEl = null; dismissBtn = null;
+    }
+
+    function dismissOverlay() {
+      var ov = document.getElementById('loading-overlay');
+      if (ov) { ov.classList.add('hidden'); setTimeout(function() { ov.style.display = 'none'; }, 500); }
+      stop();
+    }
+
+    function showError(msg, isNoDatabases) {
+      if (spinnerEl) spinnerEl.style.display = 'none';
+      if (dotsEl) { dotsEl.className = ''; dotsEl.textContent = ''; }
+      if (titleEl) titleEl.textContent = isNoDatabases ? 'No Routing Data' : 'Routing Data Error';
+      if (titleEl) titleEl.style.color = isNoDatabases ? '#f59e0b' : '#ef4444';
+      if (subtitleEl) subtitleEl.textContent = isNoDatabases
+        ? 'No routing databases are installed. Use the Data Manager to download one.'
+        : 'The routing database failed to load. The map is still available.';
+      if (dbsEl) dbsEl.textContent = '';
+      if (retryEl) retryEl.classList.remove('visible');
+      if (errorDetailEl && msg && !isNoDatabases) {
+        errorDetailEl.textContent = msg;
+        errorDetailEl.style.display = '';
+      }
+      if (dismissBtn) {
+        dismissBtn.textContent = isNoDatabases ? 'Continue (open Data Manager later)' : 'Continue without routing';
+        dismissBtn.style.display = '';
+        dismissBtn.onclick = function() {
+          dismissOverlay();
+          if (isNoDatabases) {
+            // Auto-open data manager so user can immediately download
+            setTimeout(function() {
+              var btn = document.getElementById('manage-data-btn');
+              if (btn) btn.click();
+            }, 600);
+          }
+        };
+      }
+      stopped = true; // stop polling
+    }
 
     function poll() {
       if (stopped) return;
@@ -1883,20 +2122,28 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
             retryAfter(1500);
             return;
           }
+          // Init failed with a known error
+          if (status.initError) {
+            var isNoDatabases = status.filenames && status.filenames.length === 0
+              && (status.initError.toLowerCase().includes('no .sqlite') || status.initError.toLowerCase().includes('no routing'));
+            showError(status.initError, isNoDatabases);
+            return;
+          }
           if (dbsEl) {
-            if (status.filenames && status.filenames.length > 0) {
-              dbsEl.textContent = status.filenames.join(', ');
-            } else {
-              dbsEl.textContent = 'No databases found';
-            }
+            dbsEl.textContent = (status.filenames && status.filenames.length > 0)
+              ? status.filenames.join(', ')
+              : 'No databases found';
           }
           if (status.loaded) {
             if (subtitleEl) subtitleEl.textContent = 'Loaded ' + (status.filenames.length || 0) + ' database(s)';
             setTimeout(function() {
               if (overlay) overlay.classList.add('hidden');
               stop();
-              setTimeout(function() { if (overlay) overlay.style.display = 'none'; }, 500);
+              setTimeout(function() { var ov = document.getElementById('loading-overlay'); if (ov) ov.style.display = 'none'; }, 500);
             }, 800);
+          } else if (!status.loaded && status.filenames && status.filenames.length === 0) {
+            // No databases at all — not an error, just empty install
+            showError(null, true);
           } else {
             if (subtitleEl) subtitleEl.textContent = 'Loading routing graph...';
             setTimeout(poll, 1000);

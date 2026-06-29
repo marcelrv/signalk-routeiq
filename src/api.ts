@@ -20,6 +20,7 @@ export class ApiHandler {
   private db: RoutingDatabase | null;
   private config: PluginConfig;
   private app: ServerAPI;
+  private initError: string | null = null;
   /** Callback invoked after a database download to hot-reload the routing engine */
   public onReloadRequested: ((dataDir: string) => Promise<void>) | null = null;
 
@@ -35,7 +36,12 @@ export class ApiHandler {
   setComponents(db: RoutingDatabase, engine: RoutingEngine): void {
     this.db = db;
     this.routingEngine = engine;
+    this.initError = null;
     console.log('[autoroute] API handler components updated');
+  }
+
+  setInitError(message: string): void {
+    this.initError = message;
   }
 
   isReady(): boolean {
@@ -80,6 +86,7 @@ export class ApiHandler {
     // GET /signalk/v1/api/router/stats
     this.router.get('/stats', this.handleStats.bind(this));
 
+
     // GET /signalk/v1/api/router/vessel
     this.router.get('/vessel', this.handleGetVessel.bind(this));
 
@@ -106,6 +113,7 @@ export class ApiHandler {
 
     // GET /signalk/v1/api/router/graph/overlay/stats — overlay edit counts
     this.router.get('/graph/overlay/stats', this.handleOverlayStats.bind(this));
+    this.router.post('/graph/overlay/repair', this.handleOverlayRepair.bind(this));
 
     // Graph editor endpoints (all POST with manual auth check)
     this.router.post('/graph/nodes/:id', this.handleUpsertNode.bind(this));
@@ -434,6 +442,21 @@ export class ApiHandler {
     }
   }
 
+  private async handleOverlayRepair(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+    if (!this.requireAuth(req, res)) return;
+    try {
+      const result = await this.db!.clearOverlayDeletedEdges();
+      // Reload graph so the restored edges take effect immediately
+      await this.db!.loadGraph();
+      res.json({ success: true, ...result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: message });
+      next(error);
+    }
+  }
+
   /**
    * Auth check for graph-editor mutations.
    *
@@ -471,10 +494,21 @@ export class ApiHandler {
       if (dbIndex === undefined) { res.status(400).json({ error: 'Missing dbIndex' }); return; }
       if (lat !== undefined && lon !== undefined) {
         await this.db!.addNode(dbIndex, { id: nodeId, lat, lon, node_depth, resolution });
+        // Auto-connect to the 2 nearest main graph nodes in both directions
+        const nearest = await this.db!.findKNearestMainGraphNodes(lat, lon, 2);
+        let autoConnected = 0;
+        for (const n of nearest) {
+          try {
+            await this.db!.addEdge(0, { source: nodeId, target: n.id, distance: 0, cost_factor: 1.2, min_depth: -1, max_air_draft: -1, min_width: -1, distance_to_land: 0, edge_type_id: 0, traffic_mode: 0 });
+            await this.db!.addEdge(0, { source: n.id, target: nodeId, distance: 0, cost_factor: 1.2, min_depth: -1, max_air_draft: -1, min_width: -1, distance_to_land: 0, edge_type_id: 0, traffic_mode: 0 });
+            autoConnected++;
+          } catch { /* edge already exists or other non-fatal error */ }
+        }
+        res.json({ success: true, autoConnected });
       } else {
         await this.db!.updateNode(dbIndex, nodeId, { node_depth, resolution });
+        res.json({ success: true });
       }
-      res.json({ success: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: message });
@@ -514,11 +548,22 @@ export class ApiHandler {
       const target = parseInt(req.params.target, 10);
       const { dbIndex, distance, min_depth, max_air_draft, min_width, traffic_mode, cost_factor, distance_to_land, edge_type_id } = req.body;
       if (dbIndex === undefined) { res.status(400).json({ error: 'Missing dbIndex' }); return; }
+      const isBidirectional = traffic_mode === 0 || traffic_mode === undefined;
       // Try update first; if edge doesn't exist in memory, create it
       try {
         await this.db!.updateEdge(dbIndex, source, target, { distance, min_depth, max_air_draft, min_width, traffic_mode, cost_factor });
       } catch {
         await this.db!.addEdge(dbIndex, { source, target, distance, min_depth, max_air_draft, min_width, traffic_mode, cost_factor, distance_to_land, edge_type_id });
+      }
+      // For bidirectional edges also store the reverse so A* can traverse both ways
+      if (isBidirectional) {
+        try {
+          await this.db!.updateEdge(dbIndex, target, source, { distance, min_depth, max_air_draft, min_width, traffic_mode, cost_factor });
+        } catch {
+          try {
+            await this.db!.addEdge(dbIndex, { source: target, target: source, distance, min_depth, max_air_draft, min_width, traffic_mode, cost_factor, distance_to_land, edge_type_id });
+          } catch { /* nodes may not exist for reverse — ignore */ }
+        }
       }
       res.json({ success: true });
     } catch (error) {
@@ -662,12 +707,13 @@ export class ApiHandler {
    */
   private async handleDatabasesStatus(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.db) {
-      res.json({ loaded: false, filenames: [] });
+      // Return 200 (not 503) so the frontend can read the error field
+      res.json({ loaded: false, filenames: [], initError: this.initError });
       return;
     }
     try {
       const status = this.db.getLoadingStatus();
-      res.json(status);
+      res.json({ ...status, initError: this.initError });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: message });

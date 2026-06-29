@@ -388,6 +388,23 @@ export class RoutingDatabase {
     return bestId;
   }
 
+  async findKNearestMainGraphNodes(latitude: number, longitude: number, k: number, maxDistMeters: number = 5000): Promise<Array<{ id: number; lat: number; lon: number; distance: number }>> {
+    if (!this.graphLoaded) return [];
+    const latRad = latitude * Math.PI / 180;
+    const cosLat = Math.cos(latRad);
+    const marginDeg = maxDistMeters / 111320;
+    const candidates: Array<{ id: number; lat: number; lon: number; distance: number }> = [];
+    for (const [id, c] of this.nodes) {
+      if (c.regionId === 0) continue;
+      if (Math.abs(c.lat - latitude) > marginDeg) continue;
+      if (Math.abs(c.lon - longitude) > marginDeg / cosLat) continue;
+      const d = this.haversineMeters(latitude, longitude, c.lat, c.lon);
+      if (d <= maxDistMeters) candidates.push({ id, lat: c.lat, lon: c.lon, distance: d });
+    }
+    candidates.sort((a, b) => a.distance - b.distance);
+    return candidates.slice(0, k);
+  }
+
   async findNearestNodeInSet(latitude: number, longitude: number, candidates: Set<number>, maxDistanceMeters: number = 5000): Promise<{ id: number; lat: number; lon: number; distance: number } | null> {
     if (candidates.size === 0 || !this.graphLoaded) return null;
     let best: { id: number; lat: number; lon: number; distance: number } | null = null;
@@ -932,6 +949,10 @@ export class RoutingDatabase {
       this.edgesBySource.set(edge.source, []);
     }
     this.edgesBySource.get(edge.source)!.push(newEdge);
+  }
+
+  async clearOverlayDeletedEdges(): Promise<{ restored: number }> {
+    return this.sendMessage('clearOverlayDeletedEdges');
   }
 
   async close(): Promise<void> {

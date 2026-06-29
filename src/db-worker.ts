@@ -119,6 +119,28 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
           )`).run();
           db.prepare('CREATE TABLE IF NOT EXISTS deleted_nodes (node_id INTEGER PRIMARY KEY)').run();
           db.prepare('CREATE TABLE IF NOT EXISTS deleted_edges (source INTEGER, target INTEGER, PRIMARY KEY (source, target))').run();
+          // Migrate overlay from old is_fairway schema to cost_factor
+          const edgeCols = db.prepare("PRAGMA table_info('edges')").all() as Array<{ name: string }>;
+          const colNames = edgeCols.map(c => c.name);
+          if (colNames.includes('is_fairway') && !colNames.includes('cost_factor')) {
+            db.prepare('ALTER TABLE edges ADD COLUMN cost_factor REAL DEFAULT 1.2').run();
+            db.prepare('UPDATE edges SET cost_factor = CASE WHEN is_fairway = 1 THEN 0.8 ELSE 1.2 END').run();
+            console.log('[db-worker] Migrated overlay edges: is_fairway → cost_factor');
+          }
+          // Backfill reverse edges for bidirectional (traffic_mode=0) overlay edges that are missing their reverse.
+          // Skip any reverse that the user explicitly deleted.
+          const fwdEdges = db.prepare('SELECT source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode FROM edges WHERE traffic_mode = 0').all() as Array<{ source: number; target: number; distance: number; min_depth: number; max_air_draft: number; min_width: number; cost_factor: number; distance_to_land: number; edge_type_id: number; traffic_mode: number }>;
+          const insertRev = db.prepare('INSERT OR IGNORE INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode) VALUES (?,?,?,?,?,?,?,?,?,?)');
+          let backfilled = 0;
+          for (const e of fwdEdges) {
+            const rev = db.prepare('SELECT 1 FROM edges WHERE source=? AND target=?').get(e.target, e.source);
+            if (rev) continue;
+            const wasDeleted = db.prepare('SELECT 1 FROM deleted_edges WHERE source=? AND target=?').get(e.target, e.source);
+            if (wasDeleted) continue;
+            insertRev.run(e.target, e.source, e.distance, e.min_depth, e.max_air_draft, e.min_width, e.cost_factor, e.distance_to_land, e.edge_type_id, e.traffic_mode);
+            backfilled++;
+          }
+          if (backfilled > 0) console.log(`[db-worker] Backfilled ${backfilled} missing reverse edges in overlay`);
           overlayHandle = { db, path: overlayPath };
           console.log(`[db-worker] Overlay opened: ${overlayPath}`);
           parentPort!.postMessage({ id, type, result: { success: true } });
@@ -332,6 +354,24 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         overlayHandle.db.prepare('INSERT OR IGNORE INTO deleted_edges (source, target) VALUES (?, ?)').run(delSource, delTarget);
         overlayHandle.db.prepare('DELETE FROM edges WHERE source = ? AND target = ?').run(delSource, delTarget);
         parentPort!.postMessage({ id, type, result: { success: true } });
+        break;
+      }
+      case 'clearOverlayDeletedEdges': {
+        if (!overlayHandle) throw new Error('Overlay not open');
+        // Remove only overlay-to-overlay and overlay-to-main deleted_edges entries (not main-to-main deletions).
+        // This restores edges the user drew but accidentally deleted.
+        const overlayNodeIds = (overlayHandle.db.prepare('SELECT id FROM nodes').all() as { id: number }[]).map(r => r.id);
+        const nodeSet = new Set(overlayNodeIds);
+        const delRows = overlayHandle.db.prepare('SELECT source, target FROM deleted_edges').all() as { source: number; target: number }[];
+        let restored = 0;
+        for (const { source, target } of delRows) {
+          // Keep main-to-main deletions; remove anything touching overlay nodes
+          if (nodeSet.has(source) || nodeSet.has(target)) {
+            overlayHandle.db.prepare('DELETE FROM deleted_edges WHERE source=? AND target=?').run(source, target);
+            restored++;
+          }
+        }
+        parentPort!.postMessage({ id, type, result: { restored } });
         break;
       }
       case 'insertNode': {

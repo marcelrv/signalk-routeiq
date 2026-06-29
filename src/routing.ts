@@ -774,7 +774,9 @@ export class RoutingEngine {
       const nodePos = this.db.getNodeSync(node);
       if (!nodePos) return node;
       const edges = await this.db.getOutgoingEdges(node);
-      if (edges.length === 0) return node;
+      // For end nodes with no outgoing edges, the node is still valid as a destination.
+      // For start nodes with no outgoing edges, we must find an alternative.
+      if (edges.length === 0 && label !== 'Start') return node;
 
       if (label === 'Start') {
         // For start nodes: check if all edges leading toward the destination are shallow.
@@ -807,6 +809,7 @@ export class RoutingEngine {
       for (const c of candidates) {
         if (c.id === node) continue;
         const cEdges = await this.db.getOutgoingEdges(c.id);
+        if (cEdges.length === 0) continue; // skip dead-end candidates for start node
         const hasDeep = cEdges.some(e => e.min_depth < 0 || e.min_depth >= minDepth);
         if (hasDeep && c.distance < bestDist) {
           bestDist = c.distance;
@@ -960,6 +963,7 @@ export class RoutingEngine {
 
     // Apply string-pulling to remove unnecessary grid staircasing
     const smoothedPath = await this.smoothPath(compressedPath);
+
 
     // Build GeoJSON response
     return await this.buildRouteResult(smoothedPath, path, gScore.get(endNode) || 0);

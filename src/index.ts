@@ -78,17 +78,23 @@ export function pluginConstructor(app: ServerAPI) {
         }
         routingEngine = null;
 
-        database = new RoutingDatabase(dataDir);
-        await database.init();
-        await database.loadGraph();
-        const stats = await database.getStats();
-        console.log(`[autoroute] Database hot-reloaded: ${stats.nodes} nodes, ${stats.edges} edges, ${stats.pois} POIs`);
+        try {
+          database = new RoutingDatabase(dataDir);
+          await database.init();
+          await database.loadGraph();
+          const stats = await database.getStats();
+          console.log(`[autoroute] Database hot-reloaded: ${stats.nodes} nodes, ${stats.edges} edges, ${stats.pois} POIs`);
 
-        routingEngine = new RoutingEngine(database, config, currentDims);
-        if (apiHandler) {
-          apiHandler.setComponents(database, routingEngine);
+          routingEngine = new RoutingEngine(database, config, currentDims);
+          if (apiHandler) {
+            apiHandler.setComponents(database, routingEngine);
+          }
+          console.log('[autoroute] Routing engine hot-reloaded after database download');
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          console.error(`[autoroute] Hot-reload failed: ${message}`);
+          if (apiHandler) apiHandler.setInitError(message);
         }
-        console.log('[autoroute] Routing engine hot-reloaded after database download');
       };
 
       // Re-initialize database/routing engine with (possibly updated) config
@@ -270,6 +276,9 @@ export function pluginConstructor(app: ServerAPI) {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       console.error(`[autoroute] Failed to initialize: ${message}`);
+      // Surface the error through the API so the frontend can show it rather
+      // than polling forever on a 503. The app (map, data manager) stays usable.
+      apiHandler!.setInitError(message);
     }
   }
 
