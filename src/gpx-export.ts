@@ -10,6 +10,10 @@ export class GpxExporter {
     const { coords, segments } = this.extractCoordsAndSegments(route);
     const totalDistance = route.totalDistance ?? 0;
     const totalCost = route.totalCost ?? 0;
+    // Simplified navigable waypoints (computed server-side with bounded
+    // deviation): these make the <rte>; the full computed geometry is kept
+    // as a <trk> so the receiving plotter still has the reference line.
+    const waypoints = route.waypoints && route.waypoints.length >= 2 ? route.waypoints : null;
 
     let gpx = `<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="signalk-autoroute" xmlns:ar="http://signalk.org/autoroute">
@@ -17,29 +21,56 @@ export class GpxExporter {
     <name>${this.escapeXml(name)}</name>
     <desc>Route calculated by SignalK Autoroute Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m, Cost: ${totalCost.toFixed(2)}</desc>`;
 
-    coords.forEach((coord, index) => {
-      const [lon, lat] = coord;
-      gpx += `
+    if (waypoints) {
+      waypoints.forEach((wp, index) => {
+        gpx += `
+    <rtept lat="${wp.latitude.toFixed(6)}" lon="${wp.longitude.toFixed(6)}">
+      <name>WP${index + 1}</name>
+    </rtept>`;
+      });
+    } else {
+      // Legacy result without waypoints: every graph node, with the incoming
+      // edge attributes attached (extensions only make sense at full resolution).
+      coords.forEach((coord, index) => {
+        const [lon, lat] = coord;
+        gpx += `
     <rtept lat="${lat.toFixed(6)}" lon="${lon.toFixed(6)}">
       <name>WP${index + 1}</name>`;
 
-      if (index > 0 && segments[index - 1]) {
-        const seg = segments[index - 1];
-        gpx += `
+        if (index > 0 && segments[index - 1]) {
+          const seg = segments[index - 1];
+          gpx += `
       <ele>0</ele>
       <extensions>
         <ar:minDepth>${seg.minDepth.toFixed(1)}m</ar:minDepth>
         <ar:maxAirDraft>${seg.maxAirDraft.toFixed(1)}m</ar:maxAirDraft>
         <ar:costFactor>${seg.costFactor.toFixed(2)}</ar:costFactor>
       </extensions>`;
-      }
+        }
 
-      gpx += `
+        gpx += `
     </rtept>`;
-    });
+      });
+    }
 
     gpx += `
-  </rte>
+  </rte>`;
+
+    if (waypoints) {
+      gpx += `
+  <trk>
+    <name>${this.escapeXml(name)} (computed path)</name>
+    <trkseg>`;
+      for (const [lon, lat] of coords) {
+        gpx += `
+      <trkpt lat="${lat.toFixed(6)}" lon="${lon.toFixed(6)}"></trkpt>`;
+      }
+      gpx += `
+    </trkseg>
+  </trk>`;
+    }
+
+    gpx += `
 </gpx>`;
 
     return gpx;
@@ -54,6 +85,15 @@ export class GpxExporter {
     const totalCost = route.totalCost ?? 0;
     const id = routeId || crypto.randomUUID();
 
+    // The stored route is what a plotter navigates: use the simplified
+    // waypoints (same geometry the Freeboard-SK extension saves) so the
+    // waypoint list stays meaningful. Full-resolution segments are internal
+    // metadata and only round-trip on legacy results without waypoints.
+    const waypoints = route.waypoints && route.waypoints.length >= 2 ? route.waypoints : null;
+    const coordinates = waypoints
+      ? waypoints.map(w => [w.longitude, w.latitude] as [number, number])
+      : (coords as [number, number][]);
+
     return {
       name,
       description: `Route calculated by SignalK Autoroute Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m`,
@@ -62,20 +102,22 @@ export class GpxExporter {
         type: 'Feature',
         geometry: {
           type: 'LineString',
-          coordinates: coords as [number, number][],
+          coordinates,
         },
         properties: {
           totalCost,
-          segments: segments.map(s => ({
-            from: s.from ?? -1,
-            to: s.to ?? -1,
-            distance: s.distance,
-            minDepth: s.minDepth,
-            maxAirDraft: s.maxAirDraft,
-            costFactor: s.costFactor,
-            trafficMode: s.trafficMode,
-            edgeTypeId: s.edgeTypeId,
-          })),
+          ...(waypoints ? {} : {
+            segments: segments.map(s => ({
+              from: s.from ?? -1,
+              to: s.to ?? -1,
+              distance: s.distance,
+              minDepth: s.minDepth,
+              maxAirDraft: s.maxAirDraft,
+              costFactor: s.costFactor,
+              trafficMode: s.trafficMode,
+              edgeTypeId: s.edgeTypeId,
+            })),
+          }),
         },
       },
       timestamp: new Date().toISOString(),

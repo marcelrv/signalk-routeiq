@@ -514,17 +514,8 @@ export class ApiHandler {
       if (dbIndex === undefined) { res.status(400).json({ error: 'Missing dbIndex' }); return; }
       if (lat !== undefined && lon !== undefined) {
         await this.db!.addNode(dbIndex, { id: nodeId, lat, lon, node_depth, resolution });
-        // Auto-connect to the 2 nearest main graph nodes in both directions
-        const nearest = await this.db!.findKNearestMainGraphNodes(lat, lon, 2);
-        let autoConnected = 0;
-        for (const n of nearest) {
-          try {
-            await this.db!.addEdge(0, { source: nodeId, target: n.id, distance: 0, cost_factor: 1.2, min_depth: -1, max_air_draft: -1, min_width: -1, distance_to_land: 0, edge_type_id: 0, traffic_mode: 0 });
-            await this.db!.addEdge(0, { source: n.id, target: nodeId, distance: 0, cost_factor: 1.2, min_depth: -1, max_air_draft: -1, min_width: -1, distance_to_land: 0, edge_type_id: 0, traffic_mode: 0 });
-            autoConnected++;
-          } catch { /* edge already exists or other non-fatal error */ }
-        }
-        res.json({ success: true, autoConnected });
+        const connect = await this.autoConnectNode(nodeId, lat, lon);
+        res.json({ success: true, ...connect });
       } else {
         await this.db!.updateNode(dbIndex, nodeId, { node_depth, resolution });
         res.json({ success: true });
@@ -534,6 +525,47 @@ export class ApiHandler {
       res.status(500).json({ error: message });
       next(error);
     }
+  }
+
+  /**
+   * Connect a newly placed editor node to the surrounding main graph.
+   *
+   * Candidates are the nearest main-graph nodes within a hard radius; each
+   * connection line is validated against the land polygons (when present in
+   * the data directory) so the editor cannot fabricate edges across land.
+   * Edges carry the real geodesic distance — a zero-length edge would be
+   * free for A* and distort every route through it.
+   */
+  private async autoConnectNode(
+    nodeId: number,
+    lat: number,
+    lon: number,
+  ): Promise<{ autoConnected: number; autoConnectSkipped: number }> {
+    const MAX_CONNECT_DIST = 1000; // m — beyond this, connecting blind is guesswork
+    const TARGET_CONNECTIONS = 2;
+    // Over-fetch candidates so a rejected line can fall through to the next node
+    const candidates = await this.db!.findKNearestMainGraphNodes(lat, lon, 6, MAX_CONNECT_DIST);
+
+    let autoConnected = 0;
+    let skipped = 0;
+    for (const n of candidates) {
+      if (autoConnected >= TARGET_CONNECTIONS) break;
+      if (n.id === nodeId) continue;
+      // ~50 m sampling along the straight connection, same as the LOS smoother
+      const numSamples = Math.min(60, Math.max(3, Math.ceil(n.distance / 50)));
+      if (this.db!.isLineCrossingLand(lat, lon, n.lat, n.lon, numSamples)) {
+        skipped++;
+        continue;
+      }
+      const distance = Math.max(1, Math.round(n.distance));
+      const attrs = { distance, cost_factor: 1.2, min_depth: -1, max_air_draft: -1, min_width: -1, distance_to_land: 0, edge_type_id: 0, traffic_mode: 0 };
+      try {
+        await this.db!.addEdge(0, { source: nodeId, target: n.id, ...attrs });
+        await this.db!.addEdge(0, { source: n.id, target: nodeId, ...attrs });
+        autoConnected++;
+      } catch { /* edge already exists or other non-fatal error */ }
+    }
+    return { autoConnected, autoConnectSkipped: skipped };
   }
 
   /**

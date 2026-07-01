@@ -1011,32 +1011,26 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     return list;
   }
 
-  // ---- persistence ----
-  const SPEED_STORAGE_KEY = 'autoroute_avg_speed';
-  function loadAvgSpeed() {
-    // Locally-set value wins; otherwise fall back to the plugin-config default
-    try { const v = localStorage.getItem(SPEED_STORAGE_KEY); if (v) { document.getElementById('avg-speed').value = v; return; } } catch {}
+  // ---- defaults from plugin settings ----
+  // Average speed and min coast distance are plugin configuration; the inputs
+  // always start from the configured values (edits are session-only overrides).
+  function loadConfigDefaults() {
     fetch(getApiBase() + '/signalk/v1/api/router/config')
       .then(r => r.ok ? r.json() : null)
-      .then(c => { if (c && c.averageSpeedKnots) document.getElementById('avg-speed').value = c.averageSpeedKnots; })
+      .then(c => {
+        if (!c) return;
+        if (c.averageSpeedKnots) document.getElementById('avg-speed').value = c.averageSpeedKnots;
+        if (c.defaultCoastDistance != null) document.getElementById('min-coast').value = c.defaultCoastDistance;
+        // Refresh a route pane that rendered before the config arrived
+        if (state.lastGeoJson) renderRoutePane(state.lastGeoJson);
+      })
       .catch(() => {});
   }
-  function saveAvgSpeed() {
-    try { localStorage.setItem(SPEED_STORAGE_KEY, document.getElementById('avg-speed').value); } catch {}
-  }
-  loadAvgSpeed();
-  document.getElementById('avg-speed').addEventListener('change', saveAvgSpeed);
-
-  // ---- persist min coast distance ----
-  const COAST_STORAGE_KEY = 'autoroute_min_coast';
-  function loadMinCoast() {
-    try { const v = localStorage.getItem(COAST_STORAGE_KEY); if (v) document.getElementById('min-coast').value = v; } catch {}
-  }
-  function saveMinCoast() {
-    try { localStorage.setItem(COAST_STORAGE_KEY, document.getElementById('min-coast').value); } catch {}
-  }
-  loadMinCoast();
-  document.getElementById('min-coast').addEventListener('change', saveMinCoast);
+  loadConfigDefaults();
+  // Recompute the itinerary times when the session speed override changes
+  document.getElementById('avg-speed').addEventListener('change', function () {
+    if (state.lastGeoJson) renderRoutePane(state.lastGeoJson);
+  });
 
   // ---- state ----
   const unitsConfig = { distance: {}, depth: {}, length: {}, speed: {}, temperature: {} };
@@ -1554,7 +1548,11 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
           .then(function (data) {
             var n = data && data.autoConnected ? data.autoConnected : 0;
-            btn.textContent = n > 0 ? '✓ Connected to ' + n + ' nodes' : '⚠ No nearby graph nodes found';
+            var sk = data && data.autoConnectSkipped ? data.autoConnectSkipped : 0;
+            btn.textContent = n > 0
+              ? '✓ Connected to ' + n + ' nodes' + (sk ? ' (' + sk + ' skipped: land in the way)' : '')
+              : sk ? '⚠ ' + sk + ' candidate(s) cross land — add edges manually'
+                   : '⚠ No nearby graph nodes found';
             btn.style.color = n > 0 ? '#4ade80' : '#fbbf24';
             fetchEdges();
             fetchOverlayStats();
@@ -1776,7 +1774,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
         .then(function (data) {
-          var conn = data && data.autoConnected ? ' (connected to ' + data.autoConnected + ' nearby nodes)' : ' (no nearby nodes to connect — add edges manually)';
+          var n = data && data.autoConnected ? data.autoConnected : 0;
+          var sk = data && data.autoConnectSkipped ? data.autoConnectSkipped : 0;
+          var conn = n > 0
+            ? ' (connected to ' + n + ' nearby nodes' + (sk ? ', ' + sk + ' skipped over land' : '') + ')'
+            : sk ? ' (' + sk + ' nearby candidate(s) cross land — add edges manually)'
+                 : ' (no nearby nodes to connect — add edges manually)';
           setEditorStatus('Node placed' + conn + ' — click to place another');
           fetchGraphNodes();
           fetchOverlayStats();
@@ -3152,11 +3155,31 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         });
       }
     }
-    const nodes = extractMajorNodes(coords);
+    // Prefer the server-computed itinerary (single source of truth: via/turn
+    // classification, chainage, per-leg aggregates and crossings all come from
+    // the exact graph edges). Client-side extraction remains only as a
+    // fallback for older servers reached via the API-URL override.
+    const itinerary = (Array.isArray(geoJson.itinerary) && geoJson.itinerary.length >= 2)
+      ? geoJson.itinerary : null;
+    const nodes = itinerary
+      ? itinerary.map(p => ({
+          // Local coord index for hover/highlight (webapp indexes the
+          // concatenated feature coords, which differs from server indexing)
+          index: closestCoordIndex(coords, p.latitude, p.longitude),
+          lat: p.latitude, lng: p.longitude,
+          cumDistKm: p.distanceFromStart / 1000,
+          heading: p.courseToNext || 0,
+          bearingChange: Math.abs(p.turn || 0),
+          signedChange: p.turn || 0,
+          isStart: p.kind === 'start', isEnd: p.kind === 'end',
+          _viaIdx: p.kind === 'via' ? (p.viaIndex || 0) : undefined,
+          leg: p.leg || null,
+        }))
+      : extractMajorNodes(coords);
     // Pass features only in the multi-feature (format 2) case so the function
     // can walk actual geometry lengths instead of assuming 1 coord per segment.
     const segFeatures = (geoJson.features && geoJson.features.length > 1) ? geoJson.features : null;
-    const segRanges = mapSegmentsToCoordRanges(segments, segFeatures);
+    const segRanges = itinerary ? null : mapSegmentsToCoordRanges(segments, segFeatures);
 
     // Overall warnings
     warningsEl.innerHTML = '';
@@ -3196,8 +3219,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     // Via points for labeling
     const viaPoints = state.viaPoints || [];
 
-    // Merge via points into nodes as explicit section boundaries (before crossing leg mapping)
-    if (viaPoints.length > 0 && coords.length >= 2) {
+    // Merge via points into nodes as explicit section boundaries (before crossing
+    // leg mapping) — legacy path only; the server itinerary already marks vias.
+    if (!itinerary && viaPoints.length > 0 && coords.length >= 2) {
       const cumDist = computeCumulativeDistances(coords);
       for (let vi = 0; vi < viaPoints.length; vi++) {
         const vp = viaPoints[vi];
@@ -3227,9 +3251,14 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       nodes.sort((a, b) => a.index - b.index);
     }
 
-    // Crossings mapped to legs (used in both collapsed node icons and expanded leg details)
+    // Crossings mapped to legs (used in both collapsed node icons and expanded
+    // leg details). With a server itinerary each node carries its own
+    // leg.crossings; otherwise approximate the mapping client-side.
     const crossings = geoJson.crossings || [];
-    const crossingLegMap = mapCrossingsToLegs(crossings, coords, nodes);
+    const crossingLegMap = itinerary ? null : mapCrossingsToLegs(crossings, coords, nodes);
+    const legCrossingsFor = (i) => itinerary
+      ? ((nodes[i].leg && nodes[i].leg.crossings) || [])
+      : (crossingLegMap[i] || []);
 
     // Nodes + legs
     nodesEl.innerHTML = '';
@@ -3260,7 +3289,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       // Build collapsed crossing icons for the following leg
       let crossingHtml = '';
       if (!isLast) {
-        const legCrossings = crossingLegMap[i] || [];
+        const legCrossings = legCrossingsFor(i);
         if (legCrossings.length > 0) {
           // Merge crossings with the same name (fixed + opening)
           const grouped = new Map();
@@ -3315,7 +3344,6 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       // Leg between this node and next
       if (!isLast) {
         const nextNode = nodes[i + 1];
-        const legSegs = getSegmentsForLeg(segRanges, node.index, nextNode.index);
         const legDiv = document.createElement('div');
         legDiv.className = 'route-leg';
         legDiv.dataset.coordFrom = node.index;
@@ -3323,26 +3351,37 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
         const legWarnings = [];
 
-        if (legSegs.length > 0) {
-    let minDepth = Infinity, minWidth = Infinity, maxAirDraft = Infinity;
-          let legDist = 0;
-          
-          // Get the current vessel draft from the UI panel, fallback to 2.0m
-          const vesselDraft = (lastBoat && lastBoat.draft != null) ? lastBoat.draft : 2.0;
-          const safetyMargin = (lastBoat && lastBoat.effectiveDraft != null && lastBoat.draft != null)
-            ? lastBoat.effectiveDraft - lastBoat.draft : 0.3;
-          const shallowThreshold = vesselDraft + safetyMargin;
-
+        // Aggregate leg attributes: from the server itinerary when present,
+        // else from the client-side segment→coord-range mapping (legacy).
+        let minDepth = Infinity, minWidth = Infinity, maxAirDraft = Infinity;
+        let legDist = 0, hasLegData = false;
+        if (itinerary) {
+          if (node.leg) {
+            hasLegData = true;
+            legDist = node.leg.distance || 0;
+            if (node.leg.minDepth != null) minDepth = node.leg.minDepth;
+            if (node.leg.minWidth != null) minWidth = node.leg.minWidth;
+            if (node.leg.maxAirDraft != null) maxAirDraft = node.leg.maxAirDraft;
+          }
+        } else {
+          const legSegs = getSegmentsForLeg(segRanges, node.index, nextNode.index);
+          hasLegData = legSegs.length > 0;
           for (const s of legSegs) {
             if (s.minDepth !== null && s.minDepth !== undefined && s.minDepth >= 0) minDepth = Math.min(minDepth, s.minDepth);
             if (s.minWidth !== null && s.minWidth !== undefined && s.minWidth >= 0) minWidth = Math.min(minWidth, s.minWidth);
             if (s.maxAirDraft !== null && s.maxAirDraft !== undefined && s.maxAirDraft >= 0) maxAirDraft = Math.min(maxAirDraft, s.maxAirDraft);
             legDist += s.distance;
-            
-            // CRITICAL FIX: Only warn if the depth is actually dangerous for THIS vessel
-            if (s.minDepth >= 0 && s.minDepth < shallowThreshold) legWarnings.push('Shallow (' + s.minDepth.toFixed(1) + 'm)');
-            if (s.minWidth >= 0 && s.minWidth < 6) legWarnings.push('Narrow (' + s.minWidth.toFixed(1) + 'm)');
           }
+        }
+
+        if (hasLegData) {
+          // Only warn if the depth/width is actually constraining for THIS vessel
+          const vesselDraft = (lastBoat && lastBoat.draft != null) ? lastBoat.draft : 2.0;
+          const safetyMargin = (lastBoat && lastBoat.effectiveDraft != null && lastBoat.draft != null)
+            ? lastBoat.effectiveDraft - lastBoat.draft : 0.3;
+          const shallowThreshold = vesselDraft + safetyMargin;
+          if (minDepth !== Infinity && minDepth < shallowThreshold) legWarnings.push('Shallow (' + minDepth.toFixed(1) + 'm)');
+          if (minWidth !== Infinity && minWidth < 6) legWarnings.push('Narrow (' + minWidth.toFixed(1) + 'm)');
 
           const legKm = legDist / 1000;
           const legNm = legKm / 1.852;
@@ -3356,7 +3395,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           if (maxAirDraft !== Infinity) html += '<div class="leg-stat"><span>Max Air Draft</span><span class="leg-val">' + fmtHeight(maxAirDraft) + '</span></div>';
 
           // Crossings on this leg (grouped by name)
-          const legCrossings = crossingLegMap[i] || [];
+          const legCrossings = legCrossingsFor(i);
           if (legCrossings.length > 0) {
             const grouped = new Map();
             for (const c of legCrossings) {
