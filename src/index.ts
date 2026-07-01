@@ -12,6 +12,7 @@ import * as path from 'path';
 
 import { ApiHandler } from './api.js';
 import { RoutingDatabase } from './database.js';
+import { registerPlotterExtension, setPlotterExtensionRunning } from './plotterext.js';
 import { RoutingEngine } from './routing.js';
 import { DEFAULT_CONFIG, PluginConfig } from './types.js';
 
@@ -67,7 +68,15 @@ export function pluginConstructor(app: ServerAPI) {
       if (!apiHandler) {
         apiHandler = new ApiHandler(config, app);
         console.log('[autoroute] API handler created (awaiting database init)');
+      } else {
+        // start() rebuilds the config object on every config save; the
+        // handler keeps a reference, so hand it the fresh one.
+        apiHandler.updateConfig(config);
       }
+
+      // Freeboard-SK / chartplotter integration (plotterExtensions manifest + iframe assets)
+      registerPlotterExtension(app, __plugindir);
+      setPlotterExtensionRunning(true);
 
       // Set hot-reload callback: when a new database is downloaded, re-init everything
       apiHandler.onReloadRequested = async (dataDir: string) => {
@@ -106,6 +115,10 @@ export function pluginConstructor(app: ServerAPI) {
      */
     async stop() {
       console.log('[autoroute] Stopping SignalK Autoroute Nautical Route Planner Plugin...');
+
+      // Remove the extension from the plotterExtensions collection so hosts
+      // stop offering it (presence == enabled per the extensions spec)
+      setPlotterExtensionRunning(false);
 
       // Unsubscribe from vessel dimensions
       if (subscriptionCancelled) {
@@ -172,6 +185,21 @@ export function pluginConstructor(app: ServerAPI) {
             title: 'Default Min Coast Distance (NM)',
             description: 'Default minimum distance from coastline in nautical miles',
             default: DEFAULT_CONFIG.defaultCoastDistance,
+          },
+          averageSpeedKnots: {
+            type: 'number',
+            title: 'Average Speed (kn)',
+            description: 'Cruising speed used to estimate route duration / ETA',
+            default: DEFAULT_CONFIG.averageSpeedKnots,
+            minimum: 0.5,
+            multipleOf: 0.1,
+          },
+          waypointTolerance: {
+            type: 'number',
+            title: 'Waypoint Simplification Tolerance (m)',
+            description: 'Max deviation from the computed path when reducing it to route waypoints (0 = keep every graph node)',
+            default: DEFAULT_CONFIG.waypointTolerance,
+            minimum: 0,
           },
           wrongWayPenalty: {
             type: 'number',

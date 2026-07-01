@@ -1014,7 +1014,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   // ---- persistence ----
   const SPEED_STORAGE_KEY = 'autoroute_avg_speed';
   function loadAvgSpeed() {
-    try { const v = localStorage.getItem(SPEED_STORAGE_KEY); if (v) document.getElementById('avg-speed').value = v; } catch {}
+    // Locally-set value wins; otherwise fall back to the plugin-config default
+    try { const v = localStorage.getItem(SPEED_STORAGE_KEY); if (v) { document.getElementById('avg-speed').value = v; return; } } catch {}
+    fetch(getApiBase() + '/signalk/v1/api/router/config')
+      .then(r => r.ok ? r.json() : null)
+      .then(c => { if (c && c.averageSpeedKnots) document.getElementById('avg-speed').value = c.averageSpeedKnots; })
+      .catch(() => {});
   }
   function saveAvgSpeed() {
     try { localStorage.setItem(SPEED_STORAGE_KEY, document.getElementById('avg-speed').value); } catch {}

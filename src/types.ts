@@ -57,6 +57,34 @@ export interface RouteCrossing {
   subtype?: string; // 'opening' or 'fixed' for bridges
   height?: number;  // vertical clearance (m) for fixed bridges
   position: { latitude: number; longitude: number };
+  distanceFromStart?: number; // meters along the route (chainage)
+}
+
+// A point of the simplified, navigable route geometry (Douglas-Peucker with
+// bounded deviation from the computed path) — suitable as route waypoints in
+// a chartplotter / autopilot.
+export interface RouteWaypoint {
+  latitude: number;
+  longitude: number;
+}
+
+// An entry of the human-readable route itinerary: start/end, via points and
+// major course changes, with aggregates for the leg to the next entry.
+export interface ItineraryPoint {
+  kind: 'start' | 'turn' | 'via' | 'end';
+  latitude: number;
+  longitude: number;
+  distanceFromStart: number; // meters along the route
+  courseToNext?: number;     // degrees true, chord course to the next itinerary point
+  turn?: number;             // signed course change at this point (deg, + = starboard)
+  viaIndex?: number;         // 0-based index of the matching request via point
+  leg?: {
+    distance: number;        // meters, sum of graph edges to the next itinerary point
+    minDepth?: number;       // m, only when known (>= 0 in the graph)
+    minWidth?: number;       // m
+    maxAirDraft?: number;    // m
+    crossings?: RouteCrossing[]; // bridges/locks on this leg, in route order
+  };
 }
 
 // Route result
@@ -74,6 +102,8 @@ export interface RouteResult {
   totalDistance?: number;
   totalCost?: number;
   crossings?: RouteCrossing[];
+  waypoints?: RouteWaypoint[];
+  itinerary?: ItineraryPoint[];
   features: Array<{
     type: 'Feature';
     geometry: {
@@ -95,6 +125,7 @@ export interface RouteResult {
         distance: number; // meters
         minDepth: number; // meters
         maxAirDraft: number; // meters
+        minWidth?: number; // meters
         costFactor: number;
         trafficMode: number;
         edgeTypeId?: number;
@@ -135,6 +166,7 @@ export interface PluginConfig {
   lineOfSightSampleInterval: number; // meters, default 500
   lineOfSightSearchRadius: number; // meters, default 800
   averageSpeedKnots: number;        // knots, default 6.0
+  waypointTolerance: number;        // meters, max deviation when simplifying to waypoints (default 30)
   catalogUrl: string;               // URL to the index.json catalog for downloadable databases
 }
 
@@ -151,5 +183,6 @@ export const DEFAULT_CONFIG: PluginConfig = {
   lineOfSightSampleInterval: 500,
   lineOfSightSearchRadius: 0,
   averageSpeedKnots: 6.0,
+  waypointTolerance: 30,
   catalogUrl: 'https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/index.json',
 };

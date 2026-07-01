@@ -21,6 +21,10 @@ describe('RoutingEngine', () => {
     if (fs.existsSync(testDbPath)) {
       fs.unlinkSync(testDbPath);
     }
+    const overlayPath = path.join(fixturesDir, 'user-edits.sqlite');
+    if (fs.existsSync(overlayPath)) {
+      fs.unlinkSync(overlayPath);
+    }
 
     // Create and populate the test database using raw DatabaseSync
     const raw = new DatabaseSync(testDbPath, { open: true });
@@ -66,19 +70,19 @@ describe('RoutingEngine', () => {
     run(`CREATE TABLE edges (
       source INTEGER, target INTEGER, distance REAL,
       min_depth REAL, max_air_draft REAL, min_width REAL,
-      is_fairway INTEGER, distance_to_land REAL,
+      cost_factor REAL DEFAULT 1.2, distance_to_land REAL,
       edge_type_id INTEGER DEFAULT 0,
       traffic_mode INTEGER DEFAULT 0
     )`);
-    run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, is_fairway, distance_to_land, edge_type_id, traffic_mode) VALUES
-      (1420000018500000, 1420100018501000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0),
-      (1420100018501000, 1420000018500000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0),
-      (1420100018501000, 1420200018502000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0),
-      (1420200018502000, 1420100018501000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0),
-      (1420200018502000, 1420300018503000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0),
-      (1420300018503000, 1420200018502000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0),
-      (1420300018503000, 1420400018504000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0),
-      (1420400018504000, 1420300018503000, 1500, 5.0, 20.0, 10.0, 1, 500, 0, 0)`);
+    run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode) VALUES
+      (1420000018500000, 1420100018501000, 1500, 5.0, 20.0, 10.0, 0.8, 500, 0, 0),
+      (1420100018501000, 1420000018500000, 1500, 5.0, 20.0, 10.0, 0.8, 500, 0, 0),
+      (1420100018501000, 1420200018502000, 1500, 5.0, 20.0, 10.0, 0.8, 500, 0, 0),
+      (1420200018502000, 1420100018501000, 1500, 5.0, 20.0, 10.0, 0.8, 500, 0, 0),
+      (1420200018502000, 1420300018503000, 1500, 5.0, 20.0, 10.0, 0.8, 500, 0, 0),
+      (1420300018503000, 1420200018502000, 1500, 5.0, 20.0, 10.0, 0.8, 500, 0, 0),
+      (1420300018503000, 1420400018504000, 1500, 5.0, 20.0, 10.0, 0.8, 500, 0, 0),
+      (1420400018504000, 1420300018503000, 1500, 5.0, 20.0, 10.0, 0.8, 500, 0, 0)`);
 
     run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
     run(`INSERT INTO pois (id, name, type_id, properties, lat, lon) VALUES
@@ -148,5 +152,123 @@ describe('RoutingEngine', () => {
     it('should update vessel dimensions', () => {
       engine.setVesselDimensions({ draft: 3.0, beam: 5.0, airDraft: 15.0 });
     });
+  });
+
+  describe('graph editor — edge CRUD', () => {
+    const SRC = 1420000018500000;
+    const TGT = 1420100018501000;
+
+    it('updateEdge persists values in memory and getEdgesInBBox returns them', async () => {
+      await db.updateEdge(0, SRC, TGT, { max_air_draft: 99, min_width: 88, cost_factor: 0.5 });
+      const edges = await db.getEdgesInBBox(51.9, 4.9, 52.1, 5.1, 100);
+      const updated: any = edges.find(e => e.source === SRC && e.target === TGT);
+      assert.ok(updated, 'Edge should be found in bbox');
+      assert.strictEqual(updated.max_air_draft, 99, 'max_air_draft should be 99');
+      assert.strictEqual(updated.min_width, 88, 'min_width should be 88');
+      assert.strictEqual(updated.cost_factor, 0.5, 'cost_factor should be 0.5');
+    });
+
+    it('updateEdge does not create duplicate entries', async () => {
+      const edgesBefore: any[] = await db.getEdgesInBBox(51.9, 4.9, 52.1, 5.1, 100);
+      const countBefore = edgesBefore.filter((e: any) => e.source === SRC && e.target === TGT).length;
+      await db.updateEdge(0, SRC, TGT, { min_depth: 42 });
+      const edgesAfter: any[] = await db.getEdgesInBBox(51.9, 4.9, 52.1, 5.1, 100);
+      const countAfter = edgesAfter.filter((e: any) => e.source === SRC && e.target === TGT).length;
+      assert.strictEqual(countAfter, countBefore, 'Should not create duplicate edges on update');
+    });
+
+    it('updateEdge persists to overlay SQLite', async () => {
+      const overlayPath = path.join(fixturesDir, 'user-edits.sqlite');
+      const raw = new DatabaseSync(overlayPath);
+      const row: any = raw.prepare('SELECT max_air_draft, min_width, cost_factor, min_depth FROM edges WHERE source = ? AND target = ?').get(SRC, TGT);
+      raw.close();
+      assert.ok(row, 'Edge should exist in overlay');
+      assert.strictEqual(row.max_air_draft, 99, 'Overlay max_air_draft should be 99');
+      assert.strictEqual(row.min_width, 88, 'Overlay min_width should be 88');
+      assert.strictEqual(row.min_depth, 42, 'Overlay min_depth should be 42');
+    });
+
+    it('addEdge sets source_lat/source_lon in memory', async () => {
+      const newSrc = 1420300018503000;
+      const newTgt = 1420400018504000;
+      await db.addEdge(0, { source: newSrc, target: newTgt, distance: 2000, min_depth: 5, max_air_draft: 25, min_width: 12, cost_factor: 0.8, distance_to_land: 300, edge_type_id: 1, traffic_mode: 0 });
+      const edges: any[] = await db.getEdgesInBBox(51.9, 4.9, 52.1, 5.1, 100);
+      const added: any = edges.find(e => e.source === newSrc && e.target === newTgt);
+      assert.ok(added, 'New edge should be found in bbox');
+      assert.strictEqual(added.source_lat, 52.03, `source_lat should be 52.03, got ${added.source_lat}`);
+      assert.strictEqual(added.source_lon, 5.03, `source_lon should be 5.03, got ${added.source_lon}`);
+      assert.strictEqual(added.target_lat, 52.04, `target_lat should be 52.04, got ${added.target_lat}`);
+      assert.strictEqual(added.target_lon, 5.04, `target_lon should be 5.04, got ${added.target_lon}`);
+    });
+  });
+});
+
+describe('Itinerary', async () => {
+  const { simplifyIndices, buildItinerary } = await import('../dist/itinerary.js');
+
+  // L-shaped route: 10 segments due east along lat 52.0 (lon 4.00→4.10),
+  // then 5 segments due north along lon 4.10 (lat 52.00→52.05).
+  const coords: [number, number][] = [];
+  for (let i = 0; i <= 10; i++) coords.push([4.0 + i * 0.01, 52.0]);
+  for (let i = 1; i <= 5; i++) coords.push([4.1, 52.0 + i * 0.01]);
+  const segments = coords.slice(1).map((_, i) => ({
+    distance: i < 10 ? 700 : 1113,
+    minDepth: i === 2 ? 3.5 : -1,
+    maxAirDraft: -1,
+  }));
+
+  it('drops collinear points but keeps the corner', () => {
+    const kept = simplifyIndices(coords, 30);
+    assert.deepStrictEqual(kept, [0, 10, coords.length - 1]);
+  });
+
+  it('keeps every point when tolerance is 0', () => {
+    const kept = simplifyIndices(coords, 0);
+    assert.strictEqual(kept.length, coords.length);
+  });
+
+  it('builds start/turn/end with leg aggregates and crossing chainage', () => {
+    const crossings = [
+      { type: 'bridge' as const, name: 'Testbrug', subtype: 'fixed', height: 12,
+        position: { latitude: 52.0, longitude: 4.05 } }, // at coord index 5
+    ];
+    const { waypoints, itinerary } = buildItinerary(coords, segments, crossings, [], 30);
+
+    assert.strictEqual(waypoints.length, 3, 'simplified to start/corner/end');
+
+    assert.strictEqual(itinerary.length, 3);
+    const [start, turn, end] = itinerary;
+    assert.strictEqual(start.kind, 'start');
+    assert.strictEqual(turn.kind, 'turn');
+    assert.strictEqual(end.kind, 'end');
+
+    // Chainage from graph edge distances
+    assert.strictEqual(start.distanceFromStart, 0);
+    assert.strictEqual(turn.distanceFromStart, 7000);
+    assert.strictEqual(end.distanceFromStart, 7000 + 5 * 1113);
+
+    // Turning from due east (090°) onto due north (000°) is ~90° to port
+    assert.ok(Math.abs((turn.turn ?? 0) + 90) < 3, `expected ~-90, got ${turn.turn}`);
+    assert.ok(Math.abs((start.courseToNext ?? 0) - 90) < 3, `expected ~090, got ${start.courseToNext}`);
+
+    // First leg: 10 edges of 700 m, one with a known depth, and the bridge
+    assert.strictEqual(start.leg!.distance, 7000);
+    assert.strictEqual(start.leg!.minDepth, 3.5);
+    assert.strictEqual(start.leg!.crossings!.length, 1);
+    assert.strictEqual(start.leg!.crossings![0].distanceFromStart, 5 * 700);
+    // Second leg: no known depth, no crossings
+    assert.strictEqual(turn.leg!.distance, 5 * 1113);
+    assert.strictEqual(turn.leg!.minDepth, undefined);
+    assert.strictEqual(turn.leg!.crossings, undefined);
+  });
+
+  it('marks via points with their request index', () => {
+    const via = [{ latitude: 52.0, longitude: 4.03 }]; // coord index 3
+    const { itinerary } = buildItinerary(coords, segments, [], via, 30);
+    const viaEntry = itinerary.find((p) => p.kind === 'via');
+    assert.ok(viaEntry, 'via entry present');
+    assert.strictEqual(viaEntry!.viaIndex, 0);
+    assert.strictEqual(viaEntry!.distanceFromStart, 3 * 700);
+    assert.strictEqual(itinerary[0].leg!.distance, 3 * 700, 'first leg ends at the via point');
   });
 });

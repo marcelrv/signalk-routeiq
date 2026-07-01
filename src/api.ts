@@ -33,6 +33,11 @@ export class ApiHandler {
     this.setupRoutes();
   }
 
+  /** start() rebuilds the config object on every config save; adopt the fresh one. */
+  updateConfig(config: PluginConfig): void {
+    this.config = config;
+  }
+
   setComponents(db: RoutingDatabase, engine: RoutingEngine): void {
     this.db = db;
     this.routingEngine = engine;
@@ -85,6 +90,9 @@ export class ApiHandler {
 
     // GET /signalk/v1/api/router/stats
     this.router.get('/stats', this.handleStats.bind(this));
+
+    // GET /signalk/v1/api/router/config — client-relevant plugin settings
+    this.router.get('/config', this.handleGetConfig.bind(this));
 
 
     // GET /signalk/v1/api/router/vessel
@@ -297,6 +305,18 @@ export class ApiHandler {
       res.status(500).json({ error: message });
       next(error);
     }
+  }
+
+  /**
+   * Expose the client-relevant plugin settings (used by the Freeboard-SK
+   * extension panel and the webapp for ETA calculation and defaults).
+   * GET /signalk/v1/api/router/config
+   */
+  private async handleGetConfig(_req: Request, res: Response): Promise<void> {
+    res.json({
+      averageSpeedKnots: this.config.averageSpeedKnots,
+      defaultCoastDistance: this.config.defaultCoastDistance,
+    });
   }
 
   /**

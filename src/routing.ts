@@ -4,6 +4,7 @@
  */
 
 import { EdgeRow, RoutingDatabase, getNodeTypeInt, NODE_TYPE_INLAND, EDGE_TYPE_COASTAL, POI_TYPE_BRIDGE, POI_TYPE_LOCK, TRAFFIC_TWO_WAY, TRAFFIC_ONE_WAY_REV } from './database.js';
+import { buildItinerary } from './itinerary.js';
 import {
     BBox,
     PluginConfig,
@@ -197,7 +198,7 @@ export class RoutingEngine {
             ...violationWarnings,
           ];
           if (result.warnings.length === 0) delete result.warnings;
-          this.splitToSegmentFeatures(result);
+          await this.finalizeRoute(result);
           return result;
         } catch {
           // Expand bounding box and retry
@@ -281,6 +282,7 @@ export class RoutingEngine {
       await this.connectUserPoint(start, route, 'start');
       await this.connectUserPoint(end, route, 'end');
 
+      await this.finalizeRoute(route);
       return route;
     }
 
@@ -417,7 +419,7 @@ export class RoutingEngine {
     // Connect only the overall end coordinate (start is handled per-segment above)
     await this.connectUserPoint(end, result, 'end');
 
-    this.splitToSegmentFeatures(result);
+    await this.finalizeRoute(result, via);
     return result;
   }
 
@@ -1079,6 +1081,41 @@ export class RoutingEngine {
   }
 
   /**
+   * Finalize a computed single-feature route for delivery: detect crossings
+   * (when a merge dropped them), derive the simplified navigable waypoints and
+   * the annotated itinerary, then split into per-segment features.
+   * Must be called exactly once, as the last step of every successful route.
+   */
+  private async finalizeRoute(
+    route: RouteResult,
+    via: Array<{ latitude: number; longitude: number }> = [],
+  ): Promise<void> {
+    const feature = route.features[0];
+    if (!feature || feature.geometry.coordinates.length < 2) return;
+    const coords = feature.geometry.coordinates;
+    const segments = feature.properties.segments || [];
+
+    // Via-point routes are merged from sub-results and lose the per-segment
+    // crossings detected in buildRouteResult — recover them here.
+    if (!route.crossings) {
+      const crossings = await this.detectCrossings(coords);
+      if (crossings.length > 0) route.crossings = crossings;
+    }
+
+    const { waypoints, itinerary } = buildItinerary(
+      coords,
+      segments,
+      route.crossings || [],
+      via,
+      this.config.waypointTolerance ?? 30,
+    );
+    route.waypoints = waypoints;
+    route.itinerary = itinerary;
+
+    this.splitToSegmentFeatures(route);
+  }
+
+  /**
    * Split a single-feature route (LineString + segments array) into individual
    * per-segment features so the frontend can color each segment independently
    * based on its minDepth / maxAirDraft properties.
@@ -1161,6 +1198,7 @@ export class RoutingEngine {
             distance: edge.distance,
             minDepth: edge.min_depth,
             maxAirDraft: edge.max_air_draft,
+            minWidth: edge.min_width,
             costFactor: edge.cost_factor,
             trafficMode: edge.traffic_mode,
             edgeTypeId: edge.edge_type_id,

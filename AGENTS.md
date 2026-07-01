@@ -1,5 +1,22 @@
 # Project Conventions for AI Agents
 
+## Architecture: Server-Side Routing, Frontend Is a Client
+
+- **All routing logic lives in the SignalK server plugin** (`src/routing.ts`, `src/database.ts`, `src/db-worker.ts`). The A* search, graph loading, constraint evaluation, LOS smoothing, and violation reporting all run server-side.
+- **The frontend** (`public/index.html`) is purely a **client** — it defines waypoints (start/dest/via), displays the calculated route on a map, and provides a graph editor. It contains zero routing logic. It must never implement its own pathfinding, graph traversal, or constraint evaluation.
+- **The API** (`POST /signalk/v1/api/router/route`) is the single entry point for route calculation. It returns a `FeatureCollection` with per-segment features, each annotated with `minDepth`, `maxAirDraft`, `costFactor`, etc., plus violation warnings. This API is designed to be consumed by **any frontend** (the built-in one, third-party UIs, mobile apps, etc.) — it is not coupled to the Leaflet UI.
+- **Route simplification and itineraries are backend concerns** (`src/itinerary.ts`, invoked from `RoutingEngine.finalizeRoute`). Every route result also carries `waypoints` (Douglas-Peucker-simplified navigable points, max deviation = `waypointTolerance` config, default 30 m) and `itinerary` (start/via/end + major turns with per-leg distance/minDepth/minWidth/maxAirDraft aggregates and crossings with `distanceFromStart` chainage). Frontends must render these, never re-derive them from geometry (the webapp's client-side `extractMajorNodes` is legacy and should migrate to `itinerary`).
+- **Graph editor endpoints** (`/signalk/v1/api/router/graph/nodes/*`, `/signalk/v1/api/router/graph/edges/*`) expose CRUD for the routing graph for debugging and manual corrections, but all actual routing decisions remain server-side.
+- **Vessel dimensions** (draft, beam, airDraft) are fetched from the SignalK delta stream on the server and injected into the routing engine. The frontend may display them but does not enforce constraints.
+- When modifying the frontend, ensure no routing logic leaks into it. The frontend should only: collect waypoint coordinates, POST them to the API, render the returned GeoJSON, and display warnings/metadata.
+
+## Freeboard-SK Plotter Extension (plotterext/)
+- The plugin is also a **plotter extension provider** (Plotter Extensions API v1, see the Freeboard-SK docs). `src/plotterext.ts` registers a read-only `plotterExtensions` resource manifest (toolbar button + `autoroute-panel` iframe panel) and mounts assets at `/plotterext/signalk-autoroute/`.
+- The panel (`plotterext/panel.html` + `panel.js`) has **no map** — the host chartplotter renders everything. It reads the visible route via the host `routes` capability (`route.list`/`route.get`), POSTs first/middle/last points as start/via/end to `POST /router/route`, stages the result with `route.replace`, and persists via `route.save({dialog:true})`. Same rule as the webapp: zero routing logic client-side.
+- The `signalk-plotterext-bus` client library (npm dependency) is served from its `node_modules` dist at `/plotterext/signalk-autoroute/bus/`; the panel imports `./bus/extension.js`.
+- Extension assets are deliberately **not** under `/plugins/*` (admin-gated) and the package must **not** rely on the `signalk-webapp` keyword for them.
+- `averageSpeedKnots` and `defaultCoastDistance` are exposed to clients via `GET /router/config`; ETA in both UIs derives from the plugin-config average speed.
+
 ## Python (backend/)
 - Always use `python3` (not `python`) when running scripts.
 - Always use `pip3` (not `pip`) when installing packages.

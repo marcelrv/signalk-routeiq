@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Autoroute</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1c2b3a;
+    --muted: #5f7a9a;
+    --border: #d5dee8;
+    --accent: #1976d2;
+    --accent-fg: #ffffff;
+    --warn-bg: #fff6e5;
+    --warn-fg: #8a5b00;
+    --err-fg: #b3261e;
+    --ok-fg: #1b7a3d;
+    --chip-bg: #eef3f8;
+    --line: #c3d0dd;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1e242b;
+      --fg: #e4ebf2;
+      --muted: #94a7ba;
+      --border: #3a4652;
+      --accent: #64a9e8;
+      --accent-fg: #0e1620;
+      --warn-bg: #3a2f14;
+      --warn-fg: #f0c168;
+      --err-fg: #f2938c;
+      --ok-fg: #7bd39a;
+      --chip-bg: #2a333d;
+      --line: #46566a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 8px 10px 14px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 12px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  h2 { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 12px 0 4px; }
+  select, input[type=number], input[type=text] {
+    width: 100%;
+    padding: 4px 7px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+  }
+  .row { display: flex; gap: 5px; align-items: center; }
+  .row > * { flex: 1; }
+  .row > .fixed { flex: 0 0 auto; }
+  button {
+    padding: 4px 9px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--chip-bg);
+    color: var(--fg);
+    font: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; }
+  .btnrow { display: flex; gap: 5px; margin-top: 6px; }
+  .btnrow button { flex: 1; }
+  .hint { color: var(--muted); font-size: 11px; margin: 3px 0; }
+  .status { font-size: 11px; margin: 2px 0 6px; color: var(--muted); min-height: 14px; }
+  .status.error { color: var(--err-fg); }
+  .status.ok { color: var(--ok-fg); }
+  .badge {
+    display: inline-block;
+    padding: 0 5px;
+    border-radius: 7px;
+    background: var(--chip-bg);
+    color: var(--muted);
+    font-size: 10px;
+    margin-left: 4px;
+  }
+  .badge.dirty { color: var(--warn-fg); background: var(--warn-bg); }
+  label { display: block; color: var(--muted); font-size: 11px; margin: 6px 0 2px; }
+
+  /* result summary + itinerary */
+  #summary { display: none; margin-top: 6px; }
+  #sum-line {
+    font-size: 13px; font-weight: 600;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--chip-bg);
+  }
+  ul.plain { list-style: none; margin: 5px 0 0; padding: 0; }
+  #warnings li { padding: 3px 6px; border-radius: 5px; margin-bottom: 2px; background: var(--warn-bg); color: var(--warn-fg); font-size: 11px; }
+
+  #itinerary { margin: 6px 0 0; padding: 0; list-style: none; }
+  #itinerary .it-point {
+    display: flex; align-items: baseline; gap: 6px;
+    padding: 2px 0 0;
+  }
+  #itinerary .it-dot { flex: 0 0 auto; width: 8px; text-align: center; color: var(--accent); }
+  #itinerary .it-label { font-weight: 600; white-space: nowrap; }
+  #itinerary .it-turn { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  #itinerary .it-meta { margin-left: auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+  #itinerary .it-leg {
+    border-left: 2px solid var(--line);
+    margin: 0 0 0 3px;
+    padding: 1px 0 4px 11px;
+    color: var(--muted);
+    font-size: 11px;
+  }
+  #itinerary .it-leg .constraint { white-space: nowrap; }
+  #itinerary .crossing { display: flex; align-items: center; gap: 5px; margin-top: 1px; }
+  #itinerary .crossing .dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+  #itinerary .crossing .cname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #itinerary .crossing .cdist { margin-left: auto; white-space: nowrap; }
+
+  #poi-results li, #wp-row { font-size: 11.5px; }
+  #poi-results li {
+    background: var(--chip-bg);
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 6px; border-radius: 5px; margin-bottom: 2px;
+  }
+  #poi-results .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #poi-results button { padding: 1px 7px; font-size: 11px; }
+  #unsupported { display: none; padding: 12px; }
+</style>
+</head>
+<body>
+  <div id="unsupported">This chartplotter does not support route editing (capability <code>routes</code>) — the Autoroute panel cannot work here.</div>
+
+  <div id="main" style="display:none">
+    <div id="engine-status" class="status">Checking routing engine…</div>
+
+    <h2>Route</h2>
+    <div class="hint">Draw or edit a route on the chart, then let Autoroute reshape it around land, shallows and bridges.</div>
+    <div class="row">
+      <select id="route-select"></select>
+      <button id="route-refresh" class="fixed" title="Refresh route list">&#x21bb;</button>
+    </div>
+    <div id="route-info" class="hint"></div>
+
+    <div class="btnrow">
+      <button id="btn-calc" class="primary" disabled>Auto-route</button>
+      <button id="btn-revert" disabled>Revert</button>
+      <button id="btn-save" disabled>Save…</button>
+    </div>
+    <div id="route-status" class="status"></div>
+
+    <div id="summary">
+      <div id="sum-line"></div>
+      <ul id="warnings" class="plain"></ul>
+      <ol id="itinerary"></ol>
+    </div>
+
+    <h2>Route from vessel to…</h2>
+    <div class="btnrow">
+      <button id="btn-dest" title="Auto-route to the active course destination (set with Freeboard's Go to)">Active destination</button>
+    </div>
+    <div class="row" id="wp-row" style="margin-top:5px">
+      <select id="wp-select"><option value="">Waypoint…</option></select>
+      <button id="btn-wp" class="fixed" disabled>Go</button>
+    </div>
+
+    <section id="poi-section">
+      <h2>Harbours, locks &amp; bridges</h2>
+      <div class="row">
+        <input id="poi-query" type="text" placeholder="Search by name…" />
+        <button id="poi-go" class="fixed">Search</button>
+      </div>
+      <ul id="poi-results" class="plain"></ul>
+      <div id="poi-status" class="status"></div>
+    </section>
+  </div>
+
+  <script type="module" src="panel.js"></script>
+</body>
+</html>
