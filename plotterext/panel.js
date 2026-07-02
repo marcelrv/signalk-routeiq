@@ -14,6 +14,30 @@ import { connectExtension } from './bus/extension.js';
 const API = '/signalk/v1/api/router';
 const POI_TYPES = ['harbour', 'lock', 'bridge', 'fairway', 'waterway'];
 const CROSSING_COLORS = { lock: '#f59e0b', fixed: '#ef4444', opening: '#22c55e' };
+const POI_COLORS = { harbour: '#3b8fd4', lock: '#f59e0b', bridge: '#ef4444', fairway: '#8b5cf6', waterway: '#14b8a6' };
+
+/* Same icons as the webapp (poiIcon in public/index.html) — keep in sync. */
+function poiIcon(type, props, size) {
+  size = size || 14;
+  if (type === 'bridge') {
+    if (props.subtype === 'opening') {
+      return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 22 22"><line x1="3" y1="11" x2="7" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="9.7" y2="3.5" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="19" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="7" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="15" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>';
+    }
+    return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 22 22"><line x1="3" y1="11" x2="19" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="7" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="15" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>';
+  }
+  if (type === 'lock') {
+    return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 22 22"><line x1="3" y1="8" x2="3" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="3" y1="18" x2="19" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="19" y1="8" x2="19" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><polyline points="8,14 11,16 14,14" stroke="white" stroke-width="1.5" fill="none" stroke-linejoin="round"/><line x1="11" y1="14" x2="11" y2="10" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>';
+  }
+  return ({ harbour: '⚓', fairway: '⛵', waterway: '💧' }[type] || '📍');
+}
+
+function poiBadge(type, props, color) {
+  const span = document.createElement('span');
+  span.className = 'poi-badge';
+  span.style.background = color;
+  span.innerHTML = poiIcon(type, props);
+  return span;
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -396,6 +420,11 @@ async function searchPois() {
   }
   for (const poi of data.results) {
     const li = document.createElement('li');
+    const props = poi.properties || {};
+    const t = POI_TYPES[poi.typeId] || 'harbour';
+    const color = t === 'bridge' && props.subtype === 'opening'
+      ? CROSSING_COLORS.opening : POI_COLORS[t] || '#6d96c0';
+    li.appendChild(poiBadge(t, props, color));
     const name = document.createElement('span');
     name.className = 'name';
     name.textContent = poi.name || 'Unnamed';
@@ -499,30 +528,47 @@ function renderItinerary(itinerary) {
       stats.innerHTML = bits.map((b) => '<span class="constraint">' + b + '</span>').join(' · ');
       leg.appendChild(stats);
 
+      // Group same-named crossings (a bridge can have a fixed and an opening
+      // span) — same presentation as the webapp's route leg details.
+      const grouped = new Map();
       for (const c of p.leg.crossings || []) {
+        const key = c.name || c.type;
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key).push(c);
+      }
+      for (const [, entries] of grouped) {
+        const e0 = entries[0];
+        const hasFixed = entries.some((e) => e.subtype === 'fixed');
+        const hasOpening = entries.some((e) => e.subtype === 'opening');
         const row = document.createElement('div');
         row.className = 'crossing';
-        const cd = document.createElement('span');
-        cd.className = 'dot';
-        cd.style.background = c.type === 'lock' ? CROSSING_COLORS.lock
-          : c.subtype === 'opening' ? CROSSING_COLORS.opening : CROSSING_COLORS.fixed;
+        const color = e0.type === 'lock' ? CROSSING_COLORS.lock
+          : hasFixed ? CROSSING_COLORS.fixed : CROSSING_COLORS.opening;
+        row.appendChild(poiBadge(e0.type, { subtype: e0.subtype }, color));
+        if (hasFixed && hasOpening) {
+          row.appendChild(poiBadge('bridge', { subtype: 'opening' }, CROSSING_COLORS.opening));
+        }
         const cn = document.createElement('span');
         cn.className = 'cname';
         let info = '';
-        if (c.type === 'bridge') {
-          info = c.subtype === 'opening' ? ' (opening)'
-            : typeof c.height === 'number' ? ' (' + c.height.toFixed(1) + ' m)' : ' (fixed)';
+        if (e0.type === 'bridge') {
+          const fixed = entries.find((e) => e.subtype === 'fixed');
+          if (fixed && typeof fixed.height === 'number') {
+            info = ' (' + fixed.height.toFixed(1) + ' m' + (hasOpening ? ' / opening' : '') + ')';
+          } else {
+            info = hasOpening ? ' (opening)' : ' (fixed)';
+          }
         } else {
           info = ' (lock)';
         }
-        cn.textContent = (c.name || c.type) + info;
+        cn.textContent = (e0.name || e0.type) + info;
         cn.title = cn.textContent;
         const cdist = document.createElement('span');
         cdist.className = 'cdist';
-        if (typeof c.distanceFromStart === 'number') {
-          cdist.textContent = fmtDistance(c.distanceFromStart) + ' · ' + fmtDuration(c.distanceFromStart);
+        if (typeof e0.distanceFromStart === 'number') {
+          cdist.textContent = fmtDistance(e0.distanceFromStart) + ' · ' + fmtDuration(e0.distanceFromStart);
         }
-        row.append(cd, cn, cdist);
+        row.append(cn, cdist);
         leg.appendChild(row);
       }
       li.appendChild(leg);

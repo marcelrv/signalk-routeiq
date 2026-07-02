@@ -115,10 +115,25 @@
     font-size: 11px;
   }
   #itinerary .it-leg .constraint { white-space: nowrap; }
-  #itinerary .crossing { display: flex; align-items: center; gap: 5px; margin-top: 1px; }
-  #itinerary .crossing .dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+  #itinerary .crossing { display: flex; align-items: center; gap: 5px; margin-top: 2px; }
   #itinerary .crossing .cname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #itinerary .crossing .cdist { margin-left: auto; white-space: nowrap; }
+
+  /* Circular POI icon badge — same look as the webapp's route list icons. */
+  .poi-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    border: 1.5px solid #fff;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+    color: #fff;
+    font-size: 11px;
+    line-height: 1;
+    flex: 0 0 auto;
+  }
 
   #poi-results li, #wp-row { font-size: 11.5px; }
   #poi-results li {
