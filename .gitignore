@@ -45,3 +45,6 @@ backend/__pycache__/nautical_routing_pipeline.cpython-312.pyc
 router-data/
 backend/deploy_to_data_repo.py
 signalk-autoroute-0.1.0.tgz
+
+# Private/local-only scripts — never commit
+backend/local_scripts/

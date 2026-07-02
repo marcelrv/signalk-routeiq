@@ -147,6 +147,19 @@ python3 nautical_routing_pipeline.py \
   --url "https://github.com/marcelrv/signalk-router-data"
 ```
 
+### Adding POIs to an existing database
+- `backend/add_pois_to_db.py` — standalone script that imports named POIs from the pipeline's GeoJSON layers into any existing autoroute-schema database. Extraction mirrors `nautical_routing_pipeline.py` exactly (same layers, name/point selection, deterministic MD5 ids, bridge subtype/height properties), so re-runs and overlapping regions deduplicate.
+- Each POI is linked to its nearest graph node (KD-tree lookup): `node_id` + `node_dist_m` are stored in the POI properties JSON when a node is within `--connect-radius` (default 500 m).
+- Bridge/lock POIs farther than `--snap-if-beyond` (default 120 m) from their nearest node are **moved onto that node** (original position kept as `orig_lat`/`orig_lon`), because `detectCrossings` in `src/routing.ts` only reports crossings within 150 m of a route vertex.
+- Usage:
+  ```bash
+  backend/.venv/bin/python3 backend/add_pois_to_db.py \
+    --db ./data/europe.sqlite \
+    --input-dir ./output_geojson \
+    [--dry-run] [--replace] [--layer bridge=/path/custom.geojson] \
+    [--skip-unconnected-types waterway,fairway]
+  ```
+
 ### Deploy script for the data repo
 - `backend/deploy_to_data_repo.py` — gzips a `.sqlite` and places it in the `router-data/` folder structure, then regenerates `index.json`
 - Usage:
