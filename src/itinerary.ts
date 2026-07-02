@@ -23,6 +23,8 @@ export interface PathSegment {
   minDepth?: number;
   maxAirDraft?: number;
   minWidth?: number;
+  seconds?: number;   // tide-corrected traversal time
+  currentKn?: number; // estimated along-track current, + = fair
 }
 
 type LonLat = [number, number];
@@ -249,6 +251,10 @@ export function buildItinerary(
       let minWidth = Infinity;
       let maxAirDraft = Infinity;
       let legDistance = 0;
+      let legSeconds = 0;
+      let hasSeconds = false;
+      let currentWeighted = 0;
+      let currentDist = 0;
       for (let s = idx; s < nextIdx && s < segments.length; s++) {
         const seg = segments[s];
         if (!seg) continue;
@@ -256,6 +262,11 @@ export function buildItinerary(
         if (typeof seg.minDepth === 'number' && seg.minDepth >= 0) minDepth = Math.min(minDepth, seg.minDepth);
         if (typeof seg.minWidth === 'number' && seg.minWidth >= 0) minWidth = Math.min(minWidth, seg.minWidth);
         if (typeof seg.maxAirDraft === 'number' && seg.maxAirDraft >= 0) maxAirDraft = Math.min(maxAirDraft, seg.maxAirDraft);
+        if (typeof seg.seconds === 'number') { legSeconds += seg.seconds; hasSeconds = true; }
+        if (typeof seg.currentKn === 'number') {
+          currentWeighted += seg.currentKn * (seg.distance ?? 0);
+          currentDist += seg.distance ?? 0;
+        }
       }
       const legStart = cum[idx];
       const legEnd = cum[nextIdx];
@@ -269,6 +280,8 @@ export function buildItinerary(
         ...(minDepth < Infinity ? { minDepth } : {}),
         ...(minWidth < Infinity ? { minWidth } : {}),
         ...(maxAirDraft < Infinity ? { maxAirDraft } : {}),
+        ...(hasSeconds ? { seconds: Math.round(legSeconds) } : {}),
+        ...(currentDist > 0 ? { currentKn: Math.round((currentWeighted / currentDist) * 100) / 100 } : {}),
         ...(legCrossings.length > 0 ? { crossings: legCrossings } : {}),
       };
     }

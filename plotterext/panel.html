@@ -119,6 +119,19 @@
   #itinerary .crossing .cname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #itinerary .crossing .cdist { margin-left: auto; white-space: nowrap; }
 
+  /* Departure planner rows (24h scan, green = fastest / red = slowest) */
+  #dep-list .dep-row {
+    display: flex; align-items: center; gap: 6px;
+    padding: 2px 3px; border-radius: 4px; cursor: pointer;
+    font-size: 11px;
+  }
+  #dep-list .dep-row:hover { background: var(--chip-bg); }
+  #dep-list .dep-time { width: 40px; font-family: ui-monospace, monospace; color: var(--muted); }
+  #dep-list .dep-bar { flex: 1; height: 8px; border-radius: 4px; background: var(--chip-bg); overflow: hidden; }
+  #dep-list .dep-bar > i { display: block; height: 100%; border-radius: 4px; }
+  #dep-list .dep-dur { width: 38px; text-align: right; font-family: ui-monospace, monospace; }
+  #dep-list .dep-best { width: 12px; text-align: center; color: #eab308; }
+
   /* Circular POI icon badge — same look as the webapp's route list icons. */
   .poi-badge {
     display: inline-flex;
@@ -159,6 +172,20 @@
       <button id="route-refresh" class="fixed" title="Refresh route list">&#x21bb;</button>
     </div>
     <div id="route-info" class="hint"></div>
+
+    <div id="tide-row" style="display:none">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:6px 0 2px">
+        <input id="tide-cb" type="checkbox" style="width:auto" />
+        <span>Consider tide <span style="color:var(--muted)" title="Currents are estimated from tide-height stations">(estimated)</span></span>
+      </label>
+      <div id="tide-depart" style="display:none">
+        <div class="row" style="margin-top:3px">
+          <input id="departure-time" type="datetime-local" />
+          <button id="btn-departures" class="fixed" title="Scan 24h of departures for the best tide">Best…</button>
+        </div>
+        <div id="dep-list" style="margin-top:4px"></div>
+      </div>
+    </div>
 
     <div class="btnrow">
       <button id="btn-calc" class="primary" disabled>Auto-route</button>

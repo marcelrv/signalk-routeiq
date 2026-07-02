@@ -873,6 +873,19 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       <button id="gpx-btn" class="toolbar-btn" title="Download GPX">💾</button>
       <button id="push-btn" class="toolbar-btn push-btn" title="Save to Signal K">📤</button>
     </div>
+    <div id="tide-controls" style="display:none;padding:4px 0 2px;border-top:1px solid rgba(79,148,212,0.15);margin-top:2px">
+      <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#9bb8da;cursor:pointer">
+        <input id="tide-cb" type="checkbox" />
+        <span>Consider tide <span style="color:#5f7a9a" title="Currents are estimated from tide-height stations">(estimated)</span></span>
+      </label>
+      <div id="tide-depart-row" style="display:none;margin-top:4px">
+        <label for="departure-time" style="font-size:10px;color:#5f7a9a;display:block;margin-bottom:2px">Departure</label>
+        <div style="display:flex;gap:5px">
+          <input id="departure-time" type="datetime-local" style="flex:1;min-width:0;background:#0d1b2a;border:1px solid rgba(79,148,212,0.35);border-radius:4px;color:#b8d4f0;font-size:11px;padding:3px 5px;color-scheme:dark" />
+          <button id="best-departure-btn" title="Scan 24h of departures for the best tide" style="background:#1f6391;border:none;border-radius:4px;padding:3px 9px;color:#fff;font-size:11px;cursor:pointer;white-space:nowrap">Best…</button>
+        </div>
+      </div>
+    </div>
     <div id="route-summary" style="display:none;padding:3px 0 2px;border-top:1px solid rgba(79,148,212,0.15);margin-top:2px;font-size:11px;color:#9bb8da"></div>
     <div id="route-warnings"></div>
     <div id="route-nodes"></div>
@@ -881,6 +894,25 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 </div>
 
 <!-- Data Manager Modal -->
+<!-- Departure planner: 24h scan of travel times to pick the best tide -->
+<div id="departure-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:9000;font-family:'Segoe UI',system-ui,sans-serif">
+  <div style="position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px)" id="dep-backdrop"></div>
+  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:420px;max-width:95vw;max-height:85vh;background:#0f1f30;border:1px solid rgba(79,148,212,0.35);border-radius:12px;box-shadow:0 16px 48px rgba(0,0,0,0.6);display:flex;flex-direction:column;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px 10px;border-bottom:1px solid rgba(79,148,212,0.2)">
+      <h2 style="margin:0;font-size:15px;color:#e0edf5;font-weight:600">Best departure time</h2>
+      <button id="dep-close" style="background:none;border:none;color:#6d96c0;font-size:22px;cursor:pointer;line-height:1;padding:0 4px">&times;</button>
+    </div>
+    <div id="dep-subtitle" style="padding:8px 18px 0;color:#6d96c0;font-size:11px">Total travel time per departure over the next 24&nbsp;h (estimated tidal current). Click a row to use that departure.</div>
+    <div id="dep-body" style="padding:10px 18px 16px;overflow-y:auto">
+      <div id="dep-loading" style="display:flex;align-items:center;gap:10px;color:#9bb8da;font-size:12px;padding:12px 0">
+        <div style="width:14px;height:14px;border:2px solid rgba(59,143,212,0.3);border-top-color:#3b8fd4;border-radius:50%;animation:dm-spin 0.8s linear infinite"></div>
+        Scanning departures…
+      </div>
+      <div id="dep-list"></div>
+    </div>
+  </div>
+</div>
+
 <div id="data-manager-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:9000;font-family:'Segoe UI',system-ui,sans-serif">
   <div style="position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px)" id="dm-backdrop"></div>
   <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:700px;max-width:95vw;max-height:85vh;background:#0f1f30;border:1px solid rgba(79,148,212,0.35);border-radius:12px;box-shadow:0 16px 48px rgba(0,0,0,0.6);display:flex;flex-direction:column;overflow:hidden">
@@ -997,6 +1029,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   function searchUrl()  { return getApiBase() + '/signalk/v1/api/router/search'; }
   function gpxUrl()     { return getApiBase() + '/signalk/v1/api/router/export/gpx'; }
   function pushUrl()    { return getApiBase() + '/signalk/v1/api/router/push'; }
+  function tidesStatusUrl() { return getApiBase() + '/signalk/v1/api/router/tides/status'; }
+  function departuresUrl()  { return getApiBase() + '/signalk/v1/api/router/route/departures'; }
 
   // ---- recent URLs (localStorage, max 3) ----
   function loadRecentUrls() {
@@ -1030,6 +1064,131 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   // Recompute the itinerary times when the session speed override changes
   document.getElementById('avg-speed').addEventListener('change', function () {
     if (state.lastGeoJson) renderRoutePane(state.lastGeoJson);
+  });
+
+  // ---- tide controls ----
+  // Shown only when the signalk-tides plugin knows stations near the map.
+  let tidesAvailable = false;
+  function tideEnabled() { return tidesAvailable && document.getElementById('tide-cb').checked; }
+  function departureIso() {
+    const v = document.getElementById('departure-time').value;
+    const d = v ? new Date(v) : null;
+    return d && !isNaN(d) ? d.toISOString() : undefined;
+  }
+  function setDepartureInput(date) {
+    const p = n => String(n).padStart(2, '0');
+    document.getElementById('departure-time').value =
+      date.getFullYear() + '-' + p(date.getMonth() + 1) + '-' + p(date.getDate()) +
+      'T' + p(date.getHours()) + ':' + p(date.getMinutes());
+  }
+  function checkTidesStatus(lat, lon) {
+    fetch(tidesStatusUrl() + '?latitude=' + lat.toFixed(3) + '&longitude=' + lon.toFixed(3))
+      .then(r => r.ok ? r.json() : null)
+      .then(st => {
+        tidesAvailable = !!(st && st.available);
+        document.getElementById('tide-controls').style.display = tidesAvailable ? '' : 'none';
+        if (!tidesAvailable) return;
+        const saved = localStorage.getItem('autoroute-use-tides');
+        const cb = document.getElementById('tide-cb');
+        cb.checked = saved !== null ? saved === '1' : !!st.considerTidesDefault;
+        document.getElementById('tide-depart-row').style.display = cb.checked ? '' : 'none';
+        if (!document.getElementById('departure-time').value) setDepartureInput(new Date());
+      })
+      .catch(() => {});
+  }
+  document.getElementById('tide-cb').addEventListener('change', function () {
+    try { localStorage.setItem('autoroute-use-tides', this.checked ? '1' : '0'); } catch {}
+    document.getElementById('tide-depart-row').style.display = this.checked ? '' : 'none';
+    if (!document.getElementById('departure-time').value) setDepartureInput(new Date());
+    if (state.startLatLng && state.destLatLng) routingControl.route();
+  });
+  document.getElementById('departure-time').addEventListener('change', function () {
+    if (tideEnabled() && state.startLatLng && state.destLatLng) routingControl.route();
+  });
+
+  // ---- departure planner (24h scan, color-coded) ----
+  function fmtDurHM(sec) {
+    const m = Math.round(sec / 60);
+    return Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0');
+  }
+  function openDeparturePlanner() {
+    if (!state.startLatLng || !state.destLatLng) { showToast('Set start and destination first', 'error'); return; }
+    document.getElementById('departure-modal').style.display = '';
+    document.getElementById('dep-loading').style.display = 'flex';
+    document.getElementById('dep-list').innerHTML = '';
+    const toPos = ll => ({ latitude: ll.lat, longitude: ll.lng });
+    const payload = {
+      start: toPos(state.startLatLng),
+      end: toPos(state.destLatLng),
+      via: (state.viaPoints || []).map(toPos),
+      minCoastDistance: (parseFloat(document.getElementById('min-coast').value) || 0) / 1852,
+      draft: lastBoat ? lastBoat.draft : 0,
+      beam: lastBoat ? lastBoat.beam : 4,
+      airDraft: lastBoat ? lastBoat.airDraft : 0,
+      departureTime: departureIso() || new Date().toISOString(),
+      scanHours: 24,
+      stepMinutes: 60,
+    };
+    logDebug('DEPARTURES', departuresUrl(), payload);
+    fetch(departuresUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+      .then(r => r.json().then(b => { if (!r.ok) throw new Error(b && b.error ? b.error : 'Error ' + r.status); return b; }))
+      .then(data => renderDepartureList(data.departures || []))
+      .catch(err => {
+        document.getElementById('dep-list').innerHTML =
+          '<div style="color:#f2938c;font-size:12px;padding:6px 0">' + err.message + '</div>';
+      })
+      .finally(() => { document.getElementById('dep-loading').style.display = 'none'; });
+  }
+  function renderDepartureList(deps) {
+    const listEl = document.getElementById('dep-list');
+    const ok = deps.filter(d => typeof d.totalSeconds === 'number');
+    if (!ok.length) {
+      listEl.innerHTML = '<div style="color:#9bb8da;font-size:12px;padding:6px 0">No departures could be evaluated.</div>';
+      return;
+    }
+    const minS = Math.min(...ok.map(d => d.totalSeconds));
+    const maxS = Math.max(...ok.map(d => d.totalSeconds));
+    listEl.innerHTML = '';
+    for (const d of deps) {
+      const row = document.createElement('div');
+      if (typeof d.totalSeconds !== 'number') {
+        row.style.cssText = 'display:flex;gap:8px;padding:3px 4px;font-size:11px;color:#5f7a9a';
+        row.textContent = new Date(d.departureTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + '  — no route';
+        listEl.appendChild(row);
+        continue;
+      }
+      // Green (fastest) → red (slowest), same ramp as the plotter panel.
+      const norm = maxS > minS ? (d.totalSeconds - minS) / (maxS - minS) : 0;
+      const color = 'hsl(' + Math.round(120 * (1 - norm)) + ',65%,42%)';
+      const dep = new Date(d.departureTime);
+      const best = d.totalSeconds === minS;
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:5px;cursor:pointer;font-size:12px;color:#dce8f5';
+      row.onmouseenter = () => { row.style.background = 'rgba(59,143,212,0.15)'; };
+      row.onmouseleave = () => { row.style.background = ''; };
+      const barW = Math.round(30 + 55 * norm);
+      row.innerHTML =
+        '<span style="width:56px;color:#9bb8da;font-family:monospace">' +
+          String(dep.getHours()).padStart(2, '0') + ':' + String(dep.getMinutes()).padStart(2, '0') + '</span>' +
+        '<span style="flex:1;height:10px;border-radius:5px;background:linear-gradient(90deg,' + color + ',' + color + ') no-repeat;background-size:' + barW + '% 100%;border:1px solid rgba(79,148,212,0.15)"></span>' +
+        '<span style="width:44px;text-align:right;font-family:monospace;color:' + color + '">' + fmtDurHM(d.totalSeconds) + '</span>' +
+        '<span style="width:14px;text-align:center;color:#f5d90a">' + (best ? '★' : '') + '</span>';
+      row.title = 'Depart ' + dep.toLocaleString() + ' — travel time ' + fmtDurHM(d.totalSeconds) + '. Click to use this departure.';
+      row.addEventListener('click', () => {
+        setDepartureInput(dep);
+        const cb = document.getElementById('tide-cb');
+        if (!cb.checked) { cb.checked = true; try { localStorage.setItem('autoroute-use-tides', '1'); } catch {} }
+        document.getElementById('tide-depart-row').style.display = '';
+        document.getElementById('departure-modal').style.display = 'none';
+        routingControl.route();
+      });
+      listEl.appendChild(row);
+    }
+  }
+  document.getElementById('best-departure-btn').addEventListener('click', openDeparturePlanner);
+  document.getElementById('dep-close').addEventListener('click', () => { document.getElementById('departure-modal').style.display = 'none'; });
+  document.getElementById('dep-backdrop').addEventListener('click', () => { document.getElementById('departure-modal').style.display = 'none'; });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') document.getElementById('departure-modal').style.display = 'none';
   });
 
   // ---- state ----
@@ -2046,6 +2205,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
           subtitleEl.textContent = 'Checking routing data...';
           checkDbStatus();
           fetchBoatData();
+          const c = map.getCenter();
+          checkTidesStatus(c.lat, c.lng);
         })
         .catch(err => {
           if (connectOk) return; // Already connected, ignore late errors
@@ -2235,7 +2396,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         draft: lastBoat ? lastBoat.draft : 0,
         beam: lastBoat ? lastBoat.beam : 4,
         airDraft: lastBoat ? lastBoat.airDraft : 0,
+        useTides: tideEnabled(),
       };
+      if (tideEnabled() && departureIso()) payload.departureTime = departureIso();
 
       console.log('[MarineRouter] via payload:', JSON.stringify(via));
       state.routing = true;
@@ -3203,15 +3366,30 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       const totalKm = totalDistM / 1000;
       const totalNm = totalKm / 1.852;
       const speedKn = parseFloat(document.getElementById('avg-speed').value) || 6;
-      const timeH = speedKn > 0 ? totalNm / speedKn : 0;
+      // Tide-corrected total time from the server when available
+      const tideActive = geoJson.tide && geoJson.tide.enabled && typeof geoJson.totalSeconds === 'number';
+      const timeH = tideActive ? geoJson.totalSeconds / 3600 : (speedKn > 0 ? totalNm / speedKn : 0);
       const hours = Math.floor(timeH);
       const mins = Math.round((timeH - hours) * 60);
       let timeStr = '';
       if (hours > 0) timeStr += hours + 'h ';
       timeStr += mins + 'm';
 
+      let tideStr = '';
+      if (tideActive && typeof geoJson.totalSecondsNoTide === 'number') {
+        const deltaMin = Math.round((geoJson.totalSeconds - geoJson.totalSecondsNoTide) / 60);
+        const sign = deltaMin > 0 ? '+' : '\u2212';
+        const col = deltaMin > 0 ? '#f59e0b' : '#22c55e';
+        tideStr = '  \u00b7  <span style="color:' + col + '" title="Impact of the estimated tidal current vs. still water">tide ' +
+          sign + Math.abs(deltaMin) + 'm</span>';
+        if (geoJson.arrivalTime) {
+          const arr = new Date(geoJson.arrivalTime);
+          if (!isNaN(arr)) tideStr += '  \u00b7  arr ' + String(arr.getHours()).padStart(2, '0') + ':' + String(arr.getMinutes()).padStart(2, '0');
+        }
+      }
+
       summaryEl.style.display = 'block';
-      summaryEl.innerHTML = '\u23f1 ' + fmtDist(totalDistM) + '  \u00b7  ' + timeStr + '  \u00b7  ' + speedKn.toFixed(1) + ' kn';
+      summaryEl.innerHTML = '\u23f1 ' + fmtDist(totalDistM) + '  \u00b7  ' + timeStr + '  \u00b7  ' + speedKn.toFixed(1) + ' kn' + tideStr;
     } else if (summaryEl) {
       summaryEl.style.display = 'none';
     }
@@ -3385,11 +3563,19 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
           const legKm = legDist / 1000;
           const legNm = legKm / 1.852;
-          const legTimeH = speedKn > 0 ? legNm / speedKn : 0;
+          // Prefer the server's tide-corrected leg time over the speed estimate
+          const legSeconds = (itinerary && node.leg && typeof node.leg.seconds === 'number') ? node.leg.seconds : null;
+          const legCurrentKn = (itinerary && node.leg && typeof node.leg.currentKn === 'number') ? node.leg.currentKn : null;
+          const legTimeH = legSeconds !== null ? legSeconds / 3600 : (speedKn > 0 ? legNm / speedKn : 0);
           const legTimeStr = formatTime(legTimeH);
 
           let html = '<div class="leg-stat"><span>Distance</span><span class="leg-val">' + fmtDist(legDist) + '</span></div>';
           if (legTimeStr) html += '<div class="leg-stat"><span>Time</span><span class="leg-val">' + legTimeStr + '</span></div>';
+          if (legCurrentKn !== null) {
+            const cCol = legCurrentKn >= 0.05 ? '#22c55e' : legCurrentKn <= -0.05 ? '#f59e0b' : '#9bb8da';
+            html += '<div class="leg-stat"><span>Current (est)</span><span class="leg-val" style="color:' + cCol + '">' +
+              (legCurrentKn > 0 ? '+' : '') + legCurrentKn.toFixed(1) + ' kn</span></div>';
+          }
           if (minDepth !== Infinity) html += '<div class="leg-stat"><span>Min Depth</span><span class="leg-val">' + fmtDepth(minDepth) + '</span></div>';
           if (minWidth !== Infinity) html += '<div class="leg-stat"><span>Min Width</span><span class="leg-val">' + minWidth.toFixed(1) + ' m</span></div>';
           if (maxAirDraft !== Infinity) html += '<div class="leg-stat"><span>Max Air Draft</span><span class="leg-val">' + fmtHeight(maxAirDraft) + '</span></div>';

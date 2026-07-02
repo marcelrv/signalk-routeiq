@@ -46,6 +46,7 @@ let routes = [];               // visible set from route.list
 let selectedId = null;
 let busy = false;
 let engineReady = false;
+let tidesAvailable = false;
 let cfg = { averageSpeedKnots: 6, defaultCoastDistance: 0.5 };
 let units = { distance: 'naut-mile' };
 // Per-route calculation session:
@@ -77,6 +78,7 @@ async function init() {
       : Promise.resolve(),
   ]);
   await checkEngine();
+  await checkTides();
   loadWaypoints();
 
   await client.subscribe(['route.**'], onRouteEvent);
@@ -95,6 +97,50 @@ async function init() {
   $('wp-select').addEventListener('change', () => { $('btn-wp').disabled = !$('wp-select').value; });
   $('poi-go').addEventListener('click', () => run(searchPois));
   $('poi-query').addEventListener('keydown', (e) => { if (e.key === 'Enter') run(searchPois); });
+
+  $('tide-cb').addEventListener('change', () => {
+    $('tide-depart').style.display = $('tide-cb').checked ? '' : 'none';
+    if ($('tide-cb').checked && !$('departure-time').value) setDepartureInput(new Date());
+  });
+  // "Best…" toggles the departure list: scan on first click, hide on the next.
+  $('btn-departures').addEventListener('click', () => {
+    if (depScanVisible) hideDepartures();
+    else run(scanDepartures);
+  });
+}
+
+/* ---------- tides ---------- */
+
+function tideEnabled() { return tidesAvailable && $('tide-cb').checked; }
+
+function departureIso() {
+  const v = $('departure-time').value;
+  const d = v ? new Date(v) : null;
+  return d && !isNaN(d) ? d.toISOString() : undefined;
+}
+
+function setDepartureInput(date) {
+  const p = (n) => String(n).padStart(2, '0');
+  $('departure-time').value = date.getFullYear() + '-' + p(date.getMonth() + 1) + '-' +
+    p(date.getDate()) + 'T' + p(date.getHours()) + ':' + p(date.getMinutes());
+}
+
+async function checkTides() {
+  try {
+    const pos = await vesselPosition();
+    const st = await fetch(API + `/tides/status?latitude=${pos.latitude}&longitude=${pos.longitude}`)
+      .then((r) => (r.ok ? r.json() : null));
+    tidesAvailable = !!(st && st.available);
+    $('tide-row').style.display = tidesAvailable ? '' : 'none';
+    if (tidesAvailable && st.considerTidesDefault) {
+      $('tide-cb').checked = true;
+      $('tide-depart').style.display = '';
+      if (!$('departure-time').value) setDepartureInput(new Date());
+    }
+  } catch {
+    tidesAvailable = false;
+    $('tide-row').style.display = 'none';
+  }
 }
 
 /* ---------- routing engine status ---------- */
@@ -240,7 +286,9 @@ async function calculate() {
     start: toLatLon(requestPoints[0]),
     end: toLatLon(requestPoints[requestPoints.length - 1]),
     via: requestPoints.slice(1, -1).map(toLatLon),
+    useTides: tideEnabled(),
   };
+  if (tideEnabled() && departureIso()) body.departureTime = departureIso();
 
   const resp = await fetch(API + '/route', {
     method: 'POST',
@@ -454,8 +502,21 @@ async function searchPois() {
 function renderSummary(result) {
   const distM = result.totalDistance || 0;
   const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 6;
-  $('sum-line').textContent =
-    fmtDistance(distM) + '  ·  ' + fmtDuration(distM) + '  @ ' + speed.toFixed(1) + ' kn';
+  const tideActive = result.tide && result.tide.enabled && typeof result.totalSeconds === 'number';
+  let line = fmtDistance(distM) + '  ·  ' +
+    (tideActive ? fmtDurationSec(result.totalSeconds) : fmtDuration(distM)) +
+    '  @ ' + speed.toFixed(1) + ' kn';
+  if (tideActive && typeof result.totalSecondsNoTide === 'number') {
+    const deltaMin = Math.round((result.totalSeconds - result.totalSecondsNoTide) / 60);
+    line += '  ·  tide ' + (deltaMin > 0 ? '+' : '−') + Math.abs(deltaMin) + 'm';
+    if (result.arrivalTime) {
+      const arr = new Date(result.arrivalTime);
+      if (!isNaN(arr)) {
+        line += '  ·  arr ' + String(arr.getHours()).padStart(2, '0') + ':' + String(arr.getMinutes()).padStart(2, '0');
+      }
+    }
+  }
+  $('sum-line').textContent = line;
 
   const warnings = $('warnings');
   warnings.innerHTML = '';
@@ -521,6 +582,10 @@ function renderItinerary(itinerary) {
       const bits = [];
       if (typeof p.courseToNext === 'number') bits.push('→ ' + String(p.courseToNext).padStart(3, '0') + '°');
       bits.push(fmtDistance(p.leg.distance));
+      if (typeof p.leg.seconds === 'number') bits.push(fmtDurationSec(p.leg.seconds));
+      if (typeof p.leg.currentKn === 'number') {
+        bits.push('current ' + (p.leg.currentKn > 0 ? '+' : '') + p.leg.currentKn.toFixed(1) + ' kn');
+      }
       if (typeof p.leg.minDepth === 'number') bits.push('depth ≥ ' + p.leg.minDepth.toFixed(1) + ' m');
       if (typeof p.leg.maxAirDraft === 'number') bits.push('air ≤ ' + p.leg.maxAirDraft.toFixed(1) + ' m');
       if (typeof p.leg.minWidth === 'number') bits.push('width ≥ ' + p.leg.minWidth.toFixed(0) + ' m');
@@ -596,6 +661,103 @@ function fmtDuration(meters) {
   const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 6;
   const totalMinutes = Math.round((meters / 1852 / speed) * 60);
   return Math.floor(totalMinutes / 60) + ':' + String(totalMinutes % 60).padStart(2, '0');
+}
+
+/** Seconds as h:mm (used for tide-corrected times from the server). */
+function fmtDurationSec(sec) {
+  const m = Math.round(sec / 60);
+  return Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0');
+}
+
+/* ---------- departure planner (24h scan) ---------- */
+
+let depScanVisible = false;
+
+function hideDepartures() {
+  $('dep-list').innerHTML = '';
+  $('btn-departures').textContent = 'Best…';
+  depScanVisible = false;
+}
+
+async function scanDepartures() {
+  const r = selectedRoute();
+  if (!r) { setStatus('route-status', 'Select a route on the chart first.', 'error'); return; }
+  const list = $('dep-list');
+  list.innerHTML = '<div class="hint">Scanning departures…</div>';
+
+  const { points } = await client.call('route.get', { routeId: r.routeId });
+  const session = sessions.get(r.routeId);
+  const requestPoints = (session && samePoints(points, session.generated))
+    ? session.requestPoints : points;
+  const toLatLon = (p) => ({ latitude: p.position[1], longitude: p.position[0] });
+
+  const body = {
+    start: toLatLon(requestPoints[0]),
+    end: toLatLon(requestPoints[requestPoints.length - 1]),
+    via: requestPoints.slice(1, -1).map(toLatLon),
+    departureTime: departureIso() || new Date().toISOString(),
+    scanHours: 24,
+    stepMinutes: 60,
+  };
+  const resp = await fetch(API + '/route/departures', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    hideDepartures();
+    throw new Error(data.error || ('Departure scan failed (' + resp.status + ')'));
+  }
+  renderDepartures(data.departures || []);
+  depScanVisible = true;
+  $('btn-departures').textContent = 'Hide';
+}
+
+function renderDepartures(deps) {
+  const list = $('dep-list');
+  list.innerHTML = '';
+  const ok = deps.filter((d) => typeof d.totalSeconds === 'number');
+  if (!ok.length) {
+    list.innerHTML = '<div class="hint">No departures could be evaluated.</div>';
+    return;
+  }
+  const minS = Math.min(...ok.map((d) => d.totalSeconds));
+  const maxS = Math.max(...ok.map((d) => d.totalSeconds));
+  for (const d of ok) {
+    // Green (fastest) → red (slowest), same ramp as the webapp planner.
+    const norm = maxS > minS ? (d.totalSeconds - minS) / (maxS - minS) : 0;
+    const color = 'hsl(' + Math.round(120 * (1 - norm)) + ',65%,42%)';
+    const dep = new Date(d.departureTime);
+    const row = document.createElement('div');
+    row.className = 'dep-row';
+    row.title = 'Depart ' + dep.toLocaleString() + ' — travel time ' + fmtDurationSec(d.totalSeconds);
+    const t = document.createElement('span');
+    t.className = 'dep-time';
+    t.textContent = String(dep.getHours()).padStart(2, '0') + ':' + String(dep.getMinutes()).padStart(2, '0');
+    const bar = document.createElement('span');
+    bar.className = 'dep-bar';
+    const fill = document.createElement('i');
+    fill.style.width = Math.round(30 + 55 * norm) + '%';
+    fill.style.background = color;
+    bar.appendChild(fill);
+    const dur = document.createElement('span');
+    dur.className = 'dep-dur';
+    dur.style.color = color;
+    dur.textContent = fmtDurationSec(d.totalSeconds);
+    const star = document.createElement('span');
+    star.className = 'dep-best';
+    star.textContent = d.totalSeconds === minS ? '★' : '';
+    row.append(t, bar, dur, star);
+    row.addEventListener('click', () => run(async () => {
+      hideDepartures();
+      setDepartureInput(dep);
+      $('tide-cb').checked = true;
+      $('tide-depart').style.display = '';
+      await calculate();
+    }));
+    list.appendChild(row);
+  }
 }
 
 function setStatus(id, text, kind) {

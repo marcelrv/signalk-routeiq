@@ -62,7 +62,7 @@ export class ApiHandler {
     // Wildcard is restricted to safe (read-only) routes only.
     // Mutation routes (vessel update, graph edits, database download) deliberately
     // omit ACAO so browsers block unauthenticated cross-origin writes.
-    const CORS_SAFE_POSTS = new Set(['/route', '/export/gpx', '/push']);
+    const CORS_SAFE_POSTS = new Set(['/route', '/route/departures', '/export/gpx', '/push']);
     this.router.use((_req, res, next) => {
       const allowCors = _req.method === 'GET'
         || _req.method === 'OPTIONS'
@@ -78,6 +78,12 @@ export class ApiHandler {
 
     // POST /signalk/v1/api/router/route
     this.router.post('/route', this.handleRoute.bind(this));
+
+    // POST /signalk/v1/api/router/route/departures — scan departure times for the best tide
+    this.router.post('/route/departures', this.handleDepartureScan.bind(this));
+
+    // GET /signalk/v1/api/router/tides/status?latitude=&longitude= — tide data availability
+    this.router.get('/tides/status', this.handleTidesStatus.bind(this));
 
     // GET /signalk/v1/api/router/search
     this.router.get('/search', this.handleSearch.bind(this));
@@ -177,6 +183,11 @@ export class ApiHandler {
         return;
       }
 
+      if (request.departureTime !== undefined && !Number.isFinite(Date.parse(request.departureTime))) {
+        res.status(400).json({ error: 'Invalid departureTime — expected an ISO 8601 date string' });
+        return;
+      }
+
       const route: RouteResult = await this.routingEngine!.calculateRoute(request);
 
       res.json(route);
@@ -187,6 +198,78 @@ export class ApiHandler {
       // Do not call next(error) — the response is already sent.
       res.status(422).json({ error: message, code: 'ROUTE_NOT_FOUND' });
     }
+  }
+
+  /**
+   * Scan departure times over a window and report total travel time per
+   * departure, so the user can pick the most favorable tide.
+   * POST /signalk/v1/api/router/route/departures
+   * Body: RoutingRequest + { scanHours?: number, stepMinutes?: number }
+   */
+  private async handleDepartureScan(req: Request, res: Response): Promise<void> {
+    if (!this.isReady()) {
+      res.status(503).json({ error: 'Routing engine not ready, still initializing' });
+      return;
+    }
+    try {
+      const { scanHours, stepMinutes, ...request } = req.body as RoutingRequest & {
+        scanHours?: number;
+        stepMinutes?: number;
+      };
+      if (!request.start || !request.end) {
+        res.status(400).json({ error: 'Missing required fields: start and end coordinates' });
+        return;
+      }
+      if (request.departureTime !== undefined && !Number.isFinite(Date.parse(request.departureTime))) {
+        res.status(400).json({ error: 'Invalid departureTime — expected an ISO 8601 date string' });
+        return;
+      }
+      const hours = Math.min(48, Math.max(1, Number(scanHours) || 24));
+      const step = Math.min(240, Math.max(10, Number(stepMinutes) || 60));
+
+      if (!this.routingEngine!.tidesClient) {
+        res.status(422).json({ error: 'Tide data is not available', code: 'TIDES_UNAVAILABLE' });
+        return;
+      }
+      const departures = await this.routingEngine!.scanDepartures(request, hours, step);
+      res.json({ scanHours: hours, stepMinutes: step, departures });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(422).json({ error: message, code: 'SCAN_FAILED' });
+    }
+  }
+
+  /**
+   * Tide data availability probe for UIs: is the signalk-tides plugin
+   * reachable and does it know stations near the given position?
+   * GET /signalk/v1/api/router/tides/status?latitude=&longitude=
+   */
+  private async handleTidesStatus(req: Request, res: Response): Promise<void> {
+    const client = this.routingEngine?.tidesClient;
+    const currents = this.routingEngine?.currentsClient;
+    if (!client && !currents) {
+      res.json({ available: false, reason: 'engine not ready' });
+      return;
+    }
+    const lat = parseFloat(req.query.latitude as string);
+    const lon = parseFloat(req.query.longitude as string);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      res.status(400).json({ error: 'latitude and longitude query parameters are required' });
+      return;
+    }
+    const probe = client ? await client.probe(lat, lon) : { available: false, stations: [] };
+    // Real current stations (signalk-tidal-currents plugin) near this position?
+    const currentStations = currents ? await currents.probe(lat, lon) : false;
+    res.json({
+      available: probe.available || currentStations,
+      estimated: true, // station predictions still derive from community harmonic data
+      currentStations,
+      source: currentStations ? 'stations' : 'height-estimate',
+      considerTidesDefault: this.config.considerTides,
+      stations: probe.stations.slice(0, 5).map((s) => ({
+        id: s.id, name: s.name, latitude: s.latitude, longitude: s.longitude,
+      })),
+    });
   }
 
   /**
@@ -316,6 +399,8 @@ export class ApiHandler {
     res.json({
       averageSpeedKnots: this.config.averageSpeedKnots,
       defaultCoastDistance: this.config.defaultCoastDistance,
+      considerTides: this.config.considerTides,
+      maxTidalCurrentKnots: this.config.maxTidalCurrentKnots,
     });
   }
 

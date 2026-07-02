@@ -27,6 +27,8 @@ export interface RoutingRequest {
   draft?: number; // Override vessel draft
   beam?: number; // Override vessel beam
   airDraft?: number; // Override vessel air draft
+  departureTime?: string; // ISO 8601; default now. Only meaningful with tides.
+  useTides?: boolean; // Override config.considerTides for this request
 }
 
 // Edge attributes from routing database
@@ -83,6 +85,8 @@ export interface ItineraryPoint {
     minDepth?: number;       // m, only when known (>= 0 in the graph)
     minWidth?: number;       // m
     maxAirDraft?: number;    // m
+    seconds?: number;        // tide-corrected sailing time for this leg
+    currentKn?: number;      // distance-weighted mean along-track current (+ = fair)
     crossings?: RouteCrossing[]; // bridges/locks on this leg, in route order
   };
 }
@@ -101,6 +105,16 @@ export interface RouteResult {
   warnings?: RouteWarning[];
   totalDistance?: number;
   totalCost?: number;
+  totalSeconds?: number;       // sailing time at averageSpeedKnots, tide-corrected when tide info present
+  totalSecondsNoTide?: number; // same route without current — UIs show the delta
+  departureTime?: string;      // ISO, echoed/defaulted from the request when tides active
+  arrivalTime?: string;        // ISO, departure + totalSeconds
+  tide?: {
+    enabled: boolean;
+    estimated: boolean;        // true = model/community-data predictions, not measurements
+    source?: 'stations' | 'height-estimate'; // real current stations vs height-derived estimate
+    stations: string[];        // station names used for the flow field
+  };
   crossings?: RouteCrossing[];
   waypoints?: RouteWaypoint[];
   itinerary?: ItineraryPoint[];
@@ -129,6 +143,9 @@ export interface RouteResult {
         costFactor: number;
         trafficMode: number;
         edgeTypeId?: number;
+        seconds?: number;   // traversal time, tide-corrected when tides active
+        currentKn?: number; // estimated along-track current, + = fair (with tide)
+        sogKn?: number;     // speed over ground used for this segment
       }>;
     };
   }>;
@@ -168,6 +185,9 @@ export interface PluginConfig {
   averageSpeedKnots: number;        // knots, default 6.0
   waypointTolerance: number;        // meters, max deviation when simplifying to waypoints (default 30)
   catalogUrl: string;               // URL to the index.json catalog for downloadable databases
+  considerTides: boolean;           // default for the per-request "use tides" toggle
+  maxTidalCurrentKnots: number;     // spring-current calibration for the estimated flow model
+  tidesApiBase: string;             // base URL of the server hosting signalk-tides
 }
 
 // Default plugin configuration
@@ -185,4 +205,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   averageSpeedKnots: 6.0,
   waypointTolerance: 30,
   catalogUrl: 'https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/index.json',
+  considerTides: false,
+  maxTidalCurrentKnots: 2.0,
+  tidesApiBase: 'http://localhost:3000',
 };

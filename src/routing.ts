@@ -4,7 +4,8 @@
  */
 
 import { EdgeRow, RoutingDatabase, getNodeTypeInt, NODE_TYPE_INLAND, EDGE_TYPE_COASTAL, POI_TYPE_BRIDGE, POI_TYPE_LOCK, TRAFFIC_TWO_WAY, TRAFFIC_ONE_WAY_REV } from './database.js';
-import { buildItinerary } from './itinerary.js';
+import { bearingDeg, buildItinerary } from './itinerary.js';
+import { CurrentsClient, FlowField, KNOTS_TO_MS, TidesClient, prepareStationFlowField, prepareTidalFlowField } from './tides.js';
 import {
     BBox,
     PluginConfig,
@@ -18,6 +19,18 @@ import {
 function isInsideBBox(lat: number, lon: number, bbox: BBox): boolean {
   return lat >= bbox.minLat && lat <= bbox.maxLat &&
          lon >= bbox.minLon && lon <= bbox.maxLon;
+}
+
+/**
+ * Per-request environmental context for time-dependent routing.
+ * Built once in calculateRoute and threaded through the search paths —
+ * never stored on the engine, so concurrent requests stay isolated.
+ */
+interface RouteEnv {
+  flow: FlowField;
+  departureMs: number; // departure time of the overall route
+  offsetSec: number;   // elapsed seconds before this sub-search (via legs)
+  speedMs: number;     // vessel speed through water
 }
 
 function bboxFromPoints(
@@ -107,6 +120,8 @@ export class RoutingEngine {
   private db: RoutingDatabase;
   private config: PluginConfig;
   private vesselDimensions: VesselDimensions;
+  private tides: TidesClient | null = null;
+  private currents: CurrentsClient | null = null;
 
   constructor(db: RoutingDatabase, config: PluginConfig, vesselDimensions?: VesselDimensions) {
     this.db = db;
@@ -127,6 +142,70 @@ export class RoutingEngine {
 
   get vesselDims(): VesselDimensions {
     return { ...this.vesselDimensions };
+  }
+
+  setTidesClient(client: TidesClient | null): void {
+    this.tides = client;
+  }
+
+  get tidesClient(): TidesClient | null {
+    return this.tides;
+  }
+
+  setCurrentsClient(client: CurrentsClient | null): void {
+    this.currents = client;
+  }
+
+  get currentsClient(): CurrentsClient | null {
+    return this.currents;
+  }
+
+  /**
+   * Build the per-request environmental context: resolve departure time and
+   * prepare the tidal flow field over the request area and travel window.
+   * Returns undefined when tides are off or unavailable (route falls back to
+   * plain distance-based behavior, bit-identical to before this feature).
+   */
+  private async prepareEnv(
+    request: RoutingRequest,
+    anchors: Array<{ latitude: number; longitude: number }>,
+  ): Promise<RouteEnv | undefined> {
+    const wantTides = request.useTides ?? this.config.considerTides;
+    if (!wantTides || (!this.tides && !this.currents)) return undefined;
+
+    const parsed = request.departureTime ? Date.parse(request.departureTime) : NaN;
+    const departureMs = Number.isFinite(parsed) ? parsed : Date.now();
+    const speedMs = Math.max(0.5, this.config.averageSpeedKnots) * KNOTS_TO_MS;
+
+    // Travel window estimate: 3× the direct distance at STW covers detours,
+    // clamped to sane bounds so timeline fetches stay small.
+    let directM = 0;
+    for (let i = 1; i < anchors.length; i++) {
+      directM += this.haversineDistance(
+        anchors[i - 1].latitude, anchors[i - 1].longitude,
+        anchors[i].latitude, anchors[i].longitude,
+      );
+    }
+    const windowSec = Math.min(72 * 3600, Math.max(6 * 3600, (3 * directM) / speedMs));
+
+    const endMs = departureMs + windowSec * 1000;
+
+    // Height-derived estimate (signalk-tides) — used directly when no
+    // current stations cover the route, else as the out-of-range fallback.
+    const gradient = this.tides
+      ? await prepareTidalFlowField(
+          this.tides, anchors, departureMs, endMs, this.config.maxTidalCurrentKnots,
+        )
+      : null;
+
+    // Real harmonic current stations (signalk-tidal-currents) — preferred.
+    const stationField = this.currents
+      ? await prepareStationFlowField(this.currents, anchors, departureMs, endMs, gradient)
+      : null;
+
+    const flow = stationField ?? gradient;
+    if (!flow) return undefined;
+    return { flow, departureMs, offsetSec: 0, speedMs };
   }
 
   /**
@@ -159,11 +238,14 @@ export class RoutingEngine {
       if (!startNode) throw new Error(`No routing nodes found near start point`);
       if (!endNode) throw new Error(`No routing nodes found near end point`);
 
+      // Tidal flow field for time-dependent costs (undefined = tides off/unavailable)
+      const env = await this.prepareEnv(request, [start, ...via, end]);
+
       // Build bounding box with initial margin, try A* with expansion on failure
       const bboxWarnings: RouteWarning[] = [];
 
       if (via.length > 0) {
-        return await this.routeViaPoints(start, end, via, coastDistanceMeters, effectiveDims, bboxWarnings);
+        return await this.routeViaPoints(start, end, via, coastDistanceMeters, effectiveDims, bboxWarnings, env);
       }
       // Fall through for non-via routes (bbox search below)
 
@@ -181,6 +263,7 @@ export class RoutingEngine {
             coastDistanceMeters,
             effectiveDims,
             bbox,
+            env,
           );
 
           // Connect user's start/end to the route coordinates
@@ -198,7 +281,7 @@ export class RoutingEngine {
             ...violationWarnings,
           ];
           if (result.warnings.length === 0) delete result.warnings;
-          await this.finalizeRoute(result);
+          await this.finalizeRoute(result, [], env);
           return result;
         } catch {
           // Expand bounding box and retry
@@ -216,8 +299,49 @@ export class RoutingEngine {
 
       // All bbox attempts failed — try fallback routing (unconstrained graph)
       return await this.fallbackRoute(
-        startNode, endNode, start, end, coastDistanceMeters, via, effectiveDims,
+        startNode, endNode, start, end, coastDistanceMeters, via, effectiveDims, env,
       );
+  }
+
+  /**
+   * Scan a range of departure times and return the total travel time for
+   * each, so the user can pick the most favorable tide. Each step is a full
+   * route calculation (the optimal route may differ per tide); repeated tide
+   * API fetches are absorbed by the TidesClient cache.
+   */
+  async scanDepartures(
+    request: RoutingRequest,
+    scanHours: number = 24,
+    stepMinutes: number = 60,
+  ): Promise<Array<{
+    departureTime: string;
+    totalSeconds?: number;
+    totalSecondsNoTide?: number;
+    arrivalTime?: string;
+    totalDistance?: number;
+    error?: string;
+  }>> {
+    const parsed = request.departureTime ? Date.parse(request.departureTime) : NaN;
+    const t0 = Number.isFinite(parsed) ? parsed : Date.now();
+    const steps = Math.min(97, Math.floor((scanHours * 60) / stepMinutes) + 1);
+
+    const out = [];
+    for (let i = 0; i < steps; i++) {
+      const departureTime = new Date(t0 + i * stepMinutes * 60_000).toISOString();
+      try {
+        const r = await this.calculateRoute({ ...request, departureTime, useTides: true });
+        out.push({
+          departureTime,
+          totalSeconds: r.totalSeconds,
+          totalSecondsNoTide: r.totalSecondsNoTide,
+          arrivalTime: r.arrivalTime,
+          totalDistance: r.totalDistance,
+        });
+      } catch (e) {
+        out.push({ departureTime, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    return out;
   }
 
   /**
@@ -232,6 +356,7 @@ export class RoutingEngine {
     coastDistanceMeters: number,
     _via: Array<{ latitude: number; longitude: number }>,
     dims: VesselDimensions,
+    env?: RouteEnv,
   ): Promise<RouteResult> {
     const warnings: RouteWarning[] = [];
     const reachableFromStart = this.db.getReachableNodes(startNode);
@@ -270,6 +395,8 @@ export class RoutingEngine {
             exit.lat, exit.lon,
             coastDistanceMeters,
             dims,
+            undefined,
+            env,
           );
         } catch {
           throw new Error(
@@ -282,7 +409,7 @@ export class RoutingEngine {
       await this.connectUserPoint(start, route, 'start');
       await this.connectUserPoint(end, route, 'end');
 
-      await this.finalizeRoute(route);
+      await this.finalizeRoute(route, [], env);
       return route;
     }
 
@@ -304,8 +431,10 @@ export class RoutingEngine {
     coastDistanceMeters: number,
     dims: VesselDimensions,
     globalWarnings?: RouteWarning[],
+    env?: RouteEnv,
   ): Promise<RouteResult> {
     let currentStart = start;
+    let elapsedSec = 0; // time offset of the current leg's departure
     const allSegments: RouteResult['features'][0]['properties']['segments'] = [];
     const allCoordinates: [number, number][] = [];
     const warnings: RouteWarning[] = [];
@@ -338,12 +467,14 @@ export class RoutingEngine {
         currentStart, nextPoint,
         adaptiveMargin,
       );
+      const legEnv = env ? { ...env, offsetSec: elapsedSec } : undefined;
       const segmentResult = await this.tryRouteSegment(
         currentStart.latitude, currentStart.longitude,
         nextPoint.latitude, nextPoint.longitude,
         coastDistanceMeters,
         i, warnings, dims,
         segmentBbox,
+        legEnv,
       );
       if (!segmentResult) {
         // via point completely unreachable — skip it
@@ -369,6 +500,11 @@ export class RoutingEngine {
       allSegments.push(...segmentResult.features[0].properties.segments!);
       totalDistanceMeters += segmentResult.features[0].properties.totalDistance ?? 0;
       totalCostAccum += segmentResult.features[0].properties.totalCost ?? 0;
+      elapsedSec = this.annotateSegmentTimes(
+        segmentResult.features[0].geometry.coordinates,
+        segmentResult.features[0].properties.segments!,
+        env, elapsedSec,
+      );
       currentStart = nextPoint;
     }
 
@@ -382,6 +518,7 @@ export class RoutingEngine {
       coastDistanceMeters,
       -1, warnings, dims,
       finalBbox,
+      env ? { ...env, offsetSec: elapsedSec } : undefined,
     );
 
     if (!finalResult) {
@@ -419,7 +556,7 @@ export class RoutingEngine {
     // Connect only the overall end coordinate (start is handled per-segment above)
     await this.connectUserPoint(end, result, 'end');
 
-    await this.finalizeRoute(result, via);
+    await this.finalizeRoute(result, via, env);
     return result;
   }
 
@@ -436,6 +573,7 @@ export class RoutingEngine {
     warnings: RouteWarning[],
     dims: VesselDimensions,
     bbox?: BBox,
+    env?: RouteEnv,
   ): Promise<RouteResult | null> {
     const label = viaIndex >= 0 ? `Via point ${viaIndex + 1}` : 'Destination';
     const startPt = { latitude: startLat, longitude: startLon };
@@ -447,7 +585,7 @@ export class RoutingEngine {
     while (currentMargin <= segmentMaxMargin) {
       const segmentBbox = bbox ?? bboxFromPoints(startPt, endPt, currentMargin);
       try {
-        const result = await this.astarSearch(startLat, startLon, endLat, endLon, coastDistanceMeters, dims, segmentBbox);
+        const result = await this.astarSearch(startLat, startLon, endLat, endLon, coastDistanceMeters, dims, segmentBbox, env);
         this.addViolationWarnings(result, warnings, label, startPt, endPt, dims);
         return result;
       } catch {
@@ -753,6 +891,7 @@ export class RoutingEngine {
     minCoastDistanceMeters: number,
     dims: VesselDimensions,
     bbox?: BBox,
+    env?: RouteEnv,
   ): Promise<RouteResult> {
     let startNode = await this.db.findNearestNode(startLat, startLon);
     let endNode = await this.db.findNearestNode(endLat, endLon);
@@ -857,13 +996,21 @@ export class RoutingEngine {
     const closedSet = new Set<number>();
     const gScore = new Map<number, number>();
     const parent = new Map<number, number | null>();
+    // Elapsed sailing seconds from the (sub-)route departure per settled node —
+    // used to sample the tidal flow field at the right moment.
+    const tSec = new Map<number, number>();
 
     // Minimum possible cost multiplier — ensures A* heuristic never overestimates.
     // 0.8 is the fairway cost_factor floor; if custom edges go lower, update this.
-    const minMultiplier = 0.8;
+    // With tides, an edge's effective distance can shrink to STW/(STW+maxCurrent)
+    // of its length on a fully fair current — fold that into the heuristic bound.
+    const minMultiplier = 0.8 * (env
+      ? env.speedMs / (env.speedMs + env.flow.maxSpeedMs)
+      : 1);
 
     // Initialize
     gScore.set(startNode, 0);
+    tSec.set(startNode, 0);
     openSet.push({
       nodeId: startNode,
       g: 0,
@@ -919,7 +1066,35 @@ export class RoutingEngine {
           continue;
         }
 
-        const baseCost = this.calculateEdgeCost(edge);
+        // Tidal current: scale the edge to an "effective distance" so all
+        // existing cost factors and penalties keep their meaning. A fair
+        // current shortens the edge, a foul one lengthens it; with tides off
+        // (env undefined) this is a no-op and results match the old engine.
+        let effDistance = edge.distance;
+        let edgeSeconds = 0;
+        if (env) {
+          const fromNode = this.db.getNodeSync(current.nodeId);
+          const elapsed = tSec.get(current.nodeId) ?? 0;
+          let sog = env.speedMs;
+          if (fromNode) {
+            const flow = env.flow.sample(
+              (fromNode.lat + edge.lat) / 2,
+              (fromNode.lon + edge.lon) / 2,
+              env.departureMs + (env.offsetSec + elapsed) * 1000,
+            );
+            if (flow.u !== 0 || flow.v !== 0) {
+              const brg = this.toRadians(bearingDeg(fromNode.lat, fromNode.lon, edge.lat, edge.lon));
+              const along = flow.u * Math.sin(brg) + flow.v * Math.cos(brg);
+              // Never let a foul current make an edge impossible — floor SOG
+              // at 20% of STW (matches the annotation in finalizeRoute).
+              sog = Math.max(0.2 * env.speedMs, env.speedMs + along);
+            }
+          }
+          effDistance = edge.distance * env.speedMs / sog;
+          edgeSeconds = edge.distance / sog;
+        }
+
+        const baseCost = this.calculateEdgeCost(edge, effDistance);
         const edgeCost = baseCost + (penalty * Math.max(1, edge.distance));
 
         const tentativeG = gScore.get(current.nodeId)! + edgeCost;
@@ -927,6 +1102,7 @@ export class RoutingEngine {
         if (!gScore.has(edge.target) || tentativeG < gScore.get(edge.target)!) {
           gScore.set(edge.target, tentativeG);
           parent.set(edge.target, current.nodeId);
+          if (env) tSec.set(edge.target, (tSec.get(current.nodeId) ?? 0) + edgeSeconds);
 
           const h = this.haversineDistance(
             edge.lat,
@@ -1039,9 +1215,12 @@ export class RoutingEngine {
   /**
    * Calculate the cost for an edge using the multi-layered cost function
    * Cost = Distance × CostFactor × OneWayPenalty
+   *
+   * `effectiveDistance` defaults to the edge length; tide-aware search passes
+   * the current-adjusted equivalent (distance × STW / SOG) instead.
    */
-  private calculateEdgeCost(edge: EdgeRow & { lat: number; lon: number }): number {
-    let cost = edge.distance * edge.cost_factor;
+  private calculateEdgeCost(edge: EdgeRow & { lat: number; lon: number }, effectiveDistance?: number): number {
+    let cost = (effectiveDistance ?? edge.distance) * edge.cost_factor;
 
     // One-way penalty: traffic_mode=2 means only reverse direction (target→source)
     // is allowed, so traversing source→target is wrong-way.
@@ -1089,11 +1268,30 @@ export class RoutingEngine {
   private async finalizeRoute(
     route: RouteResult,
     via: Array<{ latitude: number; longitude: number }> = [],
+    env?: RouteEnv,
   ): Promise<void> {
     const feature = route.features[0];
     if (!feature || feature.geometry.coordinates.length < 2) return;
     const coords = feature.geometry.coordinates;
     const segments = feature.properties.segments || [];
+
+    // Sailing time & estimated current per segment (covers segments added by
+    // connectUserPoint too — this runs after all geometry mutations).
+    const totalSec = this.annotateSegmentTimes(coords, segments, env, 0);
+    route.totalSeconds = Math.round(totalSec);
+    if (env) {
+      const totalDistance = feature.properties.totalDistance
+        ?? segments.reduce((s, seg) => s + (seg.distance || 0), 0);
+      route.totalSecondsNoTide = Math.round(totalDistance / env.speedMs);
+      route.departureTime = new Date(env.departureMs).toISOString();
+      route.arrivalTime = new Date(env.departureMs + totalSec * 1000).toISOString();
+      route.tide = {
+        enabled: true,
+        estimated: env.flow.estimated,
+        source: env.flow.source,
+        stations: env.flow.stations.map((s) => s.name),
+      };
+    }
 
     // Via-point routes are merged from sub-results and lose the per-segment
     // crossings detected in buildRouteResult — recover them here.
@@ -1113,6 +1311,46 @@ export class RoutingEngine {
     route.itinerary = itinerary;
 
     this.splitToSegmentFeatures(route);
+  }
+
+  /**
+   * Annotate each path segment with sailing seconds and (when a flow field is
+   * active) the estimated along-track current and SOG, sampling the field at
+   * the vessel's actual passage time. Returns the cumulative seconds at the
+   * end of the path (startOffsetSec + sailing time).
+   */
+  private annotateSegmentTimes(
+    coords: Array<[number, number]>,
+    segments: NonNullable<RouteResult['features'][0]['properties']['segments']>,
+    env: RouteEnv | undefined,
+    startOffsetSec: number,
+  ): number {
+    const speedMs = env?.speedMs ?? Math.max(0.5, this.config.averageSpeedKnots) * KNOTS_TO_MS;
+    let cum = startOffsetSec;
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const from = coords[i];
+      const to = coords[i + 1];
+      let sog = speedMs;
+      if (env && from && to) {
+        const flow = env.flow.sample(
+          (from[1] + to[1]) / 2,
+          (from[0] + to[0]) / 2,
+          env.departureMs + cum * 1000,
+        );
+        if (flow.u !== 0 || flow.v !== 0) {
+          const brg = this.toRadians(bearingDeg(from[1], from[0], to[1], to[0]));
+          const along = flow.u * Math.sin(brg) + flow.v * Math.cos(brg);
+          sog = Math.max(0.2 * speedMs, speedMs + along);
+          seg.currentKn = Math.round((along / KNOTS_TO_MS) * 100) / 100;
+          seg.sogKn = Math.round((sog / KNOTS_TO_MS) * 100) / 100;
+        }
+      }
+      const sec = (seg.distance || 0) / sog;
+      seg.seconds = Math.round(sec * 10) / 10;
+      cum += sec;
+    }
+    return cum;
   }
 
   /**
@@ -1145,6 +1383,8 @@ export class RoutingEngine {
         trafficMode: seg.trafficMode,
         edgeTypeId: seg.edgeTypeId,
         distance: seg.distance,
+        ...(seg.seconds !== undefined ? { seconds: seg.seconds } : {}),
+        ...(seg.currentKn !== undefined ? { currentKn: seg.currentKn, sogKn: seg.sogKn } : {}),
       };
 
       segmentFeatures.push({

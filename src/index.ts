@@ -14,6 +14,7 @@ import { ApiHandler } from './api.js';
 import { RoutingDatabase } from './database.js';
 import { registerPlotterExtension, setPlotterExtensionRunning } from './plotterext.js';
 import { RoutingEngine } from './routing.js';
+import { CurrentsClient, TidesClient } from './tides.js';
 import { DEFAULT_CONFIG, PluginConfig } from './types.js';
 
 // Plugin state
@@ -95,6 +96,8 @@ export function pluginConstructor(app: ServerAPI) {
           console.log(`[autoroute] Database hot-reloaded: ${stats.nodes} nodes, ${stats.edges} edges, ${stats.pois} POIs`);
 
           routingEngine = new RoutingEngine(database, config, currentDims);
+          routingEngine.setTidesClient(new TidesClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase));
+          routingEngine.setCurrentsClient(new CurrentsClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase));
           if (apiHandler) {
             apiHandler.setComponents(database, routingEngine);
           }
@@ -194,6 +197,26 @@ export function pluginConstructor(app: ServerAPI) {
             minimum: 0.5,
             multipleOf: 0.1,
           },
+          considerTides: {
+            type: 'boolean',
+            title: 'Consider Tides by Default',
+            description: 'Use estimated tidal currents in route calculation (requires the signalk-tides plugin). Clients can override per request.',
+            default: DEFAULT_CONFIG.considerTides,
+          },
+          maxTidalCurrentKnots: {
+            type: 'number',
+            title: 'Max Tidal Current (kn)',
+            description: 'Spring-tide current at full flood/ebb used to scale the estimated tidal flow',
+            default: DEFAULT_CONFIG.maxTidalCurrentKnots,
+            minimum: 0,
+            multipleOf: 0.1,
+          },
+          tidesApiBase: {
+            type: 'string',
+            title: 'Tides API Base URL',
+            description: 'Server hosting the signalk-tides plugin (default: this server)',
+            default: DEFAULT_CONFIG.tidesApiBase,
+          },
           waypointTolerance: {
             type: 'number',
             title: 'Waypoint Simplification Tolerance (m)',
@@ -292,6 +315,8 @@ export function pluginConstructor(app: ServerAPI) {
       console.log(`[autoroute] Database loaded: ${stats.nodes} nodes, ${stats.edges} edges, ${stats.pois} POIs`);
 
       routingEngine = new RoutingEngine(database, config);
+      routingEngine.setTidesClient(new TidesClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase));
+      routingEngine.setCurrentsClient(new CurrentsClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase));
       apiHandler!.setComponents(database, routingEngine);
       console.log('[autoroute] API handler ready');
 
