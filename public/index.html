@@ -773,11 +773,153 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   background: rgba(255,255,255,0.03); border: 1px solid rgba(79,148,212,0.15);
   border-radius: 8px; padding: 12px 14px; margin-bottom: 8px;
 }
+
+/* ---------- tide/current station time scrubber (bottom-center) ----------
+   Deliberately NOT a .panel — no surrounding card. Each piece (play
+   button, ruler) carries its own small backing so it stays legible
+   floating directly over the map. */
+#time-scrubber-bar {
+  display: none;
+  position: absolute;
+  bottom: 72px; /* keep clear of the #toast at bottom:30px */
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1002;
+  width: 460px;
+  max-width: 90vw;
+  align-items: flex-start;
+  gap: 8px;
+  user-select: none; /* dragging across the ruler must scrub, not text-select the hour labels */
+  -webkit-user-select: none;
+}
+#time-scrubber-track-wrap {
+  position: relative;
+  flex: 1;
+  padding-top: 24px; /* room for the floating pill above the ruler */
+  padding-bottom: 14px; /* room for the day-boundary caption below the ruler */
+  height: 24px;
+}
+#time-scrubber-hourbar {
+  display: flex;
+  height: 24px;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid rgba(79,148,212,0.35);
+  background: rgba(11,26,43,0.85);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+  cursor: pointer;
+  touch-action: none; /* dragging is handled ourselves via Pointer Events, not native scrolling */
+}
+.ts-hour-seg {
+  box-sizing: border-box;
+  border-right: 1px solid rgba(255,255,255,0.06);
+  font-size: 9px;
+  color: #7fa8cf;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255,255,255,0.02);
+  white-space: nowrap;
+  overflow: hidden;
+  transition: background 0.1s;
+}
+.ts-hour-seg.odd {
+  background: rgba(255,255,255,0.07);
+}
+.ts-hour-seg.day-start {
+  border-left: 2px dashed #7fd4ff; /* distinct from the amber "now scrubbed to" marker */
+}
+.ts-hour-seg:hover {
+  background: rgba(59,143,212,0.4);
+}
+#time-scrubber-marker {
+  position: absolute;
+  top: 24px;
+  bottom: 14px;
+  width: 3px;
+  background: #f2b84b;
+  box-shadow: 0 0 6px rgba(242,184,75,0.8);
+  transform: translateX(-1.5px);
+  pointer-events: none;
+  z-index: 2;
+}
+#time-scrubber-now-tick {
+  position: absolute;
+  top: 24px;
+  bottom: 14px;
+  left: 0;
+  border-left: 1px dashed rgba(255,255,255,0.55);
+  pointer-events: none;
+  z-index: 1;
+}
+#time-scrubber-daylabel {
+  position: absolute;
+  top: 50px;
+  transform: translateX(-50%);
+  font-size: 9px;
+  font-weight: 700;
+  color: #7fd4ff; /* matches the day-start divider color */
+  white-space: nowrap;
+  pointer-events: none;
+  display: none; /* shown only when the 24h window actually crosses midnight */
+}
+#time-scrubber-pill {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  background: #f2b84b;
+  color: #1a2c3d;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 3;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+#time-scrubber-pill::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-top-color: #f2b84b;
+}
+#time-scrubber-track-wrap.focused #time-scrubber-hourbar {
+  box-shadow: 0 0 0 2px rgba(242,184,75,0.65);
+}
+#time-scrubber-track-wrap input#time-scrubber {
+  position: absolute;
+  top: 24px;
+  left: 0;
+  width: 100%;
+  height: 24px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none; /* dragging/clicking is handled on #time-scrubber-hourbar; this stays keyboard-only */
+  outline: none; /* replaced by the .focused ring above — the native rect doesn't track our custom layout */
+}
 </style>
 </head>
 <body>
 
 <div id="map"></div>
+
+<!-- Tide/current station time scrubber -->
+<div id="time-scrubber-bar">
+  <button id="play-btn" class="toolbar-btn" title="Play" style="flex:0 0 auto;width:28px;height:24px;margin-top:24px;padding:0;box-sizing:border-box;background:rgba(11,26,43,0.85);backdrop-filter:blur(6px);box-shadow:0 4px 14px rgba(0,0,0,0.4)">▶</button>
+  <div id="time-scrubber-track-wrap">
+    <div id="time-scrubber-pill">Today · now</div>
+    <div id="time-scrubber-marker"></div>
+    <div id="time-scrubber-now-tick"></div>
+    <div id="time-scrubber-daylabel"></div>
+    <div id="time-scrubber-hourbar"></div>
+    <input id="time-scrubber" type="range" min="0" max="1440" step="15" value="0" />
+  </div>
+</div>
 
 <!-- Loading overlay -->
 <div id="loading-overlay">
@@ -843,6 +985,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
     <input id="waterways-cb" type="checkbox" />
     <span>Show Waterways</span>
+  </label>
+  <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
+    <input id="stations-cb" type="checkbox" />
+    <span>Show tide/current stations</span>
   </label>
 
   <div id="boat-info" class="boat-info" style="display:none">
@@ -1302,10 +1448,15 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   const graphLayer = L.featureGroup().addTo(map);
   const edgesLayer = L.featureGroup().addTo(map);
   const poiLayer = L.featureGroup().addTo(map);
+  const stationsLayer = L.featureGroup().addTo(map);
+  const currentGridLayer = L.featureGroup().addTo(map);
   let waterwaysVisible = false;
   let graphVisible = false;
   let edgesVisible = false;
   let poiVisible = false;
+  let stationsVisible = false;
+  let stationsWindowStart = 0; // ms, start of the fetched 24h current timelines
+  const currentStationMarkers = {}; // station id -> { marker, timeline }
 
   // ---- custom markers layer ----
   const routeLayers = L.featureGroup().addTo(map);
@@ -1320,6 +1471,27 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   function graphEdgesUrl() { return getApiBase() + '/signalk/v1/api/router/graph/edges?bbox=' + getBboxStr() + '&limit=5000'; }
   function poisUrl()        { return getApiBase() + '/signalk/v1/api/router/pois?bbox=' + getBboxStr() + '&limit=4000'; }
   function waterwaysUrl()   { return getApiBase() + '/signalk/v1/api/router/waterways?bbox=' + getBboxStr(); }
+
+  // Tide/current stations come straight from their own plugins on this same
+  // Signal K server (signalk-tides, signalk-tidal-currents) — not proxied
+  // through the autoroute backend.
+  function tideStationsUrl(lat, lon) {
+    return '/signalk/v2/api/tides/stations?latitude=' + lat.toFixed(4) + '&longitude=' + lon.toFixed(4);
+  }
+  // bbox (not a nearest-N point) so every station in the current viewport is
+  // returned, not just the closest handful to the map center.
+  function currentStationsUrl() {
+    return '/signalk/v2/api/currents/stations?bbox=' + getBboxStr() + '&limit=500';
+  }
+  function currentTimelineUrl(id, startMs, endMs) {
+    return '/signalk/v2/api/currents/stations/' + encodeURIComponent(id) + '/timeline' +
+      '?start=' + new Date(startMs).toISOString() + '&end=' + new Date(endMs).toISOString() + '&step=15';
+  }
+  // Gridded GRIB current field over the viewport — fills in coverage away
+  // from harmonic station locations, where the plugin has GRIB data loaded.
+  function currentGridUrl(timeMs) {
+    return '/signalk/v2/api/currents/grid?bbox=' + getBboxStr() + '&time=' + new Date(timeMs).toISOString() + '&maxPoints=300';
+  }
 
   function fetchGraphNodes() {
     if (!graphVisible) return;
@@ -1492,6 +1664,381 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       .catch(() => {});
   }
 
+  function tideStationIcon() {
+    return L.divIcon({
+      className: '',
+      html: '<div style="font-size:12px;line-height:18px;text-align:center;background:#3b8fd4;color:#fff;width:18px;height:18px;border-radius:9px;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.3)">〜</div>',
+      iconSize: [18, 18],
+      iconAnchor: [9, 9],
+    });
+  }
+
+  // direction: degrees true (0 = north), speedKn: signed (+ = flood, − = ebb)
+  // for station samples, an unsigned magnitude for GRIB grid samples (no
+  // flood/ebb axis in gridded data — pass variant 'grid' for a neutral
+  // color instead of the flood/ebb green/orange). The arrow rotates with
+  // the flow direction; the speed label below it does not rotate. A white
+  // outline keeps it readable on blue water.
+  function currentArrowIcon(direction, speedKn, variant) {
+    const len = Math.max(16, Math.min(36, 12 + Math.abs(speedKn) * 9));
+    const color = variant === 'grid'
+      ? '#2563eb'
+      : speedKn >= 0.05 ? '#16a34a' : speedKn <= -0.05 ? '#d97706' : '#64748b';
+    return L.divIcon({
+      className: '',
+      html: '<div style="position:relative;width:' + len + 'px;height:' + len + 'px">' +
+        '<div style="width:100%;height:100%;transform:rotate(' + direction + 'deg)">' +
+        '<svg width="100%" height="100%" viewBox="0 0 24 24">' +
+        '<line x1="12" y1="22" x2="12" y2="6" stroke="#fff" stroke-width="5.5" stroke-linecap="round"/>' +
+        '<polygon points="12,1 5.2,11.5 18.8,11.5" fill="#fff"/>' +
+        '<line x1="12" y1="21" x2="12" y2="6" stroke="' + color + '" stroke-width="3" stroke-linecap="round"/>' +
+        '<polygon points="12,2 6,11 18,11" fill="' + color + '"/>' +
+        '</svg></div>' +
+        '<div style="position:absolute;top:100%;left:50%;transform:translateX(-50%);font-size:10px;font-weight:600;color:' + color + ';text-shadow:0 1px 2px #fff,0 -1px 2px #fff,1px 0 2px #fff,-1px 0 2px #fff;white-space:nowrap">' +
+        Math.abs(speedKn).toFixed(1) + ' kn</div>' +
+        '</div>',
+      iconSize: [len, len],
+      iconAnchor: [len / 2, len / 2],
+    });
+  }
+
+  const p2 = (n) => String(n).padStart(2, '0');
+
+  function clockStr(ms) {
+    const d = new Date(ms);
+    return p2(d.getHours()) + ':' + p2(d.getMinutes());
+  }
+
+  // '+2h15' / 'now' relative to the window start (the moment the 24h
+  // timeline was fetched, i.e. when "Show tide/current stations" was
+  // last (re-)enabled).
+  function scrubOffsetStr(ms) {
+    const deltaMin = Math.round((ms - stationsWindowStart) / 60000);
+    return deltaMin === 0 ? 'now' : '+' + Math.floor(deltaMin / 60) + 'h' + p2(deltaMin % 60);
+  }
+
+  // The scrubber window is at most 24h, so the scrubbed time is either the
+  // same calendar day as "now" or the next one — never further out.
+  function scrubDayLabel(ms) {
+    const d = new Date(ms);
+    const start = new Date(stationsWindowStart);
+    const sameDay = d.getFullYear() === start.getFullYear() && d.getMonth() === start.getMonth() && d.getDate() === start.getDate();
+    return sameDay ? 'Today' : 'Tomorrow';
+  }
+
+  function fmtScrubTime(ms) {
+    return clockStr(ms) + ' (' + scrubOffsetStr(ms) + ')';
+  }
+
+  // Builds the 24h ruler: one segment per real clock hour (the edge
+  // segments are partial when stationsWindowStart isn't itself on the
+  // hour), alternating shading for readability, every hour labeled (a
+  // partial edge segment too narrow to hold text is skipped), a
+  // highlighted divider where the window crosses midnight into the next
+  // calendar day, and — right below that divider — a small date caption
+  // (e.g. "Fri 4") so the day change is legible on the ruler itself, not
+  // just in the pill.
+  function buildHourTrack() {
+    const track = document.getElementById('time-scrubber-hourbar');
+    track.innerHTML = '';
+    const totalMs = 24 * 3600_000;
+    const start = stationsWindowStart;
+    const end = start + totalMs;
+
+    const boundaries = [start];
+    let t = new Date(start);
+    t.setMinutes(0, 0, 0);
+    t = t.getTime() + 3600_000;
+    while (t < end) {
+      boundaries.push(t);
+      t += 3600_000;
+    }
+    boundaries.push(end);
+
+    const dayLabelEl = document.getElementById('time-scrubber-daylabel');
+    dayLabelEl.style.display = 'none';
+
+    for (let i = 0; i < boundaries.length - 1; i++) {
+      const segStart = boundaries[i];
+      const segEnd = boundaries[i + 1];
+      const widthPct = ((segEnd - segStart) / totalMs) * 100;
+      const hour = new Date(segStart).getHours();
+      const isDayStart = i > 0 && hour === 0;
+      const seg = document.createElement('div');
+      // day-start gets a highlighted left edge (the one midnight crossing
+      // possible in a 24h window) — the caption below spells out which day.
+      seg.className = 'ts-hour-seg' + (hour % 2 === 1 ? ' odd' : '') + (isDayStart ? ' day-start' : '');
+      seg.style.width = widthPct + '%';
+      if (widthPct > 2) {
+        seg.textContent = p2(hour);
+      }
+      track.appendChild(seg);
+
+      if (isDayStart) {
+        dayLabelEl.style.display = '';
+        dayLabelEl.style.left = ((segStart - start) / totalMs) * 100 + '%';
+        dayLabelEl.textContent = new Date(segStart).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' });
+      }
+    }
+  }
+
+  // Position the marker (thin line, free to touch the edges) and the pill
+  // (wider — clamped in pixels so it can't spill past the ruler's own
+  // bounds and overlap the play button when scrubbed all the way to "now").
+  // Pill and marker both track the exact scrub position (center of the pill
+  // = the marker's line, always — no edge-clamping). Clamping the pill to
+  // stay fully inside the ruler made it "stick" with its edge pinned to the
+  // start for the whole first stretch of the range instead of moving with
+  // the drag. Overlapping the play button isn't a risk here: the button
+  // sits in the ruler's own vertical band (margin-top:24px), while the pill
+  // lives above it (top:0) — different rows, so the pill spilling slightly
+  // past track-wrap's horizontal edge at the extremes doesn't reach it.
+  function updateScrubberPosition(minutes) {
+    const pct = (minutes / 1440) * 100;
+    document.getElementById('time-scrubber-marker').style.left = pct + '%';
+    document.getElementById('time-scrubber-pill').style.left = pct + '%';
+  }
+
+  // Hover card for tide-height stations: the next high/low waters.
+  function tideTooltipHtml(name, extremes) {
+    let html = '<div style="font-weight:600;margin-bottom:2px">' + name + '</div>';
+    if (!extremes) return html + '<span style="color:#5f7a9a">Loading tide times…</span>';
+    const now = Date.now();
+    const next = extremes.filter((e) => new Date(e.time).getTime() > now).slice(0, 4);
+    if (next.length === 0) return html + '<span style="color:#5f7a9a">No tide data</span>';
+    html += '<table style="border-collapse:collapse;font-size:11px">';
+    for (const e of next) {
+      const d = new Date(e.time);
+      const relMin = Math.round((d.getTime() - now) / 60000);
+      const sym = e.high ? '▲' : '▼';
+      const col = e.high ? '#3b8fd4' : '#d97706';
+      html += '<tr>' +
+        '<td style="color:' + col + ';font-weight:700;padding:0 4px 0 0">' + sym + '</td>' +
+        '<td style="padding:0 8px 0 0">' + (e.high ? 'High' : 'Low') + '</td>' +
+        '<td style="padding:0 8px 0 0">' + p2(d.getHours()) + ':' + p2(d.getMinutes()) + '</td>' +
+        '<td style="padding:0 8px 0 0;text-align:right">' + e.level.toFixed(2) + ' m</td>' +
+        '<td style="color:#5f7a9a">in ' + Math.floor(relMin / 60) + 'h' + p2(relMin % 60) + '</td>' +
+        '</tr>';
+    }
+    html += '</table>';
+    return html;
+  }
+
+  function updateStationMarkers(minutes) {
+    const t = stationsWindowStart + minutes * 60_000;
+    document.getElementById('time-scrubber-pill').textContent = scrubDayLabel(t) + ' · ' + clockStr(t);
+    updateScrubberPosition(minutes);
+    const idx = Math.round(minutes / 15);
+    for (const id in currentStationMarkers) {
+      const entry = currentStationMarkers[id];
+      const sample = entry.timeline[Math.max(0, Math.min(entry.timeline.length - 1, idx))];
+      if (!sample || sample.direction === null) continue;
+      entry.marker.setIcon(currentArrowIcon(sample.direction, sample.speedKn));
+      entry.marker.setTooltipContent(entry.name + '<br/>' + sample.speedKn.toFixed(1) + ' kn @ ' + fmtScrubTime(new Date(sample.time).getTime()));
+    }
+  }
+
+  function fetchStations() {
+    if (!stationsVisible) return;
+    stationsLayer.clearLayers();
+    for (const id in currentStationMarkers) delete currentStationMarkers[id];
+    const center = map.getCenter();
+    stationsWindowStart = Date.now();
+    const windowEnd = stationsWindowStart + 24 * 3600_000;
+    buildHourTrack();
+    updateScrubberPosition(Number(document.getElementById('time-scrubber').value));
+
+    fetch(tideStationsUrl(center.lat, center.lng))
+      .then((r) => (r.ok ? r.json() : []))
+      .then((stations) => {
+        for (const s of stations || []) {
+          if (typeof s.latitude !== 'number' || typeof s.longitude !== 'number') continue;
+          const name = s.name || 'Tide station';
+          const m = L.marker([s.latitude, s.longitude], { icon: tideStationIcon() })
+            .bindTooltip(tideTooltipHtml(name, null), { direction: 'top', offset: [0, -10] })
+            .addTo(stationsLayer);
+          let extremesRequested = false;
+          m.on('mouseover', function () {
+            if (extremesRequested) return;
+            extremesRequested = true;
+            // Note: signalk-tides ids contain a literal '/' (e.g. "ticon/…")
+            // and its route only matches the raw, unencoded form.
+            fetch('/signalk/v2/api/tides/stations/' + s.id + '/extremes')
+              .then((r) => (r.ok ? r.json() : null))
+              .then((d) => {
+                if (d && d.extremes) m.setTooltipContent(tideTooltipHtml(name, d.extremes));
+                else extremesRequested = false;
+              })
+              .catch(() => { extremesRequested = false; });
+          });
+        }
+      })
+      .catch(() => {});
+
+    fetch(currentStationsUrl())
+      .then((r) => (r.ok ? r.json() : []))
+      .then((stations) => {
+        const vectorCapable = (stations || []).filter((s) => s.vectorCapable);
+        vectorCapable.forEach((s) => {
+          const marker = L.marker([s.latitude, s.longitude], { icon: currentArrowIcon(0, 0) })
+            .bindTooltip(s.name, { direction: 'top', offset: [0, -10] })
+            .addTo(stationsLayer);
+          currentStationMarkers[s.id] = { marker, name: s.name, timeline: [] };
+          fetch(currentTimelineUrl(s.id, stationsWindowStart, windowEnd))
+            .then((r) => (r.ok ? r.json() : null))
+            .then((data) => {
+              const entry = currentStationMarkers[s.id];
+              if (!entry || !data || !data.timeline) return; // marker replaced by a newer fetch
+              entry.timeline = data.timeline;
+              updateStationMarkers(Number(document.getElementById('time-scrubber').value));
+            })
+            .catch(() => {});
+        });
+      })
+      .catch(() => {});
+
+    fetchCurrentGrid();
+  }
+
+  // GRIB gridded current field (if the plugin has one configured) sampled
+  // over the viewport at the currently-scrubbed time. Unlike station
+  // markers this has no per-point timeline to interpolate locally — it's
+  // refetched on viewport change, on scrubber release, and on every tick
+  // while playing. gridFetchToken guards against an in-flight request
+  // resolving out of order (e.g. during playback) and drawing stale points
+  // over a newer frame.
+  let gridFetchToken = 0;
+  function fetchCurrentGrid() {
+    currentGridLayer.clearLayers();
+    if (!stationsVisible) return;
+    const minutes = Number(document.getElementById('time-scrubber').value);
+    const t = (stationsWindowStart || Date.now()) + minutes * 60_000;
+    const token = ++gridFetchToken;
+    fetch(currentGridUrl(t))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (token !== gridFetchToken) return; // superseded by a newer request
+        if (!data || !data.points) return; // no GRIB source configured, or 503/404
+        for (const p of data.points) {
+          L.marker([p.latitude, p.longitude], { icon: currentArrowIcon(p.direction, p.speedKn, 'grid') })
+            .bindTooltip('GRIB current<br/>' + p.speedKn.toFixed(1) + ' kn', { direction: 'top', offset: [0, -10] })
+            .addTo(currentGridLayer);
+        }
+      })
+      .catch(() => {});
+  }
+
+  // Play/pause: steps the scrubber forward on a timer so set/drift can be
+  // watched evolve over the 24h window instead of dragging by hand.
+  const PLAY_STEP_MS = 600;
+  let playTimer = null;
+  function stopPlay() {
+    if (!playTimer) return;
+    clearInterval(playTimer);
+    playTimer = null;
+    const btn = document.getElementById('play-btn');
+    btn.textContent = '▶';
+    btn.title = 'Play';
+  }
+  function togglePlay() {
+    if (playTimer) {
+      stopPlay();
+      return;
+    }
+    const btn = document.getElementById('play-btn');
+    btn.textContent = '⏸';
+    btn.title = 'Pause';
+    const slider = document.getElementById('time-scrubber');
+    playTimer = setInterval(function () {
+      const step = Number(slider.step) || 15;
+      const max = Number(slider.max);
+      let v = Number(slider.value) + step;
+      if (v > max) v = 0;
+      slider.value = v;
+      updateStationMarkers(v);
+      fetchCurrentGrid();
+    }, PLAY_STEP_MS);
+  }
+  document.getElementById('play-btn').addEventListener('click', togglePlay);
+
+  document.getElementById('stations-cb').addEventListener('change', function () {
+    stationsVisible = this.checked;
+    document.getElementById('time-scrubber-bar').style.display = stationsVisible ? 'flex' : 'none';
+    if (stationsVisible) {
+      document.getElementById('time-scrubber').value = 0;
+      fetchStations();
+    } else {
+      stopPlay();
+      stationsLayer.clearLayers();
+      currentGridLayer.clearLayers();
+      for (const id in currentStationMarkers) delete currentStationMarkers[id];
+    }
+  });
+
+  // Keyboard path: the native input stays focusable (Tab + arrow keys)
+  // and dispatches real input/change events when the browser itself
+  // changes its value.
+  document.getElementById('time-scrubber').addEventListener('input', function () {
+    stopPlay();
+    updateStationMarkers(Number(this.value));
+  });
+  document.getElementById('time-scrubber').addEventListener('change', function () {
+    fetchCurrentGrid();
+  });
+
+  // Keyboard-focus ring: the native input is visually hidden (opacity:0)
+  // and its own focus outline doesn't line up with our custom ruler, so
+  // draw a ring around the ruler itself instead when the input has focus.
+  (function () {
+    const input = document.getElementById('time-scrubber');
+    const wrap = document.getElementById('time-scrubber-track-wrap');
+    input.addEventListener('focus', function () { wrap.classList.add('focused'); });
+    input.addEventListener('blur', function () { wrap.classList.remove('focused'); });
+  })();
+
+  // Pointer path: click-or-drag anywhere on the ruler to jump straight to
+  // that time. The native input has pointer-events:none (see CSS) so this
+  // is the only mouse/touch entry point — Pointer Events unify mouse,
+  // touch and pen, and setPointerCapture keeps the drag tracking correctly
+  // even if the pointer leaves the bar while held down.
+  (function () {
+    const hourbar = document.getElementById('time-scrubber-hourbar');
+    const input = document.getElementById('time-scrubber');
+    let dragging = false;
+
+    function minutesFromClientX(clientX) {
+      const rect = hourbar.getBoundingClientRect();
+      const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      const step = Number(input.step) || 15;
+      const max = Number(input.max);
+      return Math.min(max, Math.round((frac * max) / step) * step);
+    }
+
+    function scrubTo(minutes) {
+      input.value = minutes;
+      updateStationMarkers(minutes);
+    }
+
+    hourbar.addEventListener('pointerdown', function (e) {
+      e.preventDefault(); // stop the browser's default drag-to-select-text behavior
+      dragging = true;
+      stopPlay();
+      input.focus();
+      hourbar.setPointerCapture(e.pointerId);
+      scrubTo(minutesFromClientX(e.clientX));
+    });
+    hourbar.addEventListener('pointermove', function (e) {
+      if (!dragging) return;
+      scrubTo(minutesFromClientX(e.clientX));
+    });
+    hourbar.addEventListener('pointerup', function (e) {
+      if (!dragging) return;
+      dragging = false;
+      scrubTo(minutesFromClientX(e.clientX));
+      fetchCurrentGrid(); // commit, same as releasing the native slider
+    });
+  })();
+
   let moveTimer = null;
   map.on('moveend', function () {
     clearTimeout(moveTimer);
@@ -1500,6 +2047,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       if (graphVisible) fetchGraphNodes();
       if (edgesVisible) fetchEdges();
       if (poiVisible) fetchPois();
+      if (stationsVisible) fetchStations();
     }, 400);
   });
 
