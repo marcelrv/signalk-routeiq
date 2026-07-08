@@ -9,6 +9,11 @@ export interface VesselDimensions {
   airDraft?: number;
 }
 
+// How a leg (the segment ARRIVING at a waypoint) is routed:
+// 'auto'   — A* graph search (default)
+// 'manual' — straight rhumb line drawn by the user, bypassing the graph
+export type LegMode = 'auto' | 'manual';
+
 // Routing parameters from user request
 export interface RoutingRequest {
   start: {
@@ -22,7 +27,9 @@ export interface RoutingRequest {
   via?: Array<{
     latitude: number;
     longitude: number;
+    mode?: LegMode; // mode of the leg from the previous point to this one
   }>;
+  endMode?: LegMode; // mode of the final leg (last via, or start) → end
   minCoastDistance?: number; // NM from shore
   draft?: number; // Override vessel draft
   beam?: number; // Override vessel beam
@@ -93,7 +100,7 @@ export interface ItineraryPoint {
 
 // Route result
 export interface RouteWarning {
-  type: 'start_unreachable' | 'end_unreachable' | 'both_unreachable' | 'via_constrained' | 'via_skipped' | 'bbox_expanded' | 'start_connecting' | 'end_connecting';
+  type: 'start_unreachable' | 'end_unreachable' | 'both_unreachable' | 'via_constrained' | 'via_skipped' | 'bbox_expanded' | 'start_connecting' | 'end_connecting' | 'manual_segment';
   message: string;
   from?: { latitude: number; longitude: number };
   to?: { latitude: number; longitude: number };
@@ -133,6 +140,7 @@ export interface RouteResult {
       costFactor?: number;
       trafficMode?: number;
       edgeTypeId?: number;
+      mode?: 'manual'; // present on user-drawn straight-line segments
       segments?: Array<{
         from: number; // node id
         to: number; // node id
@@ -143,6 +151,7 @@ export interface RouteResult {
         costFactor: number;
         trafficMode: number;
         edgeTypeId?: number;
+        mode?: 'manual';    // user-drawn straight-line segment (bypasses the graph)
         seconds?: number;   // traversal time, tide-corrected when tides active
         currentKn?: number; // estimated along-track current, + = fair (with tide)
         sogKn?: number;     // speed over ground used for this segment

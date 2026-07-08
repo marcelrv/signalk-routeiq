@@ -902,6 +902,313 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   pointer-events: none; /* dragging/clicking is handled on #time-scrubber-hourbar; this stays keyboard-only */
   outline: none; /* replaced by the .focused ring above — the native rect doesn't track our custom layout */
 }
+
+/* ================= UI overhaul additions ================= */
+:root {
+  --bg-panel: rgba(11, 26, 43, 0.9);
+  --border-soft: rgba(79, 148, 212, 0.35);
+  --accent: #3b8fd4;
+  --accent-bright: #5eb2f5;
+  --good: #22c55e;
+  --warn: #f59e0b;
+  --bad: #ef4444;
+  --manual: #f97316; /* manual (hand-drawn) route segments */
+  --text: #e0edf5;
+  --text-dim: #9bb8da;
+  --text-faint: #6d96c0;
+  --tap-target: 34px;
+}
+
+/* ---------- switch toggles (replace bare checkboxes) ---------- */
+/* label.switch-row outranks the generic `.panel label { display:block }` */
+label.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: var(--tap-target);
+  cursor: pointer;
+  padding: 2px 0;
+  margin-bottom: 0;
+  user-select: none;
+}
+.switch-row span.switch-label { color: var(--text-dim); font-size: 13px; flex: 1; }
+.switch-row input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 40px;
+  height: 22px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.12);
+  border: 1px solid var(--border-soft);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.18s, border-color 0.18s;
+  flex-shrink: 0;
+  margin: 0;
+}
+.switch-row input[type="checkbox"]::after {
+  content: '';
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: #8fa9c4;
+  transition: transform 0.18s ease, background 0.18s;
+}
+.switch-row input[type="checkbox"]:checked {
+  background: rgba(59, 143, 212, 0.55);
+  border-color: var(--accent);
+}
+.switch-row input[type="checkbox"]:checked::after {
+  transform: translateX(18px);
+  background: #fff;
+}
+.switch-row input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 2px;
+}
+
+/* ---------- settings panel tabs ---------- */
+.panel-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 8px;
+  padding: 3px;
+}
+.panel-tab {
+  flex: 1;
+  min-height: var(--tap-target);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-faint);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.panel-tab:hover { color: var(--text-dim); }
+.panel-tab.active {
+  background: rgba(59, 143, 212, 0.3);
+  color: var(--text);
+}
+
+/* ---------- map context menu ---------- */
+#map-context-menu {
+  position: fixed;
+  z-index: 5000;
+  display: none;
+  min-width: 200px;
+  background: var(--bg-panel);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  box-shadow: 0 10px 36px rgba(0,0,0,0.55);
+  padding: 5px;
+  font-size: 13px;
+}
+#map-context-menu.visible { display: block; }
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  min-height: var(--tap-target);
+  border-radius: 7px;
+  color: #c8dcee;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+.ctx-item:hover { background: rgba(59, 143, 212, 0.18); }
+.ctx-item .ctx-icon {
+  width: 20px;
+  display: inline-flex;
+  justify-content: center;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.ctx-item.ctx-danger { color: #f0a0a0; }
+.ctx-item.ctx-danger:hover { background: rgba(239, 68, 68, 0.15); }
+.ctx-sep { height: 1px; background: rgba(79,148,212,0.2); margin: 4px 8px; }
+.ctx-coords {
+  padding: 4px 12px 6px;
+  font-size: 10px;
+  color: var(--text-faint);
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+}
+
+/* ---------- confirm dialog ---------- */
+#confirm-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+}
+#confirm-modal.visible { display: block; }
+#confirm-modal .confirm-backdrop {
+  position: absolute; inset: 0;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(3px);
+}
+#confirm-modal .confirm-box {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 320px;
+  max-width: calc(100vw - 40px);
+  background: #0f1f30;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.6);
+  padding: 18px;
+}
+#confirm-modal .confirm-title { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+#confirm-modal .confirm-msg { font-size: 13px; color: var(--text-dim); margin-bottom: 16px; line-height: 1.5; }
+#confirm-modal .confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+#confirm-modal .confirm-actions button {
+  min-height: 40px;
+  padding: 0 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--text-dim);
+}
+#confirm-modal .confirm-actions button:hover { background: rgba(79,148,212,0.12); }
+#confirm-modal .confirm-actions button.confirm-yes {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: #fff;
+}
+#confirm-modal .confirm-actions button.confirm-yes:hover { background: #dc2626; }
+
+/* ---------- route toolbar: manual mode + undo/redo ---------- */
+.toolbar-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.toolbar-btn:disabled:hover { background: transparent; border-color: rgba(79,148,212,0.3); }
+.toolbar-btn.manual-btn.active {
+  background: rgba(249, 115, 22, 0.22);
+  border-color: var(--manual);
+  color: #fdba74;
+  box-shadow: 0 0 0 1px rgba(249,115,22,0.35);
+}
+#manual-banner {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 2px;
+  padding: 6px 10px;
+  background: rgba(249, 115, 22, 0.13);
+  border: 1px dashed rgba(249, 115, 22, 0.55);
+  border-radius: 7px;
+  font-size: 11px;
+  color: #fdba74;
+}
+#manual-banner.visible { display: flex; }
+
+/* ---------- responsive: small chartplotters / tablets / phones ---------- */
+.toolbar-btn { min-height: var(--tap-target); min-width: var(--tap-target); }
+
+@media (max-width: 700px), (max-height: 500px) {
+  :root { --tap-target: 44px; }
+
+  /* Route pane becomes a bottom sheet (collapses via max-height, not width) */
+  #route-pane {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    max-height: 46vh;
+    border-radius: 14px 14px 0 0;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+    padding: 8px 14px 12px;
+    transition: max-height 0.25s ease, padding 0.25s ease;
+  }
+  #route-pane.collapsed {
+    width: 100%;
+    min-width: 0;
+    max-height: 0;
+  }
+  #route-pane-tab {
+    left: 12px;
+    top: auto;
+    bottom: 12px;
+    transform: none;
+    width: 52px;
+    height: 44px;
+    border-radius: 10px;
+    border: 1px solid var(--border-soft);
+    font-size: 16px;
+    z-index: 1004; /* stays tappable above the open bottom sheet */
+  }
+
+  /* Settings panel becomes a full-height slide-over (above the search bar) */
+  #settings-panel {
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(340px, 88vw);
+    max-height: 100vh;
+    overflow-y: auto;
+    border-radius: 12px 0 0 12px;
+    border-top: none;
+    border-right: none;
+    border-bottom: none;
+    z-index: 1003;
+  }
+  #settings-pane-tab {
+    right: 12px;
+    top: auto;
+    bottom: 12px;
+    transform: none;
+    width: 52px;
+    height: 44px;
+    border-radius: 10px;
+    border: 1px solid var(--border-soft);
+    font-size: 16px;
+    z-index: 1004; /* stays tappable above the open slide-over */
+  }
+
+  #search-panel { width: calc(100vw - 120px); max-width: 340px; top: 12px; }
+  #search-input { min-height: 44px; }
+  .search-result-item { min-height: 44px; }
+
+  #time-scrubber-bar { width: calc(100vw - 24px); bottom: 64px; }
+
+  .panel input[type="number"], .panel input[type="url"], .panel input[type="text"] {
+    min-height: 42px;
+    font-size: 14px;
+  }
+  #conn-btn { min-height: 42px; }
+  .route-node { padding: 6px 0 6px 10px; }
+
+  /* keep the leaflet zoom control clear of the bottom controls */
+  .leaflet-top.leaflet-left { top: 60px; }
+}
+
+@media (pointer: coarse) {
+  :root { --tap-target: 44px; }
+  .switch-row input[type="checkbox"] { width: 48px; height: 26px; }
+  .switch-row input[type="checkbox"]::after { width: 20px; height: 20px; }
+  .switch-row input[type="checkbox"]:checked::after { transform: translateX(22px); }
+  ::-webkit-scrollbar { width: 3px; }
+}
 </style>
 </head>
 <body>
@@ -948,57 +1255,47 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 <!-- Settings -->
 <div id="settings-panel" class="panel collapsed">
   <div id="settings-pane-inner">
-    <div class="panel-title">Settings</div>
-  <label for="api-url">Backend URL</label>
-  <div id="url-row">
-    <span id="conn-dot" class="conn-dot conn-offline"></span>
-     <input id="api-url" type="url" placeholder="http://localhost:3000" autocomplete="off" />
-    <button id="conn-btn">Connect</button>
-  </div>
-  <div id="url-history-list"></div>
-  <label for="min-coast" style="margin-top:10px">Min Coastline Distance (m)</label>
-  <input id="min-coast" type="number" value="50" min="0" step="50" />
-  <label for="avg-speed" style="margin-top:10px">Average Speed (kn)</label>
-  <input id="avg-speed" type="number" value="6" min="0.5" max="60" step="0.5" />
-  <div id="tt-legend" style="font-size:10px;color:#5f7a9a;margin-top:2px">Used to estimate travel time</div>
+    <div class="panel-tabs" role="tablist">
+      <button class="panel-tab active" data-tab="routing" role="tab" aria-selected="true">&#9881; Routing</button>
+      <button class="panel-tab" data-tab="view" role="tab" aria-selected="false">&#128065; View</button>
+    </div>
 
-  <label class="debug-toggle" style="margin-top:10px;display:flex;align-items:center;gap:8px;cursor:pointer">
-    <input id="debug-cb" type="checkbox" />
-    <span>Debug logging</span>
-  </label>
-  <label class="debug-toggle" style="margin-top:6px;display:flex;align-items:center;gap:8px;cursor:pointer">
-    <input id="graph-cb" type="checkbox" />
-    <span>Show graph</span>
-  </label>
-  <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
-    <input id="edges-cb" type="checkbox" />
-    <span>Show edges</span>
-  </label>
-  <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
-    <input id="edit-cb" type="checkbox" />
-    <span>Edit nodes &amp; edges</span>
-  </label>
-  <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
-    <input id="poi-cb" type="checkbox" />
-    <span>Show POIs</span>
-  </label>
-  <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
-    <input id="waterways-cb" type="checkbox" />
-    <span>Show Waterways</span>
-  </label>
-  <label class="debug-toggle" style="margin-top:2px;display:flex;align-items:center;gap:8px;cursor:pointer">
-    <input id="stations-cb" type="checkbox" />
-    <span>Show tide/current stations</span>
-  </label>
+    <!-- Routing Settings: everything that changes the calculated route -->
+    <div id="settings-tab-routing" role="tabpanel">
+      <label for="api-url">Backend URL</label>
+      <div id="url-row">
+        <span id="conn-dot" class="conn-dot conn-offline"></span>
+        <input id="api-url" type="url" placeholder="http://localhost:3000" autocomplete="off" />
+        <button id="conn-btn">Connect</button>
+      </div>
+      <div id="url-history-list"></div>
+      <label for="min-coast" style="margin-top:10px">Min Coastline Distance (m)</label>
+      <input id="min-coast" type="number" value="50" min="0" step="50" />
+      <label for="avg-speed" style="margin-top:10px">Average Speed (kn)</label>
+      <input id="avg-speed" type="number" value="6" min="0.5" max="60" step="0.5" />
+      <div id="tt-legend" style="font-size:10px;color:#5f7a9a;margin-top:2px">Used to estimate travel time</div>
 
-  <div id="boat-info" class="boat-info" style="display:none">
-    <div class="panel-title" style="margin-top:12px">Vessel</div>
-    <div id="boat-pos" class="info-line"><span class="label">POS</span><span class="value">—</span></div>
-    <div id="boat-draft" class="info-line"><span class="label">ROUTING DRAFT</span><span class="value">—</span></div>
-    <div id="boat-beam" class="info-line"><span class="label">ROUTING BEAM</span><span class="value">—</span></div>
-    <div id="boat-airdraft" class="info-line"><span class="label">ROUTING AIR</span><span class="value">—</span></div>
-  </div>
-  <button id="manage-data-btn" style="margin-top:10px;width:100%;background:#1f6391;border:none;border-radius:6px;padding:8px 0;color:#fff;font-weight:600;cursor:pointer;font-size:12px;transition:background 0.15s">Manage Routing Data</button>
+      <div id="boat-info" class="boat-info" style="display:none">
+        <div class="panel-title" style="margin-top:12px">Vessel</div>
+        <div id="boat-pos" class="info-line"><span class="label">POS</span><span class="value">—</span></div>
+        <div id="boat-draft" class="info-line"><span class="label">ROUTING DRAFT</span><span class="value">—</span></div>
+        <div id="boat-beam" class="info-line"><span class="label">ROUTING BEAM</span><span class="value">—</span></div>
+        <div id="boat-airdraft" class="info-line"><span class="label">ROUTING AIR</span><span class="value">—</span></div>
+      </div>
+      <button id="manage-data-btn" style="margin-top:12px;width:100%;min-height:var(--tap-target);background:#1f6391;border:none;border-radius:8px;padding:8px 0;color:#fff;font-weight:600;cursor:pointer;font-size:12px;transition:background 0.15s">Manage Routing Data</button>
+    </div>
+
+    <!-- View Options: map overlays and debugging, never affect routing -->
+    <div id="settings-tab-view" role="tabpanel" style="display:none">
+      <label class="switch-row"><span class="switch-label">Graph nodes</span><input id="graph-cb" type="checkbox" /></label>
+      <label class="switch-row"><span class="switch-label">Graph edges</span><input id="edges-cb" type="checkbox" /></label>
+      <label class="switch-row"><span class="switch-label">POIs (harbours, locks…)</span><input id="poi-cb" type="checkbox" /></label>
+      <label class="switch-row"><span class="switch-label">Waterways</span><input id="waterways-cb" type="checkbox" /></label>
+      <label class="switch-row"><span class="switch-label">Tide / current stations</span><input id="stations-cb" type="checkbox" /></label>
+      <div style="height:1px;background:rgba(79,148,212,0.2);margin:8px 0"></div>
+      <label class="switch-row"><span class="switch-label">Edit nodes &amp; edges</span><input id="edit-cb" type="checkbox" /></label>
+      <label class="switch-row"><span class="switch-label">Debug logging</span><input id="debug-cb" type="checkbox" /></label>
+    </div>
   </div>
 </div>
 
@@ -1009,16 +1306,20 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   <div id="route-pane-inner">
     <div class="panel-title">Route</div>
     <div id="hint-line" class="info-line" style="color:#9bb8da;font-size:11px;padding-bottom:2px;border-bottom:1px solid rgba(79,148,212,0.2);margin-bottom:2px">
-      <span id="hint-action">Click map: 1st=Start, 2nd=Dest, 3rd+=Via</span>
+      <span id="hint-action">Tap map: 1st=Start, 2nd=Dest, 3rd+=Via · right-click for menu</span>
     </div>
     <div id="start-info" class="info-line"><span class="label">START</span><span class="coords">—</span></div>
     <div id="dest-info" class="info-line"><span class="label">DEST</span><span class="coords">—</span></div>
     <div id="via-info" class="info-line vias"><span class="label">VIAS</span><span class="coords">—</span></div>
     <div class="route-toolbar">
+      <button id="undo-btn" class="toolbar-btn" title="Undo (Ctrl+Z)" disabled>&#8630;</button>
+      <button id="redo-btn" class="toolbar-btn" title="Redo (Ctrl+Y)" disabled>&#8631;</button>
+      <button id="manual-btn" class="toolbar-btn manual-btn" title="Manual draw mode — new points connect with straight lines instead of auto-routing" aria-pressed="false">&#9998;</button>
       <button id="clear-btn" class="toolbar-btn clear-btn" title="Clear route">✕</button>
       <button id="gpx-btn" class="toolbar-btn" title="Download GPX">💾</button>
       <button id="push-btn" class="toolbar-btn push-btn" title="Save to Signal K">📤</button>
     </div>
+    <div id="manual-banner"><span>&#9998; Manual mode — new points draw straight lines</span></div>
     <div id="tide-controls" style="display:none;padding:4px 0 2px;border-top:1px solid rgba(79,148,212,0.15);margin-top:2px">
       <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#9bb8da;cursor:pointer">
         <input id="tide-cb" type="checkbox" />
@@ -1125,6 +1426,22 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       <button id="editor-trash-btn" title="Delete (click twice to confirm)">&#x1F5D1;</button>
     </div>
     <div id="editor-props-form"></div>
+  </div>
+</div>
+
+<!-- Map right-click context menu -->
+<div id="map-context-menu"></div>
+
+<!-- Generic confirm dialog (used e.g. before clearing the route) -->
+<div id="confirm-modal">
+  <div class="confirm-backdrop"></div>
+  <div class="confirm-box" role="alertdialog" aria-modal="true">
+    <div class="confirm-title"></div>
+    <div class="confirm-msg"></div>
+    <div class="confirm-actions">
+      <button class="confirm-no" type="button">Cancel</button>
+      <button class="confirm-yes" type="button">Confirm</button>
+    </div>
   </div>
 </div>
 
@@ -1266,7 +1583,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     const payload = {
       start: toPos(state.startLatLng),
       end: toPos(state.destLatLng),
-      via: (state.viaPoints || []).map(toPos),
+      via: (state.viaPoints || []).map((ll, i) => ({
+        latitude: ll.lat, longitude: ll.lng, mode: state.viaModes[i] || 'auto',
+      })),
+      endMode: state.destMode || 'auto',
       minCoastDistance: (parseFloat(document.getElementById('min-coast').value) || 0) / 1852,
       draft: lastBoat ? lastBoat.draft : 0,
       beam: lastBoat ? lastBoat.beam : 4,
@@ -1380,6 +1700,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     routeLayers:  null,
     lastGeoJson:  null,
     viaPoints:    [],
+    viaModes:     [],         // parallel to viaPoints: 'auto' | 'manual' (mode of the leg ARRIVING at the via)
+    destMode:     'auto',     // mode of the final leg into the destination
+    manualMode:   false,      // toolbar toggle: new points connect with straight lines
     routeSegments: [],        // { polyline, startIdx, endIdx, isWarning, originalStyle }
     junctionMarkers: null,    // L.layerGroup for hover junction markers
     startPoiName: '',         // POI name when start was set via search
@@ -1406,42 +1729,301 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
   }).addTo(map);
 
-  // Right-drag panning: left click for node/graph interaction, right drag to pan
-  map.dragging.disable();
-  map.boxZoom.disable();
-  map.getContainer().style.cursor = 'crosshair';
-  map.on('contextmenu', function (e) { L.DomEvent.preventDefault(e.originalEvent); });
-  {
-    let dragging = false, lastPos = null;
-    map.on('mousedown', function (e) {
-      if (e.originalEvent.button === 2) {
-        dragging = true;
-        lastPos = e.containerPoint;
-        map.getContainer().style.cursor = 'grabbing';
-        L.DomEvent.preventDefault(e);
+  // Standard map conventions: left-drag pans (Leaflet default), left-click
+  // places waypoints (Leaflet suppresses 'click' after a drag), right-click
+  // opens the context menu. The menu itself is wired up further below.
+  map.on('contextmenu', function (e) {
+    L.DomEvent.preventDefault(e.originalEvent);
+    openContextMenu(e.latlng, e.originalEvent.clientX, e.originalEvent.clientY);
+  });
+
+  // ==================== undo / redo history ====================
+  // Every user mutation of the planned route (add/move/remove/clear) pushes a
+  // full snapshot, so any accidental change is one Ctrl+Z away.
+  const history = { stack: [], idx: -1, max: 60 };
+
+  function snapshotRoute() {
+    return {
+      start: state.startLatLng ? { lat: state.startLatLng.lat, lng: state.startLatLng.lng } : null,
+      dest: state.destLatLng ? { lat: state.destLatLng.lat, lng: state.destLatLng.lng } : null,
+      vias: state.viaPoints.map(function (ll, i) {
+        return { lat: ll.lat, lng: ll.lng, mode: state.viaModes[i] || 'auto' };
+      }),
+      destMode: state.destMode,
+      startPoiName: state.startPoiName,
+      destPoiName: state.destPoiName,
+      waypointNext: state.waypointNext,
+    };
+  }
+
+  function pushHistory() {
+    history.stack.length = history.idx + 1; // drop any redo tail
+    history.stack.push(snapshotRoute());
+    if (history.stack.length > history.max) history.stack.shift();
+    history.idx = history.stack.length - 1;
+    updateHistoryButtons();
+  }
+
+  function restoreSnapshot(s) {
+    state.startLatLng = s.start ? L.latLng(s.start.lat, s.start.lng) : null;
+    state.destLatLng = s.dest ? L.latLng(s.dest.lat, s.dest.lng) : null;
+    state.viaPoints = s.vias.map(function (v) { return L.latLng(v.lat, v.lng); });
+    state.viaModes = s.vias.map(function (v) { return v.mode; });
+    state.destMode = s.destMode || 'auto';
+    state.startPoiName = s.startPoiName || '';
+    state.destPoiName = s.destPoiName || '';
+    state.waypointNext = s.waypointNext || 'start';
+    applyWaypoints(); // clears the drawn route itself when < 2 points remain
+  }
+
+  function undoRoute() {
+    if (history.idx <= 0) return;
+    history.idx--;
+    restoreSnapshot(history.stack[history.idx]);
+    updateHistoryButtons();
+    showToast('Undone', '');
+  }
+
+  function redoRoute() {
+    if (history.idx >= history.stack.length - 1) return;
+    history.idx++;
+    restoreSnapshot(history.stack[history.idx]);
+    updateHistoryButtons();
+    showToast('Redone', '');
+  }
+
+  function updateHistoryButtons() {
+    document.getElementById('undo-btn').disabled = history.idx <= 0;
+    document.getElementById('redo-btn').disabled = history.idx >= history.stack.length - 1;
+  }
+
+  document.getElementById('undo-btn').addEventListener('click', undoRoute);
+  document.getElementById('redo-btn').addEventListener('click', redoRoute);
+  document.addEventListener('keydown', function (e) {
+    const tag = document.activeElement ? document.activeElement.tagName : '';
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
+      e.preventDefault(); undoRoute();
+    } else if (((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z') ||
+               ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y')) {
+      e.preventDefault(); redoRoute();
+    }
+  });
+
+  // ==================== confirm dialog ====================
+  function confirmDialog(title, msg, yesLabel) {
+    return new Promise(function (resolve) {
+      const modal = document.getElementById('confirm-modal');
+      modal.querySelector('.confirm-title').textContent = title;
+      modal.querySelector('.confirm-msg').textContent = msg;
+      const yesBtn = modal.querySelector('.confirm-yes');
+      const noBtn = modal.querySelector('.confirm-no');
+      yesBtn.textContent = yesLabel || 'Confirm';
+      modal.classList.add('visible');
+      function done(answer) {
+        modal.classList.remove('visible');
+        yesBtn.removeEventListener('click', onYes);
+        noBtn.removeEventListener('click', onNo);
+        modal.querySelector('.confirm-backdrop').removeEventListener('click', onNo);
+        document.removeEventListener('keydown', onKey);
+        resolve(answer);
       }
-    });
-    map.on('mousemove', function (e) {
-      if (dragging && lastPos) {
-        const dx = e.containerPoint.x - lastPos.x;
-        const dy = e.containerPoint.y - lastPos.y;
-        lastPos = e.containerPoint;
-        map.panBy([-dx, -dy], { animate: false });
+      function onYes() { done(true); }
+      function onNo() { done(false); }
+      function onKey(e) {
+        if (e.key === 'Escape') { e.stopPropagation(); done(false); }
+        if (e.key === 'Enter') done(true);
       }
-    });
-    map.on('mouseup', function (e) {
-      if (e.originalEvent.button === 2) {
-        dragging = false;
-        map.getContainer().style.cursor = 'crosshair';
-      }
-    });
-    map.on('mouseleave', function () {
-      if (dragging) {
-        dragging = false;
-        map.getContainer().style.cursor = 'crosshair';
-      }
+      yesBtn.addEventListener('click', onYes);
+      noBtn.addEventListener('click', onNo);
+      modal.querySelector('.confirm-backdrop').addEventListener('click', onNo);
+      document.addEventListener('keydown', onKey);
+      yesBtn.focus();
     });
   }
+
+  // ==================== manual (draw) mode toggle ====================
+  function setManualMode(on) {
+    state.manualMode = !!on;
+    const btn = document.getElementById('manual-btn');
+    btn.classList.toggle('active', state.manualMode);
+    btn.setAttribute('aria-pressed', state.manualMode ? 'true' : 'false');
+    document.getElementById('manual-banner').classList.toggle('visible', state.manualMode);
+    document.getElementById('hint-action').textContent = state.manualMode
+      ? 'Manual mode: taps add straight-line points'
+      : 'Tap map: 1st=Start, 2nd=Dest, 3rd+=Via · right-click for menu';
+  }
+  document.getElementById('manual-btn').addEventListener('click', function () {
+    setManualMode(!state.manualMode);
+  });
+  function currentLegMode() { return state.manualMode ? 'manual' : 'auto'; }
+
+  // ==================== map context menu ====================
+  const ctxMenuEl = document.getElementById('map-context-menu');
+
+  function closeContextMenu() { ctxMenuEl.classList.remove('visible'); }
+
+  function ctxItem(icon, label, danger, onClick) {
+    const div = document.createElement('div');
+    div.className = 'ctx-item' + (danger ? ' ctx-danger' : '');
+    div.innerHTML = '<span class="ctx-icon">' + icon + '</span><span>' + label + '</span>';
+    div.addEventListener('click', function (e) {
+      e.stopPropagation();
+      closeContextMenu();
+      onClick();
+    });
+    return div;
+  }
+
+  // opts.removeTarget: {kind:'start'|'dest'|'via', viaIdx?} — set when the
+  // menu was opened on a waypoint marker instead of empty map.
+  function openContextMenu(latlng, clientX, clientY, opts) {
+    opts = opts || {};
+    ctxMenuEl.innerHTML = '';
+
+    if (opts.removeTarget) {
+      const t = opts.removeTarget;
+      const label = t.kind === 'start' ? 'Remove start' : t.kind === 'dest' ? 'Remove destination' : 'Remove via point';
+      ctxMenuEl.appendChild(ctxItem('🗑', label, true, function () {
+        if (t.kind === 'start') { state.startLatLng = null; state.startPoiName = ''; }
+        else if (t.kind === 'dest') { state.destLatLng = null; state.destPoiName = ''; state.destMode = 'auto'; }
+        else if (t.viaIdx != null && t.viaIdx >= 0) {
+          state.viaPoints.splice(t.viaIdx, 1);
+          state.viaModes.splice(t.viaIdx, 1);
+        }
+        pushHistory();
+        applyWaypoints();
+      }));
+      if (t.kind === 'via') {
+        const isManual = state.viaModes[t.viaIdx] === 'manual';
+        ctxMenuEl.appendChild(ctxItem(isManual ? '🧭' : '✏',
+          isManual ? 'Make leg auto-routed' : 'Make leg manual (straight)', false, function () {
+          state.viaModes[t.viaIdx] = isManual ? 'auto' : 'manual';
+          pushHistory();
+          applyWaypoints();
+        }));
+      }
+      ctxMenuEl.appendChild(document.createElement('div')).className = 'ctx-sep';
+    }
+
+    ctxMenuEl.appendChild(ctxItem('🟢', 'Set start here', false, function () {
+      state.startLatLng = latlng;
+      state.startPoiName = '';
+      state.waypointNext = 'dest';
+      lookupNearestPoi(latlng.lat, latlng.lng, 'start');
+      pushHistory();
+      applyWaypoints();
+    }));
+    ctxMenuEl.appendChild(ctxItem('🔴', 'Set destination here', false, function () {
+      state.destLatLng = latlng;
+      state.destPoiName = '';
+      state.destMode = currentLegMode();
+      state.waypointNext = 'start';
+      lookupNearestPoi(latlng.lat, latlng.lng, 'dest');
+      pushHistory();
+      applyWaypoints();
+    }));
+    if (state.startLatLng && state.destLatLng) {
+      ctxMenuEl.appendChild(ctxItem('🟣', 'Add via point', false, function () {
+        addViaPoint(latlng, 'auto');
+      }));
+      ctxMenuEl.appendChild(ctxItem('✏', 'Add manual point (straight leg)', false, function () {
+        addViaPoint(latlng, 'manual');
+      }));
+    }
+
+    const hasRoute = state.startLatLng || state.destLatLng || state.viaPoints.length > 0;
+    if (hasRoute) {
+      ctxMenuEl.appendChild(document.createElement('div')).className = 'ctx-sep';
+      if (history.idx > 0) {
+        ctxMenuEl.appendChild(ctxItem('↶', 'Undo', false, undoRoute));
+      }
+      ctxMenuEl.appendChild(ctxItem('✕', 'Clear route…', true, requestClearRoute));
+    }
+
+    const coordsDiv = document.createElement('div');
+    coordsDiv.className = 'ctx-coords';
+    coordsDiv.textContent = fmtCoord(latlng.lat, latlng.lng);
+    ctxMenuEl.appendChild(coordsDiv);
+
+    // Position, clamped to the viewport
+    ctxMenuEl.classList.add('visible');
+    const rect = ctxMenuEl.getBoundingClientRect();
+    const x = Math.min(clientX, window.innerWidth - rect.width - 8);
+    const y = Math.min(clientY, window.innerHeight - rect.height - 8);
+    ctxMenuEl.style.left = Math.max(8, x) + 'px';
+    ctxMenuEl.style.top = Math.max(8, y) + 'px';
+  }
+
+  document.addEventListener('click', function () { closeContextMenu(); });
+  map.on('movestart zoomstart', closeContextMenu);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeContextMenu();
+  });
+
+  function addViaPoint(latlng, mode) {
+    state.viaPoints.push(latlng);
+    state.viaModes.push(mode || 'auto');
+    sortViasWithModes();
+    pushHistory();
+    applyWaypoints();
+  }
+
+  // Keep via modes attached to their points when sorting along the route
+  function sortViasWithModes() {
+    if (state.viaPoints.length < 2) return;
+    const coords = getRouteCoords(state.lastGeoJson);
+    if (!coords || coords.length < 2) return;
+    const paired = state.viaPoints.map(function (vp, i) {
+      return { vp: vp, mode: state.viaModes[i] || 'auto', idx: closestCoordIndex(coords, vp.lat, vp.lng) };
+    });
+    paired.sort(function (a, b) { return a.idx - b.idx; });
+    state.viaPoints = paired.map(function (p) { return p.vp; });
+    state.viaModes = paired.map(function (p) { return p.mode; });
+  }
+
+  // ==================== clear route (with confirmation) ====================
+  function doClearRoute() {
+    state.startLatLng = null;
+    state.destLatLng  = null;
+    state.startPoiName = '';
+    state.destPoiName = '';
+    state.routeName = '';
+    state.viaPoints = [];
+    state.viaModes = [];
+    state.destMode = 'auto';
+    state.waypointNext = 'start';
+    if (state.startMarker) { map.removeLayer(state.startMarker); state.startMarker = null; }
+    if (state.destMarker) { map.removeLayer(state.destMarker); state.destMarker = null; }
+    for (const m of state.viaMarkers) map.removeLayer(m);
+    state.viaMarkers = [];
+    state.routeLayers.clearLayers();
+    state.lastGeoJson = null;
+    routingControl.setWaypoints([]);
+    updateInfo();
+    clearRoutePane();
+    pushHistory();
+  }
+
+  function requestClearRoute() {
+    const hasAnything = state.startLatLng || state.destLatLng || state.viaPoints.length > 0;
+    if (!hasAnything) return;
+    confirmDialog('Clear route?', 'This removes the start, destination and all via points. You can undo afterwards.', 'Clear route')
+      .then(function (yes) { if (yes) doClearRoute(); });
+  }
+
+  // ==================== settings panel tabs ====================
+  document.querySelectorAll('#settings-panel .panel-tab').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#settings-panel .panel-tab').forEach(function (b) {
+        b.classList.toggle('active', b === btn);
+        b.setAttribute('aria-selected', b === btn ? 'true' : 'false');
+      });
+      const tab = btn.dataset.tab;
+      document.getElementById('settings-tab-routing').style.display = tab === 'routing' ? '' : 'none';
+      document.getElementById('settings-tab-view').style.display = tab === 'view' ? '' : 'none';
+    });
+  });
 
   // ---- overlay layers for debug / visualization ----
   const waterwaysLayer = L.featureGroup().addTo(map);
@@ -1638,8 +2220,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
               } else {
                 state.destLatLng = ll;
                 state.destPoiName = name;
+                state.destMode = currentLegMode();
                 state.waypointNext = 'start';
               }
+              pushHistory();
               applyWaypoints();
               map.closePopup();
             });
@@ -2502,12 +3086,15 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       } else if (!state.destLatLng) {
         state.destLatLng = ll;
         state.destPoiName = '';
+        state.destMode = currentLegMode();
         state.waypointNext = 'start';
         lookupNearestPoi(ll.lat, ll.lng, 'dest');
       } else {
         state.viaPoints.push(ll);
-        state.viaPoints = sortViasByRoutePosition(state.viaPoints);
+        state.viaModes.push(currentLegMode());
+        sortViasWithModes();
       }
+      pushHistory();
       applyWaypoints();
     }
   });
@@ -2568,12 +3155,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     }
   });
 
+  // Click on the drawn route inserts a via point at that spot (it sorts into
+  // its position along the route, so dragging isn't needed to refine a leg).
   routeLayers.on('click', function (e) {
     L.DomEvent.stopPropagation(e);
     if (state.startLatLng && state.destLatLng) {
-      state.viaPoints.push(e.latlng);
-      state.viaPoints = sortViasByRoutePosition(state.viaPoints);
-      applyWaypoints();
+      addViaPoint(e.latlng, currentLegMode());
     }
   });
 
@@ -2589,7 +3176,18 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     iconSize: [32, 32],
     iconAnchor: [16, 16],
   });
-  function makeViaIcon(n) {
+  // Via markers: purple circle for auto-routed legs, orange diamond for
+  // manual (hand-drawn straight) legs so the two are distinguishable at a glance.
+  function makeViaIcon(n, isManual) {
+    if (isManual) {
+      return L.divIcon({
+        className: '',
+        html: '<div style="width:26px;height:26px;background:#f97316;border:3px solid #fff;transform:rotate(45deg);border-radius:6px;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,.4)">' +
+              '<span style="transform:rotate(-45deg);font-weight:700;font-size:12px;color:#fff">' + n + '</span></div>',
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+      });
+    }
     return L.divIcon({
       className: '',
       html: '<div style="width:28px;height:28px;background:#8b5cf6;border:3px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;color:#fff;box-shadow:0 2px 6px rgba(0,0,0,.4)">' + n + '</div>',
@@ -2717,6 +3315,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       state.waypointNext = 'dest';
       map.setView([lat, lng], map.getZoom());
       lookupNearestPoi(lat, lng, 'start');
+      pushHistory();
       applyWaypoints();
       showToast('Start set to vessel position', 'success');
     }
@@ -2931,7 +3530,13 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       const toPos = ll => ({ latitude: ll.lat, longitude: ll.lng });
       const start = toPos(wpts[0]);
       const end   = toPos(wpts[wpts.length - 1]);
-      const via   = wpts.slice(1, -1).map(toPos);
+      // Waypoints arrive in applyWaypoints() order (start, vias..., dest), so
+      // the leg modes can be attached to the vias by index.
+      const via   = wpts.slice(1, -1).map((ll, i) => ({
+        latitude: ll.lat,
+        longitude: ll.lng,
+        mode: state.viaModes[i] || 'auto',
+      }));
 
       const minCoastMeters = parseFloat(document.getElementById('min-coast').value) || 0;
       const minCoastNauticalMiles = minCoastMeters / 1852;
@@ -2940,6 +3545,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         start: start,
         end: end,
         via: via,
+        endMode: state.destMode || 'auto',
         minCoastDistance: minCoastNauticalMiles,
         draft: lastBoat ? lastBoat.draft : 0,
         beam: lastBoat ? lastBoat.beam : 4,
@@ -3065,16 +3671,6 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     return coords.length >= 2 ? coords : null;
   }
 
-  function sortViasByRoutePosition(viaPoints) {
-    const coords = getRouteCoords(state.lastGeoJson);
-    if (!coords || coords.length < 2 || viaPoints.length < 2) return viaPoints;
-    const withPos = viaPoints.map(vp => ({
-      vp, idx: closestCoordIndex(coords, vp.lat, vp.lng)
-    }));
-    withPos.sort((a, b) => a.idx - b.idx);
-    return withPos.map(w => w.vp);
-  }
-
   function highlightMapByCoordRange(fromIdx, toIdx) {
     clearMapHighlight();
     for (const seg of state.routeSegments) {
@@ -3180,14 +3776,19 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     // after concatenation features share endpoint coords, so feature k owns the
     // segment from coord[2k] → coord[2k+1].
     const coordWarn = new Array(Math.max(0, coords.length - 1)).fill(false);
+    const coordManual = new Array(Math.max(0, coords.length - 1)).fill(false);
     let coordCursor = 0;
     for (const f of features) {
       if (!f || !f.geometry) continue;
       const fc = extractCoords(f.geometry);
       if (fc.length < 2) continue;
       const w = isSegmentWarning(f.properties || {});
+      const m = (f.properties || {}).mode === 'manual';
       for (let j = 0; j < fc.length - 1; j++) {
-        if (coordCursor + j < coordWarn.length) coordWarn[coordCursor + j] = w;
+        if (coordCursor + j < coordWarn.length) {
+          coordWarn[coordCursor + j] = w;
+          coordManual[coordCursor + j] = m;
+        }
       }
       coordCursor += fc.length - 1; // features share endpoint coords; don't double-count
     }
@@ -3198,8 +3799,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       if (coordWarn[i]) { warnIdx.add(i); warnIdx.add(i + 1); }
     }
 
-    // Split at BOTH major node boundaries AND warn/no-warn transitions.
-    // This keeps segments aligned with pane legs and only colors warned coords orange.
+    // Split at major node boundaries, warn/no-warn transitions AND
+    // manual/auto transitions, so each polyline has one uniform style.
     const nodes = extractMajorNodes(coords);
     const splitSet = new Set([0]);
     for (const n of nodes) splitSet.add(n.index);
@@ -3207,6 +3808,9 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     for (let i = 1; i < coords.length; i++) {
       const curWarn = warnIdx.has(i);
       if (curWarn !== prevWarn) { splitSet.add(i); prevWarn = curWarn; }
+    }
+    for (let i = 1; i < coordManual.length; i++) {
+      if (coordManual[i] !== coordManual[i - 1]) splitSet.add(i);
     }
     splitSet.add(coords.length - 1);
 
@@ -3217,12 +3821,17 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       if (e - s < 1) continue;
       const seg = latLngs.slice(s, e + 1);
       if (seg.length < 2) continue;
-      const isWarn = warnIdx.has(s);
-      const style = isWarn
-        ? { color: '#f59e0b', opacity: 0.9, weight: 4, dashArray: '8, 6' }
-        : { color: '#3b8fd4', opacity: 0.9, weight: 4 };
+      const isManual = !!coordManual[s];
+      const isWarn = !isManual && warnIdx.has(s);
+      // Manual (hand-drawn) legs: dashed orange. Auto legs: solid blue,
+      // or dashed amber when a constraint warning applies.
+      const style = isManual
+        ? { color: '#f97316', opacity: 0.95, weight: 4, dashArray: '10, 8' }
+        : isWarn
+          ? { color: '#f59e0b', opacity: 0.9, weight: 4, dashArray: '8, 6' }
+          : { color: '#3b8fd4', opacity: 0.9, weight: 4 };
       const polyline = L.polyline(seg, style).addTo(state.routeLayers);
-      state.routeSegments.push({ polyline, startIdx: s, endIdx: e, isWarning: isWarn, originalStyle: style });
+      state.routeSegments.push({ polyline, startIdx: s, endIdx: e, isWarning: isWarn, isManual: isManual, originalStyle: style });
       addPolylineHoverHandlers(polyline, s, e);
     }
     state.routeLayers.bringToFront();
@@ -3297,35 +3906,47 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     for (const m of state.viaMarkers) map.removeLayer(m);
     state.viaMarkers = [];
 
+    function markerMenu(marker, target) {
+      marker.on('contextmenu', function (e) {
+        L.DomEvent.stopPropagation(e);
+        L.DomEvent.preventDefault(e.originalEvent);
+        openContextMenu(this.getLatLng(), e.originalEvent.clientX, e.originalEvent.clientY,
+          { removeTarget: typeof target === 'function' ? target(this) : target });
+      });
+    }
+
     if (state.startLatLng) {
       state.startMarker = L.marker(state.startLatLng, { icon: startIcon, draggable: true }).addTo(map);
       state.startMarker.on('dragend', function () {
         state.startLatLng = this.getLatLng();
         state.startPoiName = '';
+        pushHistory();
         applyWaypoints();
         lookupNearestPoi(state.startLatLng.lat, state.startLatLng.lng, 'start');
       });
+      markerMenu(state.startMarker, { kind: 'start' });
     }
     if (state.destLatLng) {
       state.destMarker = L.marker(state.destLatLng, { icon: destIcon, draggable: true }).addTo(map);
       state.destMarker.on('dragend', function () {
         state.destLatLng = this.getLatLng();
         state.destPoiName = '';
+        pushHistory();
         applyWaypoints();
         lookupNearestPoi(state.destLatLng.lat, state.destLatLng.lng, 'dest');
       });
+      markerMenu(state.destMarker, { kind: 'dest' });
     }
     state.viaPoints.forEach(function (ll, i) {
-      const m = L.marker(ll, { icon: makeViaIcon(i + 1), draggable: true }).addTo(map);
+      const isManual = state.viaModes[i] === 'manual';
+      const m = L.marker(ll, { icon: makeViaIcon(i + 1, isManual), draggable: true }).addTo(map);
       m.on('dragend', function () {
         state.viaPoints[state.viaMarkers.indexOf(this)] = this.getLatLng();
+        pushHistory();
         applyWaypoints();
       });
-      m.on('contextmenu', function (e) {
-        L.DomEvent.stopPropagation(e);
-        const idx = state.viaMarkers.indexOf(this);
-        if (idx !== -1) state.viaPoints.splice(idx, 1);
-        applyWaypoints();
+      markerMenu(m, function (marker) {
+        return { kind: 'via', viaIdx: state.viaMarkers.indexOf(marker) };
       });
       state.viaMarkers.push(m);
     });
@@ -3339,7 +3960,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     if (pts.length >= 2) {
       routingControl.setWaypoints(pts);
     } else {
+      // No complete route any more (e.g. destination removed / undone):
+      // drop the drawn line and itinerary as well.
       routingControl.setWaypoints([]);
+      state.routeLayers.clearLayers();
+      state.lastGeoJson = null;
+      clearRoutePane();
     }
     updateMarkers();
     updateInfo();
@@ -3367,25 +3993,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   // Right-click: no longer sets start/dest (left-click does that).
   // The contextmenu preventDefault is handled in the panning setup above.
 
-  // ---- clear route ----
-  document.getElementById('clear-btn').addEventListener('click', function () {
-    state.startLatLng = null;
-    state.destLatLng  = null;
-    state.startPoiName = '';
-    state.destPoiName = '';
-    state.routeName = '';
-    state.viaPoints = [];
-    state.waypointNext = 'start';
-    if (state.startMarker) { map.removeLayer(state.startMarker); state.startMarker = null; }
-    if (state.destMarker) { map.removeLayer(state.destMarker); state.destMarker = null; }
-    for (const m of state.viaMarkers) map.removeLayer(m);
-    state.viaMarkers = [];
-    state.routeLayers.clearLayers();
-    state.lastGeoJson = null;
-    routingControl.setWaypoints([]);
-    updateInfo();
-    clearRoutePane();
-  });
+  // ---- clear route (confirmation + undo-able via history) ----
+  document.getElementById('clear-btn').addEventListener('click', requestClearRoute);
 
   // ---- synchronise state when LRM waypoints change externally ----
   routingControl.on('waypointschanged', function () {
@@ -3394,6 +4003,8 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       state.startLatLng = null;
       state.destLatLng  = null;
       state.viaPoints = [];
+      state.viaModes = [];
+      state.destMode = 'auto';
       state.waypointNext = 'start';
       state.routeLayers.clearLayers();
       state.lastGeoJson = null;
@@ -3495,8 +4106,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       } else {
         state.destLatLng = ll;
         state.destPoiName = name;
+        state.destMode = currentLegMode();
         state.waypointNext = 'start';
       }
+      pushHistory();
       applyWaypoints();
     }
     searchResults.style.display = 'none';
@@ -4799,8 +5412,11 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     }
   });
 
-  // ---- expose state for debugging ----
-  window.__marine = { map, routingControl, state, router };
+  // ---- initial (empty) history snapshot so the first action is undoable ----
+  pushHistory();
+
+  // ---- expose state for debugging / automated UI tests ----
+  window.__marine = { map, routingControl, state, router, history, undoRoute, redoRoute, setManualMode };
 })();
 </script>
 </body>

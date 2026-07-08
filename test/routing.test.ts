@@ -92,6 +92,21 @@ describe('RoutingEngine', () => {
 
     raw.close();
 
+    // Small land polygon used by the manual-leg land-crossing warning test
+    fs.writeFileSync(path.join(fixturesDir, 'land_polygons.geojson'), JSON.stringify({
+      type: 'FeatureCollection',
+      features: [{
+        type: 'Feature',
+        properties: {},
+        geometry: {
+          type: 'Polygon',
+          coordinates: [[
+            [4.99, 52.05], [5.01, 52.05], [5.01, 52.06], [4.99, 52.06], [4.99, 52.05],
+          ]],
+        },
+      }],
+    }));
+
     // Open via RoutingDatabase with the fixtures directory
     db = new RoutingDatabase(fixturesDir);
     await db.init();
@@ -104,6 +119,10 @@ describe('RoutingEngine', () => {
     await db.close();
     if (fs.existsSync(testDbPath)) {
       fs.unlinkSync(testDbPath);
+    }
+    const landPath = path.join(fixturesDir, 'land_polygons.geojson');
+    if (fs.existsSync(landPath)) {
+      fs.unlinkSync(landPath);
     }
   });
 
@@ -145,6 +164,113 @@ describe('RoutingEngine', () => {
       assert.ok(route.warnings, 'Expected warnings when constraints block the route');
       const constraintWarning = route.warnings!.find(w => w.type === 'via_constrained');
       assert.ok(constraintWarning, 'Expected a via_constrained warning for draft constraint violation');
+    });
+  });
+
+  describe('calculateRoute — manual legs', () => {
+    it('routes a fully manual leg as a straight line (endMode: manual)', async () => {
+      const route = await engine.calculateRoute({
+        start: { latitude: 52.0, longitude: 5.0 },
+        end: { latitude: 52.04, longitude: 5.04 },
+        endMode: 'manual',
+        minCoastDistance: 0,
+      });
+
+      assert.strictEqual(route.type, 'FeatureCollection');
+      assert.strictEqual(route.features.length, 1, 'one straight segment expected');
+      assert.strictEqual(route.features[0].properties.mode, 'manual');
+      assert.strictEqual(route.features[0].geometry.coordinates.length, 2);
+      // Straight-line distance start→end is ~5.2 km
+      assert.ok(route.totalDistance! > 5000 && route.totalDistance! < 5500,
+        `expected ~5.2km straight line, got ${route.totalDistance}`);
+    });
+
+    it('does not require graph coverage for manual legs', async () => {
+      // Same coordinates that make the auto router throw "No routing nodes"
+      const route = await engine.calculateRoute({
+        start: { latitude: 0.0, longitude: 0.0 },
+        end: { latitude: 1.0, longitude: 1.0 },
+        endMode: 'manual',
+      });
+      assert.strictEqual(route.features.length, 1);
+      assert.strictEqual(route.features[0].properties.mode, 'manual');
+    });
+
+    it('mixes a manual first leg with an auto-routed remainder', async () => {
+      const route = await engine.calculateRoute({
+        start: { latitude: 52.0, longitude: 5.0 },
+        end: { latitude: 52.04, longitude: 5.04 },
+        via: [{ latitude: 52.02, longitude: 5.02, mode: 'manual' }],
+        minCoastDistance: 0,
+      });
+
+      assert.ok(route.features.length >= 2, 'manual + auto features expected');
+      const manualFeatures = route.features.filter(f => f.properties.mode === 'manual');
+      const autoFeatures = route.features.filter(f => f.properties.mode === undefined);
+      assert.strictEqual(manualFeatures.length, 1, 'exactly one manual segment');
+      assert.ok(autoFeatures.length >= 1, 'auto segments after the manual leg');
+      // Manual leg comes first in the feature order
+      assert.strictEqual(route.features[0].properties.mode, 'manual');
+    });
+
+    it('snaps a manual endpoint to a nearby graph node so auto routing picks up there', async () => {
+      // ~60 m NE of node (52.02, 5.02) — inside the 150 m snap radius
+      const route = await engine.calculateRoute({
+        start: { latitude: 52.0, longitude: 5.0 },
+        end: { latitude: 52.04, longitude: 5.04 },
+        via: [{ latitude: 52.0205, longitude: 5.0205, mode: 'manual' }],
+        minCoastDistance: 0,
+      });
+
+      const manual = route.features.find(f => f.properties.mode === 'manual');
+      assert.ok(manual, 'manual feature present');
+      const endCoord = manual!.geometry.coordinates[manual!.geometry.coordinates.length - 1];
+      assert.ok(Math.abs(endCoord[1] - 52.02) < 1e-9 && Math.abs(endCoord[0] - 5.02) < 1e-9,
+        `manual endpoint should snap to node (52.02, 5.02), got (${endCoord[1]}, ${endCoord[0]})`);
+    });
+
+    it('keeps the exact user destination on a manual final leg (no snapping)', async () => {
+      // ~60 m from node (52.04, 5.04); a manual FINAL leg must not snap away
+      const route = await engine.calculateRoute({
+        start: { latitude: 52.0, longitude: 5.0 },
+        end: { latitude: 52.0405, longitude: 5.0405 },
+        via: [{ latitude: 52.02, longitude: 5.02 }],
+        endMode: 'manual',
+        minCoastDistance: 0,
+      });
+      const manual = route.features[route.features.length - 1];
+      assert.strictEqual(manual.properties.mode, 'manual');
+      const endCoord = manual.geometry.coordinates[manual.geometry.coordinates.length - 1];
+      assert.ok(Math.abs(endCoord[1] - 52.0405) < 1e-9 && Math.abs(endCoord[0] - 5.0405) < 1e-9,
+        `manual final leg must end at the exact destination, got (${endCoord[1]}, ${endCoord[0]})`);
+    });
+
+    it('warns when a manual leg crosses land', async () => {
+      // land fixture (see before()) covers 52.05–52.06 / 4.99–5.01
+      const route = await engine.calculateRoute({
+        start: { latitude: 52.045, longitude: 5.005 },
+        end: { latitude: 52.065, longitude: 5.005 },
+        endMode: 'manual',
+      });
+      assert.ok(route.warnings, 'expected warnings');
+      const w = route.warnings!.find(w => w.type === 'manual_segment');
+      assert.ok(w, 'expected a manual_segment land-crossing warning');
+    });
+
+    it('rejects nothing: a manual leg never fails, even where auto routing would', async () => {
+      // Draft that blocks every edge of the graph — manual ignores constraints
+      engine.setVesselDimensions({ draft: 100.0, beam: 4.0, airDraft: 10.0 });
+      const route = await engine.calculateRoute({
+        start: { latitude: 52.0, longitude: 5.0 },
+        end: { latitude: 52.04, longitude: 5.04 },
+        endMode: 'manual',
+        minCoastDistance: 0,
+      });
+      engine.setVesselDimensions({ draft: 2.0, beam: 4.0, airDraft: 10.0 });
+      assert.strictEqual(route.features[0].properties.mode, 'manual');
+      // No depth violations reported for manual segments (minDepth is unknown)
+      const depthWarnings = (route.warnings || []).filter(w => w.type === 'via_constrained');
+      assert.strictEqual(depthWarnings.length, 0, 'manual legs carry no constraint violations');
     });
   });
 

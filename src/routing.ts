@@ -8,6 +8,7 @@ import { bearingDeg, buildItinerary } from './itinerary.js';
 import { CurrentsClient, FlowField, KNOTS_TO_MS, TidesClient, prepareStationFlowField, prepareTidalFlowField } from './tides.js';
 import {
     BBox,
+    LegMode,
     PluginConfig,
     RouteCrossing,
     RouteResult,
@@ -231,12 +232,16 @@ export class RoutingEngine {
 
     const coastDistanceMeters = effectiveCoastDistance * 1852;
 
-      // Find nearest graph nodes to start/end
+      // Find nearest graph nodes to start/end. A missing node is only fatal
+      // when the adjacent leg is auto-routed — manual legs are straight lines
+      // and work in areas with no graph coverage at all.
       const startNode = await this.db.findNearestNode(start.latitude, start.longitude);
       const endNode = await this.db.findNearestNode(end.latitude, end.longitude);
+      const firstLegMode = via.length > 0 ? via[0].mode : request.endMode;
+      const lastLegMode = request.endMode;
 
-      if (!startNode) throw new Error(`No routing nodes found near start point`);
-      if (!endNode) throw new Error(`No routing nodes found near end point`);
+      if (!startNode && firstLegMode !== 'manual') throw new Error(`No routing nodes found near start point`);
+      if (!endNode && lastLegMode !== 'manual') throw new Error(`No routing nodes found near end point`);
 
       // Tidal flow field for time-dependent costs (undefined = tides off/unavailable)
       const env = await this.prepareEnv(request, [start, ...via, end]);
@@ -244,8 +249,8 @@ export class RoutingEngine {
       // Build bounding box with initial margin, try A* with expansion on failure
       const bboxWarnings: RouteWarning[] = [];
 
-      if (via.length > 0) {
-        return await this.routeViaPoints(start, end, via, coastDistanceMeters, effectiveDims, bboxWarnings, env);
+      if (via.length > 0 || request.endMode === 'manual') {
+        return await this.routeViaPoints(start, end, via, coastDistanceMeters, effectiveDims, bboxWarnings, env, request.endMode);
       }
       // Fall through for non-via routes (bbox search below)
 
@@ -297,9 +302,10 @@ export class RoutingEngine {
         }
       }
 
-      // All bbox attempts failed — try fallback routing (unconstrained graph)
+      // All bbox attempts failed — try fallback routing (unconstrained graph).
+      // (Only reachable on the all-auto path, where both nodes were verified.)
       return await this.fallbackRoute(
-        startNode, endNode, start, end, coastDistanceMeters, via, effectiveDims, env,
+        startNode!, endNode!, start, end, coastDistanceMeters, via, effectiveDims, env,
       );
   }
 
@@ -427,11 +433,12 @@ export class RoutingEngine {
   private async routeViaPoints(
     start: { latitude: number; longitude: number },
     end: { latitude: number; longitude: number },
-    via: Array<{ latitude: number; longitude: number }>,
+    via: Array<{ latitude: number; longitude: number; mode?: LegMode }>,
     coastDistanceMeters: number,
     dims: VesselDimensions,
     globalWarnings?: RouteWarning[],
     env?: RouteEnv,
+    endMode?: LegMode,
   ): Promise<RouteResult> {
     let currentStart = start;
     let elapsedSec = 0; // time offset of the current leg's departure
@@ -462,20 +469,30 @@ export class RoutingEngine {
     );
 
     for (let i = 0; i < via.length; i++) {
-      const nextPoint = via[i];
-      const segmentBbox = bboxFromPoints(
-        currentStart, nextPoint,
-        adaptiveMargin,
-      );
+      let nextPoint: { latitude: number; longitude: number; mode?: LegMode } = via[i];
       const legEnv = env ? { ...env, offsetSec: elapsedSec } : undefined;
-      const segmentResult = await this.tryRouteSegment(
-        currentStart.latitude, currentStart.longitude,
-        nextPoint.latitude, nextPoint.longitude,
-        coastDistanceMeters,
-        i, warnings, dims,
-        segmentBbox,
-        legEnv,
-      );
+      let segmentResult: RouteResult | null;
+      if (nextPoint.mode === 'manual') {
+        // User-drawn straight line, bypassing the graph. The endpoint snaps to
+        // a nearby graph node (when one exists) so a following auto leg picks
+        // up exactly where the manual line ends.
+        const manual = await this.buildManualLeg(currentStart, nextPoint, `Via point ${i + 1}`, warnings);
+        segmentResult = manual.route;
+        nextPoint = { ...nextPoint, ...manual.snappedEnd };
+      } else {
+        const segmentBbox = bboxFromPoints(
+          currentStart, nextPoint,
+          adaptiveMargin,
+        );
+        segmentResult = await this.tryRouteSegment(
+          currentStart.latitude, currentStart.longitude,
+          nextPoint.latitude, nextPoint.longitude,
+          coastDistanceMeters,
+          i, warnings, dims,
+          segmentBbox,
+          legEnv,
+        );
+      }
       if (!segmentResult) {
         // via point completely unreachable — skip it
         warnings.push({
@@ -508,18 +525,25 @@ export class RoutingEngine {
       currentStart = nextPoint;
     }
 
-    const finalBbox = bboxFromPoints(
-      currentStart, end,
-      adaptiveMargin,
-    );
-    const finalResult = await this.tryRouteSegment(
-      currentStart.latitude, currentStart.longitude,
-      end.latitude, end.longitude,
-      coastDistanceMeters,
-      -1, warnings, dims,
-      finalBbox,
-      env ? { ...env, offsetSec: elapsedSec } : undefined,
-    );
+    let finalResult: RouteResult | null;
+    if (endMode === 'manual') {
+      // Final leg drawn by hand — end exactly at the user's destination
+      // (no node snapping; there is no following leg to pick up from it).
+      finalResult = (await this.buildManualLeg(currentStart, end, 'Destination', warnings, false)).route;
+    } else {
+      const finalBbox = bboxFromPoints(
+        currentStart, end,
+        adaptiveMargin,
+      );
+      finalResult = await this.tryRouteSegment(
+        currentStart.latitude, currentStart.longitude,
+        end.latitude, end.longitude,
+        coastDistanceMeters,
+        -1, warnings, dims,
+        finalBbox,
+        env ? { ...env, offsetSec: elapsedSec } : undefined,
+      );
+    }
 
     if (!finalResult) {
       throw new Error('No route found to destination');
@@ -621,6 +645,90 @@ export class RoutingEngine {
       }
     }
     return null;
+  }
+
+  /**
+   * Build a manual (user-drawn) leg: a straight rhumb line from `from` to
+   * `to`, bypassing the A* graph entirely. When `snapEnd` is true (default)
+   * the endpoint is snapped to the nearest graph node within
+   * MANUAL_SNAP_RADIUS_M so a following auto leg picks up seamlessly — the
+   * caller must continue from the returned `snappedEnd`.
+   *
+   * The segment carries no depth/air-draft data (mode:'manual', minDepth -1)
+   * — the user takes responsibility for its navigability. A line-of-sight
+   * sample against the graph flags likely land crossings as a warning.
+   */
+  private async buildManualLeg(
+    from: { latitude: number; longitude: number },
+    to: { latitude: number; longitude: number },
+    label: string,
+    warnings: RouteWarning[],
+    snapEnd: boolean = true,
+  ): Promise<{ route: RouteResult; snappedEnd: { latitude: number; longitude: number } }> {
+    const MANUAL_SNAP_RADIUS_M = 150;
+    let endLat = to.latitude;
+    let endLon = to.longitude;
+    let endNodeId = -1;
+
+    if (snapEnd) {
+      const nearId = await this.db.findNearestNode(to.latitude, to.longitude, MANUAL_SNAP_RADIUS_M);
+      if (nearId != null) {
+        const node = await this.db.getNodeById(nearId);
+        if (node) {
+          endLat = node.lat;
+          endLon = node.lon;
+          endNodeId = nearId;
+        }
+      }
+    }
+
+    const distance = Math.round(
+      this.haversineDistance(from.latitude, from.longitude, endLat, endLon),
+    );
+
+    // Best-effort land check: sample the straight line against the graph.
+    // Manual mode exists precisely for areas with poor graph coverage, so
+    // this can only ever be a warning, never a rejection.
+    const samples = Math.max(5, Math.min(40, Math.round(distance / 200)));
+    if (distance > 20 && this.db.isLineCrossingLand(from.latitude, from.longitude, endLat, endLon, samples)) {
+      warnings.push({
+        type: 'manual_segment',
+        message: `Manual leg to ${label.toLowerCase()} may cross land or uncharted water — verify against the chart.`,
+        from: { latitude: from.latitude, longitude: from.longitude },
+        to: { latitude: endLat, longitude: endLon },
+        distanceMeters: distance,
+      });
+    }
+
+    const route: RouteResult = {
+      type: 'FeatureCollection',
+      features: [{
+        type: 'Feature',
+        geometry: {
+          type: 'LineString',
+          coordinates: [
+            [from.longitude, from.latitude],
+            [endLon, endLat],
+          ],
+        },
+        properties: {
+          totalDistance: distance,
+          totalCost: distance,
+          segments: [{
+            from: -1,
+            to: endNodeId,
+            distance,
+            minDepth: -1,
+            maxAirDraft: -1,
+            costFactor: 1.0,
+            trafficMode: TRAFFIC_TWO_WAY,
+            mode: 'manual',
+          }],
+        },
+      }],
+    };
+
+    return { route, snappedEnd: { latitude: endLat, longitude: endLon } };
   }
 
   /**
@@ -1383,6 +1491,7 @@ export class RoutingEngine {
         trafficMode: seg.trafficMode,
         edgeTypeId: seg.edgeTypeId,
         distance: seg.distance,
+        ...(seg.mode !== undefined ? { mode: seg.mode } : {}),
         ...(seg.seconds !== undefined ? { seconds: seg.seconds } : {}),
         ...(seg.currentKn !== undefined ? { currentKn: seg.currentKn, sogKn: seg.sogKn } : {}),
       };

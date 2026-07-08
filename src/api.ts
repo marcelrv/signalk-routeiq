@@ -183,6 +183,28 @@ export class ApiHandler {
         return;
       }
 
+      // Normalize via points and per-leg modes ('auto' is the default; only
+      // 'manual' changes behavior — anything else is rejected).
+      if (request.via !== undefined && !Array.isArray(request.via)) {
+        res.status(400).json({ error: 'Invalid via — expected an array of {latitude, longitude, mode?}' });
+        return;
+      }
+      for (const v of request.via || []) {
+        norm(v);
+        if (typeof v.latitude !== 'number' || typeof v.longitude !== 'number') {
+          res.status(400).json({ error: 'Invalid via coordinate format. Expected {latitude, longitude}' });
+          return;
+        }
+        if (v.mode !== undefined && v.mode !== 'auto' && v.mode !== 'manual') {
+          res.status(400).json({ error: "Invalid via mode — expected 'auto' or 'manual'" });
+          return;
+        }
+      }
+      if (request.endMode !== undefined && request.endMode !== 'auto' && request.endMode !== 'manual') {
+        res.status(400).json({ error: "Invalid endMode — expected 'auto' or 'manual'" });
+        return;
+      }
+
       if (request.departureTime !== undefined && !Number.isFinite(Date.parse(request.departureTime))) {
         res.status(400).json({ error: 'Invalid departureTime — expected an ISO 8601 date string' });
         return;
