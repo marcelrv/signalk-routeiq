@@ -4,6 +4,7 @@
  */
 
 import { EdgeRow, RoutingDatabase, getNodeTypeInt, NODE_TYPE_INLAND, EDGE_TYPE_COASTAL, POI_TYPE_BRIDGE, POI_TYPE_LOCK, TRAFFIC_TWO_WAY, TRAFFIC_ONE_WAY_REV } from './database.js';
+import type { FunnelResult } from './navmesh.js';
 import { bearingDeg, buildItinerary } from './itinerary.js';
 import { CurrentsClient, FlowField, KNOTS_TO_MS, TidesClient, prepareStationFlowField, prepareTidalFlowField } from './tides.js';
 import {
@@ -231,6 +232,23 @@ export class RoutingEngine {
     };
 
     const coastDistanceMeters = effectiveCoastDistance * 1852;
+
+      // Same-region navmesh fast path: when both endpoints land inside the
+      // same navmesh_regions polygon, the whole route is a single funnel
+      // path with no point-graph traversal needed at all — astarSearch's
+      // multi-candidate boundary-node seeding (below) can't produce this on
+      // its own, since it always seeds/goal-tests against boundary nodes.
+      if (via.length === 0 && request.endMode !== 'manual') {
+        const navmeshRoute = await this.trySameRegionNavmeshRoute(start, end, effectiveDims);
+        if (navmeshRoute) {
+          const violationWarnings: RouteWarning[] = [];
+          this.addViolationWarnings(navmeshRoute, violationWarnings, 'destination', start, end, effectiveDims);
+          if (violationWarnings.length) navmeshRoute.warnings = violationWarnings;
+          const sameRegionEnv = await this.prepareEnv(request, [start, end]);
+          await this.finalizeRoute(navmeshRoute, [], sameRegionEnv);
+          return navmeshRoute;
+        }
+      }
 
       // Find nearest graph nodes to start/end. A missing node is only fatal
       // when the adjacent leg is auto-routed — manual legs are straight lines
@@ -988,6 +1006,122 @@ export class RoutingEngine {
   }
 
   /**
+   * When both start and end fall inside the same navmesh_regions polygon,
+   * the route is a single funnel path with no point-graph traversal at all.
+   * Returns null (falls through to normal A*) whenever that's not the case,
+   * including when either point resolves to no region or to different regions.
+   */
+  /**
+   * splitToSegmentFeatures (called from finalizeRoute) assumes
+   * coordinates.length === segments.length + 1 — one LineString hop per
+   * segment. A funnel-computed multi-point polyline breaks that invariant if
+   * represented as a single segment spanning many coordinates (the extra
+   * points silently get dropped). This expands an N-point polyline into N-1
+   * segments, one per consecutive coordinate pair, so every point survives
+   * into the final per-segment GeoJSON features. Only the true endpoints
+   * (when known) carry a real node id; interior synthetic points use -1,
+   * matching connectUserPoint's existing off-graph-point convention.
+   */
+  private buildSubSegments(
+    points: Array<[number, number]>, // [lat, lon], >= 2 points
+    attrs: { minDepth: number; maxAirDraft: number; minWidth?: number; costFactor: number; trafficMode: number; edgeTypeId?: number },
+    fromNodeId: number,
+    toNodeId: number,
+  ): NonNullable<RouteResult['features'][0]['properties']['segments']> {
+    const segs: NonNullable<RouteResult['features'][0]['properties']['segments']> = [];
+    for (let i = 0; i < points.length - 1; i++) {
+      const distance = Math.round(this.haversineDistance(points[i][0], points[i][1], points[i + 1][0], points[i + 1][1]));
+      segs.push({
+        from: i === 0 ? fromNodeId : -1,
+        to: i === points.length - 2 ? toNodeId : -1,
+        distance,
+        minDepth: attrs.minDepth,
+        maxAirDraft: attrs.maxAirDraft,
+        minWidth: attrs.minWidth,
+        costFactor: attrs.costFactor,
+        trafficMode: attrs.trafficMode,
+        edgeTypeId: attrs.edgeTypeId,
+      });
+    }
+    return segs;
+  }
+
+  private async trySameRegionNavmeshRoute(
+    start: { latitude: number; longitude: number },
+    end: { latitude: number; longitude: number },
+    _dims: VesselDimensions,
+  ): Promise<RouteResult | null> {
+    const startRegion = this.db.findNavmeshRegionAt(start.latitude, start.longitude);
+    if (!startRegion) return null;
+    const endRegion = this.db.findNavmeshRegionAt(end.latitude, end.longitude);
+    if (!endRegion || endRegion !== startRegion) return null;
+
+    const result = this.db.funnelPathBetweenPoints(startRegion, start.latitude, start.longitude, end.latitude, end.longitude);
+    if (!result) return null;
+
+    const coordinates: [number, number][] = result.path.map(([lat, lon]) => [lon, lat]);
+    const segments = this.buildSubSegments(
+      result.path,
+      { minDepth: startRegion.depthCeilingM, maxAirDraft: -1, costFactor: 1.0, trafficMode: TRAFFIC_TWO_WAY },
+      -1, -1,
+    );
+    const distance = Math.round(result.distance);
+
+    return {
+      type: 'FeatureCollection',
+      features: [{
+        type: 'Feature',
+        geometry: { type: 'LineString', coordinates },
+        properties: {
+          totalDistance: distance,
+          totalCost: distance,
+          segments,
+        },
+      }],
+    };
+  }
+
+  /**
+   * Splice a funnel-computed prefix (user start point -> boundary node) and/or
+   * suffix (boundary node -> user end point) onto an astarSearch result whose
+   * first/last node was resolved via navmesh multi-candidate seeding. Mirrors
+   * connectUserPoint's synthetic-segment convention (from/to: -1 for the
+   * off-graph endpoint) — and makes connectUserPoint itself a no-op afterward,
+   * since coords[0]/coords[last] already exactly equal the user's point.
+   */
+  private splicePrefixSuffix(
+    result: RouteResult,
+    prefix?: { boundaryNodeId: number } & FunnelResult,
+    suffix?: { boundaryNodeId: number } & FunnelResult,
+  ): void {
+    const feature = result.features[0];
+    if (!feature) return;
+    const coords = feature.geometry.coordinates;
+    const segments = feature.properties.segments!;
+
+    const attrs = { minDepth: -1, maxAirDraft: -1, costFactor: 1.0, trafficMode: TRAFFIC_TWO_WAY };
+
+    if (prefix) {
+      // prefix.path goes userPoint -> boundary node vertex; drop the last
+      // point, which duplicates coords[0] (the boundary node's own coordinate).
+      const pts: [number, number][] = prefix.path.slice(0, -1).map(([lat, lon]) => [lon, lat]);
+      coords.unshift(...pts);
+      segments.unshift(...this.buildSubSegments(prefix.path, attrs, -1, prefix.boundaryNodeId));
+      feature.properties.totalDistance = (feature.properties.totalDistance ?? 0) + Math.round(prefix.distance);
+    }
+
+    if (suffix) {
+      // suffix.path goes userPoint -> boundary node vertex (funnelPathFromPoint's
+      // direction); reverse to boundary node -> userPoint before appending.
+      const reversed = [...suffix.path].reverse();
+      const pts: [number, number][] = reversed.slice(1).map(([lat, lon]) => [lon, lat]);
+      coords.push(...pts);
+      segments.push(...this.buildSubSegments(reversed, attrs, suffix.boundaryNodeId, -1));
+      feature.properties.totalDistance = (feature.properties.totalDistance ?? 0) + Math.round(suffix.distance);
+    }
+  }
+
+  /**
    * Core A* search algorithm with nautical cost function.
    * Optionally constrains search to a bounding box for performance.
    */
@@ -1001,11 +1135,44 @@ export class RoutingEngine {
     bbox?: BBox,
     env?: RouteEnv,
   ): Promise<RouteResult> {
-    let startNode = await this.db.findNearestNode(startLat, startLon);
-    let endNode = await this.db.findNearestNode(endLat, endLon);
+    let startNode: number | null = await this.db.findNearestNode(startLat, startLon);
+    let endNode: number | null = await this.db.findNearestNode(endLat, endLon);
 
-    if (!startNode || !endNode) {
+    const startRegion = this.db.findNavmeshRegionAt(startLat, startLon);
+    const endRegion = this.db.findNavmeshRegionAt(endLat, endLon);
+
+    if ((!startNode && !startRegion) || (!endNode && !endRegion)) {
       throw new Error('Could not find routing nodes near start or end point');
+    }
+
+    // Multi-candidate boundary-node seeding/goal-testing (spec §6 items 1-4):
+    // when a point lands inside a navmesh region, let real A* cost comparison
+    // pick the cheapest boundary node to enter/exit through, rather than
+    // pre-selecting a single "nearest" one — important in concave regions
+    // where nearest-by-straight-line isn't necessarily cheapest by graph cost.
+    let startCandidates: Map<number, FunnelResult> | null = null;
+    if (startRegion) {
+      startCandidates = new Map();
+      for (const nodeId of startRegion.boundaryNodeIds) {
+        const r = this.db.funnelPathFromPoint(startRegion, startLat, startLon, nodeId);
+        if (r) startCandidates.set(nodeId, r);
+      }
+      if (startCandidates.size === 0) startCandidates = null;
+    }
+    let endCandidates: Map<number, FunnelResult> | null = null;
+    if (endRegion) {
+      endCandidates = new Map();
+      for (const nodeId of endRegion.boundaryNodeIds) {
+        const r = this.db.funnelPathFromPoint(endRegion, endLat, endLon, nodeId);
+        if (r) endCandidates.set(nodeId, r);
+      }
+      if (endCandidates.size === 0) endCandidates = null;
+    }
+    if (!startCandidates && startNode === null) {
+      throw new Error('Could not find routing nodes near start point');
+    }
+    if (!endCandidates && endNode === null) {
+      throw new Error('Could not find routing nodes near end point');
     }
 
     const minDepth = (dims.draft || 2.0) + this.config.safetyMarginDraft;
@@ -1071,31 +1238,52 @@ export class RoutingEngine {
       return best;
     };
 
-    const improvedEnd = await improveNode(endNode, endLat, endLon, 'End');
-    if (improvedEnd !== endNode) {
-      endNode = improvedEnd;
+    // Skip the shallow-water node-improvement heuristic when a region resolved
+    // valid boundary candidates — navmesh regions are open water by
+    // construction, so "improve to a deeper nearby node" doesn't apply, and
+    // real A* cost comparison across candidates already does a better job.
+    if (!endCandidates && endNode !== null) {
+      const improvedEnd = await improveNode(endNode, endLat, endLon, 'End');
+      if (improvedEnd !== endNode) endNode = improvedEnd;
     }
-    const improvedStart = await improveNode(startNode, startLat, startLon, 'Start');
-    if (improvedStart !== startNode) {
-      startNode = improvedStart;
+    if (!startCandidates && startNode !== null) {
+      const improvedStart = await improveNode(startNode, startLat, startLon, 'Start');
+      if (improvedStart !== startNode) startNode = improvedStart;
     }
 
-    // Expand bbox to include the actual snapped node coordinates so the
-    // strict isInsideBBox check below never rejects a valid start/end node.
+    // Expand bbox to include the actual snapped node coordinates (and, for
+    // navmesh-resolved endpoints, the whole region's extent) so the strict
+    // isInsideBBox check below never rejects a valid start/end candidate.
     if (bbox) {
-      const snapStart = await this.db.getNodeById(startNode);
-      const snapEnd = await this.db.getNodeById(endNode);
-      if (snapStart) {
-        bbox.minLat = Math.min(bbox.minLat, snapStart.lat);
-        bbox.maxLat = Math.max(bbox.maxLat, snapStart.lat);
-        bbox.minLon = Math.min(bbox.minLon, snapStart.lon);
-        bbox.maxLon = Math.max(bbox.maxLon, snapStart.lon);
+      if (startNode !== null) {
+        const snapStart = await this.db.getNodeById(startNode);
+        if (snapStart) {
+          bbox.minLat = Math.min(bbox.minLat, snapStart.lat);
+          bbox.maxLat = Math.max(bbox.maxLat, snapStart.lat);
+          bbox.minLon = Math.min(bbox.minLon, snapStart.lon);
+          bbox.maxLon = Math.max(bbox.maxLon, snapStart.lon);
+        }
       }
-      if (snapEnd) {
-        bbox.minLat = Math.min(bbox.minLat, snapEnd.lat);
-        bbox.maxLat = Math.max(bbox.maxLat, snapEnd.lat);
-        bbox.minLon = Math.min(bbox.minLon, snapEnd.lon);
-        bbox.maxLon = Math.max(bbox.maxLon, snapEnd.lon);
+      if (endNode !== null) {
+        const snapEnd = await this.db.getNodeById(endNode);
+        if (snapEnd) {
+          bbox.minLat = Math.min(bbox.minLat, snapEnd.lat);
+          bbox.maxLat = Math.max(bbox.maxLat, snapEnd.lat);
+          bbox.minLon = Math.min(bbox.minLon, snapEnd.lon);
+          bbox.maxLon = Math.max(bbox.maxLon, snapEnd.lon);
+        }
+      }
+      if (startRegion) {
+        bbox.minLat = Math.min(bbox.minLat, startRegion.bbox.minLat);
+        bbox.maxLat = Math.max(bbox.maxLat, startRegion.bbox.maxLat);
+        bbox.minLon = Math.min(bbox.minLon, startRegion.bbox.minLon);
+        bbox.maxLon = Math.max(bbox.maxLon, startRegion.bbox.maxLon);
+      }
+      if (endRegion) {
+        bbox.minLat = Math.min(bbox.minLat, endRegion.bbox.minLat);
+        bbox.maxLat = Math.max(bbox.maxLat, endRegion.bbox.maxLat);
+        bbox.minLon = Math.min(bbox.minLon, endRegion.bbox.minLon);
+        bbox.maxLon = Math.max(bbox.maxLon, endRegion.bbox.maxLon);
       }
     }
 
@@ -1116,26 +1304,39 @@ export class RoutingEngine {
       ? env.speedMs / (env.speedMs + env.flow.maxSpeedMs)
       : 1);
 
-    // Initialize
-    gScore.set(startNode, 0);
-    tSec.set(startNode, 0);
-    openSet.push({
-      nodeId: startNode,
-      g: 0,
-      f: this.haversineDistance(startLat, startLon, endLat, endLon) * minMultiplier,
-      parent: null,
-    });
+    // Initialize: either the single literal nearest node (unchanged path), or
+    // one open-set entry per navmesh boundary-node candidate with g = the
+    // funnel prefix distance from the user's point to that boundary node.
+    if (startCandidates) {
+      for (const [nodeId, prefix] of startCandidates) {
+        const coord = this.db.getNodeSync(nodeId);
+        if (!coord) continue;
+        gScore.set(nodeId, prefix.distance);
+        tSec.set(nodeId, 0);
+        const h = this.haversineDistance(coord.lat, coord.lon, endLat, endLon) * minMultiplier;
+        openSet.push({ nodeId, g: prefix.distance, f: prefix.distance + h, parent: null });
+      }
+    } else {
+      gScore.set(startNode!, 0);
+      tSec.set(startNode!, 0);
+      openSet.push({
+        nodeId: startNode!,
+        g: 0,
+        f: this.haversineDistance(startLat, startLon, endLat, endLon) * minMultiplier,
+        parent: null,
+      });
+    }
 
     let goalReached = false;
+    let reachedNode: number | null = null;
     let iterations = 0;
     const maxIterations = 5000000; // Safety limit (5000K suffices for trans-continental routes like NL→Italy ~2000nm)
 
-    // Pre-fetch start node coords for boundary checks
-    const startCoords = await this.db.getNodeById(startNode);
-
-    // Ensure start is inside the bounding box
-    if (bbox && startCoords) {
-      if (!isInsideBBox(startCoords.lat, startCoords.lon, bbox)) {
+    // Ensure start is inside the bounding box (skipped for navmesh-resolved
+    // starts — the bbox was already expanded to cover the whole region above).
+    if (bbox && !startCandidates && startNode !== null) {
+      const startCoords = await this.db.getNodeById(startNode);
+      if (startCoords && !isInsideBBox(startCoords.lat, startCoords.lon, bbox)) {
         throw new Error('Start node is outside the routing bounding box');
       }
     }
@@ -1144,8 +1345,9 @@ export class RoutingEngine {
       iterations++;
       const current = openSet.pop()!;
 
-      if (current.nodeId === endNode) {
+      if (current.nodeId === endNode || (endCandidates?.has(current.nodeId) ?? false)) {
         goalReached = true;
+        reachedNode = current.nodeId;
         break;
       }
 
@@ -1229,16 +1431,19 @@ export class RoutingEngine {
       }
     }
 
-    if (!goalReached) {
+    if (!goalReached || reachedNode === null) {
       throw new Error(
         `No route found between the given points with current constraints. ` +
         `Try reducing minCoastDistance or checking vessel dimensions (draft=${dims.draft}m, beam=${dims.beam}m, airDraft=${dims.airDraft}m).`
       );
     }
 
-    // Reconstruct path
+    // Reconstruct path. path[0] is whichever seeded candidate A* actually
+    // used (the literal startNode, or — with multi-candidate seeding — the
+    // real-cost-cheapest boundary node), since only seed nodes are absent
+    // from `parent`.
     const path: number[] = [];
-    let current: number | null = endNode;
+    let current: number | null = reachedNode;
     while (current !== null) {
       path.unshift(current);
       current = parent.get(current) ?? null;
@@ -1250,9 +1455,20 @@ export class RoutingEngine {
     // Apply string-pulling to remove unnecessary grid staircasing
     const smoothedPath = await this.smoothPath(compressedPath);
 
-
     // Build GeoJSON response
-    return await this.buildRouteResult(smoothedPath, path, gScore.get(endNode) || 0);
+    const result = await this.buildRouteResult(smoothedPath, path, gScore.get(reachedNode) || 0);
+
+    const prefix = startCandidates?.get(path[0]);
+    const suffix = endCandidates?.get(reachedNode);
+    if (prefix || suffix) {
+      this.splicePrefixSuffix(
+        result,
+        prefix ? { boundaryNodeId: path[0], ...prefix } : undefined,
+        suffix ? { boundaryNodeId: reachedNode, ...suffix } : undefined,
+      );
+    }
+
+    return result;
   }
 
   private getEdgePenalty(edge: EdgeRow & { lat: number; lon: number }, minCoastDistanceMeters: number, dims: VesselDimensions): number {
@@ -1525,11 +1741,6 @@ export class RoutingEngine {
     let totalDistance = 0;
 
     for (let i = 0; i < smoothedPath.length; i++) {
-      const node = await this.db.getNodeById(smoothedPath[i]);
-      if (node) {
-        coordinates.push([node.lon, node.lat]);
-      }
-
       if (i > 0) {
         const prevNode = smoothedPath[i - 1];
         const currNode = smoothedPath[i];
@@ -1541,17 +1752,36 @@ export class RoutingEngine {
 
         if (edge) {
           totalDistance += edge.distance;
-          segments.push({
-            from: prevNode,
-            to: currNode,
-            distance: edge.distance,
-            minDepth: edge.min_depth,
-            maxAirDraft: edge.max_air_draft,
-            minWidth: edge.min_width,
-            costFactor: edge.cost_factor,
-            trafficMode: edge.traffic_mode,
-            edgeTypeId: edge.edge_type_id,
-          });
+          if (edge.path_points && edge.path_points.length > 0) {
+            // A funnel-computed navmesh edge carries the interior polyline of
+            // its taut path — expand it into one sub-segment per point pair
+            // (see buildSubSegments) instead of one segment spanning many
+            // coordinates, which splitToSegmentFeatures can't represent.
+            const fromCoord = this.db.getNodeSync(prevNode);
+            const toCoord = this.db.getNodeSync(currNode);
+            const pts: Array<[number, number]> = [
+              fromCoord ? [fromCoord.lat, fromCoord.lon] : edge.path_points[0],
+              ...edge.path_points,
+              toCoord ? [toCoord.lat, toCoord.lon] : edge.path_points[edge.path_points.length - 1],
+            ];
+            for (const [lat, lon] of edge.path_points) coordinates.push([lon, lat]);
+            segments.push(...this.buildSubSegments(pts, {
+              minDepth: edge.min_depth, maxAirDraft: edge.max_air_draft, minWidth: edge.min_width,
+              costFactor: edge.cost_factor, trafficMode: edge.traffic_mode, edgeTypeId: edge.edge_type_id,
+            }, prevNode, currNode));
+          } else {
+            segments.push({
+              from: prevNode,
+              to: currNode,
+              distance: edge.distance,
+              minDepth: edge.min_depth,
+              maxAirDraft: edge.max_air_draft,
+              minWidth: edge.min_width,
+              costFactor: edge.cost_factor,
+              trafficMode: edge.traffic_mode,
+              edgeTypeId: edge.edge_type_id,
+            });
+          }
         } else {
           const fromNode = await this.db.getNodeById(prevNode);
           const toNode = await this.db.getNodeById(currNode);
@@ -1573,6 +1803,9 @@ export class RoutingEngine {
           }
         }
       }
+
+      const node = await this.db.getNodeById(smoothedPath[i]);
+      if (node) coordinates.push([node.lon, node.lat]);
     }
 
     const crossings = await this.detectCrossings(coordinates);
@@ -1809,6 +2042,19 @@ private async smoothPath(path: number[]): Promise<number[]> {
           if (getNodeTypeInt(path[k]) === NODE_TYPE_INLAND) {
             skippingInland = true;
             break;
+          }
+        }
+
+        // Never string-pull across a funnel-augmented hop: it's already the
+        // taut/optimal path through its navmesh region, and this straight-line
+        // LOS check samples too coarsely to trust cutting a corner across it.
+        if (!skippingInland) {
+          for (let m = i; m < j; m++) {
+            const hopEdge = this.db.getEdgeSync(path[m], path[m + 1]);
+            if (hopEdge?.path_points && hopEdge.path_points.length > 0) {
+              skippingInland = true;
+              break;
+            }
           }
         }
 

@@ -21,8 +21,19 @@ interface EdgeRow {
   distance_to_land: number;
   edge_type_id: number;
   traffic_mode: number;
+  edge_kind_id: number;
   crosses_land?: number;
   crosses_obstacle?: number;
+}
+
+interface NavmeshRegionRow {
+  region_id: number;
+  boundary_geometry: string;
+  vertices: string;
+  triangles: string;
+  triangle_adjacency: string | null;
+  boundary_node_ids: string;
+  depth_ceiling_m: number;
 }
 
 interface PoiRow {
@@ -45,6 +56,7 @@ let hasCrossesLand = false;
 let hasCrossesObstacle = false;
 let hasNodeDepth = false;
 let hasRegionId = false;
+let hasEdgeKind = false;
 let overlayHandle: DbHandle | null = null;
 
 if (!parentPort) {
@@ -61,6 +73,7 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         hasCrossesObstacle = false;
         hasNodeDepth = false;
         hasRegionId = false;
+        hasEdgeKind = false;
         handles.length = 0;
         filenames.length = 0;
         for (const dbPath of dbPaths) {
@@ -81,6 +94,7 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
             // Merge schema flags across all valid databases
             hasCrossesLand = hasCrossesLand || edgeCols.some(c => c.name === 'crosses_land');
             hasCrossesObstacle = hasCrossesObstacle || edgeCols.some(c => c.name === 'crosses_obstacle');
+            hasEdgeKind = hasEdgeKind || edgeCols.some(c => c.name === 'edge_kind_id');
             const nodeCols = db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>;
             hasNodeDepth = hasNodeDepth || nodeCols.some(c => c.name === 'node_depth');
             hasRegionId = hasRegionId || nodeCols.some(c => c.name === 'region_id');
@@ -192,12 +206,13 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
       case 'loadEdges': {
         const crossesCol = hasCrossesLand ? ', crosses_land' : '';
         const obstacleCol = hasCrossesObstacle ? ', crosses_obstacle' : '';
+        const edgeKindCol = hasEdgeKind ? ', edge_kind_id' : ', 0 AS edge_kind_id';
         let allEdges: EdgeRow[] = [];
         for (const h of handles) {
           const edges = h.db.prepare(
             `SELECT source, target, distance, min_depth, max_air_draft, min_width,
                     cost_factor, distance_to_land,
-                    edge_type_id, traffic_mode${crossesCol}${obstacleCol}
+                    edge_type_id, traffic_mode${crossesCol}${obstacleCol}${edgeKindCol}
              FROM edges`
           ).all() as unknown as EdgeRow[];
           allEdges = allEdges.concat(edges);
@@ -206,7 +221,8 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         if (overlayHandle) {
           const overlayEdges = overlayHandle.db.prepare(
             `SELECT source, target, distance, min_depth, max_air_draft, min_width,
-                    cost_factor, distance_to_land, edge_type_id, traffic_mode
+                    cost_factor, distance_to_land, edge_type_id, traffic_mode,
+                    0 AS edge_kind_id
              FROM edges`
           ).all() as unknown as EdgeRow[];
           allEdges = allEdges.concat(overlayEdges);
@@ -233,6 +249,26 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
           }
         }
         parentPort!.postMessage({ id, type, result: allPois });
+        break;
+      }
+      case 'loadNavmeshRegions': {
+        const allRegions: NavmeshRegionRow[] = [];
+        for (const h of handles) {
+          try {
+            const cols = h.db.prepare("PRAGMA table_info('navmesh_regions')").all() as Array<{ name: string }>;
+            if (cols.length === 0) continue; // Phase-0-only DB — no navmesh_regions table, skip gracefully
+            const colNames = new Set(cols.map(c => c.name));
+            const adjacencyCol = colNames.has('triangle_adjacency') ? 'triangle_adjacency' : 'NULL AS triangle_adjacency';
+            const sql = `SELECT region_id, boundary_geometry, vertices, triangles,
+                                ${adjacencyCol}, boundary_node_ids, depth_ceiling_m
+                         FROM navmesh_regions`;
+            allRegions.push(...h.db.prepare(sql).all() as unknown as NavmeshRegionRow[]);
+          } catch {
+            // Skip databases with a malformed/legacy navmesh_regions table
+            continue;
+          }
+        }
+        parentPort!.postMessage({ id, type, result: allRegions });
         break;
       }
       case 'getMetadata': {

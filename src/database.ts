@@ -3,6 +3,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { PoiResult } from './types.js';
+import * as Navmesh from './navmesh.js';
 
 // Node type constants (encoded in the node ID via coordinate hashing)
 export const NODE_TYPE_COASTAL = 0;
@@ -29,6 +30,13 @@ export const TRAFFIC_TWO_WAY = 0;
 export const TRAFFIC_ONE_WAY_FWD = 1;
 export const TRAFFIC_ONE_WAY_REV = 2;
 
+// Edge kind: 0=centerline (default), 1=navmesh boundary (fallback/funnel-augmented),
+// 2=lane, 3=macro (spec §2.5)
+export const EDGE_KIND_CENTERLINE = 0;
+export const EDGE_KIND_NAVMESH_BOUNDARY = 1;
+export const EDGE_KIND_LANE = 2;
+export const EDGE_KIND_MACRO = 3;
+
 export interface EdgeRow {
   source: number;
   target: number;
@@ -40,12 +48,17 @@ export interface EdgeRow {
   distance_to_land: number;
   edge_type_id: number;
   traffic_mode: number;
+  edge_kind_id?: number;
   crosses_land?: number;
   crosses_obstacle?: number;
   lat: number;
   lon: number;
   source_lat?: number;
   source_lon?: number;
+  /** Intermediate [lat,lon] points of a funnel-computed navmesh path along this
+   *  edge (set only when this edge_kind_id=1 edge was upgraded from a straight
+   *  fallback chord to a real taut path by precomputeFunnelEdges). */
+  path_points?: Array<[number, number]>;
 }
 
 interface PoiRow {
@@ -76,6 +89,7 @@ export class RoutingDatabase {
   private nodes: Map<number, { lat: number; lon: number; regionId: number; nodeDepth: number; resolution: number }> = new Map();
   private edgesBySource: Map<number, Array<EdgeRow & { lat: number; lon: number }>> = new Map();
   private pois: PoiRow[] = [];
+  private navmeshRegions: Navmesh.NavmeshRegion[] = [];
   private spatialGrid: Map<string, number[]> = new Map();
   private hasCrossesLand: boolean = false;
   private hasCrossesObstacle: boolean = false;
@@ -323,7 +337,64 @@ export class RoutingDatabase {
     // Cache metadata
     this.metadataCache = await this.getMetadata();
 
+    const rawRegions: Array<{
+      region_id: number; boundary_geometry: string; vertices: string;
+      triangles: string; triangle_adjacency: string | null;
+      boundary_node_ids: string; depth_ceiling_m: number;
+    }> = await this.sendMessage('loadNavmeshRegions');
+    this.navmeshRegions = rawRegions.map(r => Navmesh.buildNavmeshRegion(r, (id) => this.nodes.get(id)));
+    this.precomputeFunnelEdges();
+
     this.graphLoaded = true;
+  }
+
+  /**
+   * Upgrade Phase 1's straight-line edge_kind_id=1 fallback edges between a
+   * region's boundary nodes to the real funnel-computed taut path (spec §6's
+   * "prefer the funnel-computed path over the fallback edges" runtime
+   * strategy) — done once here, at graph-load time, so astarSearch's
+   * per-edge relaxation loop never has to know navmesh regions exist at all.
+   */
+  private precomputeFunnelEdges(): void {
+    const MAX_BOUNDARY_NODES = 150; // see NEXT_PHASES.md: k-NN-capped, one small cluster per seam
+    for (const region of this.navmeshRegions) {
+      if (region.boundaryNodeIds.length > MAX_BOUNDARY_NODES) {
+        console.warn(`[autoroute] navmesh region ${region.regionId}: ${region.boundaryNodeIds.length} boundary nodes exceeds precompute cap (${MAX_BOUNDARY_NODES}) — leaving straight-line fallback edges in place`);
+        continue;
+      }
+
+      const computed = new Map<string, Navmesh.FunnelResult>();
+      const boundarySet = new Set(region.boundaryNodeIds);
+
+      for (const nodeId of region.boundaryNodeIds) {
+        const edges = this.edgesBySource.get(nodeId);
+        if (!edges) continue;
+        for (const edge of edges) {
+          if (edge.edge_kind_id !== EDGE_KIND_NAVMESH_BOUNDARY) continue;
+          if (!boundarySet.has(edge.target)) continue;
+
+          // Always compute in a canonical (lo -> hi) direction so the cache
+          // is correct regardless of which direction's edge row is visited
+          // first — orientation is then just "did I ask for lo or hi first".
+          const [lo, hi] = nodeId < edge.target ? [nodeId, edge.target] : [edge.target, nodeId];
+          const pairKey = `${lo}:${hi}`;
+          let result = computed.get(pairKey);
+          if (!result) {
+            result = Navmesh.funnelBetweenNodes(region, lo, hi) ?? undefined;
+            if (result) computed.set(pairKey, result);
+          }
+          if (!result) continue;
+
+          // Sanity guard: never let a degenerate funnel make routing worse
+          // than doing nothing — keep the original straight-line fallback.
+          if (result.distance > edge.distance * 3 + 50) continue;
+
+          edge.distance = result.distance;
+          const path = nodeId === lo ? result.path : [...result.path].reverse();
+          edge.path_points = path.slice(1, -1);
+        }
+      }
+    }
   }
 
   async getNodeById(id: number): Promise<{ lat: number; lon: number; regionId: number; nodeDepth: number; resolution: number } | null> {
@@ -549,6 +620,33 @@ export class RoutingDatabase {
       }
     }
     return visited;
+  }
+
+  /** The navmesh region (if any) whose boundary_geometry contains this point. */
+  findNavmeshRegionAt(lat: number, lon: number): Navmesh.NavmeshRegion | null {
+    for (const region of this.navmeshRegions) {
+      if (lat < region.bbox.minLat || lat > region.bbox.maxLat ||
+          lon < region.bbox.minLon || lon > region.bbox.maxLon) continue;
+      if (Navmesh.pointInPolygon(lat, lon, region.boundaryGeometry)) return region;
+    }
+    return null;
+  }
+
+  /** Read-only accessor, e.g. for graph-editor visualization. */
+  getNavmeshRegions(): Navmesh.NavmeshRegion[] {
+    return this.navmeshRegions;
+  }
+
+  funnelPathBetweenNodes(region: Navmesh.NavmeshRegion, nodeA: number, nodeB: number): Navmesh.FunnelResult | null {
+    return Navmesh.funnelBetweenNodes(region, nodeA, nodeB);
+  }
+
+  funnelPathFromPoint(region: Navmesh.NavmeshRegion, lat: number, lon: number, targetNodeId: number): Navmesh.FunnelResult | null {
+    return Navmesh.funnelFromPoint(region, lat, lon, targetNodeId);
+  }
+
+  funnelPathBetweenPoints(region: Navmesh.NavmeshRegion, latA: number, lonA: number, latB: number, lonB: number): Navmesh.FunnelResult | null {
+    return Navmesh.funnelBetweenPoints(region, latA, lonA, latB, lonB);
   }
 
   async searchPois(query: string, maxResults: number = 20): Promise<PoiResult[]> {
@@ -969,6 +1067,7 @@ export class RoutingDatabase {
     this.nodes.clear();
     this.edgesBySource.clear();
     this.pois = [];
+    this.navmeshRegions = [];
     this.spatialGrid.clear();
     this.waterwaysGeoJson = null;
     this.waterwaysGeojsonPath = null;
