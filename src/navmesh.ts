@@ -23,9 +23,15 @@ export interface NavmeshRegion {
   boundaryNodeIds: number[];
   boundaryNodeToVertex: Map<number, number>;
   vertexToBoundaryNode: Map<number, number>;
+  /** Small, bounded subset of `boundaryNodeIds` (see `selectAnchors`) that
+   *  interior shortcuts are precomputed between/against — the fix for
+   *  NEXT_PHASES.md's boundary-shortcut-sparsification bug. */
+  anchorNodeIds: number[];
   depthCeilingM: number;
   bbox: { minLat: number; minLon: number; maxLat: number; maxLon: number };
 }
+
+export const DEFAULT_MAX_ANCHORS = 40;
 
 interface RawNavmeshRegionRow {
   region_id: number;
@@ -203,7 +209,7 @@ export function buildNavmeshRegion(
     vertexToBoundaryNode.set(idx, nodeId);
   }
 
-  return {
+  const region: NavmeshRegion = {
     regionId: row.region_id,
     boundaryGeometry,
     vertices,
@@ -215,9 +221,61 @@ export function buildNavmeshRegion(
     boundaryNodeIds,
     boundaryNodeToVertex,
     vertexToBoundaryNode,
+    anchorNodeIds: [],
     depthCeilingM: row.depth_ceiling_m,
     bbox: { minLat, minLon, maxLat, maxLon },
   };
+  region.anchorNodeIds = selectAnchors(region, DEFAULT_MAX_ANCHORS);
+  return region;
+}
+
+/**
+ * Farthest-point sampling over a region's boundary nodes: pick a small,
+ * bounded set of well-distributed "anchors" regardless of how many boundary
+ * nodes the region actually has (real regions have hundreds, by design — see
+ * NEXT_PHASES.md). Real regions have hundreds of boundary nodes by design
+ * (ring-order perimeter tracing, not k-NN clustering), but genuine interior
+ * shortcuts only need to be precomputed between a bounded number of
+ * well-spread points; every other boundary node reaches the interior cheaply
+ * via its nearest anchor instead.
+ */
+export function selectAnchors(region: NavmeshRegion, maxAnchors = DEFAULT_MAX_ANCHORS): number[] {
+  const candidates = region.boundaryNodeIds.filter(id => region.boundaryNodeToVertex.has(id));
+  if (candidates.length === 0) return [];
+  if (candidates.length <= maxAnchors) return candidates;
+
+  const coord = (id: number): [number, number] => region.vertices[region.boundaryNodeToVertex.get(id)!];
+
+  const chosen: number[] = [candidates[0]];
+  const chosenSet = new Set(chosen);
+  const minDist = new Map<number, number>();
+  const [firstLat, firstLon] = coord(candidates[0]);
+  for (const id of candidates) {
+    const [lat, lon] = coord(id);
+    minDist.set(id, haversineMeters(lat, lon, firstLat, firstLon));
+  }
+
+  while (chosen.length < maxAnchors) {
+    let best = -1;
+    let bestD = -Infinity;
+    for (const id of candidates) {
+      if (chosenSet.has(id)) continue;
+      const d = minDist.get(id)!;
+      if (d > bestD) { bestD = d; best = id; }
+    }
+    if (best === -1) break;
+    chosen.push(best);
+    chosenSet.add(best);
+    const [blat, blon] = coord(best);
+    for (const id of candidates) {
+      if (chosenSet.has(id)) continue;
+      const [lat, lon] = coord(id);
+      const d = haversineMeters(lat, lon, blat, blon);
+      if (d < minDist.get(id)!) minDist.set(id, d);
+    }
+  }
+
+  return chosen;
 }
 
 // ---------------------------------------------------------------------------

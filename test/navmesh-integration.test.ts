@@ -205,3 +205,171 @@ describe('navmesh_regions consumption (integration)', () => {
     assert.ok(route.totalDistance! > 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Boundary-shortcut-sparsification regression (NEXT_PHASES.md). Real regions
+// have hundreds of ring-order boundary nodes by design (§1.3's k-NN chords
+// were deliberately abandoned in favor of ring-adjacency) — the confirmed
+// live-scenario regression was: (a) a fixed boundary-node-count precompute
+// cap silently disabled navmesh consumption entirely above 150 nodes, and
+// (b) even without the cap, ring-adjacency edges alone never gave two
+// *distant* boundary nodes a cheap way to reach each other, forcing the
+// router to zigzag the whole fine ring. This fixture is an NxN grid
+// triangulation (a real interior mesh, not a single-hub fan — a fan's
+// triangle-dual graph is topologically just the ring again, no shortcut is
+// geometrically reachable through it) whose perimeter alone already exceeds
+// the old cap, with only ring-adjacency edges pre-populated between
+// perimeter nodes (mirroring the real pipeline output) — so any interior
+// shortcut found here can only have come from `addAnchorShortcutEdges`.
+// ---------------------------------------------------------------------------
+
+describe('navmesh boundary-shortcut sparsification (regression)', () => {
+  const fixturesDir = './test/fixtures/navmesh-large';
+  const dbPath = path.join(fixturesDir, 'test_navmesh_large.sqlite');
+  const N = 40; // (N+1)x(N+1) vertex grid; perimeter = 4N = 160, past the old 150-node cap
+  const STEP_DEG = 0.002;
+
+  const idx = (r: number, c: number) => r * (N + 1) + c;
+  const vertices: Array<[number, number]> = [];
+  for (let r = 0; r <= N; r++) {
+    for (let c = 0; c <= N; c++) vertices.push([r * STEP_DEG, c * STEP_DEG]);
+  }
+  const triangles: Array<[number, number, number]> = [];
+  for (let r = 0; r < N; r++) {
+    for (let c = 0; c < N; c++) {
+      triangles.push([idx(r, c), idx(r, c + 1), idx(r + 1, c + 1)]);
+      triangles.push([idx(r, c), idx(r + 1, c + 1), idx(r + 1, c)]);
+    }
+  }
+
+  // Perimeter, walked in ring order: bottom row L->R, right column B->T,
+  // top row R->L, left column T->B (each corner counted once).
+  const perimeterIdx: number[] = [];
+  for (let c = 0; c < N; c++) perimeterIdx.push(idx(0, c));
+  for (let r = 0; r < N; r++) perimeterIdx.push(idx(r, N));
+  for (let c = N; c > 0; c--) perimeterIdx.push(idx(N, c));
+  for (let r = N; r > 0; r--) perimeterIdx.push(idx(r, 0));
+  const PERIMETER_COUNT = perimeterIdx.length; // 4N = 160
+
+  const rimNodeIds = perimeterIdx.map(i => nodeIdFor(vertices[i][0], vertices[i][1]));
+  const ringCoords = [...perimeterIdx, perimeterIdx[0]].map(i => [vertices[i][1], vertices[i][0]]);
+
+  let db: RoutingDatabase;
+  let warnings: string[] = [];
+  let originalWarn: typeof console.warn;
+
+  before(async () => {
+    if (!fs.existsSync(fixturesDir)) fs.mkdirSync(fixturesDir, { recursive: true });
+    const overlayPath = path.join(fixturesDir, 'user-edits.sqlite');
+    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+    if (fs.existsSync(overlayPath)) fs.unlinkSync(overlayPath);
+
+    const sdb = new DatabaseSync(dbPath);
+    const run = (sql: string, params: unknown[] = []) => sdb.prepare(sql).run(...(params as any[]));
+
+    run(`CREATE TABLE metadata (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, country TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL, description TEXT, last_update_date TEXT NOT NULL
+    )`);
+    run(`INSERT INTO metadata (country, name, description, last_update_date)
+         VALUES ('TEST', 'Large Navmesh Region', '(N+1)x(N+1) grid, 160-node perimeter', '2026-01-01T00:00:00Z')`);
+
+    run(`CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL, lon REAL, resolution REAL DEFAULT 0.0, node_depth REAL DEFAULT -1, region_id INTEGER)`);
+    run(`CREATE TABLE edges (
+      source INTEGER, target INTEGER, distance REAL,
+      min_depth REAL, max_air_draft REAL, min_width REAL,
+      cost_factor REAL DEFAULT 1.2, distance_to_land REAL,
+      edge_type_id INTEGER DEFAULT 0, traffic_mode INTEGER DEFAULT 0,
+      edge_kind_id INTEGER DEFAULT 0
+    )`);
+
+    for (let i = 0; i < PERIMETER_COUNT; i++) {
+      const [lat, lon] = vertices[perimeterIdx[i]];
+      run(`INSERT INTO nodes (id, lat, lon, region_id) VALUES (?, ?, ?, 1)`, [rimNodeIds[i], lat, lon]);
+    }
+    // Only ring-adjacency edges — same as the real pipeline's output — no
+    // pre-existing shortcuts between non-adjacent perimeter nodes.
+    for (let i = 0; i < PERIMETER_COUNT; i++) {
+      const j = (i + 1) % PERIMETER_COUNT;
+      const d = haversineMeters(vertices[perimeterIdx[i]][0], vertices[perimeterIdx[i]][1], vertices[perimeterIdx[j]][0], vertices[perimeterIdx[j]][1]);
+      run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES
+        (?, ?, ?, 5.0, -1, -1, 1.0, 9999, 0, 0, 1)`, [rimNodeIds[i], rimNodeIds[j], d]);
+      run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES
+        (?, ?, ?, 5.0, -1, -1, 1.0, 9999, 0, 0, 1)`, [rimNodeIds[j], rimNodeIds[i], d]);
+    }
+
+    run(`CREATE TABLE navmesh_regions (
+      id INTEGER PRIMARY KEY, region_id INTEGER, boundary_geometry TEXT,
+      vertices TEXT, triangles TEXT, triangle_adjacency TEXT,
+      boundary_node_ids TEXT, depth_ceiling_m REAL
+    )`);
+    run(`INSERT INTO navmesh_regions (region_id, boundary_geometry, vertices, triangles, triangle_adjacency, boundary_node_ids, depth_ceiling_m)
+         VALUES (1, ?, ?, ?, NULL, ?, 5.0)`, [
+      JSON.stringify({ type: 'Polygon', coordinates: [ringCoords] }),
+      JSON.stringify(vertices),
+      JSON.stringify(triangles),
+      JSON.stringify(rimNodeIds),
+    ]);
+    sdb.close();
+
+    warnings = [];
+    originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
+
+    db = new RoutingDatabase(fixturesDir);
+    await db.init();
+    await db.loadGraph();
+  });
+
+  after(async () => {
+    console.warn = originalWarn;
+    await db.close();
+    const overlayPath = path.join(fixturesDir, 'user-edits.sqlite');
+    for (const p of [dbPath, overlayPath]) {
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+  });
+
+  it('never disables navmesh consumption via a boundary-node-count cap (the confirmed regression)', () => {
+    assert.ok(!warnings.some(w => w.includes('exceeds precompute cap')),
+      `expected no precompute-cap warning, got: ${JSON.stringify(warnings)}`);
+  });
+
+  it('bounds anchor count well below the full boundary-node set', () => {
+    const region = db.getNavmeshRegions()[0];
+    assert.strictEqual(region.boundaryNodeIds.length, PERIMETER_COUNT);
+    assert.ok(region.anchorNodeIds.length <= 40, `expected <=40 anchors, got ${region.anchorNodeIds.length}`);
+    assert.ok(region.anchorNodeIds.length > 1);
+  });
+
+  it('gives two opposite-corner boundary nodes a direct single-hop edge, not a ~80-hop ring walk', () => {
+    // (0,0) and (N,N) are on opposite sides of the perimeter — with only
+    // ring-adjacency edges (the pre-fix graph), reaching one from the other
+    // requires walking ~half the perimeter (PERIMETER_COUNT/2 = 80 hops).
+    // The actual point of `addAnchorShortcutEdges` is turning that into a
+    // single precomputed edge; how close that edge's *distance* gets to the
+    // true geometric diagonal depends on navmesh.ts's corridor-search/funnel
+    // quality for a given mesh shape (out of scope here — validated
+    // separately against the real Zeeland pipeline output), so this only
+    // asserts the direct hop exists and isn't a pathological blow-up.
+    const oppositePos = Math.floor(PERIMETER_COUNT / 2);
+    const nodeA = rimNodeIds[0];
+    const nodeB = rimNodeIds[oppositePos];
+    const [latA, lonA] = vertices[perimeterIdx[0]];
+    const [latB, lonB] = vertices[perimeterIdx[oppositePos]];
+    const chord = haversineMeters(latA, lonA, latB, lonB);
+
+    const edge = db.getEdgeSync(nodeA, nodeB);
+    assert.ok(edge, 'expected a direct edge between opposite-corner nodes after the anchor-shortcut pass');
+    assert.ok(edge!.distance < chord * 2,
+      `expected a bounded shortcut distance, got ${edge!.distance}m (chord ${chord}m)`);
+  });
+});
+
+function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}

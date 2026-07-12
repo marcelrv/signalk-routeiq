@@ -352,49 +352,144 @@ export class RoutingDatabase {
    * Upgrade Phase 1's straight-line edge_kind_id=1 fallback edges between a
    * region's boundary nodes to the real funnel-computed taut path (spec §6's
    * "prefer the funnel-computed path over the fallback edges" runtime
-   * strategy) — done once here, at graph-load time, so astarSearch's
-   * per-edge relaxation loop never has to know navmesh regions exist at all.
+   * strategy), and add genuine interior shortcuts between the region's
+   * anchors (see NEXT_PHASES.md's "Boundary Shortcut Sparsification" fix) —
+   * done once here, at graph-load time, so astarSearch's per-edge relaxation
+   * loop never has to know navmesh regions exist at all.
    */
   private precomputeFunnelEdges(): void {
-    const MAX_BOUNDARY_NODES = 150; // see NEXT_PHASES.md: k-NN-capped, one small cluster per seam
     for (const region of this.navmeshRegions) {
-      if (region.boundaryNodeIds.length > MAX_BOUNDARY_NODES) {
-        console.warn(`[autoroute] navmesh region ${region.regionId}: ${region.boundaryNodeIds.length} boundary nodes exceeds precompute cap (${MAX_BOUNDARY_NODES}) — leaving straight-line fallback edges in place`);
-        continue;
-      }
+      this.upgradeRingBoundaryEdges(region);
+      this.addAnchorShortcutEdges(region);
+    }
+  }
 
-      const computed = new Map<string, Navmesh.FunnelResult>();
-      const boundarySet = new Set(region.boundaryNodeIds);
+  /** Upgrade existing ring-adjacency edge_kind_id=1 edges (Phase 1 only ever
+   *  creates these between ring-adjacent perimeter vertices) to their real
+   *  funnel-computed taut path. Cheap regardless of region size — each
+   *  boundary node has ~2 such edges (prev/next in the ring), not one per
+   *  pair, so there's no need to cap this by boundary-node count. */
+  private upgradeRingBoundaryEdges(region: Navmesh.NavmeshRegion): void {
+    const computed = new Map<string, Navmesh.FunnelResult>();
+    const boundarySet = new Set(region.boundaryNodeIds);
 
-      for (const nodeId of region.boundaryNodeIds) {
-        const edges = this.edgesBySource.get(nodeId);
-        if (!edges) continue;
-        for (const edge of edges) {
-          if (edge.edge_kind_id !== EDGE_KIND_NAVMESH_BOUNDARY) continue;
-          if (!boundarySet.has(edge.target)) continue;
+    for (const nodeId of region.boundaryNodeIds) {
+      const edges = this.edgesBySource.get(nodeId);
+      if (!edges) continue;
+      for (const edge of edges) {
+        if (edge.edge_kind_id !== EDGE_KIND_NAVMESH_BOUNDARY) continue;
+        if (!boundarySet.has(edge.target)) continue;
 
-          // Always compute in a canonical (lo -> hi) direction so the cache
-          // is correct regardless of which direction's edge row is visited
-          // first — orientation is then just "did I ask for lo or hi first".
-          const [lo, hi] = nodeId < edge.target ? [nodeId, edge.target] : [edge.target, nodeId];
-          const pairKey = `${lo}:${hi}`;
-          let result = computed.get(pairKey);
-          if (!result) {
-            result = Navmesh.funnelBetweenNodes(region, lo, hi) ?? undefined;
-            if (result) computed.set(pairKey, result);
-          }
-          if (!result) continue;
-
-          // Sanity guard: never let a degenerate funnel make routing worse
-          // than doing nothing — keep the original straight-line fallback.
-          if (result.distance > edge.distance * 3 + 50) continue;
-
-          edge.distance = result.distance;
-          const path = nodeId === lo ? result.path : [...result.path].reverse();
-          edge.path_points = path.slice(1, -1);
+        // Always compute in a canonical (lo -> hi) direction so the cache
+        // is correct regardless of which direction's edge row is visited
+        // first — orientation is then just "did I ask for lo or hi first".
+        const [lo, hi] = nodeId < edge.target ? [nodeId, edge.target] : [edge.target, nodeId];
+        const pairKey = `${lo}:${hi}`;
+        let result = computed.get(pairKey);
+        if (!result) {
+          result = Navmesh.funnelBetweenNodes(region, lo, hi) ?? undefined;
+          if (result) computed.set(pairKey, result);
         }
+        if (!result) continue;
+
+        // Sanity guard: never let a degenerate funnel make routing worse
+        // than doing nothing — keep the original straight-line fallback.
+        if (result.distance > edge.distance * 3 + 50) continue;
+
+        edge.distance = result.distance;
+        const path = nodeId === lo ? result.path : [...result.path].reverse();
+        edge.path_points = path.slice(1, -1);
       }
     }
+  }
+
+  /**
+   * Ring-adjacency edges alone only ever connect two *immediately adjacent*
+   * perimeter points — there was never a mechanism to cheaply cross a large
+   * region between two *distant* boundary nodes, which is exactly what's
+   * needed when a route crosses from one region, through a stitch point,
+   * into an adjacent one. Fix: a genuine interior "highway" between every
+   * pair of a small, bounded set of well-distributed anchors, plus a cheap
+   * link from every other boundary node to its nearest 1-2 anchors (by ring
+   * arc-distance — cheap index math, no funnel call needed to pick them).
+   */
+  private addAnchorShortcutEdges(region: Navmesh.NavmeshRegion): void {
+    const anchors = region.anchorNodeIds;
+    if (anchors.length < 2) return;
+
+    for (let i = 0; i < anchors.length; i++) {
+      for (let j = i + 1; j < anchors.length; j++) {
+        this.addFunnelShortcutEdge(region, anchors[i], anchors[j]);
+      }
+    }
+
+    const anchorSet = new Set(anchors);
+    const ringIndexById = new Map<number, number>();
+    region.boundaryNodeIds.forEach((id, idx) => ringIndexById.set(id, idx));
+    const anchorRingIndices = anchors
+      .map(id => ringIndexById.get(id))
+      .filter((idx): idx is number => idx !== undefined);
+    const n = region.boundaryNodeIds.length;
+
+    region.boundaryNodeIds.forEach((nodeId, idx) => {
+      if (anchorSet.has(nodeId)) return;
+      const nearest = anchorRingIndices
+        .map(ai => ({ ai, d: Math.min(Math.abs(ai - idx), n - Math.abs(ai - idx)) }))
+        .sort((a, b) => a.d - b.d)
+        .slice(0, 2);
+      for (const { ai } of nearest) {
+        this.addFunnelShortcutEdge(region, nodeId, region.boundaryNodeIds[ai]);
+      }
+    });
+  }
+
+  /** Insert a new funnel-computed shortcut between two boundary nodes of the
+   *  same region as a pair of directional in-memory edges (mirrors the shape
+   *  `addEdge` builds, minus the async DB round-trip — these are derived,
+   *  load-time-only edges, never persisted). No-op if a ring-adjacency
+   *  edge_kind_id=1 edge already connects the pair directly — that one is
+   *  handled (and upgraded) by `upgradeRingBoundaryEdges` instead. */
+  private addFunnelShortcutEdge(region: Navmesh.NavmeshRegion, nodeA: number, nodeB: number): void {
+    if (nodeA === nodeB) return;
+    const alreadyDirectEdge = this.edgesBySource.get(nodeA)?.some(
+      e => e.target === nodeB && e.edge_kind_id === EDGE_KIND_NAVMESH_BOUNDARY,
+    );
+    if (alreadyDirectEdge) return;
+
+    const result = Navmesh.funnelBetweenNodes(region, nodeA, nodeB);
+    if (!result) return;
+
+    const a = this.nodes.get(nodeA);
+    const b = this.nodes.get(nodeB);
+    if (!a || !b) return;
+
+    const forwardPath = result.path.slice(1, -1);
+    const reversePath = [...forwardPath].reverse();
+    const shared = {
+      distance: result.distance,
+      min_depth: region.depthCeilingM,
+      max_air_draft: -1,
+      min_width: -1,
+      cost_factor: 1.0,
+      distance_to_land: 9999,
+      edge_type_id: EDGE_TYPE_COASTAL,
+      traffic_mode: TRAFFIC_TWO_WAY,
+      edge_kind_id: EDGE_KIND_NAVMESH_BOUNDARY,
+    };
+
+    if (!this.edgesBySource.has(nodeA)) this.edgesBySource.set(nodeA, []);
+    this.edgesBySource.get(nodeA)!.push({
+      ...shared, source: nodeA, target: nodeB,
+      lat: b.lat, lon: b.lon, source_lat: a.lat, source_lon: a.lon,
+      path_points: forwardPath,
+    });
+
+    if (!this.edgesBySource.has(nodeB)) this.edgesBySource.set(nodeB, []);
+    this.edgesBySource.get(nodeB)!.push({
+      ...shared, source: nodeB, target: nodeA,
+      lat: a.lat, lon: a.lon, source_lat: b.lat, source_lon: b.lon,
+      path_points: reversePath,
+    });
   }
 
   async getNodeById(id: number): Promise<{ lat: number; lon: number; regionId: number; nodeDepth: number; resolution: number } | null> {
@@ -647,6 +742,21 @@ export class RoutingDatabase {
 
   funnelPathBetweenPoints(region: Navmesh.NavmeshRegion, latA: number, lonA: number, latB: number, lonB: number): Navmesh.FunnelResult | null {
     return Navmesh.funnelBetweenPoints(region, latA, lonA, latB, lonB);
+  }
+
+  /**
+   * Look up a precomputed navmesh shortcut edge (ring-adjacency upgrade or
+   * anchor shortcut — see `addAnchorShortcutEdges`) between two boundary
+   * nodes of the same region, if one exists. Lets a caller compose a cheap,
+   * non-live approximate cost to a non-anchor boundary node — live anchor
+   * result + this precomputed hop — instead of a live `funnelPathFromPoint`
+   * call per node (NEXT_PHASES.md's boundary-shortcut-sparsification fix).
+   */
+  getPrecomputedNavmeshShortcut(source: number, target: number): { distance: number; path_points?: Array<[number, number]> } | null {
+    const edge = this.edgesBySource.get(source)?.find(
+      e => e.target === target && e.edge_kind_id === EDGE_KIND_NAVMESH_BOUNDARY,
+    );
+    return edge ? { distance: edge.distance, path_points: edge.path_points } : null;
   }
 
   async searchPois(query: string, maxResults: number = 20): Promise<PoiResult[]> {

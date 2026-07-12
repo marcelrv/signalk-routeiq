@@ -172,6 +172,7 @@ describe('corridorSearch', () => {
       boundaryNodeIds: [],
       boundaryNodeToVertex: new Map(),
       vertexToBoundaryNode: new Map(),
+      anchorNodeIds: [],
       depthCeilingM: 0,
       bbox: { minLat: -90, minLon: -180, maxLat: 90, maxLon: 180 },
     };
@@ -193,6 +194,7 @@ describe('corridorSearch', () => {
       boundaryNodeIds: [],
       boundaryNodeToVertex: new Map(),
       vertexToBoundaryNode: new Map(),
+      anchorNodeIds: [],
       depthCeilingM: 0,
       bbox: { minLat: -90, minLon: -180, maxLat: 90, maxLon: 180 },
     };

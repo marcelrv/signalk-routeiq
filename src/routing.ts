@@ -4,7 +4,7 @@
  */
 
 import { EdgeRow, RoutingDatabase, getNodeTypeInt, NODE_TYPE_INLAND, EDGE_TYPE_COASTAL, POI_TYPE_BRIDGE, POI_TYPE_LOCK, TRAFFIC_TWO_WAY, TRAFFIC_ONE_WAY_REV } from './database.js';
-import type { FunnelResult } from './navmesh.js';
+import type { FunnelResult, NavmeshRegion } from './navmesh.js';
 import { bearingDeg, buildItinerary } from './itinerary.js';
 import { CurrentsClient, FlowField, KNOTS_TO_MS, TidesClient, prepareStationFlowField, prepareTidalFlowField } from './tides.js';
 import {
@@ -1082,6 +1082,50 @@ export class RoutingEngine {
   }
 
   /**
+   * Build the multi-candidate boundary-node seed map for a navmesh region a
+   * user point falls inside: a live `funnelPathFromPoint` call for each of
+   * the region's anchors, plus a cheap composed (anchor result + precomputed
+   * anchor<->node shortcut edge) cost for every other boundary node — never
+   * a second live call per node. See the boundary-shortcut-sparsification
+   * fix in NEXT_PHASES.md: this is what turns 695+713 uncached live calls
+   * into ~40, without narrowing the actual candidate set A* searches/tests
+   * against (narrowing that set is what caused the regression — see the
+   * comment at this method's call site).
+   */
+  private seedNavmeshCandidates(region: NavmeshRegion, lat: number, lon: number): Map<number, FunnelResult> | null {
+    const candidates = new Map<number, FunnelResult>();
+    for (const anchorId of region.anchorNodeIds) {
+      const r = this.db.funnelPathFromPoint(region, lat, lon, anchorId);
+      if (r) candidates.set(anchorId, r);
+    }
+
+    for (const nodeId of region.boundaryNodeIds) {
+      if (candidates.has(nodeId)) continue;
+      let bestDistance = Infinity;
+      let bestAnchorPrefix: FunnelResult | null = null;
+      let bestShortcut: { distance: number; path_points?: Array<[number, number]> } | null = null;
+      for (const [anchorId, anchorPrefix] of candidates) {
+        const shortcut = this.db.getPrecomputedNavmeshShortcut(anchorId, nodeId);
+        if (!shortcut) continue;
+        const total = anchorPrefix.distance + shortcut.distance;
+        if (total < bestDistance) {
+          bestDistance = total;
+          bestAnchorPrefix = anchorPrefix;
+          bestShortcut = shortcut;
+        }
+      }
+      if (!bestAnchorPrefix || !bestShortcut) continue;
+
+      const nodeCoord = this.db.getNodeSync(nodeId);
+      if (!nodeCoord) continue;
+      const path: Array<[number, number]> = [...bestAnchorPrefix.path, ...(bestShortcut.path_points ?? []), [nodeCoord.lat, nodeCoord.lon]];
+      candidates.set(nodeId, { distance: bestDistance, path });
+    }
+
+    return candidates.size > 0 ? candidates : null;
+  }
+
+  /**
    * Splice a funnel-computed prefix (user start point -> boundary node) and/or
    * suffix (boundary node -> user end point) onto an astarSearch result whose
    * first/last node was resolved via navmesh multi-candidate seeding. Mirrors
@@ -1150,24 +1194,19 @@ export class RoutingEngine {
     // pick the cheapest boundary node to enter/exit through, rather than
     // pre-selecting a single "nearest" one — important in concave regions
     // where nearest-by-straight-line isn't necessarily cheapest by graph cost.
-    let startCandidates: Map<number, FunnelResult> | null = null;
-    if (startRegion) {
-      startCandidates = new Map();
-      for (const nodeId of startRegion.boundaryNodeIds) {
-        const r = this.db.funnelPathFromPoint(startRegion, startLat, startLon, nodeId);
-        if (r) startCandidates.set(nodeId, r);
-      }
-      if (startCandidates.size === 0) startCandidates = null;
-    }
-    let endCandidates: Map<number, FunnelResult> | null = null;
-    if (endRegion) {
-      endCandidates = new Map();
-      for (const nodeId of endRegion.boundaryNodeIds) {
-        const r = this.db.funnelPathFromPoint(endRegion, endLat, endLon, nodeId);
-        if (r) endCandidates.set(nodeId, r);
-      }
-      if (endCandidates.size === 0) endCandidates = null;
-    }
+    // Every boundary node stays a valid candidate (dropping the rest would
+    // narrow the A* goal test to just the anchors, whose "last mile" funnel
+    // cost back to the literal point isn't reflected by the search
+    // heuristic — that let A* settle on a cheap-to-reach-but-far anchor with
+    // a large, unaccounted-for suffix, worse than not restricting at all).
+    // What NEXT_PHASES.md's fix actually buys is avoiding a *live*
+    // `funnelPathFromPoint` call per boundary node (695+713 of them,
+    // uncached, in the confirmed regression): only the ~40 anchors get a
+    // live call; every other node's cost is composed cheaply from the
+    // nearest live anchor result plus a precomputed anchor<->node shortcut
+    // edge (`addAnchorShortcutEdges`, database.ts).
+    const startCandidates = startRegion ? this.seedNavmeshCandidates(startRegion, startLat, startLon) : null;
+    const endCandidates = endRegion ? this.seedNavmeshCandidates(endRegion, endLat, endLon) : null;
     if (!startCandidates && startNode === null) {
       throw new Error('Could not find routing nodes near start point');
     }
