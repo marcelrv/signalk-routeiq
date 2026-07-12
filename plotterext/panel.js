@@ -349,8 +349,28 @@ async function save() {
 
 /* ---------- route creation ---------- */
 
+// Tracks the routeId created by the last createAndCalculate() call, so the
+// next one can clean it up instead of piling another draft onto the chart.
+let lastAutoRouteId = null;
+
+// Auto-created routes (Active destination / Go to waypoint / POI "Route")
+// are throwaway drafts. Only discard it if it's still an unsaved draft —
+// once the user Saves it, it's theirs and later auto-route clicks must
+// leave it alone.
+async function discardPendingAutoRoute() {
+  if (!lastAutoRouteId) return;
+  const prev = routes.find((r) => r.routeId === lastAutoRouteId);
+  lastAutoRouteId = null;
+  if (!prev || prev.saved) return;
+  try {
+    await client.call('route.hide', { routeId: prev.routeId });
+  } catch { /* already gone */ }
+  sessions.delete(prev.routeId);
+}
+
 async function createAndCalculate(name, destination, destName) {
   const pos = await vesselPosition();
+  await discardPendingAutoRoute();
   const { routeId } = await client.call('route.create', {
     name,
     points: [
@@ -358,6 +378,7 @@ async function createAndCalculate(name, destination, destName) {
       { position: [destination.longitude, destination.latitude], name: destName || 'Destination' },
     ],
   });
+  lastAutoRouteId = routeId;
   selectedId = routeId;
   await refreshRoutes(routeId);
   await calculate();

@@ -17,22 +17,10 @@
 - Extension assets are deliberately **not** under `/plugins/*` (admin-gated) and the package must **not** rely on the `signalk-webapp` keyword for them.
 - `averageSpeedKnots` and `defaultCoastDistance` are exposed to clients via `GET /router/config`; ETA in both UIs derives from the plugin-config average speed.
 
-## Python (backend/)
-- Always use `python3` (not `python`) when running scripts.
-- Always use `pip3` (not `pip`) when installing packages.
-- The backend has two scripts:
-  - `enc_preprocessor.py` — accepts `--input` and `--output`
-  - `nautical_routing_pipeline.py` — accepts `--input-dir`, `--output`, `--country`, `--name`, `--description`, `--tags`, `--contributor`, `--url`
-- Dependencies in `requirements.txt`. Install via `pip3 install --user --break-system-packages -r backend/requirements.txt`
-- No system `sudo` available in dev environment; use `--user` + `--break-system-packages` for pip installs.
-- **Preprocessor runtime**: `enc_preprocessor.py` takes a long time (often 10-30+ minutes depending on input size). The process may appear to hang — this is normal. Do NOT kill it early and assume it failed. Always let it run to completion. If the agent's session times out, the preprocessor step must be re-run from scratch in the next session before proceeding with other steps (e.g., the pipeline). Verify the output file exists before continuing.
-
-## Adaptive Quadtree Grid (coastal navmesh)
-- `nautical_routing_pipeline.py` uses adaptive quadtree subdivision (replacing the old fixed 0.01° grid).
-- Resolution: 0.005° (~500m) in open sea → 0.0002° (~20m) in narrow channels.
-- Subdivision criteria: narrowness (distance to nearest land), presence of centerlines, land/water boundary.
-- Nodes store `resolution` metadata in the SQLite DB; `node_type` is encoded in the node ID (see below).
-- Edges store `edge_type` ('coastal' or 'inland').
+## Data Pipeline (moved out of this repo)
+- The chart-ingestion/graph-generation pipeline (`enc_preprocessor.py`, `nautical_routing_pipeline.py`, `add_pois_to_db.py`, `deploy_to_data_repo.py`, `generate_coastline.py`) no longer lives here — it moved to its own repo, **signalk-router-pipeline** (local checkout: `/home/node/signalkdev/signalk-router-pipeline`). This repo (`autoroute`) now only contains the **runtime consumer** of the compiled `.sqlite` databases.
+- For pipeline architecture, usage, and data sources, see that repo's `README.md`. For the database schema this runtime must read (including fields not yet consumed here, like `source_tier`/`navmesh_regions`), see `signalk-router-data`'s `specs/routing-database-format-specification.md`.
+- Sections below (SQLite Schema, Deterministic Node IDs, Config) describe what the current runtime (`src/database.ts`, `src/routing.ts`) actually reads today — check the format spec for anything newer the pipeline may start emitting.
 
 ## Bounding-Box A* Search (runtime)
 - `routing.ts:astarSearch()` accepts an optional `bbox` parameter that prunes nodes outside the box.
@@ -65,59 +53,12 @@
 - `lineOfSightSearchRadius` (m, default 800): LOS node search radius
 
 ## Node.js / TypeScript (root, src/)
-- **No local node/npm** — use Docker for all Node.js commands:
-  ```
-  docker run --rm -v "$(pwd):/work" -w /work node:22 <command>
-  ```
-- **Always pass `-u "$(id -u):$(id -g)"`** so build output is owned by your user, not root.
-- **Always set `-e HOME=/tmp`** so npm cache (`/.npm`) doesn't cause EACCES (root-owned in node:22 image).
-- Package manager: `npm` (not yarn, pnpm) — runs via Docker.
-- Build: `docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/work" -w /work node:22 npm run build`
-- Dev: `docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/work" -w /work node:22 npm run dev`
-- Lint: `docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/work" -w /work node:22 npm run lint`
-- Format: `docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/work" -w /work node:22 npm run format`
-- Tests: `docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/work" -w /work node:22 npm test`
-  (for now: `node --test --test-force-exit dist-test/routing.test.js`)
-- Multi-step (build + test): `docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/work" -w /work node:22 sh -c "npm run build && npm test"`
+- Package manager: `npm` (not yarn, pnpm).
+- Scripts: `build`, `dev`, `lint`, `format`, `test` — see `package.json`.
+  (Tests for now: `node --test --test-force-exit dist-test/routing.test.js`)
 - All source in `src/`, compiled to `dist/`.
 - ES modules (`"type": "module"` in package.json).
 
-## Signal K Server Plugin Deployment
-- Container name: `signalk-server` (runs `signalk/signalk-server:latest`)
-- The dev directory is **bind-mounted** at `/home/node/.signalk/autoroute-dev` via `docker-compose.yml`.
-  This path is OUTSIDE `node_modules/` so npm doesn't treat the bind-mount as a managed package.
-- npm manages a `file:` symlink via `.signalk/package.json`:
-  ```
-  "signalk-autoroute": "file:autoroute-dev"
-  ```
-  which creates `node_modules/signalk-autoroute → ../autoroute-dev`.
-- npm preserves `file:` symlinks during its install-tree operations for other packages.
-- Build output in `dist/` is instantly visible to the SK server via the symlink.
-- Plugin config stored at: `/home/node/.signalk/plugin-config-data/signalk-autoroute.json`
-- Server data dir: `/home/node/.signalk/` (bind-mounted).
-- Signal K server restarts via `docker restart signalk-server`.
-
-### Deployment workflow (after code changes)
-One command: `bash deploy.sh`
-  — builds via Docker, then restarts the SK container.
-
-The container must be running first. If it isn't:
-```bash
-docker compose -f /home/node/signalkdev/autoroute/docker-compose.yml up -d
-```
-
-### First-time setup (fresh container)
-After `docker compose up -d`, run `npm install` once to create the `file:` symlink:
-```bash
-docker exec signalk-server sh -c "cd /home/node/.signalk && npm install"
-```
-Then `bash deploy.sh` to build and start using the plugin.
-
-### If the container ever needs to be recreated
-```bash
-docker compose -f /home/node/signalkdev/autoroute/docker-compose.yml up -d
-```
-Then follow the first-time setup above.
 
 ### Required `package.json` settings
 1. `"keywords": ["signalk-node-server-plugin"]` — **essential** for SK server to discover the plugin via `modulesWithKeyword()`.
@@ -132,45 +73,7 @@ Then follow the first-time setup above.
 - `coverage-map.png` shows all available regions (auto-generated by same script)
 - GitHub Action in `.github/workflows/generate-index.yml` auto-regenerates both on push
 - The plugin's frontend has a "Manage Routing Data" dialog that fetches the catalog and allows downloading/updating databases
-- Pipeline generates databases with `schema_version=2` which includes `boundary_geometry` and `bounding_box` in the metadata table (required for the coverage map)
-
-### Database CLI example (with new args):
-```bash
-python3 nautical_routing_pipeline.py \
-  --input-dir ./output_geojson \
-  --output ./netherlands.sqlite \
-  --country NL \
-  --name "Netherlands" \
-  --description "Dutch inland waterways and coastal waters based on ENCs" \
-  --tags '["rws","enc","inland","coastal"]' \
-  --contributor "Marcel Verpaalen" \
-  --url "https://github.com/marcelrv/signalk-router-data"
-```
-
-### Adding POIs to an existing database
-- `backend/add_pois_to_db.py` — standalone script that imports named POIs from the pipeline's GeoJSON layers into any existing autoroute-schema database. Extraction mirrors `nautical_routing_pipeline.py` exactly (same layers, name/point selection, deterministic MD5 ids, bridge subtype/height properties), so re-runs and overlapping regions deduplicate.
-- Each POI is linked to its nearest graph node (KD-tree lookup): `node_id` + `node_dist_m` are stored in the POI properties JSON when a node is within `--connect-radius` (default 500 m).
-- Bridge/lock POIs farther than `--snap-if-beyond` (default 120 m) from their nearest node are **moved onto that node** (original position kept as `orig_lat`/`orig_lon`), because `detectCrossings` in `src/routing.ts` only reports crossings within 150 m of a route vertex.
-- Usage:
-  ```bash
-  backend/.venv/bin/python3 backend/add_pois_to_db.py \
-    --db ./data/europe.sqlite \
-    --input-dir ./output_geojson \
-    [--dry-run] [--replace] [--layer bridge=/path/custom.geojson] \
-    [--skip-unconnected-types waterway,fairway]
-  ```
-
-### Deploy script for the data repo
-- `backend/deploy_to_data_repo.py` — gzips a `.sqlite` and places it in the `router-data/` folder structure, then regenerates `index.json`
-- Usage:
-  ```bash
-  python3 backend/deploy_to_data_repo.py \
-    --input ./netherlands.sqlite \
-    --continent europe \
-    --country nl \
-    --region netherlands \
-    --data-repo /home/node/signalkdev/router-data
-  ```
+- Building or updating a database, adding POIs, or deploying to this repo is done from **signalk-router-pipeline** now, not from here — see that repo's `README.md`.
 
 ### Known issues
 1. **`POST /router/push`** fails with *"PUT not supported for resources.routes.*"* — the SK server's delta PUT handler does not support writing to `resources.routes.*`. Use `putSelfPath(relPath, value, cb)` to attempt the write, but this currently returns 405.

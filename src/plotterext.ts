@@ -23,10 +23,13 @@ const PLUGIN_ID = 'signalk-autoroute';
  * read-only users can load them — /plugins is admin-gated by the server. */
 export const ASSET_BASE = `/plotterext/${PLUGIN_ID}`;
 
-// Module-level guards: start() runs again on every config save, but Express
-// mounts and the resource provider registration must only happen once.
+// Module-level guard: start() runs again on every config save, but the
+// Express mounts must only happen once. The resource provider registration
+// is NOT guarded this way — signalk-server unregisters a plugin's resource
+// providers on every stop() (see onStopHandlers in its plugin host), so
+// registerResourceProvider must be called again on every start(), per the
+// documented plugin contract. It's a cheap Map.set server-side, safe to repeat.
 let assetsMounted = false;
-let providerRegistered = false;
 // Presence in the plotterExtensions collection is the "enabled" signal for
 // hosts, so an empty list is returned while the plugin is stopped.
 let running = false;
@@ -81,37 +84,36 @@ function buildManifest(version: string) {
 
 /**
  * Register the plotterExtensions resource provider and mount the iframe
- * assets. Safe to call on every plugin start.
+ * assets. Safe to call on every plugin start: the resource provider
+ * registration is re-done every time (the server unregisters it on every
+ * stop), while the Express asset mounts are only ever mounted once.
  */
 export function registerPlotterExtension(app: ServerAPI, plugindir: string): void {
   const version = readPluginVersion(plugindir);
 
-  if (!providerRegistered) {
-    try {
-      app.registerResourceProvider({
-        type: 'plotterExtensions',
-        methods: {
-          listResources: async () => (running ? { [PLUGIN_ID]: buildManifest(version) } : {}),
-          getResource: async (id: string) => {
-            if (!running || id !== PLUGIN_ID) {
-              throw new Error(`No such plotterExtensions resource: ${id}`);
-            }
-            return buildManifest(version);
-          },
-          // The manifest is code, not user data.
-          setResource: async () => {
-            throw new Error(`${PLUGIN_ID} is a read-only plotterExtensions provider`);
-          },
-          deleteResource: async () => {
-            throw new Error(`${PLUGIN_ID} is a read-only plotterExtensions provider`);
-          },
+  try {
+    app.registerResourceProvider({
+      type: 'plotterExtensions',
+      methods: {
+        listResources: async () => (running ? { [PLUGIN_ID]: buildManifest(version) } : {}),
+        getResource: async (id: string) => {
+          if (!running || id !== PLUGIN_ID) {
+            throw new Error(`No such plotterExtensions resource: ${id}`);
+          }
+          return buildManifest(version);
         },
-      });
-      providerRegistered = true;
-      console.log('[autoroute] plotterExtensions manifest registered');
-    } catch (error) {
-      console.warn(`[autoroute] Failed to register plotterExtensions provider: ${error}`);
-    }
+        // The manifest is code, not user data.
+        setResource: async () => {
+          throw new Error(`${PLUGIN_ID} is a read-only plotterExtensions provider`);
+        },
+        deleteResource: async () => {
+          throw new Error(`${PLUGIN_ID} is a read-only plotterExtensions provider`);
+        },
+      },
+    });
+    console.log('[autoroute] plotterExtensions manifest registered');
+  } catch (error) {
+    console.warn(`[autoroute] Failed to register plotterExtensions provider: ${error}`);
   }
 
   if (!assetsMounted) {

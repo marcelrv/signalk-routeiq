@@ -21,19 +21,7 @@ An offline-first, vessel-aware nautical route planner designed to run natively a
 The project consists of three main parts:
 
 ### Part 1: Cloud Graph Generator (Data Pipeline)
-Python pipeline that processes S-57 ENCs and generates a navigable routing graph.
-
-**Location**: `backend/`
-
-**Technology**: Python, GDAL/OGR, NetworkX, SQLite, Shapely
-
-**Process**:
-1. Parse S-57 ENC vector data (depth areas, bridges, locks, fairways)
-2. Generate directed graph topology (inland centerlines + adaptive-resolution coastal navmesh via quadtree)
-3. Calculate edge attributes (depth, clearance, penalties)
-4. Export to compressed SQLite database
-
-**Key improvement:** The coastal navmesh uses adaptive quadtree subdivision (0.005° in open sea → 0.0002° in narrow channels) so routes follow channels precisely while keeping open-water nodes sparse.
+Python pipeline that processes S-57 ENCs and generates a navigable routing graph — lives in its own repo, [signalk-router-pipeline](https://github.com/marcelrv/signalk-router-pipeline), not in this one. Compiled databases it produces are published to [signalk-router-data](https://github.com/marcelrv/signalk-router-data) and downloaded by the plugin below at runtime; see the schema/consumption contract in that repo's `specs/routing-database-format-specification.md`.
 
 ### Part 2: Signal K Backend Plugin
 Node.js plugin running on the vessel's Signal K server.
@@ -68,7 +56,6 @@ User-facing application hosted by Signal K server.
 ### Prerequisites
 
 - Node.js >= 18.0.0
-- Python >= 3.9 (for Part 1 data pipeline)
 - Signal K Server (for plugin deployment)
 
 ### Installation
@@ -86,18 +73,10 @@ npm test
 
 ### Generating the Routing Database
 
-1. Unpack S-57 ENCs to a directory
-2. Run the ENC preprocessor:
-   ```bash
-   cd backend
-   python enc_preprocessor.py
-   ```
-3. Run the routing pipeline:
-   ```bash
-   python nautical_routing_pipeline.py
-   ```
-
-This generates `routing_graph.sqlite` in the data directory.
+Not done in this repo — see [signalk-router-pipeline](https://github.com/marcelrv/signalk-router-pipeline)
+for generating a database from source charts, or just download a
+pre-compiled one via the plugin's "Manage Routing Data" dialog (backed by
+[signalk-router-data](https://github.com/marcelrv/signalk-router-data)).
 
 ### Running the Plugin
 
@@ -153,9 +132,6 @@ Cost = Distance × FairwayMultiplier × DirectionalPenalty
 
 ```
 autoroute/
-├── backend/                 # Part 1: Python data pipeline
-│   ├── enc_preprocessor.py  # S-57 to GeoJSON converter
-│   └── nautical_routing_pipeline.py  # Adaptive quadtree graph generator
 ├── public/                  # Part 3: WebApp frontend
 │   ├── index.html
 │   ├── styles.css
