@@ -56,6 +56,18 @@ interface SearchState {
   parent: number | null;
 }
 
+// Tally of why edges were skipped/penalized during a search, so a failed
+// route can report its actual cause instead of a generic constraint guess.
+interface SearchSkipReasons {
+  land: number;
+  obstacle: number;
+  airDraft: number;
+  draft: number;
+  beam: number;
+  coastDistance: number;
+  bbox: number;
+}
+
 // Priority queue for A* (min-heap)
 class MinHeap<T> {
   private data: T[] = [];
@@ -87,6 +99,10 @@ class MinHeap<T> {
 
   isEmpty(): boolean {
     return this.data.length === 0;
+  }
+
+  peek(): T | undefined {
+    return this.data[0];
   }
 
   private bubbleUp(index: number): void {
@@ -422,9 +438,10 @@ export class RoutingEngine {
             undefined,
             env,
           );
-        } catch {
+        } catch (e) {
+          const cause = e instanceof Error ? e.message : String(e);
           throw new Error(
-            'No route found through the primary waterway network between the connection points.'
+            `No route found through the primary waterway network between the connection points: ${cause}`
           );
         }
       }
@@ -1370,6 +1387,7 @@ export class RoutingEngine {
     let reachedNode: number | null = null;
     let iterations = 0;
     const maxIterations = 5000000; // Safety limit (5000K suffices for trans-continental routes like NL→Italy ~2000nm)
+    const skipReasons: SearchSkipReasons = { land: 0, obstacle: 0, airDraft: 0, draft: 0, beam: 0, coastDistance: 0, bbox: 0 };
 
     // Ensure start is inside the bounding box (skipped for navmesh-resolved
     // starts — the bbox was already expanded to cover the whole region above).
@@ -1380,21 +1398,59 @@ export class RoutingEngine {
       }
     }
 
+    // Best true total cost found so far for finishing the route, and the
+    // node it finishes through — see the goal-test note below for why this
+    // can't just stop on the first candidate touched.
+    let bestGoalCost = Infinity;
+
     while (!openSet.isEmpty() && iterations < maxIterations) {
       iterations++;
-      const current = openSet.pop()!;
 
-      if (current.nodeId === endNode || (endCandidates?.has(current.nodeId) ?? false)) {
-        goalReached = true;
-        reachedNode = current.nodeId;
-        break;
+      // Once any goal candidate is known, no future pop can beat it once the
+      // open set's best remaining f (an admissible lower bound on true
+      // remaining cost, including any navmesh suffix) is no better than that
+      // candidate's already-known true total — stop.
+      if (reachedNode !== null) {
+        const top = openSet.peek();
+        if (!top || top.f >= bestGoalCost) break;
       }
+
+      const current = openSet.pop()!;
 
       if (closedSet.has(current.nodeId)) {
         continue;
       }
 
       closedSet.add(current.nodeId);
+
+      // A node finishes the route one of two ways: it IS the literal
+      // nearest-graph-node target (suffix cost 0), or it's one of the
+      // destination navmesh region's boundary-node candidates, whose own
+      // precomputed funnel "suffix" (that boundary node -> the literal end
+      // point, from seedNavmeshCandidates) still has to be paid before the
+      // journey is actually over. Reaching *some* boundary node cheaply via
+      // the graph does not mean the cheapest finish has been found — a
+      // pricier-to-reach boundary node can still be cheaper overall if its
+      // own suffix is much shorter (e.g. one that's actually close to the
+      // literal end point vs. one that's merely close by graph distance).
+      // Comparing true totals here (instead of stopping on first touch) is
+      // the fix for a real regression: the old immediate-stop let A* settle
+      // for whichever boundary node was cheapest to reach by graph alone,
+      // even when that meant crossing a heavily constraint-penalized edge
+      // while a clean, only-slightly-more-expensive-to-reach boundary node
+      // (e.g. next to an opening bridge) sat unexplored in the open set.
+      const suffix = endCandidates?.get(current.nodeId);
+      let candidateTotal: number | null = null;
+      if (current.nodeId === endNode) candidateTotal = current.g;
+      if (suffix !== undefined) {
+        const withSuffix = current.g + suffix.distance;
+        if (candidateTotal === null || withSuffix < candidateTotal) candidateTotal = withSuffix;
+      }
+      if (candidateTotal !== null && candidateTotal < bestGoalCost) {
+        bestGoalCost = candidateTotal;
+        reachedNode = current.nodeId;
+        goalReached = true;
+      }
 
       // Get outgoing edges from current node
       const edges = await this.db.getOutgoingEdges(current.nodeId);
@@ -1406,11 +1462,12 @@ export class RoutingEngine {
 
         // Bounding box check — skip nodes outside the box
         if (bbox && !isInsideBBox(edge.lat, edge.lon, bbox)) {
+          skipReasons.bbox++;
           continue;
         }
 
         // Apply soft safety constraints
-        const penalty = this.getEdgePenalty(edge, minCoastDistanceMeters, dims);
+        const penalty = this.getEdgePenalty(edge, minCoastDistanceMeters, dims, skipReasons);
         if (penalty === -1) {
           continue;
         }
@@ -1471,9 +1528,32 @@ export class RoutingEngine {
     }
 
     if (!goalReached || reachedNode === null) {
+      // Report what the search actually ran into instead of always blaming
+      // vessel constraints — a disconnected graph, an undersized bounding
+      // box, or a genuine land/obstacle block all hit this same failure
+      // path, and previously got the identical generic message regardless.
+      const causes: string[] = [];
+      if (skipReasons.land > 0) causes.push(`${skipReasons.land} edge(s) blocked by land`);
+      if (skipReasons.obstacle > 0) causes.push(`${skipReasons.obstacle} edge(s) blocked by an obstacle`);
+      if (skipReasons.draft > 0) causes.push(`${skipReasons.draft} edge(s) too shallow for draft ${dims.draft}m`);
+      if (skipReasons.airDraft > 0) causes.push(`${skipReasons.airDraft} edge(s) with insufficient air draft for airDraft ${dims.airDraft}m`);
+      if (skipReasons.beam > 0) causes.push(`${skipReasons.beam} edge(s) too narrow for beam ${dims.beam}m`);
+      if (skipReasons.coastDistance > 0) causes.push(`${skipReasons.coastDistance} edge(s) closer to shore than the requested minCoastDistance`);
+      if (skipReasons.bbox > 0) causes.push(`${skipReasons.bbox} edge(s) outside the current search bounding box`);
+
+      let detail: string;
+      if (causes.length === 0) {
+        detail = iterations >= maxIterations
+          ? 'the search exceeded its iteration limit before finding a path — the area may be too large for the current bounding box.'
+          : 'the destination appears unreachable from the start — the graph may be disconnected here (no edges connect the two areas), independent of vessel size or coast-distance settings.';
+      } else {
+        detail = `during the search, ran into: ${causes.join(', ')}.` +
+          (iterations >= maxIterations ? ' The search also exceeded its iteration limit before finishing.' : '');
+      }
+
       throw new Error(
-        `No route found between the given points with current constraints. ` +
-        `Try reducing minCoastDistance or checking vessel dimensions (draft=${dims.draft}m, beam=${dims.beam}m, airDraft=${dims.airDraft}m).`
+        `No route found between the given points — ${detail} ` +
+        `(vessel dims: draft=${dims.draft}m, beam=${dims.beam}m, airDraft=${dims.airDraft}m, minCoastDistance=${(minCoastDistanceMeters / 1852).toFixed(2)}nm)`
       );
     }
 
@@ -1510,20 +1590,41 @@ export class RoutingEngine {
     return result;
   }
 
-  private getEdgePenalty(edge: EdgeRow & { lat: number; lon: number }, minCoastDistanceMeters: number, dims: VesselDimensions): number {
-    if (edge.crosses_land === 1) return -1;
-    if (edge.crosses_obstacle === 1) return -1;
+  private getEdgePenalty(
+    edge: EdgeRow & { lat: number; lon: number },
+    minCoastDistanceMeters: number,
+    dims: VesselDimensions,
+    skipReasons?: SearchSkipReasons,
+  ): number {
+    if (edge.crosses_land === 1) {
+      if (skipReasons) skipReasons.land++;
+      return -1;
+    }
+    if (edge.crosses_obstacle === 1) {
+      if (skipReasons) skipReasons.obstacle++;
+      return -1;
+    }
 
     let penalty = 0;
 
     if (typeof edge.max_air_draft === 'number' && edge.max_air_draft >= 0 && edge.max_air_draft < (dims.airDraft || 0) + this.config.safetyMarginAirDraft) {
       penalty += 1000000;
+      if (skipReasons) skipReasons.airDraft++;
     }
 
     const minDepth = (dims.draft || 2.0) + this.config.safetyMarginDraft;
-    if (typeof edge.min_depth === 'number' && edge.min_depth >= 0 && edge.min_depth < minDepth) penalty += 1000000;
-    if (typeof edge.min_width === 'number' && edge.min_width >= 0 && edge.min_width < (dims.beam || 4.0) + this.config.safetyMarginBeam) penalty += 1000000;
-    if (edge.edge_type_id === EDGE_TYPE_COASTAL && edge.distance_to_land < minCoastDistanceMeters) penalty += 50000;
+    if (typeof edge.min_depth === 'number' && edge.min_depth >= 0 && edge.min_depth < minDepth) {
+      penalty += 1000000;
+      if (skipReasons) skipReasons.draft++;
+    }
+    if (typeof edge.min_width === 'number' && edge.min_width >= 0 && edge.min_width < (dims.beam || 4.0) + this.config.safetyMarginBeam) {
+      penalty += 1000000;
+      if (skipReasons) skipReasons.beam++;
+    }
+    if (edge.edge_type_id === EDGE_TYPE_COASTAL && edge.distance_to_land < minCoastDistanceMeters) {
+      penalty += 50000;
+      if (skipReasons) skipReasons.coastDistance++;
+    }
 
     return penalty;
   }

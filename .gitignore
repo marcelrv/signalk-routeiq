@@ -37,6 +37,14 @@ output_geojson/
 
 # Test fixtures
 test/fixtures/*.sqlite
+
+# Exception: a real (not synthetic) pipeline-generated database, committed
+# deliberately so the Zeelandbrug opening-bridge regression test exercises
+# genuine navmesh/skeleton geometry — the bugs it guards against (SSFA
+# portal-vertex swap, A* goal-test ignoring funnel suffix cost, mariculture
+# obstacle over-blocking) only ever surfaced on a real generated database,
+# never on the small synthetic fixtures used by the other navmesh tests.
+!test/fixtures/zeelandbrug/netherlands.sqlite
 **/repomix-output.xml
 **/*.pyc
 backend/__pycache__/nautical_routing_pipeline.cpython-312.pyc

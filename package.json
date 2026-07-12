@@ -6,7 +6,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc && tsc test/routing.test.ts test/navmesh.test.ts test/navmesh-integration.test.ts --outDir dist-test --moduleResolution node --module es2022 --target es2022 --declaration --declarationMap --sourceMap --esModuleInterop --strict --skipLibCheck",
+    "build": "tsc && tsc test/routing.test.ts test/navmesh.test.ts test/navmesh-integration.test.ts test/zeelandbrug.test.ts --outDir dist-test --moduleResolution node --module es2022 --target es2022 --declaration --declarationMap --sourceMap --esModuleInterop --strict --skipLibCheck",
     "build:watch": "tsc --watch",
     "start": "node dist/index.js",
     "dev": "ts-node --esm src/index.ts",
@@ -14,7 +14,7 @@
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
-    "test": "node --test --test-force-exit dist-test/routing.test.js dist-test/navmesh.test.js dist-test/navmesh-integration.test.js",
+    "test": "node --test --test-force-exit dist-test/routing.test.js dist-test/navmesh.test.js dist-test/navmesh-integration.test.js dist-test/zeelandbrug.test.js",
     "test:unit": "node --test --test-force-exit dist-test/unit/*.test.js",
     "test:integration": "node --test --test-force-exit dist-test/integration/*.test.js",
     "deploy": "bash deploy.sh"

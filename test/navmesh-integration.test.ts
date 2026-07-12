@@ -186,13 +186,27 @@ describe('navmesh_regions consumption (integration)', () => {
     });
     // Each polyline hop of the bent funnel path becomes its own per-segment
     // feature (splitToSegmentFeatures splits on segments, not on the whole
-    // route) — a bent path spanning N points yields N-1 features.
-    assert.ok(route.features.length > 1, `expected a bent multi-feature path, got ${route.features.length}`);
+    // route) — a bent path spanning N points yields N-1 features. The taut
+    // (correct) path around this L's reflex corner is exactly 3 points —
+    // start, the corner at P3=(1,1), end — i.e. 2 features / 4 coordinates
+    // total. A buggy funnel that hugs extra portal vertices instead of
+    // cutting straight to the corner would produce more than that; a
+    // straight 2-point line (no bend at all) would incorrectly cut through
+    // the L's missing notch. This is a direct regression guard for the
+    // left/right portal-vertex swap bug fixed in navmesh.ts's funnel()
+    // (see NEXT_PHASES.md Phase 2 Hardening Round 3).
+    assert.strictEqual(route.features.length, 2, `expected exactly one bend (2 features), got ${route.features.length}`);
     const totalCoords = route.features.reduce((n, f) => n + f.geometry.coordinates.length, 0);
-    assert.ok(totalCoords > 4, `expected a bent funnel path, got ${totalCoords} coordinates across features`);
+    assert.strictEqual(totalCoords, 4, `expected the minimal taut bent path (4 coordinates), got ${totalCoords}`);
     const [startLon, startLat] = route.features[0].geometry.coordinates[0];
     assert.ok(Math.abs(startLat - 0.5) < 1e-9 && Math.abs(startLon - 2) < 1e-9,
       'route should start exactly at the requested interior point');
+    const [bendLon, bendLat] = route.features[0].geometry.coordinates[1];
+    assert.ok(Math.abs(bendLat - P3[0]) < 1e-6 && Math.abs(bendLon - P3[1]) < 1e-6,
+      `expected the bend to sit exactly at the reflex corner P3=(${P3[0]},${P3[1]}), got (${bendLat},${bendLon})`);
+    const directDistance = haversine(0.5, 2, P3[0], P3[1]) + haversine(P3[0], P3[1], 2, 0.5);
+    assert.ok(Math.abs(route.totalDistance! - directDistance) < 1,
+      `expected the taut two-segment distance ~${directDistance.toFixed(1)}m, got ${route.totalDistance}m (inflation indicates the funnel is hugging extra vertices)`);
   });
 
   it('non-navmesh routing on the plain fixture is unaffected', async () => {

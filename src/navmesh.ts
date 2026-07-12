@@ -509,8 +509,8 @@ export function funnel(
       // indicates caller-constructed input, not a search result — fail safe.
       return [start, end];
     }
-    const vLeft = region.vertices[edge.b];
-    const vRight = region.vertices[edge.a];
+    const vLeft = region.vertices[edge.a];
+    const vRight = region.vertices[edge.b];
     portals.push({ left: proj(vLeft[0], vLeft[1]), right: proj(vRight[0], vRight[1]) });
   }
   portals.push({ left: endP, right: endP });
