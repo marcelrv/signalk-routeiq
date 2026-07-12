@@ -249,6 +249,9 @@ traffic dir and isoneway --> combine 1,2,3
 enum table 'field', id, 'desscription' + helper function
 direction_penalty
 
+Only load the needed databases, not all of them all the time
+add a extra costs field, or use existing field in a more extensive way (r.g. the direction field)
+
 
 'edge type to id'
 

@@ -48,3 +48,13 @@ signalk-autoroute-0.1.0.tgz
 
 # Private/local-only scripts — never commit
 backend/local_scripts/
+
+# Machine-specific agent notes — never commit
+AGENTS.local.md
+.claude/settings.local.json
+
+# Private/local-only planning notes — never commit
+todo.local.md
+
+# Private/local-only reference implementation — never commit
+node-server/
