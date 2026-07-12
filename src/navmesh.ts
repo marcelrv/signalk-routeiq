@@ -356,19 +356,45 @@ class MinHeap<T> {
   isEmpty(): boolean { return this.data.length === 0; }
 }
 
+/**
+ * Multi-source/sink A* over the triangle dual graph. Was a plain Dijkstra
+ * (score = distance-so-far only) until Phase 2 Hardening Round 4 found it
+ * dominating load time on large regions (a single ~5,000-boundary-node
+ * region cost ~190s of a ~4min full-scale load, almost entirely here) —
+ * anchor-anchor shortcuts are deliberately between far-apart points
+ * (farthest-point sampling), which is exactly the case where unguided
+ * Dijkstra has to expand most of a large mesh before reaching the target.
+ * Adding a straight-line-distance-to-nearest-end-candidate heuristic makes
+ * this A* instead: since edge weights are haversine distances between
+ * triangle centroids (a metric satisfying the triangle inequality), the
+ * heuristic is admissible and consistent, so the result is provably
+ * identical to the old Dijkstra's — this is a pure speedup, not an
+ * approximation. (See NEXT_PHASES.md, "Phase 2 Hardening, Round 4".)
+ */
 export function corridorSearch(region: NavmeshRegion, startCandidates: number[], endCandidates: number[]): number[] | null {
   if (startCandidates.length === 0 || endCandidates.length === 0) return null;
   const endSet = new Set(endCandidates);
   for (const s of startCandidates) if (endSet.has(s)) return [s];
 
-  const dist = new Map<number, number>();
+  const endCentroids = endCandidates.map(t => region.triangleCentroids[t]);
+  const heuristic = (tri: number): number => {
+    const [lat, lon] = region.triangleCentroids[tri];
+    let best = Infinity;
+    for (const [elat, elon] of endCentroids) {
+      const d = haversineMeters(lat, lon, elat, elon);
+      if (d < best) best = d;
+    }
+    return best;
+  };
+
+  const gScore = new Map<number, number>();
   const prev = new Map<number, number>();
   const visited = new Set<number>();
-  const heap = new MinHeap<{ tri: number; d: number }>(x => x.d);
+  const heap = new MinHeap<{ tri: number; g: number; f: number }>(x => x.f);
 
   for (const s of startCandidates) {
-    if (!dist.has(s) || dist.get(s)! > 0) dist.set(s, 0);
-    heap.push({ tri: s, d: 0 });
+    if (!gScore.has(s) || gScore.get(s)! > 0) gScore.set(s, 0);
+    heap.push({ tri: s, g: 0, f: heuristic(s) });
   }
 
   while (!heap.isEmpty()) {
@@ -392,11 +418,11 @@ export function corridorSearch(region: NavmeshRegion, startCandidates: number[],
       const [clat, clon] = region.triangleCentroids[cur.tri];
       const [nlat, nlon] = region.triangleCentroids[neighbor];
       const w = haversineMeters(clat, clon, nlat, nlon);
-      const nd = cur.d + w;
-      if (!dist.has(neighbor) || nd < dist.get(neighbor)!) {
-        dist.set(neighbor, nd);
+      const ng = cur.g + w;
+      if (!gScore.has(neighbor) || ng < gScore.get(neighbor)!) {
+        gScore.set(neighbor, ng);
         prev.set(neighbor, cur.tri);
-        heap.push({ tri: neighbor, d: nd });
+        heap.push({ tri: neighbor, g: ng, f: ng + heuristic(neighbor) });
       }
     }
   }

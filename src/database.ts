@@ -410,8 +410,8 @@ export class RoutingDatabase {
    * needed when a route crosses from one region, through a stitch point,
    * into an adjacent one. Fix: a genuine interior "highway" between every
    * pair of a small, bounded set of well-distributed anchors, plus a cheap
-   * link from every other boundary node to its nearest 1-2 anchors (by ring
-   * arc-distance — cheap index math, no funnel call needed to pick them).
+   * link from every other boundary node to its nearest 1-2 anchors (by real
+   * geometric distance — see Round 4 comment below on why not ring index).
    */
   private addAnchorShortcutEdges(region: Navmesh.NavmeshRegion): void {
     const anchors = region.anchorNodeIds;
@@ -423,22 +423,31 @@ export class RoutingDatabase {
       }
     }
 
+    // Pick each non-anchor boundary node's nearest anchors by real (haversine)
+    // geometric distance, not ring arc-index. Round 4 found ring arc-distance
+    // a poor proxy on Zeeland's convoluted coastline — arc-adjacent doesn't
+    // mean geometrically close — which both picked a lower-quality "nearest"
+    // anchor and made its corridor search needlessly expensive (a genuinely
+    // distant target visits far more of the triangle mesh). The distance
+    // computation itself is 40 cheap haversine calls per node, negligible
+    // next to the corridor search it feeds.
     const anchorSet = new Set(anchors);
-    const ringIndexById = new Map<number, number>();
-    region.boundaryNodeIds.forEach((id, idx) => ringIndexById.set(id, idx));
-    const anchorRingIndices = anchors
-      .map(id => ringIndexById.get(id))
-      .filter((idx): idx is number => idx !== undefined);
-    const n = region.boundaryNodeIds.length;
+    const anchorCoords: Array<{ id: number; pos: { lat: number; lon: number } }> = [];
+    for (const id of anchors) {
+      const pos = this.nodes.get(id);
+      if (pos) anchorCoords.push({ id, pos });
+    }
 
-    region.boundaryNodeIds.forEach((nodeId, idx) => {
+    region.boundaryNodeIds.forEach((nodeId) => {
       if (anchorSet.has(nodeId)) return;
-      const nearest = anchorRingIndices
-        .map(ai => ({ ai, d: Math.min(Math.abs(ai - idx), n - Math.abs(ai - idx)) }))
+      const nodePos = this.nodes.get(nodeId);
+      if (!nodePos) return;
+      const nearest = anchorCoords
+        .map(a => ({ id: a.id, d: this.haversineMeters(nodePos.lat, nodePos.lon, a.pos.lat, a.pos.lon) }))
         .sort((a, b) => a.d - b.d)
         .slice(0, 2);
-      for (const { ai } of nearest) {
-        this.addFunnelShortcutEdge(region, nodeId, region.boundaryNodeIds[ai]);
+      for (const { id } of nearest) {
+        this.addFunnelShortcutEdge(region, nodeId, id);
       }
     });
   }
