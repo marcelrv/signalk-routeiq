@@ -6,7 +6,6 @@ interface NodeRow {
   lat: number;
   lon: number;
   node_depth: number;
-  resolution: number;
   region_id?: number;
 }
 
@@ -121,7 +120,7 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
           const db = new DatabaseSync(overlayPath, { open: true });
           db.prepare(`CREATE TABLE IF NOT EXISTS nodes (
             id INTEGER PRIMARY KEY, lat REAL, lon REAL,
-            node_depth REAL DEFAULT -1, resolution REAL DEFAULT 0
+            node_depth REAL DEFAULT -1
           )`).run();
           db.prepare(`CREATE TABLE IF NOT EXISTS edges (
             source INTEGER, target INTEGER,
@@ -191,11 +190,11 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         const regionIdCol = hasRegionId ? 'region_id' : '0 AS region_id';
         const allNodes: NodeRow[] = [];
         for (const h of handles) {
-          allNodes.push(...h.db.prepare(`SELECT id, lat, lon, node_depth, resolution, ${regionIdCol} FROM nodes`).all() as unknown as NodeRow[]);
+          allNodes.push(...h.db.prepare(`SELECT id, lat, lon, node_depth, ${regionIdCol} FROM nodes`).all() as unknown as NodeRow[]);
         }
         // Merge in overlay-added nodes (region_id = 0)
         if (overlayHandle) {
-          const overlayNodes = overlayHandle.db.prepare('SELECT id, lat, lon, node_depth, resolution FROM nodes').all() as unknown as Array<{ id: number; lat: number; lon: number; node_depth: number; resolution: number }>;
+          const overlayNodes = overlayHandle.db.prepare('SELECT id, lat, lon, node_depth FROM nodes').all() as unknown as Array<{ id: number; lat: number; lon: number; node_depth: number }>;
           for (const n of overlayNodes) {
             allNodes.push({ ...n, region_id: 0 } as NodeRow);
           }
@@ -341,13 +340,13 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
       }
       case 'updateNode': {
         if (!overlayHandle) throw new Error('Overlay not open');
-        const { nodeId, node_depth, resolution } = payload!;
+        const { nodeId, node_depth } = payload!;
         // Ensure node exists in overlay (copy from region DB if needed)
         overlayHandle.db.prepare(
-          'INSERT OR IGNORE INTO nodes (id, lat, lon, node_depth, resolution) VALUES (?, ?, ?, ?, ?)'
-        ).run(nodeId, payload!.lat ?? 0, payload!.lon ?? 0, -1, 0);
-        overlayHandle.db.prepare('UPDATE nodes SET node_depth = ?, resolution = ? WHERE id = ?')
-          .run(node_depth ?? -1, resolution ?? 0, nodeId);
+          'INSERT OR IGNORE INTO nodes (id, lat, lon, node_depth) VALUES (?, ?, ?, ?)'
+        ).run(nodeId, payload!.lat ?? 0, payload!.lon ?? 0, -1);
+        overlayHandle.db.prepare('UPDATE nodes SET node_depth = ? WHERE id = ?')
+          .run(node_depth ?? -1, nodeId);
         parentPort!.postMessage({ id, type, result: { success: true } });
         break;
       }
@@ -412,10 +411,10 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
       }
       case 'insertNode': {
         if (!overlayHandle) throw new Error('Overlay not open');
-        const { id: nodeId, lat, lon, node_depth, resolution } = payload!;
+        const { id: nodeId, lat, lon, node_depth } = payload!;
         overlayHandle.db.prepare(
-          'INSERT OR REPLACE INTO nodes (id, lat, lon, node_depth, resolution) VALUES (?, ?, ?, ?, ?)'
-        ).run(nodeId, lat, lon, node_depth ?? -1, resolution ?? 0);
+          'INSERT OR REPLACE INTO nodes (id, lat, lon, node_depth) VALUES (?, ?, ?, ?)'
+        ).run(nodeId, lat, lon, node_depth ?? -1);
         parentPort!.postMessage({ id, type, result: { success: true } });
         break;
       }

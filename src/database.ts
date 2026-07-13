@@ -86,7 +86,7 @@ export class RoutingDatabase {
   private messageIdCounter = 0;
   private pending = new Map<number, { resolve: (value: any) => void; reject: (reason: any) => void }>();
   private dbDir: string;
-  private nodes: Map<number, { lat: number; lon: number; regionId: number; nodeDepth: number; resolution: number }> = new Map();
+  private nodes: Map<number, { lat: number; lon: number; regionId: number; nodeDepth: number }> = new Map();
   private edgesBySource: Map<number, Array<EdgeRow & { lat: number; lon: number }>> = new Map();
   private pois: PoiRow[] = [];
   private navmeshRegions: Navmesh.NavmeshRegion[] = [];
@@ -294,9 +294,9 @@ export class RoutingDatabase {
   }
 
   async loadGraph(): Promise<void> {
-    const allNodes: Array<{ id: number; lat: number; lon: number; node_depth: number; resolution: number; region_id?: number }> = await this.sendMessage('loadNodes');
+    const allNodes: Array<{ id: number; lat: number; lon: number; node_depth: number; region_id?: number }> = await this.sendMessage('loadNodes');
     for (const n of allNodes) {
-      this.nodes.set(n.id, { lat: n.lat, lon: n.lon, regionId: n.region_id ?? 0, nodeDepth: n.node_depth, resolution: n.resolution });
+      this.nodes.set(n.id, { lat: n.lat, lon: n.lon, regionId: n.region_id ?? 0, nodeDepth: n.node_depth });
     }
 
     // Apply overlay deletions — remove nodes/edges the user deleted
@@ -501,14 +501,14 @@ export class RoutingDatabase {
     });
   }
 
-  async getNodeById(id: number): Promise<{ lat: number; lon: number; regionId: number; nodeDepth: number; resolution: number } | null> {
+  async getNodeById(id: number): Promise<{ lat: number; lon: number; regionId: number; nodeDepth: number } | null> {
     if (this.graphLoaded) {
       return this.nodes.get(id) || null;
     }
     return null;
   }
 
-  getNodeSync(id: number): { lat: number; lon: number; regionId: number; nodeDepth: number; resolution: number } | null {
+  getNodeSync(id: number): { lat: number; lon: number; regionId: number; nodeDepth: number } | null {
     if (!this.graphLoaded) {
       throw new Error('Graph must be loaded for synchronous node lookup');
     }
@@ -806,13 +806,12 @@ export class RoutingDatabase {
     minLat: number, minLon: number,
     maxLat: number, maxLon: number,
     limit: number = 5000,
-  ): Promise<Array<{ id: number; lat: number; lon: number; resolution: number; min_depth: number; region_id: number }>> {
-    const results: Array<{ id: number; lat: number; lon: number; resolution: number; min_depth: number; region_id: number }> = [];
+  ): Promise<Array<{ id: number; lat: number; lon: number; min_depth: number; region_id: number }>> {
+    const results: Array<{ id: number; lat: number; lon: number; min_depth: number; region_id: number }> = [];
     for (const [id, c] of this.nodes) {
       if (c.lat >= minLat && c.lat <= maxLat && c.lon >= minLon && c.lon <= maxLon) {
         results.push({
           id, lat: c.lat, lon: c.lon,
-          resolution: c.resolution,
           min_depth: c.nodeDepth,
           region_id: c.regionId,
         });
@@ -1063,14 +1062,12 @@ export class RoutingDatabase {
     return this.cachedDatabaseList;
   }
 
-  async updateNode(dbIndex: number, nodeId: number, updates: { node_depth?: number; resolution?: number }): Promise<void> {
+  async updateNode(dbIndex: number, nodeId: number, updates: { node_depth?: number }): Promise<void> {
     const cur = this.nodes.get(nodeId);
     if (!cur) throw new Error(`Node ${nodeId} not found`);
     const node_depth = updates.node_depth ?? cur.nodeDepth;
-    const resolution = updates.resolution ?? cur.resolution;
-    await this.sendMessage('updateNode', { dbIndex, nodeId, lat: cur.lat, lon: cur.lon, node_depth, resolution });
+    await this.sendMessage('updateNode', { dbIndex, nodeId, lat: cur.lat, lon: cur.lon, node_depth });
     cur.nodeDepth = node_depth;
-    cur.resolution = resolution;
   }
 
   async updateEdge(dbIndex: number, source: number, target: number, updates: {
@@ -1122,12 +1119,11 @@ export class RoutingDatabase {
     await this.sendMessage('deleteEdge', { dbIndex, source, target });
   }
 
-  async addNode(dbIndex: number, node: { id: number; lat: number; lon: number; node_depth?: number; resolution?: number }): Promise<void> {
+  async addNode(dbIndex: number, node: { id: number; lat: number; lon: number; node_depth?: number }): Promise<void> {
     await this.sendMessage('insertNode', { dbIndex, ...node });
     this.nodes.set(node.id, {
       lat: node.lat, lon: node.lon, regionId: 0,
       nodeDepth: node.node_depth ?? -1,
-      resolution: node.resolution ?? 0,
     });
     this.spatialGrid.clear();
     this.buildSpatialIndex();

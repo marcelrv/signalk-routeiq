@@ -617,14 +617,14 @@ export class ApiHandler {
     if (!this.requireAuth(req, res)) return;
     try {
       const nodeId = parseInt(req.params.id, 10);
-      const { dbIndex, lat, lon, node_depth, resolution } = req.body;
+      const { dbIndex, lat, lon, node_depth } = req.body;
       if (dbIndex === undefined) { res.status(400).json({ error: 'Missing dbIndex' }); return; }
       if (lat !== undefined && lon !== undefined) {
-        await this.db!.addNode(dbIndex, { id: nodeId, lat, lon, node_depth, resolution });
+        await this.db!.addNode(dbIndex, { id: nodeId, lat, lon, node_depth });
         const connect = await this.autoConnectNode(nodeId, lat, lon);
         res.json({ success: true, ...connect });
       } else {
-        await this.db!.updateNode(dbIndex, nodeId, { node_depth, resolution });
+        await this.db!.updateNode(dbIndex, nodeId, { node_depth });
         res.json({ success: true });
       }
     } catch (error) {
