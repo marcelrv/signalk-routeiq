@@ -47,6 +47,7 @@ User-facing application hosted by Signal K server.
 
 **Features**:
 - Interactive map with click-and-drag route planning
+- Chart selection (Charts tab): nautical charts from the Signal K `resources/charts` API — raster tile charts and S-57 vector charts (simplified S-52 rendering) — plus built-in OpenStreetMap / OpenSeaMap
 - Real-time vessel dimension display and overrides
 - POI search with map integration
 - GPX download and Signal K route activation
@@ -178,4 +179,5 @@ Contributions are welcome! Please submit pull requests or open issues for bugs a
 
 - Signal K team for the plugin framework
 - Dutch Hydrographic Office and Rijkswaterstaat for reference data
-- OpenStreetMap contributors for map tiles
+- OpenStreetMap and OpenSeaMap contributors for map tiles
+- [Freeboard-SK](https://github.com/SignalK/freeboard-sk) (Apache-2.0) — the webapp's chart-source handling (Signal K `resources/charts` normalisation, built-in OSM/OpenSeaMap sources) and its simplified S-52 chart styling are adapted from Freeboard-SK, which in turn derives its S-52 symbology rules from [OpenCPN](https://github.com/OpenCPN/OpenCPN)'s s52plib

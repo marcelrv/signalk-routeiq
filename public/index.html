@@ -1257,6 +1257,7 @@ label.switch-row {
   <div id="settings-pane-inner">
     <div class="panel-tabs" role="tablist">
       <button class="panel-tab active" data-tab="routing" role="tab" aria-selected="true">&#9881; Routing</button>
+      <button class="panel-tab" data-tab="charts" role="tab" aria-selected="false">&#128506; Charts</button>
       <button class="panel-tab" data-tab="view" role="tab" aria-selected="false">&#128065; View</button>
     </div>
 
@@ -1283,6 +1284,12 @@ label.switch-row {
         <div id="boat-airdraft" class="info-line"><span class="label">ROUTING AIR</span><span class="value">—</span></div>
       </div>
       <button id="manage-data-btn" style="margin-top:12px;width:100%;min-height:var(--tap-target);background:#1f6391;border:none;border-radius:8px;padding:8px 0;color:#fff;font-weight:600;cursor:pointer;font-size:12px;transition:background 0.15s">Manage Routing Data</button>
+    </div>
+
+    <!-- Charts: base map + nautical chart selection (Signal K resources/charts API) -->
+    <div id="settings-tab-charts" role="tabpanel" style="display:none">
+      <!-- populated from the Signal K resources/charts API + built-in sources -->
+      <div id="chart-list"></div>
     </div>
 
     <!-- View Options: map overlays and debugging, never affect routing -->
@@ -1450,6 +1457,9 @@ label.switch-row {
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+<!-- Vector-tile renderer for S-57 charts served by Signal K chart providers.
+     Vendored locally (see vendor/README.md) so the planner works offline. -->
+<script src="vendor/leaflet.vectorgrid.min.js"></script>
 <script>
 (function () {
   'use strict';
@@ -1721,13 +1731,315 @@ label.switch-row {
   const map = L.map('map', {
     center: [45.5, -1.0],
     zoom: 10,
+    maxZoom: 18,
     zoomControl: true,
   });
 
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 18,
-    attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
-  }).addTo(map);
+  // ==================== chart sources ====================
+  // Base map / nautical chart selection backed by the Signal K
+  // `resources/charts` API, so the planner can draw the same charts the
+  // server provides to chartplotters. The chart-entry normalisation
+  // (v1 `tilemapUrl`/`chartLayers` vs v2 `url`/`layers`), the built-in
+  // OSM/OpenSeaMap sources and the simplified S-52 day-palette styling below
+  // are adapted from Freeboard-SK (https://github.com/SignalK/freeboard-sk,
+  // Apache-2.0), which in turn derives its S-52 conditional-symbology rules
+  // from OpenCPN's s52plib. This is deliberately a *simplified* rendering
+  // (no symbol sprites, no soundings text) — enough to plan a route over,
+  // not a navigation display.
+  const CHART_STORE_KEY = 'autoroute-charts';
+
+  map.createPane('charts').style.zIndex = 210;   // above base tiles (200)
+  map.createPane('seamarks').style.zIndex = 220; // seamark overlay above charts
+
+  // S-52 DAY_BRIGHT palette (subset) from Freeboard-SK's chartsymbols.xml
+  const S52 = {
+    CHBLK: 'rgb(7,7,7)',       CHGRD: 'rgb(125,137,140)',
+    CHYLW: 'rgb(244,218,72)',  CHMGD: 'rgb(197,69,195)',
+    CHMGF: 'rgb(211,166,233)', CHBRN: 'rgb(177,145,57)',
+    LANDA: 'rgb(201,185,122)', CSTLN: 'rgb(82,90,92)',
+    DEPCN: 'rgb(125,137,140)', DEPDW: 'rgb(212,234,238)',
+    DEPMD: 'rgb(186,213,225)', DEPMS: 'rgb(152,197,242)',
+    DEPVS: 'rgb(115,182,239)', DEPIT: 'rgb(131,178,149)',
+  };
+  // Depth bands (m), matching Freeboard-SK defaults
+  const DEPTH_BANDS = { shallow: 2, safety: 3, deep: 6 };
+
+  // Seabed colour by depth range — port of OpenCPN GetSeabed01 (via Freeboard-SK)
+  function depareFill(p) {
+    let d1 = parseFloat(p.DRVAL1); if (isNaN(d1)) d1 = -1;
+    let d2 = parseFloat(p.DRVAL2); if (isNaN(d2)) d2 = d1 + 0.01;
+    let c = S52.DEPIT;
+    if (d1 >= 0 && d2 > 0) c = S52.DEPVS;
+    if (d1 >= DEPTH_BANDS.shallow && d2 > DEPTH_BANDS.shallow) c = S52.DEPMS;
+    if (d1 >= DEPTH_BANDS.safety && d2 > DEPTH_BANDS.safety) c = S52.DEPMD;
+    if (d1 >= DEPTH_BANDS.deep && d2 > DEPTH_BANDS.deep) c = S52.DEPDW;
+    return c;
+  }
+
+  // S-57 COLOUR attribute codes → display colours (buoys/beacons)
+  const S57_COLOUR = {
+    1: '#ffffff', 2: '#070707', 3: '#d5382d', 4: '#289b38', 5: '#2a5dd8',
+    6: '#f4da48', 7: '#808285', 8: '#b19139', 9: '#e0a445', 10: '#7d4fbe',
+    11: '#e88a2d', 12: '#c545c3', 13: '#eda9c0',
+  };
+  function buoyFill(p) {
+    const first = String(p.COLOUR || '').split(',')[0];
+    return S57_COLOUR[parseInt(first, 10)] || S52.CHYLW;
+  }
+
+  function areaStyle(color, extra) {
+    return Object.assign({ fill: true, fillColor: color, fillOpacity: 1, stroke: false }, extra);
+  }
+  function lineStyle(color, weight, dash) {
+    return { fill: false, stroke: true, color: color, weight: weight, dashArray: dash || null };
+  }
+  function pointStyle(fillColor, radius) {
+    return { radius: radius || 4, fill: true, fillColor: fillColor, fillOpacity: 1,
+             stroke: true, color: S52.CHBLK, weight: 1 };
+  }
+
+  // Style for one S-57 vector-tile layer (uppercase = coastal ENC,
+  // lowercase = inland ENC — same object classes, so match case-insensitively).
+  // Returns a (properties, zoom) => style function, or null to hide the layer.
+  function s57LayerStyle(name) {
+    switch (name.toUpperCase()) {
+      case 'DEPARE': case 'DRGARE':
+        return function (p) { return areaStyle(depareFill(p)); };
+      case 'LNDARE':
+        return function () { return areaStyle(S52.LANDA, { stroke: true, color: S52.CSTLN, weight: 1 }); };
+      case 'BUAARE':
+        return function () { return areaStyle(S52.CHBRN, { fillOpacity: 0.5 }); };
+      case 'LAKARE': case 'RIVERS': case 'CANALS':
+      case 'LOKBSN': case 'HRBBSN': case 'TRNBSN': case 'LKBSPT':
+        return function () { return areaStyle(S52.DEPVS, { stroke: true, color: S52.CSTLN, weight: 1 }); };
+      case 'PONTON': case 'HULKES': case 'FLODOC': case 'DRYDOC':
+        return function () { return areaStyle(S52.CHBRN, { stroke: true, color: S52.CSTLN, weight: 1 }); };
+      case 'COALNE': case 'SLCONS': case 'GATCON': case 'DAMCON': case 'DYKCON':
+      case 'MORFAC': case 'TERMNL': case 'BERTHS':
+        return function () { return lineStyle(S52.CSTLN, 1.2); };
+      case 'BRIDGE':
+        return function () { return lineStyle(S52.CHGRD, 3); };
+      case 'DEPCNT':
+        return function (p, z) { return z >= 11 ? lineStyle(S52.DEPCN, 0.8) : []; };
+      case 'FAIRWY':
+        return function (p, z) { return z >= 10 ? lineStyle(S52.CHGRD, 1, '4,4') : []; };
+      case 'WTWAXS':
+        return function (p, z) { return z >= 10 ? lineStyle(S52.CHGRD, 1, '6,4') : []; };
+      case 'FERYRT':
+        return function (p, z) { return z >= 12 ? lineStyle(S52.CHMGF, 1, '4,4') : []; };
+      case 'RECTRC': case 'NAVLNE':
+        return function (p, z) { return z >= 12 ? lineStyle(S52.CHBLK, 0.8, '6,4') : []; };
+      case 'RESARE': case 'CTNARE': case 'ACHARE': case 'ACHBRT': case 'MIPARE':
+      case 'DMPGRD': case 'TSEZNE': case 'COMARE':
+        return function (p, z) { return z >= 11 ? lineStyle(S52.CHMGD, 1.2, '3,4') : []; };
+      case 'CBLSUB': case 'CBLARE': case 'CBLOHD': case 'PIPSOL': case 'PIPARE': case 'CONVYR':
+        return function (p, z) { return z >= 13 ? lineStyle(S52.CHMGF, 1, '2,4') : []; };
+      case 'BOYLAT': case 'BOYCAR': case 'BOYSAW': case 'BOYSPP': case 'BOYISD': case 'BOYINB':
+      case 'BCNLAT': case 'BCNCAR': case 'BCNSAW': case 'BCNSPP': case 'BCNISD':
+        return function (p, z) { return z >= 11 ? pointStyle(buoyFill(p)) : []; };
+      case 'LIGHTS':
+        return function (p, z) { return z >= 12 ? pointStyle(S52.CHYLW, 3) : []; };
+      case 'WRECKS': case 'OBSTRN': case 'UWTROC':
+        return function (p, z) {
+          return z >= 11
+            ? { radius: 4, fill: true, fillColor: S52.CHMGF, fillOpacity: 0.5,
+                stroke: true, color: S52.CHBLK, weight: 1, dashArray: '2,2' }
+            : [];
+        };
+      default:
+        return null; // metadata layers, soundings (no text support), symbols we can't draw
+    }
+  }
+
+  // Chart tiles are served from the SK server root, not the plugin router mount
+  function chartServerBase() {
+    return getApiBase().replace(/\/plugins\/[^/]+$/, '');
+  }
+  function resolveChartUrl(url) {
+    return /^https?:\/\//i.test(url) ? url : chartServerBase() + url;
+  }
+
+  // Normalise a chart entry across resource API versions (after Freeboard-SK's SKChart)
+  function normalizeChart(id, c) {
+    return {
+      id: id,
+      name: c.name || id,
+      description: c.description || '',
+      url: c.url || c.tilemapUrl || '',
+      layers: c.layers || c.chartLayers || [],
+      bounds: Array.isArray(c.bounds) && c.bounds.length === 4 ? c.bounds : null,
+      minZoom: c.minzoom != null ? c.minzoom : 0,
+      maxZoom: c.maxzoom != null ? c.maxzoom : 18,
+      format: c.format || 'png',
+      type: c.type || 'tilelayer',
+      scale: typeof c.scale === 'number' ? c.scale : 250000,
+    };
+  }
+  function isVectorChart(c) { return c.format === 'pbf' || c.type === 'S-57'; }
+  function isRasterChart(c) {
+    return /^(tilelayer|tilejson)$/i.test(c.type) && /^(png|jpe?g|webp)$/i.test(c.format);
+  }
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function makeChartLayer(c) {
+    if (!c.url) return null;
+    const opts = {
+      pane: 'charts',
+      minZoom: c.minZoom,
+      maxNativeZoom: c.maxZoom,
+      maxZoom: 18,
+      attribution: escapeHtml(c.name),
+    };
+    if (c.bounds) {
+      opts.bounds = L.latLngBounds([c.bounds[1], c.bounds[0]], [c.bounds[3], c.bounds[2]]);
+    }
+    if (isRasterChart(c)) {
+      return L.tileLayer(resolveChartUrl(c.url), opts);
+    }
+    if (isVectorChart(c) && L.vectorGrid) {
+      const styles = {};
+      let matched = 0;
+      c.layers.forEach(function (name) {
+        const fn = s57LayerStyle(name);
+        if (fn) matched++;
+        styles[name] = fn || [];
+      });
+      // Vector charts whose layers aren't S-57 classes (e.g. converted
+      // OSM/GSHHG basemaps) would otherwise render blank — draw everything
+      // in a neutral land style instead.
+      if (!matched) {
+        c.layers.forEach(function (name) {
+          styles[name] = { fill: true, fillColor: S52.LANDA, fillOpacity: 0.6,
+                           stroke: true, color: S52.CSTLN, weight: 1 };
+        });
+      }
+      opts.rendererFactory = L.canvas.tile;
+      opts.vectorTileLayerStyles = styles;
+      opts.interactive = false;
+      return L.vectorGrid.protobuf(resolveChartUrl(c.url), opts);
+    }
+    return null;
+  }
+
+  // sources: id -> { id, name, description, builtin, supported, enabled, zIndex, layer, make }
+  const chartSources = new Map();
+
+  function loadChartSelection() {
+    try {
+      const v = JSON.parse(localStorage.getItem(CHART_STORE_KEY));
+      if (Array.isArray(v)) return v;
+    } catch {}
+    return ['openstreetmap']; // default = previous hardcoded base map
+  }
+  function saveChartSelection() {
+    const on = [];
+    chartSources.forEach(function (s) { if (s.enabled) on.push(s.id); });
+    try { localStorage.setItem(CHART_STORE_KEY, JSON.stringify(on)); } catch {}
+  }
+
+  function setChartEnabled(src, on) {
+    src.enabled = on;
+    if (on) {
+      if (!src.layer) src.layer = src.make();
+      if (!src.layer) { src.enabled = false; return; }
+      src.layer.addTo(map);
+      if (src.zIndex && src.layer.setZIndex) src.layer.setZIndex(src.zIndex);
+    } else if (src.layer) {
+      map.removeLayer(src.layer);
+    }
+  }
+
+  function renderChartList() {
+    const box = document.getElementById('chart-list');
+    box.innerHTML = '';
+    chartSources.forEach(function (src) {
+      const label = document.createElement('label');
+      label.className = 'switch-row';
+      const span = document.createElement('span');
+      span.className = 'switch-label';
+      span.textContent = src.supported ? src.name : src.name + ' (unsupported)';
+      if (src.description) label.title = src.description;
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!src.enabled;
+      if (!src.supported) { cb.disabled = true; label.style.opacity = '0.5'; }
+      cb.addEventListener('change', function () {
+        setChartEnabled(src, this.checked);
+        saveChartSelection();
+      });
+      label.appendChild(span);
+      label.appendChild(cb);
+      box.appendChild(label);
+    });
+  }
+
+  // Fetch the chart list from the server; called on (re)connect
+  function refreshChartList() {
+    const url = chartServerBase() + '/signalk/v1/api/resources/charts';
+    logDebug('CHARTS', url);
+    fetch(url, { signal: AbortSignal.timeout(8000) })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (res) {
+        if (!res || typeof res !== 'object') return;
+        const saved = loadChartSelection();
+        // drop server charts that disappeared
+        chartSources.forEach(function (src, id) {
+          if (!src.builtin && !res[id]) {
+            if (src.layer && src.enabled) map.removeLayer(src.layer);
+            chartSources.delete(id);
+          }
+        });
+        // smaller scale number = more detail = drawn on top (Freeboard-SK ordering)
+        const ids = Object.keys(res).sort(function (a, b) {
+          return ((res[b].scale || 0) - (res[a].scale || 0)) || a.localeCompare(b);
+        });
+        let z = 1;
+        ids.forEach(function (id) {
+          const c = normalizeChart(id, res[id]);
+          let src = chartSources.get(id);
+          if (!src) {
+            src = { id: id, builtin: false, enabled: false, layer: null };
+            chartSources.set(id, src);
+            src.enabled = saved.includes(id);
+          }
+          src.name = c.name;
+          src.description = c.description;
+          src.supported = isRasterChart(c) || (isVectorChart(c) && !!L.vectorGrid);
+          src.make = function () { return makeChartLayer(c); };
+          src.zIndex = z++;
+          if (src.enabled && src.supported && !src.layer) setChartEnabled(src, true);
+        });
+        renderChartList();
+      })
+      .catch(function () {});
+  }
+
+  // Built-in sources (always listed, no server needed)
+  [
+    { id: 'openstreetmap', name: 'OpenStreetMap', description: 'World base map',
+      make: function () {
+        return L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 18,
+          attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
+        });
+      } },
+    { id: 'openseamap', name: 'OpenSeaMap seamarks', description: 'Seamark overlay (buoys, lights…)',
+      make: function () {
+        return L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png', {
+          pane: 'seamarks',
+          maxZoom: 18,
+          attribution: '&copy; <a href="https://www.openseamap.org">OpenSeaMap</a>',
+        });
+      } },
+  ].forEach(function (b) {
+    const src = { id: b.id, name: b.name, description: b.description, builtin: true,
+                  supported: true, enabled: false, layer: null, make: b.make, zIndex: 0 };
+    chartSources.set(b.id, src);
+    if (loadChartSelection().includes(b.id)) setChartEnabled(src, true);
+  });
+  renderChartList();
 
   // Standard map conventions: left-drag pans (Leaflet default), left-click
   // places waypoints (Leaflet suppresses 'click' after a drag), right-click
@@ -2021,6 +2333,7 @@ label.switch-row {
       });
       const tab = btn.dataset.tab;
       document.getElementById('settings-tab-routing').style.display = tab === 'routing' ? '' : 'none';
+      document.getElementById('settings-tab-charts').style.display = tab === 'charts' ? '' : 'none';
       document.getElementById('settings-tab-view').style.display = tab === 'view' ? '' : 'none';
     });
   });
@@ -3352,6 +3665,7 @@ label.switch-row {
           subtitleEl.textContent = 'Checking routing data...';
           checkDbStatus();
           fetchBoatData();
+          refreshChartList();
           const c = map.getCenter();
           checkTidesStatus(c.lat, c.lng);
         })
