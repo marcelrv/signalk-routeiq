@@ -161,8 +161,17 @@ export class RoutingDatabase {
         }
         return;
       }
-      // Final marker (chunk=false) — already resolved by last chunk above
-      if (msg.chunk === false) return;
+      // Final marker (chunk=false) — normally already resolved by the last
+      // chunk above. Exception: zero rows means the worker's chunk loop never
+      // ran and this marker is the *only* message sent — resolve here with an
+      // empty array, or this promise (and loadGraph() with it) hangs forever.
+      if (msg.chunk === false) {
+        if (!(pending as any)._chunks) {
+          this.pending.delete(msg.id);
+          pending.resolve([]);
+        }
+        return;
+      }
 
       this.pending.delete(msg.id);
       pending.resolve(msg.result);
@@ -358,9 +367,24 @@ export class RoutingDatabase {
    * loop never has to know navmesh regions exist at all.
    */
   private precomputeFunnelEdges(): void {
-    for (const region of this.navmeshRegions) {
+    let emptyCount = 0;
+    this.navmeshRegions.forEach((region, index) => {
+      if (region.boundaryNodeIds.length === 0) {
+        emptyCount++;
+        // region_id is not a unique key in real generated databases (all rows
+        // observed with region_id=1 in zeeland.sqlite) — log the load-order
+        // index too so individual occurrences are distinguishable.
+        console.warn(`[autoroute] Navmesh region_id=${region.regionId} (load index ${index}) has no ` +
+          'boundary_node_ids — funnel-edge upgrade and anchor shortcuts are silently skipped for it, ' +
+          'leaving only straight-line edge_kind_id=1 fallback edges (see NEXT_PHASES.md, Round 9 master finding).');
+        return;
+      }
       this.upgradeRingBoundaryEdges(region);
       this.addAnchorShortcutEdges(region);
+    });
+    if (emptyCount > 0) {
+      console.warn(`[autoroute] ${emptyCount}/${this.navmeshRegions.length} navmesh regions have empty ` +
+        'boundary_node_ids — funnel-upgrade coverage is degraded for this database.');
     }
   }
 
@@ -831,7 +855,7 @@ export class RoutingDatabase {
     source_lat: number; source_lon: number;
     target_lat: number; target_lon: number;
     distance: number; min_depth: number; max_air_draft: number; min_width: number;
-    edge_type_id: number; traffic_mode: number;
+    edge_type_id: number; edge_kind_id: number; traffic_mode: number;
     cost_factor: number;
   }>> {
     const results: Array<{
@@ -839,7 +863,7 @@ export class RoutingDatabase {
       source_lat: number; source_lon: number;
       target_lat: number; target_lon: number;
       distance: number; min_depth: number; max_air_draft: number; min_width: number;
-      edge_type_id: number; traffic_mode: number;
+      edge_type_id: number; edge_kind_id: number; traffic_mode: number;
       cost_factor: number;
     }> = [];
     for (const [, edges] of this.edgesBySource) {
@@ -854,7 +878,7 @@ export class RoutingDatabase {
             target_lat: e.lat, target_lon: e.lon,
             distance: e.distance, min_depth: e.min_depth,
             max_air_draft: e.max_air_draft, min_width: e.min_width,
-            edge_type_id: e.edge_type_id, traffic_mode: e.traffic_mode,
+            edge_type_id: e.edge_type_id, edge_kind_id: e.edge_kind_id ?? EDGE_KIND_CENTERLINE, traffic_mode: e.traffic_mode,
             cost_factor: e.cost_factor,
           });
           if (results.length >= limit) break;

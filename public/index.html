@@ -1295,7 +1295,7 @@ label.switch-row {
     <!-- View Options: map overlays and debugging, never affect routing -->
     <div id="settings-tab-view" role="tabpanel" style="display:none">
       <label class="switch-row"><span class="switch-label">Graph nodes</span><input id="graph-cb" type="checkbox" /></label>
-      <label class="switch-row"><span class="switch-label">Graph edges</span><input id="edges-cb" type="checkbox" /></label>
+      <label class="switch-row" title="Color = edge kind (green=centerline, amber=navmesh boundary, violet=lane, pink=macro) · dash = coastal(solid)/inland(long-dot-long) · opacity = two-way(faint)/one-way(bold)"><span class="switch-label">Graph edges</span><input id="edges-cb" type="checkbox" /></label>
       <label class="switch-row"><span class="switch-label">POIs (harbours, locks…)</span><input id="poi-cb" type="checkbox" /></label>
       <label class="switch-row"><span class="switch-label">Waterways</span><input id="waterways-cb" type="checkbox" /></label>
       <label class="switch-row"><span class="switch-label">Tide / current stations</span><input id="stations-cb" type="checkbox" /></label>
@@ -2435,10 +2435,21 @@ label.switch-row {
       .then(r => { logDebug('EDGES', graphEdgesUrl(), undefined, r); return r.ok ? r.json() : null; })
       .then(data => {
         if (!data || !data.edges) return;
+        // Three independent visual channels, always on (no mode toggle):
+        //  - color:   edge_kind_id (centerline/navmesh_boundary/lane/macro)
+        //  - dash:    edge_type_id (coastal long-dot-long vs. inland solid)
+        //  - opacity: traffic_mode (one-way edges more prominent)
+        const KIND_COLORS = ['#22c55e', '#f59e0b', '#8b5cf6', '#ec4899'];
+        // Long,dot,long — tuned to actually read at debug-overlay opacity;
+        // the original 10,3,2,3 was invisible at 0.35 opacity/weight 3 (short
+        // segments blur out at low alpha, verified with pixel-level checks
+        // against a live render, not just eyeballing).
+        const COASTAL_DASH = '16,6,4,6';
         for (const e of data.edges) {
-          const color = e.edge_type_id === 1 ? '#22c55e' : '#34d399';
-          const dash = e.traffic_mode !== 0 ? '5,5' : null;
-          const opts = { color, weight: 3, opacity: 0.35, dashArray: dash };
+          const color = KIND_COLORS[e.edge_kind_id] || '#6d96c0';
+          const dash = e.edge_type_id === 0 ? COASTAL_DASH : null;
+          const opacity = e.traffic_mode !== 0 ? 0.85 : 0.6;
+          const opts = { color, weight: 3, opacity, dashArray: dash };
           const line = L.polyline([[e.source_lat, e.source_lon], [e.target_lat, e.target_lon]], opts);
           if (state.editMode) {
             line._edgeData = e;
@@ -4149,6 +4160,13 @@ label.switch-row {
       addPolylineHoverHandlers(polyline, s, e);
     }
     state.routeLayers.bringToFront();
+    // In edit mode the graph itself is what's being worked on: keep edges/nodes
+    // clickable (and visible) above the route line instead of the route
+    // permanently occluding whatever it overlaps after every redraw.
+    if (state.editMode) {
+      edgesLayer.bringToFront();
+      graphLayer.bringToFront();
+    }
   }
 
   function makeSimpleInstructions(latLngs, originalWpts) {

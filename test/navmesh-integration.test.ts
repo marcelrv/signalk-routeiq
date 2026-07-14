@@ -380,6 +380,92 @@ describe('navmesh boundary-shortcut sparsification (regression)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Round 9 master finding regression: a navmesh region with empty
+// boundary_node_ids (the exact real-world shape found in zeeland.sqlite,
+// where the pipeline never populates it for depth-split regions) must warn
+// loudly instead of silently skipping the funnel-edge upgrade — see
+// NEXT_PHASES.md, "Design question: warn on empty boundaryNodeIds".
+// ---------------------------------------------------------------------------
+
+describe('empty boundary_node_ids (Round 9 warn-on-empty)', () => {
+  const fixturesDir = './test/fixtures/navmesh-empty-boundary';
+  const dbPath = path.join(fixturesDir, 'test_empty_boundary.sqlite');
+
+  let db: RoutingDatabase;
+  let warnings: string[] = [];
+  let originalWarn: typeof console.warn;
+
+  before(async () => {
+    if (!fs.existsSync(fixturesDir)) fs.mkdirSync(fixturesDir, { recursive: true });
+    const overlayPath = path.join(fixturesDir, 'user-edits.sqlite');
+    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+    if (fs.existsSync(overlayPath)) fs.unlinkSync(overlayPath);
+
+    const sdb = new DatabaseSync(dbPath);
+    const run = (sql: string, params: unknown[] = []) => sdb.prepare(sql).run(...(params as any[]));
+
+    run(`CREATE TABLE metadata (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, country TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL, description TEXT, last_update_date TEXT NOT NULL
+    )`);
+    run(`INSERT INTO metadata (country, name, description, last_update_date)
+         VALUES ('TEST', 'Empty Boundary Region', 'depth-split region with no boundary_node_ids', '2026-01-01T00:00:00Z')`);
+    run(`CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL, lon REAL, resolution REAL DEFAULT 0.0, node_depth REAL DEFAULT -1, region_id INTEGER)`);
+    run(`CREATE TABLE edges (
+      source INTEGER, target INTEGER, distance REAL,
+      min_depth REAL, max_air_draft REAL, min_width REAL,
+      cost_factor REAL DEFAULT 1.2, distance_to_land REAL,
+      edge_type_id INTEGER DEFAULT 0, traffic_mode INTEGER DEFAULT 0,
+      edge_kind_id INTEGER DEFAULT 0
+    )`);
+    run(`CREATE TABLE navmesh_regions (
+      id INTEGER PRIMARY KEY, region_id INTEGER, boundary_geometry TEXT,
+      vertices TEXT, triangles TEXT, triangle_adjacency TEXT,
+      boundary_node_ids TEXT, depth_ceiling_m REAL
+    )`);
+    // region_id=1 duplicated across rows mirrors the real generated
+    // database (region_id is not a unique key there — see the "load index"
+    // note in database.ts's precomputeFunnelEdges warning).
+    run(`INSERT INTO navmesh_regions (region_id, boundary_geometry, vertices, triangles, triangle_adjacency, boundary_node_ids, depth_ceiling_m)
+         VALUES (1, ?, ?, ?, NULL, '[]', 6.0)`, [
+      JSON.stringify({ type: 'Polygon', coordinates: [[[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]]] }),
+      JSON.stringify([[0, 0], [0, 1], [1, 1], [1, 0]]),
+      JSON.stringify([[0, 1, 2], [0, 2, 3]]),
+    ]);
+    sdb.close();
+
+    warnings = [];
+    originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
+
+    db = new RoutingDatabase(fixturesDir);
+    await db.init();
+    await db.loadGraph();
+  });
+
+  after(async () => {
+    console.warn = originalWarn;
+    await db.close();
+    const overlayPath = path.join(fixturesDir, 'user-edits.sqlite');
+    for (const p of [dbPath, overlayPath]) {
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+  });
+
+  it('loads the region with zero boundary nodes rather than erroring', () => {
+    assert.strictEqual(db.getNavmeshRegions().length, 1);
+    assert.strictEqual(db.getNavmeshRegions()[0].boundaryNodeIds.length, 0);
+  });
+
+  it('warns loudly instead of silently skipping the funnel-edge upgrade', () => {
+    assert.ok(warnings.some(w => w.includes('no') && w.includes('boundary_node_ids')),
+      `expected a per-region empty-boundary warning, got: ${JSON.stringify(warnings)}`);
+    assert.ok(warnings.some(w => w.includes('1/1') && w.includes('empty')),
+      `expected a summary warning, got: ${JSON.stringify(warnings)}`);
+  });
+});
+
 function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000;
   const dLat = (lat2 - lat1) * Math.PI / 180;
