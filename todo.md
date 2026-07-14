@@ -1,4 +1,4 @@
-# TODO — Feature Planning (autoroute plugin)
+# TODO — Feature Planning (routeiq plugin)
 
 Last reviewed 2026-07-13. This file used to mix plugin-side ideas with
 routing-database/pipeline design and had drifted far out of date — several
@@ -184,7 +184,7 @@ before adding to the lists above, or dropping if no longer relevant:
   fixed/auto-detected.
 - **Position/route-aware dynamic database loading** — replacing
   `RoutingDatabase.init()`'s "open every `.sqlite` in the directory" with
-  peek-then-lazy-load. This *is* real autoroute work, but it's already
+  peek-then-lazy-load. This *is* real routeiq work, but it's already
   properly scoped as Phase 4 §4a in
   `signalk-router-pipeline/PHASE_4_DESIGN.md` — follow that design doc rather
   than this note when picked up. Not started; most valuable once more than

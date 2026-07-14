@@ -60,7 +60,7 @@ times or schedules, so this data starts life as tier-6/community-sourced
 almost by definition, gets reviewed the same way any other override does,
 and is a good early real test of that workflow once it exists. Written up
 as **PHASE_4_DESIGN.md §4c** in the sibling repo — read that for the
-schema/override-schema details; this doc only covers the `autoroute`
+schema/override-schema details; this doc only covers the `routeiq`
 consumption side.
 
 ## Architecture (this repo)

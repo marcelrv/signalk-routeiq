@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="RouteIQ — vessel-aware route planner">
+  <defs>
+    <linearGradient id="sea" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d3a6e"/>
+      <stop offset="1" stop-color="#1173c4"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="0.25" cy="0.15" r="0.9">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="0.55" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- tile -->
+  <rect x="0" y="0" width="512" height="512" rx="116" fill="url(#sea)"/>
+  <rect x="0" y="0" width="512" height="512" rx="116" fill="url(#sheen)"/>
+
+  <!-- depth contours (chart texture) -->
+  <g fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="10" stroke-linecap="round">
+    <path d="M-20,168 C 80,128 170,208 268,168 S 440,108 532,152"/>
+    <path d="M-20,296 C 90,262 180,330 284,290 S 450,238 532,282"/>
+    <path d="M60,452 C 140,420 210,470 300,440"/>
+  </g>
+
+  <!-- route -->
+  <path d="M112,398 L210,344 L176,248 L268,204 L342,212"
+        fill="none" stroke="#0b2f5a" stroke-opacity="0.35" stroke-width="40"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M112,398 L210,344 L176,248 L268,204 L342,212"
+        fill="none" stroke="#ffffff" stroke-width="26"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- waypoints -->
+  <g>
+    <circle cx="210" cy="344" r="19" fill="#ffffff"/>
+    <circle cx="210" cy="344" r="9" fill="#1173c4"/>
+    <circle cx="176" cy="248" r="19" fill="#ffffff"/>
+    <circle cx="176" cy="248" r="9" fill="#1173c4"/>
+    <circle cx="268" cy="204" r="19" fill="#ffffff"/>
+    <circle cx="268" cy="204" r="9" fill="#1173c4"/>
+  </g>
+
+  <!-- start -->
+  <circle cx="112" cy="398" r="26" fill="#34d399" stroke="#ffffff" stroke-width="9"/>
+
+  <!-- destination pin -->
+  <g>
+    <path d="M352,66 c-33,0 -60,27 -60,60 0,45 60,110 60,110 s60,-65 60,-110 c0,-33 -27,-60 -60,-60 z"
+          fill="#ff7a59" stroke="#ffffff" stroke-width="9" stroke-linejoin="round"/>
+    <circle cx="352" cy="126" r="22" fill="#ffffff"/>
+  </g>
+
+  <!-- IQ badge -->
+  <g>
+    <rect x="292" y="352" width="160" height="98" rx="49" fill="#ffffff"/>
+    <rect x="326" y="376" width="20" height="50" rx="10" fill="#0b2f5a"/>
+    <circle cx="396" cy="401" r="23" fill="none" stroke="#0b2f5a" stroke-width="14"/>
+    <path d="M410,417 L427,435" fill="none" stroke="#0b2f5a" stroke-width="14" stroke-linecap="round"/>
+  </g>
+</svg>

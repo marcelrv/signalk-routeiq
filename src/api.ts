@@ -42,7 +42,7 @@ export class ApiHandler {
     this.db = db;
     this.routingEngine = engine;
     this.initError = null;
-    console.log('[autoroute] API handler components updated');
+    console.log('[routeiq] API handler components updated');
   }
 
   setInitError(message: string): void {
@@ -334,7 +334,7 @@ export class ApiHandler {
     }
     try {
       const route: RouteResult = req.body.route;
-      const name: string = req.body.name || 'Autoroute';
+      const name: string = req.body.name || 'RouteIQ';
 
       if (!route) {
         res.status(400).json({ error: 'Missing route data in request body' });
@@ -364,7 +364,7 @@ export class ApiHandler {
     }
     try {
       const route: RouteResult = req.body.route;
-      const name: string = req.body.name || 'Autoroute Route';
+      const name: string = req.body.name || 'RouteIQ Route';
 
       if (!route) {
         res.status(400).json({ error: 'Missing route data in request body' });
@@ -387,7 +387,7 @@ export class ApiHandler {
     } catch (error) {
       const err = error as any;
       const message = err instanceof Error ? err.message : `NonError: ${JSON.stringify(err)}`;
-      console.error('[autoroute] Push route error:', error);
+      console.error('[routeiq] Push route error:', error);
       res.status(500).json({ error: `Failed to push route: ${message}` });
       next(error);
     }
@@ -496,7 +496,7 @@ export class ApiHandler {
       res.json({ count: nodes.length, nodes });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[autoroute] graph/nodes error:', error);
+      console.error('[routeiq] graph/nodes error:', error);
       res.status(500).json({ error: message });
       next(error);
     }
@@ -528,7 +528,7 @@ export class ApiHandler {
       res.json({ count: edges.length, edges });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[autoroute] graph/edges error:', error);
+      console.error('[routeiq] graph/edges error:', error);
       res.status(500).json({ error: message });
       next(error);
     }
@@ -835,7 +835,7 @@ export class ApiHandler {
       res.json({ type: 'FeatureCollection', features });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[autoroute] waterways error:', error);
+      console.error('[routeiq] waterways error:', error);
       res.status(500).json({ error: message });
       next(error);
     }
@@ -955,7 +955,7 @@ export class ApiHandler {
       // Ensure data directory exists
       try { fs.mkdirSync(dataDir, { recursive: true }); } catch { /* ignore */ }
 
-      console.log(`[autoroute] Downloading database: ${url}`);
+      console.log(`[routeiq] Downloading database: ${url}`);
       const response = await fetch(url, { signal: AbortSignal.timeout(120000) });
       if (!response.ok) {
         res.status(502).json({ error: `Download failed: server returned ${response.status}` });
@@ -970,7 +970,7 @@ export class ApiHandler {
       if (filename.endsWith('.sqlite.gz')) {
         saveFilename = filename.slice(0, -3); // strip .gz
         saveBuffer = zlib.gunzipSync(buffer);
-        console.log(`[autoroute] Decompressed ${filename} -> ${saveFilename} (${buffer.length} -> ${saveBuffer.length} bytes)`);
+        console.log(`[routeiq] Decompressed ${filename} -> ${saveFilename} (${buffer.length} -> ${saveBuffer.length} bytes)`);
       }
 
       // Reject filenames that could escape the data directory (path traversal)
@@ -990,30 +990,30 @@ export class ApiHandler {
       for (const f of oldFiles) {
         try {
           fs.unlinkSync(path.join(dataDir, f));
-          console.log(`[autoroute] Removed old database: ${f}`);
+          console.log(`[routeiq] Removed old database: ${f}`);
         } catch (e) {
-          console.warn(`[autoroute] Failed to remove old database ${f}: ${e}`);
+          console.warn(`[routeiq] Failed to remove old database ${f}: ${e}`);
         }
       }
       fs.writeFileSync(destPath, saveBuffer);
 
-      console.log(`[autoroute] Database saved: ${saveFilename} (${saveBuffer.length} bytes)`);
+      console.log(`[routeiq] Database saved: ${saveFilename} (${saveBuffer.length} bytes)`);
 
       // Refresh metadata cache so the new DB shows in the installed list
       try {
         await this.db!.reloadMetadata();
-        console.log(`[autoroute] Metadata cache refreshed after download`);
+        console.log(`[routeiq] Metadata cache refreshed after download`);
       } catch (e) {
-        console.warn(`[autoroute] Metadata refresh failed: ${e}`);
+        console.warn(`[routeiq] Metadata refresh failed: ${e}`);
       }
 
       // Hot-reload the database and routing engine so the new DB is used immediately
       if (this.onReloadRequested) {
         try {
           await this.onReloadRequested(dataDir);
-          console.log(`[autoroute] Routing engine hot-reloaded`);
+          console.log(`[routeiq] Routing engine hot-reloaded`);
         } catch (e) {
-          console.error(`[autoroute] Hot-reload failed: ${e}`);
+          console.error(`[routeiq] Hot-reload failed: ${e}`);
           res.status(500).json({ error: `Database saved but hot-reload failed: ${e}` });
           return;
         }
@@ -1027,7 +1027,7 @@ export class ApiHandler {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[autoroute] Database download error:', error);
+      console.error('[routeiq] Database download error:', error);
       res.status(500).json({ error: `Download failed: ${message}` });
       next(error);
     }

@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 SignalK Autoroute Nautical Route Planner Contributors
+Copyright (c) 2026 SignalK RouteIQ Nautical Route Planner Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

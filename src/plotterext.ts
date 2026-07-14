@@ -2,9 +2,9 @@
  * Freeboard-SK Plotter Extension provider
  *
  * Registers the plugin as a "plotterExtensions" resource provider and serves
- * the extension iframe assets. This is what makes the autoroute engine usable
+ * the extension iframe assets. This is what makes the RouteIQ engine usable
  * from inside Freeboard-SK (or any host chartplotter that implements the
- * Plotter Extensions API v1): a toolbar button opens the Autoroute panel,
+ * Plotter Extensions API v1): a toolbar button opens the RouteIQ panel,
  * which reshapes the route the user is editing via the host `routes`
  * capability. The host renders the chart — the extension has no map of its own.
  *
@@ -17,7 +17,7 @@ import * as fs from 'fs';
 import { createRequire } from 'node:module';
 import * as path from 'path';
 
-const PLUGIN_ID = 'signalk-autoroute';
+const PLUGIN_ID = 'signalk-routeiq';
 
 /** Base URL for extension iframe assets. Top-level (not /plugins/*) so that
  * read-only users can load them — /plugins is admin-gated by the server. */
@@ -49,7 +49,7 @@ function readPluginVersion(plugindir: string): string {
 
 function buildManifest(version: string) {
   return {
-    name: 'Autoroute',
+    name: 'RouteIQ',
     description:
       'Offline vessel-aware auto-routing: reshape the route you are editing around land, shallows and bridges.',
     version,
@@ -61,17 +61,17 @@ function buildManifest(version: string) {
     optional: ['map', 'units'],
     buttons: [
       {
-        id: 'open-autoroute',
-        title: 'Autoroute',
+        id: 'open-routeiq',
+        title: 'RouteIQ',
         slot: 'mapToolbar',
         icon: 'alt_route',
-        action: { type: 'togglePanel', panel: 'autoroute-panel' },
+        action: { type: 'togglePanel', panel: 'routeiq-panel' },
       },
     ],
     panels: [
       {
-        id: 'autoroute-panel',
-        title: 'Autoroute',
+        id: 'routeiq-panel',
+        title: 'RouteIQ',
         type: 'iframe',
         url: `${ASSET_BASE}/panel.html`,
         // keepAlive: route selection, last result and the revert buffer
@@ -111,9 +111,9 @@ export function registerPlotterExtension(app: ServerAPI, plugindir: string): voi
         },
       },
     });
-    console.log('[autoroute] plotterExtensions manifest registered');
+    console.log('[routeiq] plotterExtensions manifest registered');
   } catch (error) {
-    console.warn(`[autoroute] Failed to register plotterExtensions provider: ${error}`);
+    console.warn(`[routeiq] Failed to register plotterExtensions provider: ${error}`);
   }
 
   if (!assetsMounted) {
@@ -123,9 +123,9 @@ export function registerPlotterExtension(app: ServerAPI, plugindir: string): voi
     const extAssetDir = path.join(plugindir, 'plotterext');
     if (fs.existsSync(extAssetDir)) {
       appExpress.use(ASSET_BASE, express.static(extAssetDir));
-      console.log(`[autoroute] Plotter extension assets served from: ${extAssetDir}`);
+      console.log(`[routeiq] Plotter extension assets served from: ${extAssetDir}`);
     } else {
-      console.warn(`[autoroute] Plotter extension asset dir missing: ${extAssetDir}`);
+      console.warn(`[routeiq] Plotter extension asset dir missing: ${extAssetDir}`);
     }
 
     // The signalk-plotterext-bus client library (ESM build), imported by the
@@ -136,7 +136,7 @@ export function registerPlotterExtension(app: ServerAPI, plugindir: string): voi
       const busDist = path.dirname(require.resolve('signalk-plotterext-bus/extension'));
       appExpress.use(`${ASSET_BASE}/bus`, express.static(busDist));
     } catch (error) {
-      console.warn(`[autoroute] signalk-plotterext-bus not found, extension UI disabled: ${error}`);
+      console.warn(`[routeiq] signalk-plotterext-bus not found, extension UI disabled: ${error}`);
     }
 
     assetsMounted = true;

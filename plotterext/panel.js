@@ -1,5 +1,5 @@
 /**
- * Autoroute panel — Freeboard-SK plotter extension.
+ * RouteIQ panel — Freeboard-SK plotter extension.
  *
  * The host chartplotter renders the chart and owns the route edit buffer;
  * this panel only supplies geometry. Flow: read the visible route's points
@@ -165,7 +165,7 @@ async function checkEngine() {
   } catch (e) {
     engineReady = false;
     el.className = 'status error';
-    el.textContent = 'Autoroute plugin not reachable: ' + (e?.message || e);
+    el.textContent = 'RouteIQ plugin not reachable: ' + (e?.message || e);
   }
   renderRouteState();
 }
@@ -390,7 +390,7 @@ async function routeToDestination() {
     setStatus('route-status', 'No active destination — set one first (e.g. “Navigate to here” on the chart).', 'error');
     return;
   }
-  await createAndCalculate('Autoroute to destination', dest, 'Destination');
+  await createAndCalculate('RouteIQ to destination', dest, 'Destination');
   // The route now covers the trip; drop the direct "Navigate to here" course
   // so the chart doesn't show both. (The host offers no context-menu hook for
   // extensions, so this is the closest to a one-step "auto-route to here".)

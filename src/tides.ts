@@ -419,7 +419,7 @@ export async function prepareStationFlowField(
     if (series.length === 0) return null;
     return new StationFlowField(series, fallback);
   } catch (e) {
-    console.warn(`[autoroute] station flow field unavailable: ${e}`);
+    console.warn(`[routeiq] station flow field unavailable: ${e}`);
     return null;
   }
 }
@@ -472,7 +472,7 @@ export async function prepareTidalFlowField(
 
     return new HeightGradientFlowField(timelines, maxCurrentKnots);
   } catch (e) {
-    console.warn(`[autoroute] tidal flow field unavailable: ${e}`);
+    console.warn(`[routeiq] tidal flow field unavailable: ${e}`);
     return null;
   }
 }

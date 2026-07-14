@@ -1,15 +1,16 @@
-# Autoroute Next Phases — pointer
+# RouteIQ Next Phases — pointer
 
 The full, canonical cross-repo plan and investigation log lives in
 [`signalk-router-pipeline/NEXT_PHASES.md`](../signalk-router-pipeline/NEXT_PHASES.md)
 (local checkout: `/home/node/signalkdev/signalk-router-pipeline/NEXT_PHASES.md`).
-This repo (`autoroute`) is the TypeScript runtime side of that plan — most
+This repo (`routeiq`) is the TypeScript runtime side of that plan — most
 of the recent work described there (navmesh funnel-algorithm consumption,
 Phase 2 Hardening Rounds 1-4) lives in `src/navmesh.ts`, `src/database.ts`,
 `src/routing.ts`, and `test/zeelandbrug.test.ts` here, with the
-generation/pipeline side in the sibling repo. (Renamed from `NEXT_PHASES.md`
-so the two repos' file lists — and open editor tabs — aren't identically
-named.)
+generation/pipeline side in the sibling repo. (Originally named
+`AUTOROUTE_NEXT_PHASES.md`, renamed from `NEXT_PHASES.md` so the two
+repos' file lists — and open editor tabs — aren't identically named; now
+`ROUTEIQ_NEXT_PHASES.md` after the plugin's rebrand.)
 
 ## Ready to start now — no pipeline dependency
 
@@ -60,7 +61,7 @@ claim ("Zandkreeksluis opening bridge not taken") **does not reproduce**:
 in every reproduction (2 vessel profiles × both directions, direct
 ~10km crossing), `RoutingEngine.calculateRoute`'s returned `crossings`
 always includes "Zandkreeksluis, brug over buitenhoofd" — the bridge is
-never skipped. **This is autoroute-side confirmation that there's no
+never skipped. **This is routeiq-side confirmation that there's no
 `astarSearch`/bridge-avoidance bug for this specific bridge.** Full
 writeup and the real (different, pipeline-side) issue found along the
 way: see Round 9 below.
@@ -203,7 +204,7 @@ for the root cause itself.
 
 The real user-reported bad route (Oude-Tonge to Zierikzee) investigation
 that used to be the priority item here is **done being investigated from
-`autoroute`** — the live-instrumentation session (this repo's
+`routeiq`** — the live-instrumentation session (this repo's
 `round6*.mjs` scratch scripts, `debug_region13.json`/`debug_region16.json`
 node-ID watchlists) found the actual root cause: the route's southward
 detour runs on `inland_waterways`-sourced graph edges, a separate data
@@ -236,7 +237,7 @@ lives in the sibling repo's
 [`PHASE_3_DESIGN.md`](../signalk-router-pipeline/PHASE_3_DESIGN.md). Most
 of it (data fusion, overrides, vessel-traffic validation, scale-out) is
 pipeline-side and doesn't touch this repo — but **§3f, supernode/
-macro-edge hierarchical routing, is a real `autoroute` change**: a coarse
+macro-edge hierarchical routing, is a real `routeiq` change**: a coarse
 supernode-graph search mode in `astarSearch` (sparse long-haul routing
 over `edge_kind_id=3` macro-edges, already reserved in the schema but
 unpopulated, falling back to today's full-resolution search only for
@@ -246,7 +247,7 @@ small region.
 
 There's also
 [`PHASE_4_DESIGN.md`](../signalk-router-pipeline/PHASE_4_DESIGN.md) in
-the sibling repo, and **§4a there is entirely an `autoroute` change** (§4b
+the sibling repo, and **§4a there is entirely a `routeiq` change** (§4b
 and §4c are pipeline/router-data-side): position- and route-aware dynamic
 database loading, replacing `RoutingDatabase.init()`'s current
 unconditional "open every `.sqlite` in the directory" behavior with a
@@ -254,7 +255,7 @@ peek-then-lazy-load model driven by vessel position and route requests.
 Not started; independent of everything in Phase 3, but most valuable once
 more than one real region exists locally at once.
 
-**§4c's `autoroute`-side consumption is designed separately in this
+**§4c's `routeiq`-side consumption is designed separately in this
 repo**, `feature-bridge-lock-waits.md` — modeling bridge/lock waiting
 time so routes aren't assumed instant-passage, phased in three tiers
 (flat-constant ETA correction → schedule-aware minimum wait → full

@@ -1,8 +1,12 @@
 {
-  "name": "signalk-autoroute",
+  "name": "signalk-routeiq",
   "version": "0.1.0",
-  "description": "SignalK Open-Source Nautical Route Planner - Offline vessel-aware routing",
+  "description": "SignalK Nautical Route Planner - Offline tide and vessel-aware routing",
   "keywords": ["signalk-node-server-plugin", "signalk-webapp"],
+  "signalk": {
+    "displayName": "RouteIQ",
+    "appIcon": "icon.svg"
+  },
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -39,9 +43,9 @@
   },
   "signalK": {
     "pluginConstructor": "pluginConstructor",
-    "name": "signalk-autoroute",
-    "description": "Offline nautical route planner with vessel-aware A* pathfinding",
-    "url": "https://github.com/signalk/signalk-autoroute",
+    "name": "signalk-routeiq",
+    "description": "Offline nautical route planner with tide and vessel-aware A* pathfinding",
+    "url": "https://github.com/signalk/signalk-routeiq",
     "scope": "route",
     "configSchema": {
       "type": "object",

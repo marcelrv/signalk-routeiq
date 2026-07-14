@@ -1,5 +1,5 @@
 /**
- * SignalK Autoroute Nautical Route Planner Plugin - Main Entry Point
+ * SignalK RouteIQ Nautical Route Planner Plugin - Main Entry Point
  * 
  * A SignalK server plugin that provides offline-first nautical route planning
  * with vessel-aware A* pathfinding on a pre-computed routing graph.
@@ -30,19 +30,19 @@ export function pluginConstructor(app: ServerAPI) {
   let vesselDimensions = { draft: 0, beam: 4, airDraft: 0 };
   let subscriptionCancelled: (() => void) | null = null;
 
-  const pluginId = 'signalk-autoroute';
+  const pluginId = 'signalk-routeiq';
   const __filename = new URL(import.meta.url).pathname;
   const __plugindir = path.dirname(path.dirname(__filename)); // dist/.. → plugin root
 
   return {
     id: pluginId,
-    name: 'SignalK Autoroute Nautical Route Planner',
+    name: 'SignalK RouteIQ Nautical Route Planner',
 
     /**
      * Start the plugin
      */
     start(options: any, _restart?: () => void) {
-      console.log('[autoroute] Starting SignalK Autoroute Nautical Route Planner Plugin...');
+      console.log('[routeiq] Starting SignalK RouteIQ Nautical Route Planner Plugin...');
 
       // Merge received configuration with defaults
       config = { ...DEFAULT_CONFIG, ...options };
@@ -50,7 +50,7 @@ export function pluginConstructor(app: ServerAPI) {
       // Migrate legacy routingDatabase config to routingDataDir
       if (!config.routingDataDir && (options as any).routingDatabase) {
         config.routingDataDir = path.dirname((options as any).routingDatabase);
-        console.log(`[autoroute] Migrated legacy routingDatabase → routingDataDir: ${config.routingDataDir}`);
+        console.log(`[routeiq] Migrated legacy routingDatabase → routingDataDir: ${config.routingDataDir}`);
       }
 
       // Resolve data directory relative to plugin directory
@@ -62,13 +62,13 @@ export function pluginConstructor(app: ServerAPI) {
       if (config.routingDataDir) {
         try { fs.mkdirSync(config.routingDataDir, { recursive: true }); } catch { /* ignore */ }
       }
-      console.log(`[autoroute] Configuration loaded: ${JSON.stringify(config)}`);
+      console.log(`[routeiq] Configuration loaded: ${JSON.stringify(config)}`);
 
       // Create ApiHandler once; Express routes are registered against it on first start.
       // On subsequent starts (config save), only the routing engine is recreated.
       if (!apiHandler) {
         apiHandler = new ApiHandler(config, app);
-        console.log('[autoroute] API handler created (awaiting database init)');
+        console.log('[routeiq] API handler created (awaiting database init)');
       } else {
         // start() rebuilds the config object on every config save; the
         // handler keeps a reference, so hand it the fresh one.
@@ -93,7 +93,7 @@ export function pluginConstructor(app: ServerAPI) {
           await database.init();
           await database.loadGraph();
           const stats = await database.getStats();
-          console.log(`[autoroute] Database hot-reloaded: ${stats.nodes} nodes, ${stats.edges} edges, ${stats.pois} POIs`);
+          console.log(`[routeiq] Database hot-reloaded: ${stats.nodes} nodes, ${stats.edges} edges, ${stats.pois} POIs`);
 
           routingEngine = new RoutingEngine(database, config, currentDims);
           routingEngine.setTidesClient(new TidesClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase));
@@ -101,10 +101,10 @@ export function pluginConstructor(app: ServerAPI) {
           if (apiHandler) {
             apiHandler.setComponents(database, routingEngine);
           }
-          console.log('[autoroute] Routing engine hot-reloaded after database download');
+          console.log('[routeiq] Routing engine hot-reloaded after database download');
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Unknown error';
-          console.error(`[autoroute] Hot-reload failed: ${message}`);
+          console.error(`[routeiq] Hot-reload failed: ${message}`);
           if (apiHandler) apiHandler.setInitError(message);
         }
       };
@@ -117,7 +117,7 @@ export function pluginConstructor(app: ServerAPI) {
      * Stop the plugin
      */
     async stop() {
-      console.log('[autoroute] Stopping SignalK Autoroute Nautical Route Planner Plugin...');
+      console.log('[routeiq] Stopping SignalK RouteIQ Nautical Route Planner Plugin...');
 
       // Remove the extension from the plotterExtensions collection so hosts
       // stop offering it (presence == enabled per the extensions spec)
@@ -143,7 +143,7 @@ export function pluginConstructor(app: ServerAPI) {
       }
       routingEngine = null;
 
-      console.log('[autoroute] Plugin stopped');
+      console.log('[routeiq] Plugin stopped');
     },
 
     /**
@@ -277,16 +277,16 @@ export function pluginConstructor(app: ServerAPI) {
           res.sendFile(path.join(publicPath, 'index.html'));
         });
         router.use(express.static(publicPath));
-        console.log(`[autoroute] Frontend served from: ${publicPath}`);
+        console.log(`[routeiq] Frontend served from: ${publicPath}`);
       }
 
       // Always attach routes — apiHandler was created synchronously in start()
       // so it's guaranteed to exist here. If the DB isn't loaded yet, routes
       // will return 503 Service Unavailable.
       router.use('/router', apiHandler!.getRouter());
-      console.log('[autoroute] API routes attached');
+      console.log('[routeiq] API routes attached');
 
-      console.log('[autoroute] Router registered, awaiting initialization...');
+      console.log('[routeiq] Router registered, awaiting initialization...');
     },
 
     /**
@@ -312,23 +312,23 @@ export function pluginConstructor(app: ServerAPI) {
       await database.init();
       await database.loadGraph();
       const stats = await database.getStats();
-      console.log(`[autoroute] Database loaded: ${stats.nodes} nodes, ${stats.edges} edges, ${stats.pois} POIs`);
+      console.log(`[routeiq] Database loaded: ${stats.nodes} nodes, ${stats.edges} edges, ${stats.pois} POIs`);
 
       routingEngine = new RoutingEngine(database, config);
       routingEngine.setTidesClient(new TidesClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase));
       routingEngine.setCurrentsClient(new CurrentsClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase));
       apiHandler!.setComponents(database, routingEngine);
-      console.log('[autoroute] API handler ready');
+      console.log('[routeiq] API handler ready');
 
       // Fetch initial vessel dimensions synchronously (subscription may not fire for static values)
       await fetchInitialVesselDimensions(app);
 
       // Subscribe to future vessel dimension changes
       await subscribeToVesselDimensions(app);
-      console.log('[autoroute] Plugin started successfully');
+      console.log('[routeiq] Plugin started successfully');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error(`[autoroute] Failed to initialize: ${message}`);
+      console.error(`[routeiq] Failed to initialize: ${message}`);
       // Surface the error through the API so the frontend can show it rather
       // than polling forever on a 503. The app (map, data manager) stays usable.
       apiHandler!.setInitError(message);
@@ -370,10 +370,10 @@ export function pluginConstructor(app: ServerAPI) {
         if (airDraft !== undefined) newDimensions.airDraft = airDraft;
         vesselDimensions = { ...vesselDimensions, ...newDimensions };
         routingEngine!.setVesselDimensions(vesselDimensions);
-        console.log(`[autoroute] Vessel dimensions (from path API): ${JSON.stringify(vesselDimensions)}`);
+        console.log(`[routeiq] Vessel dimensions (from path API): ${JSON.stringify(vesselDimensions)}`);
       }
     } catch (error) {
-      console.warn('[autoroute] Failed to fetch initial vessel dimensions:', error);
+      console.warn('[routeiq] Failed to fetch initial vessel dimensions:', error);
     }
   }
 
@@ -429,7 +429,7 @@ export function pluginConstructor(app: ServerAPI) {
         });
       }
     } catch (error) {
-      console.warn('[autoroute] Failed to subscribe to vessel dimensions:', error);
+      console.warn('[routeiq] Failed to subscribe to vessel dimensions:', error);
     }
   }
 
@@ -482,7 +482,7 @@ export function pluginConstructor(app: ServerAPI) {
     if (Object.keys(newDimensions).length > 0) {
       vesselDimensions = { ...vesselDimensions, ...newDimensions };
       routingEngine.setVesselDimensions(vesselDimensions);
-      console.log(`[autoroute] Vessel dimensions updated: ${JSON.stringify(vesselDimensions)}`);
+      console.log(`[routeiq] Vessel dimensions updated: ${JSON.stringify(vesselDimensions)}`);
     }
   }
 }

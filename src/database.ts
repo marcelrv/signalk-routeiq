@@ -200,7 +200,7 @@ export class RoutingDatabase {
     // Open overlay (user-edits.sqlite) — created if not exists
     const overlayPath = join(this.dbDir, 'user-edits.sqlite');
     await this.sendMessage('openOverlay', { overlayPath });
-    console.log(`[autoroute] User-edits overlay ready: ${overlayPath}`);
+    console.log(`[routeiq] User-edits overlay ready: ${overlayPath}`);
   }
 
   private regionIdCol(): string {
@@ -374,7 +374,7 @@ export class RoutingDatabase {
         // region_id is not a unique key in real generated databases (all rows
         // observed with region_id=1 in zeeland.sqlite) — log the load-order
         // index too so individual occurrences are distinguishable.
-        console.warn(`[autoroute] Navmesh region_id=${region.regionId} (load index ${index}) has no ` +
+        console.warn(`[routeiq] Navmesh region_id=${region.regionId} (load index ${index}) has no ` +
           'boundary_node_ids — funnel-edge upgrade and anchor shortcuts are silently skipped for it, ' +
           'leaving only straight-line edge_kind_id=1 fallback edges (see NEXT_PHASES.md, Round 9 master finding).');
         return;
@@ -383,7 +383,7 @@ export class RoutingDatabase {
       this.addAnchorShortcutEdges(region);
     });
     if (emptyCount > 0) {
-      console.warn(`[autoroute] ${emptyCount}/${this.navmeshRegions.length} navmesh regions have empty ` +
+      console.warn(`[routeiq] ${emptyCount}/${this.navmeshRegions.length} navmesh regions have empty ` +
         'boundary_node_ids — funnel-upgrade coverage is degraded for this database.');
     }
   }

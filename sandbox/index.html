@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>SignalK Autoroute Nautical Route Planner</title>
+<title>SignalK RouteIQ Nautical Route Planner</title>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
@@ -400,7 +400,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   const STORAGE_KEY = 'sandbox_recent_urls';
   const DEFAULT_URL = '';
 
-  // auto-detect plugin path from URL like /plugins/signalk-autoroute/
+  // auto-detect plugin path from URL like /plugins/signalk-routeiq/
   const PLUGIN_PATH = (() => {
     const m = window.location.pathname.match(/^(\/plugins\/[^\/]+)\//);
     return m ? m[1] : '';
@@ -449,7 +449,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   }
 
   // ---- persist min coast distance ----
-  const S_COAST_KEY = 'autoroute_min_coast';
+  const S_COAST_KEY = 'routeiq_min_coast';
   try { const v = localStorage.getItem(S_COAST_KEY); if (v) document.getElementById('min-coast').value = v; } catch {}
   document.getElementById('min-coast').addEventListener('change', function () {
     try { localStorage.setItem(S_COAST_KEY, this.value); } catch {}
@@ -1360,7 +1360,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
         type: 'Feature',
         geometry: { type: 'LineString', coordinates: coords },
         properties: {
-          name: name || 'Autoroute',
+          name: name || 'RouteIQ',
           totalDistance: totalDist,
           totalCost: totalDist,
           segments: [],
@@ -1376,7 +1376,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       return;
     }
     showToast('Downloading GPX…', '');
-    const body = { route: lrmRouteToGeoJson(state.latestRoute, 'Autoroute'), name: 'Autoroute' };
+    const body = { route: lrmRouteToGeoJson(state.latestRoute, 'RouteIQ'), name: 'RouteIQ' };
     logDebug('GPX', gpxUrl(), body);
     fetch(gpxUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(r => {
@@ -1408,7 +1408,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
       return;
     }
     showToast('Saving route to Signal K…', '');
-    const body = { route: lrmRouteToGeoJson(state.latestRoute, 'Autoroute Route'), name: 'Autoroute Route' };
+    const body = { route: lrmRouteToGeoJson(state.latestRoute, 'RouteIQ Route'), name: 'RouteIQ Route' };
     logDebug('PUSH', pushUrl(), body);
     fetch(pushUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(r => {

@@ -161,7 +161,7 @@ don't copy):
 signalk-tides: config points at a tcdata dir; parses ASCII HARMONIC/IDX
 first (covers NL via the V10 bundle), TCD later (US data); publishes
 `environment.current` predictions plus a REST API (station search by
-position, set/drift timeline). Autoroute then adds a thin `StationFlowField`
+position, set/drift timeline). RouteIQ then adds a thin `StationFlowField`
 provider that prefers real current stations within range and falls back to
 the height-gradient estimate elsewhere — the `FlowField` interface needs no
 change. Label data provenance in the UI (community data, not official).

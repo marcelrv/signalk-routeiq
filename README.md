@@ -1,4 +1,6 @@
-# SignalK Autoroute Nautical Route Planner
+![RouteIQ icon](public/icon.svg)
+
+# SignalK RouteIQ Nautical Route Planner
 
 An offline-first, vessel-aware nautical route planner designed to run natively as a webapp and plugin within the Signal K ecosystem. Optimized for inland waterways and coastal navigation, it dynamically calculates safe routes based on a vessel's physical dimensions (draft, beam, air draft) and user safety preferences.
 
@@ -132,7 +134,7 @@ Cost = Distance × FairwayMultiplier × DirectionalPenalty
 ## Project Structure
 
 ```
-autoroute/
+routeiq/
 ├── public/                  # Part 3: WebApp frontend
 │   ├── index.html
 │   ├── styles.css

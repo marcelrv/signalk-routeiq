@@ -1,5 +1,5 @@
 /**
- * E2E UI validation for the SignalK Autoroute frontend overhaul.
+ * E2E UI validation for the SignalK RouteIQ frontend overhaul.
  * Runs against the live SignalK server (real routing data, Zeeland NL).
  *
  * Covers:
@@ -15,7 +15,7 @@
  */
 import { chromium } from 'playwright';
 
-const BASE = process.env.BASE_URL || 'http://localhost:3000/signalk-autoroute/';
+const BASE = process.env.BASE_URL || 'http://localhost:3000/signalk-routeiq/';
 const SHOTS = '/shots';
 
 let failures = 0;

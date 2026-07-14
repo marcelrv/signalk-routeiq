@@ -1,4 +1,4 @@
-# Project Specification: SignalK Open-Source Nautical Route Planner
+# Project Specification: SignalK Nautical Route Planner
 
 ## 1. Project Overview
 This project is an offline-first, vessel-aware nautical route planner designed to run natively as a webapp and plugin within the Signal K ecosystem. Optimized for inland waterways and coastal navigation, it dynamically calculates safe routes based on a vessel's physical dimensions (draft, beam, air draft) and user safety preferences.

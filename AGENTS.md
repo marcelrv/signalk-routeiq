@@ -9,17 +9,17 @@
 - **Graph editor endpoints** (`/signalk/v1/api/router/graph/nodes/*`, `/signalk/v1/api/router/graph/edges/*`) expose CRUD for the routing graph for debugging and manual corrections, but all actual routing decisions remain server-side.
 - **Vessel dimensions** (draft, beam, airDraft) are fetched from the SignalK delta stream on the server and injected into the routing engine. The frontend may display them but does not enforce constraints.
 - When modifying the frontend, ensure no routing logic leaks into it. The frontend should only: collect waypoint coordinates, POST them to the API, render the returned GeoJSON, and display warnings/metadata.
-- **Chart sources** (webapp, "chart sources" section in `public/index.html`): the Charts tab lets users pick map layers — built-in OSM/OpenSeaMap plus charts from the SK server's `resources/charts` API (fetched from the *server root*, not the plugin router mount). Raster `tilelayer` charts render via `L.tileLayer`; S-57 `pbf` charts via Leaflet.VectorGrid with a **simplified** S-52 day-palette style. That normalisation + styling is adapted from Freeboard-SK (Apache-2.0) — keep the attribution comments there and in README when touching it. Selection persists in `localStorage['autoroute-charts']`.
+- **Chart sources** (webapp, "chart sources" section in `public/index.html`): the Charts tab lets users pick map layers — built-in OSM/OpenSeaMap plus charts from the SK server's `resources/charts` API (fetched from the *server root*, not the plugin router mount). Raster `tilelayer` charts render via `L.tileLayer`; S-57 `pbf` charts via Leaflet.VectorGrid with a **simplified** S-52 day-palette style. That normalisation + styling is adapted from Freeboard-SK (Apache-2.0) — keep the attribution comments there and in README when touching it. Selection persists in `localStorage['routeiq-charts']`.
 
 ## Freeboard-SK Plotter Extension (plotterext/)
-- The plugin is also a **plotter extension provider** (Plotter Extensions API v1, see the Freeboard-SK docs). `src/plotterext.ts` registers a read-only `plotterExtensions` resource manifest (toolbar button + `autoroute-panel` iframe panel) and mounts assets at `/plotterext/signalk-autoroute/`.
+- The plugin is also a **plotter extension provider** (Plotter Extensions API v1, see the Freeboard-SK docs). `src/plotterext.ts` registers a read-only `plotterExtensions` resource manifest (toolbar button + `routeiq-panel` iframe panel) and mounts assets at `/plotterext/signalk-routeiq/`.
 - The panel (`plotterext/panel.html` + `panel.js`) has **no map** — the host chartplotter renders everything. It reads the visible route via the host `routes` capability (`route.list`/`route.get`), POSTs first/middle/last points as start/via/end to `POST /router/route`, stages the result with `route.replace`, and persists via `route.save({dialog:true})`. Same rule as the webapp: zero routing logic client-side.
-- The `signalk-plotterext-bus` client library (npm dependency) is served from its `node_modules` dist at `/plotterext/signalk-autoroute/bus/`; the panel imports `./bus/extension.js`.
+- The `signalk-plotterext-bus` client library (npm dependency) is served from its `node_modules` dist at `/plotterext/signalk-routeiq/bus/`; the panel imports `./bus/extension.js`.
 - Extension assets are deliberately **not** under `/plugins/*` (admin-gated) and the package must **not** rely on the `signalk-webapp` keyword for them.
 - `averageSpeedKnots` and `defaultCoastDistance` are exposed to clients via `GET /router/config`; ETA in both UIs derives from the plugin-config average speed.
 
 ## Data Pipeline (moved out of this repo)
-- The chart-ingestion/graph-generation pipeline (`enc_preprocessor.py`, `nautical_routing_pipeline.py`, `add_pois_to_db.py`, `deploy_to_data_repo.py`, `generate_coastline.py`) no longer lives here — it moved to its own repo, **signalk-router-pipeline** (local checkout: `/home/node/signalkdev/signalk-router-pipeline`). This repo (`autoroute`) now only contains the **runtime consumer** of the compiled `.sqlite` databases.
+- The chart-ingestion/graph-generation pipeline (`enc_preprocessor.py`, `nautical_routing_pipeline.py`, `add_pois_to_db.py`, `deploy_to_data_repo.py`, `generate_coastline.py`) no longer lives here — it moved to its own repo, **signalk-router-pipeline** (local checkout: `/home/node/signalkdev/signalk-router-pipeline`). This repo (`routeiq`) now only contains the **runtime consumer** of the compiled `.sqlite` databases.
 - For pipeline architecture, usage, and data sources, see that repo's `README.md`. For the database schema this runtime must read (including fields not yet consumed here, like `source_tier`/`navmesh_regions`), see `signalk-router-data`'s `specs/routing-database-format-specification.md`.
 - Sections below (SQLite Schema, Deterministic Node IDs, Config) describe what the current runtime (`src/database.ts`, `src/routing.ts`) actually reads today — check the format spec for anything newer the pipeline may start emitting.
 
@@ -63,7 +63,7 @@
 
 ### Required `package.json` settings
 1. `"keywords": ["signalk-node-server-plugin"]` — **essential** for SK server to discover the plugin via `modulesWithKeyword()`.
-2. `"signalK": { "pluginConstructor": "pluginConstructor", "name": "signalk-autoroute" }` — names the factory function.
+2. `"signalK": { "pluginConstructor": "pluginConstructor", "name": "signalk-routeiq" }` — names the factory function.
 3. `"type": "module"` + `"main": "dist/index.js"`.
 4. Both **named** and **default** exports must point to `pluginConstructor` — SK's `importOrRequire()` returns `module.default` for ESM.
 

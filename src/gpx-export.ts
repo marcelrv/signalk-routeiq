@@ -6,7 +6,7 @@ export class GpxExporter {
    * Convert a RouteResult GeoJSON to GPX XML string
    * Handles both single-feature (segments array) and multi-feature (per-segment) formats.
    */
-  static toGpx(route: RouteResult, name: string = 'Autoroute'): string {
+  static toGpx(route: RouteResult, name: string = 'RouteIQ'): string {
     const { coords, segments } = this.extractCoordsAndSegments(route);
     const totalDistance = route.totalDistance ?? 0;
     const totalCost = route.totalCost ?? 0;
@@ -16,10 +16,10 @@ export class GpxExporter {
     const waypoints = route.waypoints && route.waypoints.length >= 2 ? route.waypoints : null;
 
     let gpx = `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="signalk-autoroute" xmlns:ar="http://signalk.org/autoroute">
+<gpx version="1.1" creator="signalk-routeiq" xmlns:ar="http://signalk.org/routeiq">
   <rte>
     <name>${this.escapeXml(name)}</name>
-    <desc>Route calculated by SignalK Autoroute Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m, Cost: ${totalCost.toFixed(2)}</desc>`;
+    <desc>Route calculated by SignalK RouteIQ Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m, Cost: ${totalCost.toFixed(2)}</desc>`;
 
     if (waypoints) {
       waypoints.forEach((wp, index) => {
@@ -79,7 +79,7 @@ export class GpxExporter {
   /**
    * Convert route to Signal K v2 Route specification
    */
-  static toSignalKRoute(route: RouteResult, name: string = 'Autoroute Route', routeId?: string): any {
+  static toSignalKRoute(route: RouteResult, name: string = 'RouteIQ Route', routeId?: string): any {
     const { coords, segments } = this.extractCoordsAndSegments(route);
     const totalDistance = route.totalDistance ?? 0;
     const totalCost = route.totalCost ?? 0;
@@ -96,7 +96,7 @@ export class GpxExporter {
 
     return {
       name,
-      description: `Route calculated by SignalK Autoroute Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m`,
+      description: `Route calculated by SignalK RouteIQ Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m`,
       distance: totalDistance,
       feature: {
         type: 'Feature',

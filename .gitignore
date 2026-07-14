@@ -52,7 +52,7 @@ backend/__pycache__/nautical_routing_pipeline.cpython-312.pyc
 # Data-repo staging files (sync to signalk-router-data repo)
 router-data/
 backend/deploy_to_data_repo.py
-signalk-autoroute-0.1.0.tgz
+signalk-routeiq-*.tgz
 
 # Private/local-only scripts — never commit
 backend/local_scripts/

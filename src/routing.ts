@@ -1289,7 +1289,7 @@ export class RoutingEngine {
         }
       }
       if (best !== node) {
-        console.log(`[autoroute] ${label} node ${node} → ${best} (better depth, ${Math.round(bestDist)}m away)`);
+        console.log(`[routeiq] ${label} node ${node} → ${best} (better depth, ${Math.round(bestDist)}m away)`);
       }
       return best;
     };

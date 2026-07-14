@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>SignalK Autoroute Nautical Route Planner</title>
+<title>SignalK RouteIQ Nautical Route Planner</title>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
@@ -1468,7 +1468,7 @@ label.switch-row {
   const STORAGE_KEY = 'sandbox_recent_urls';
   const DEFAULT_URL = '';
 
-  // auto-detect plugin path from URL like /plugins/signalk-autoroute/
+  // auto-detect plugin path from URL like /plugins/signalk-routeiq/
   const PLUGIN_PATH = (() => {
     const m = window.location.pathname.match(/^(\/plugins\/[^\/]+)\//);
     return m ? m[1] : '';
@@ -1561,7 +1561,7 @@ label.switch-row {
         tidesAvailable = !!(st && st.available);
         document.getElementById('tide-controls').style.display = tidesAvailable ? '' : 'none';
         if (!tidesAvailable) return;
-        const saved = localStorage.getItem('autoroute-use-tides');
+        const saved = localStorage.getItem('routeiq-use-tides');
         const cb = document.getElementById('tide-cb');
         cb.checked = saved !== null ? saved === '1' : !!st.considerTidesDefault;
         document.getElementById('tide-depart-row').style.display = cb.checked ? '' : 'none';
@@ -1570,7 +1570,7 @@ label.switch-row {
       .catch(() => {});
   }
   document.getElementById('tide-cb').addEventListener('change', function () {
-    try { localStorage.setItem('autoroute-use-tides', this.checked ? '1' : '0'); } catch {}
+    try { localStorage.setItem('routeiq-use-tides', this.checked ? '1' : '0'); } catch {}
     document.getElementById('tide-depart-row').style.display = this.checked ? '' : 'none';
     if (!document.getElementById('departure-time').value) setDepartureInput(new Date());
     if (state.startLatLng && state.destLatLng) routingControl.route();
@@ -1652,7 +1652,7 @@ label.switch-row {
       row.addEventListener('click', () => {
         setDepartureInput(dep);
         const cb = document.getElementById('tide-cb');
-        if (!cb.checked) { cb.checked = true; try { localStorage.setItem('autoroute-use-tides', '1'); } catch {} }
+        if (!cb.checked) { cb.checked = true; try { localStorage.setItem('routeiq-use-tides', '1'); } catch {} }
         document.getElementById('tide-depart-row').style.display = '';
         document.getElementById('departure-modal').style.display = 'none';
         routingControl.route();
@@ -1746,7 +1746,7 @@ label.switch-row {
   // from OpenCPN's s52plib. This is deliberately a *simplified* rendering
   // (no symbol sprites, no soundings text) — enough to plan a route over,
   // not a navigation display.
-  const CHART_STORE_KEY = 'autoroute-charts';
+  const CHART_STORE_KEY = 'routeiq-charts';
 
   map.createPane('charts').style.zIndex = 210;   // above base tiles (200)
   map.createPane('seamarks').style.zIndex = 220; // seamark overlay above charts
@@ -2369,7 +2369,7 @@ label.switch-row {
 
   // Tide/current stations come straight from their own plugins on this same
   // Signal K server (signalk-tides, signalk-tidal-currents) — not proxied
-  // through the autoroute backend.
+  // through the routeiq backend.
   function tideStationsUrl(lat, lon) {
     return '/signalk/v2/api/tides/stations?latitude=' + lat.toFixed(4) + '&longitude=' + lon.toFixed(4);
   }
@@ -3901,7 +3901,7 @@ label.switch-row {
           return r.json();
         })
         .then(geoJson => {
-          if (isDebug()) console.log('[autoroute] Route response:', JSON.stringify(geoJson, null, 2));
+          if (isDebug()) console.log('[routeiq] Route response:', JSON.stringify(geoJson, null, 2));
           state.lastGeoJson = geoJson;
           state.routing = false;
           const result = geoJsonToLRM(geoJson, waypoints);
@@ -4537,7 +4537,7 @@ label.switch-row {
       showToast('No route to export — calculate a route first', 'error');
       return;
     }
-    const routeName = state.routeName || 'Autoroute';
+    const routeName = state.routeName || 'RouteIQ';
     showToast('Downloading GPX…', '');
     const body = { route: state.lastGeoJson, name: routeName };
     logDebug('GPX', gpxUrl(), body);
@@ -4570,7 +4570,7 @@ label.switch-row {
       showToast('No route to save — calculate a route first', 'error');
       return;
     }
-    const routeName = state.routeName || 'Autoroute Route';
+    const routeName = state.routeName || 'RouteIQ Route';
     showToast('Saving route to Signal K…', '');
     const body = { route: state.lastGeoJson, name: routeName };
     logDebug('PUSH', pushUrl(), body);
