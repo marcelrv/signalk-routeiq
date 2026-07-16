@@ -1028,6 +1028,26 @@ export class RoutingDatabase {
     return edges.find(e => e.target === target) || null;
   }
 
+  /**
+   * Walk the original (unsmoothed) A* path between `fromNode` and `toNode`
+   * and aggregate every underlying edge's attributes — used whenever
+   * path-smoothing (compressCollinear's pure node-position collinearity
+   * check, or the optional LOS string-pulling in smoothPath) leaves two
+   * smoothed-path nodes with no *direct* edge between them.
+   *
+   * Also concatenates each underlying edge's own `path_points` (plus the
+   * coordinate of every original-path node strictly between fromNode and
+   * toNode) into a single ordered polyline, so a stretch that happens to
+   * span one or more funnel-upgraded navmesh edges still renders its real
+   * curved geometry instead of buildRouteResult falling back to a flat
+   * chord (see NEXT_PHASES.md, "Round 11"/"Round 12"). Direction is not an
+   * issue here: getEdgeSync(source, target) always returns that edge's own
+   * path_points already oriented source→target (upgradeRingBoundaryEdges
+   * and addFunnelShortcutEdge both store each direction's edge row with its
+   * own correctly-oriented path_points, mirroring how they're consumed
+   * directly in buildRouteResult), so no reversal is needed when walking
+   * originalPath forward.
+   */
   aggregateSegmentEdges(fromNode: number, toNode: number, originalPath: number[]): (EdgeRow & { lat: number; lon: number }) | null {
     if (!this.graphLoaded) return null;
 
@@ -1044,6 +1064,7 @@ export class RoutingDatabase {
     let edgeTypeId = EDGE_TYPE_COASTAL;
     let crossesLand = 0;
     let crossesObstacle = 0;
+    const pathPoints: Array<[number, number]> = [];
 
     for (let i = startIdx; i < endIdx; i++) {
       const edge = this.getEdgeSync(originalPath[i], originalPath[i + 1]);
@@ -1060,6 +1081,16 @@ export class RoutingDatabase {
         edgeTypeId = edge.edge_type_id;
         if (edge.crosses_land === 1) crossesLand = 1;
         if (edge.crosses_obstacle === 1) crossesObstacle = 1;
+
+        if (edge.path_points && edge.path_points.length > 0) pathPoints.push(...edge.path_points);
+        // The intermediate original-path node itself is a real vertex of the
+        // aggregated polyline (not just curve interior) — include it, except
+        // after the final edge, whose target *is* toNode (added separately
+        // by buildRouteResult, same as the single-edge path_points case).
+        if (i < endIdx - 1) {
+          const midNode = this.nodes.get(originalPath[i + 1]);
+          if (midNode) pathPoints.push([midNode.lat, midNode.lon]);
+        }
       }
     }
 
@@ -1079,6 +1110,7 @@ export class RoutingDatabase {
       crosses_obstacle: crossesObstacle,
       lat: toNodeCoords?.lat || 0,
       lon: toNodeCoords?.lon || 0,
+      ...(pathPoints.length > 0 ? { path_points: pathPoints } : {}),
     };
   }
 
