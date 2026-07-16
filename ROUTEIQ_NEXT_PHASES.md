@@ -326,3 +326,116 @@ in the first place). Needs its own investigation into which of those is
 right, plus a real before/after check (do the same segment-geometry
 classification done here, confirm curved segments actually appear,
 confirm total distance doesn't change) before considering it done.
+
+## Round 12 — aggregateSegmentEdges fixed to carry real path_points; confirmed correct, but this route's own path barely exercises it
+
+Investigated (a) vs (b) before touching anything, per Round 11's own
+"needs its own investigation" note. `smoothPath` (`routing.ts`) already
+has a "never string-pull across a funnel-augmented hop" guard — added
+back in `bfd3560`, well before Round 11 — that explicitly refuses to LOS-
+skip over any hop whose direct edge carries `path_points`. So option (b)
+is *already implemented* for `smoothPath` specifically. But it's dead in
+practice: `smoothPath` only runs when `config.lineOfSightSearchRadius` is
+non-zero, and that defaults to `0` in both `DEFAULT_CONFIG` (`types.ts`)
+and the live plugin's own saved config
+(`/home/node/.signalk/plugin-config-data/signalk-routeiq.json`) — so
+`smoothPath` returns its input unchanged and the guard never runs. The
+actual gap-creator, confirmed by instrumenting both, is
+**`compressCollinear`** (`routing.ts`), an earlier, *ungated* pre-pass
+that always runs and has zero awareness of `path_points` — it drops a
+path node whenever it sits within 2m of the straight line between its
+neighbors, purely by node position, with no check on the geometry of the
+edges either side of it. That's the real source of the two-consecutive-
+smoothed-nodes-with-no-direct-edge gaps `aggregateSegmentEdges` has to
+paper over. Given that, teaching `compressCollinear` about `path_points`
+would only close one of the gap sources (and duplicates logic
+`aggregateSegmentEdges` needs to keep anyway for other cases, e.g.
+disconnected-graph bridging) — **option (a) is the right fix**: make
+`aggregateSegmentEdges` itself always reconstruct the true geometry,
+regardless of why the gap exists.
+
+**Fix**: `aggregateSegmentEdges` (`database.ts`) now builds a `pathPoints`
+array while it walks the underlying edges — for each underlying edge, its
+own `path_points` (if any) followed by the coordinate of the next
+original-path node (except after the final edge, whose target is `toNode`
+itself, added separately by `buildRouteResult` the same way it already
+handles a single direct edge). No direction-flipping logic was needed:
+`upgradeRingBoundaryEdges`/`addFunnelShortcutEdge` already store each
+direction of an edge as its own row with independently-correct
+`path_points` orientation (confirmed by reading both, and re-confirmed by
+a direct reverse-direction test below), so `getEdgeSync(source, target)`
+always returns points already oriented `source→target` — the same
+invariant `buildRouteResult` already relies on for un-aggregated edges.
+
+**Verified mechanically correct**, independent of any real route: found a
+genuine `A→B→C` chain in `data/zeeland_round10_locks.sqlite` where both
+`A→B` and `B→C` are real funnel-upgraded edges with their own
+`path_points`, and no direct `A→C` edge exists. Calling
+`aggregateSegmentEdges(A, C, [A,B,C])` directly returns `distance` exactly
+equal to the sum of the two edges' distances, and `path_points` of exactly
+the expected length (`A→B`'s 2 interior points + `B`'s own coordinate +
+`B→C`'s 2 interior points = 5), in the correct order. Ran the mirror-image
+`C→B→A` aggregation too — distance identical, points correctly ordered in
+reverse — confirming the "no reversal needed" reasoning above rather than
+just assuming it.
+
+**Verified against the full pipeline build**: rebuilt (`npx tsc`, Docker
+node:22 pattern) and ran the full suite — 41/41 pass, same as before the
+change. Reproduced the exact Round 11 route (Oude-Tonge start, via point,
+near-Zierikzee destination; draft 1.5m/beam 5.0m/airDraft 17.3m) against
+`data/zeeland_round10_locks.sqlite`:
+
+| | before | after |
+|---|---|---|
+| smoothed-path hops | 266 | 266 (unchanged — fix is display-only) |
+| flat (1 sub-segment) hops | 264 | 186 |
+| curved (>1 sub-segment) hops | 2 | 80 |
+| rendered 2-point features | 270 | 396 |
+| `route.totalDistance` | 51633.33 | 51633.33 (byte-identical) |
+| `route.totalCost` | 12002425269.136288 | 12002425269.136288 (byte-identical) |
+
+Distance/cost being exactly unchanged confirms this is purely a
+display/geometry fix, as expected — it doesn't touch route choice or the
+Round 10 distance-inflation investigation.
+
+**Honest caveat, found by checking under the hood rather than trusting
+the hop-count improvement alone**: of the 80 hops that gained extra
+points, *none* of their underlying edges actually carry real funnel
+`path_points` — checked directly (0 of the 206 underlying edges spanned
+by those 80 aggregation calls have `path_points` themselves). What's
+rendering now is the real intermediate graph nodes `compressCollinear`
+had dropped (correct — those are genuine path vertices, not just curve
+interior — but they're near-collinear by construction of the 2m
+threshold, so visually this specific improvement is subtle, not a
+dramatic new curve). Went further and measured the *entire* raw A* path
+for both legs of this route: 393 edges total, only 3 are
+`edge_kind_id=1` (`EDGE_KIND_NAVMESH_BOUNDARY`) boundary/anchor edges, and
+literally 0 of those 3 fall inside any of the 80 aggregated spans. So for
+this specific route, on this specific database, the "real curved
+navmesh-interior path" the Round 11 title asks about still doesn't
+visibly appear — not because the fix doesn't work (the isolated
+`A→B→C` test above proves it does, byte-exact), but because this route's
+chosen path barely touches navmesh-upgraded edges at all despite ~99% of
+its nodes geographically sitting inside a navmesh region's polygon
+(measured: 149/150 and 242/243 raw-path nodes have `regionId != 0`). It
+travels almost entirely via `edge_kind_id=0` ("centerline") edges instead.
+
+That's a different, new observation from anything Round 9-11 measured:
+not "the route hugs region boundaries" but "the route barely uses the
+navmesh graph construct at all, preferring whatever centerline edges
+happen to be nearby, even deep inside a region's footprint." Whether
+that's correct (real charted channels legitimately running through open
+water) or a route-*choice* bug (A* under-preferring cheaper funnel
+shortcuts for some cost/heuristic reason) is exactly the kind of question
+Round 10's still-open inflation investigation should fold in — flagging
+it here rather than guessing further, per this round's scope being
+display-correctness only, not route choice.
+
+Also noticed in passing (not fixed, out of scope): the very short
+`B→C` funnel shortcut edge found for the isolated test above has a
+duplicate point within its own `path_points` (`[51.590306932259715,
+3.8902612867207584]` appears twice consecutively) — looks like a
+pre-existing degenerate case in the funnel algorithm for very short
+edges, unrelated to this fix (`aggregateSegmentEdges` just concatenates
+whatever each edge already stores). Worth a look if anyone's touching
+`Navmesh.funnelBetweenNodes` next.
