@@ -261,3 +261,68 @@ time so routes aren't assumed instant-passage, phased in three tiers
 (flat-constant ETA correction → schedule-aware minimum wait → full
 route-choice impact). Tier 1 needs no pipeline data; Tiers 2-3 do. See
 `todo.md`'s "Open — Routing features" item 3.
+
+## Round 11 — real returned routes never show a curved navmesh-interior path: found and precisely located, not fixed yet
+
+User's own hypothesis from a live screenshot (a route with a large,
+clearly wrong circular loop through the Oosterschelde): "I'm pretty sure
+it does not take any route inside the navmesh, just remains at the
+boundaries." Investigated directly rather than theorizing further —
+reproduced the exact route (start/via/dest from the screenshot) against
+the current best pipeline build (post Round 9 + Round 10's lock fix) and
+classified every returned segment's geometry: **270 straight 2-point
+segments, 0 curved multi-point segments.** Not "mostly boundary, some
+interior" — literally zero funnel-computed interior geometry anywhere in
+the route.
+
+**This is not the master finding regressing.** Added temporary
+diagnostic counters to `upgradeRingBoundaryEdges` (reverted after use,
+same live-instrumentation discipline as every prior round) and confirmed
+the funnel-upgrade mechanism itself works perfectly: every region logged
+`total=N upgraded=N nullResult=0 guardRejected=0` — a 100% success rate.
+`Navmesh.funnelBetweenNodes` is being called, succeeding, and correctly
+assigning real `path_points` to both ring-adjacency and anchor-shortcut
+edges in memory, exactly as designed.
+
+**Root cause, found by reading the actual path-reconstruction code,
+`buildRouteResult`/`aggregateSegmentEdges` (`src/database.ts`)**: when
+the search's path-smoothing step produces two consecutive path nodes
+that don't have a *direct* edge between them (common — path smoothing
+consolidates a long raw path into fewer, more direct hops, which
+routinely spans what used to be several ring/shortcut edges),
+`buildRouteResult` falls back to `this.db.aggregateSegmentEdges(prevNode,
+currNode, originalPath)` (`database.ts:1037`). That function correctly
+aggregates `distance`/`min_depth`/`max_air_draft`/`min_width`/
+`cost_factor`/`traffic_mode` across every underlying edge it walks — but
+**its returned object has no `path_points` field at all**. Back in
+`buildRouteResult`, the `if (edge.path_points && edge.path_points.length
+> 0)` check (line 1895) then always takes the `else` branch for these
+aggregated edges, pushing a flat 2-point segment regardless of how many
+real, curved, funnel-computed edges got aggregated underneath. Whenever
+path-smoothing spans a funnel-upgraded stretch — which is routine for
+any real crossing of a navmesh region — its curve is silently discarded.
+
+**Important distinction, don't conflate with the still-open inflation
+investigation**: `aggregateSegmentEdges`'s summed `distance` IS real
+(sums actual underlying edge distances), and `buildRouteResult` uses
+that real distance for `totalDistance`/cost. So this bug is very likely
+**not** the cause of the Zandkreeksluis/Issue-A distance inflation
+Round 10 was chasing — the route-*choice* and its reported distance
+are probably still accurate. This is a distinct, separate bug: the
+*drawn* geometry misrepresents the *chosen* path, which is its own real
+problem (a rendered route that visually looks like it might cross land
+or take an illogical loop, even when the underlying chosen path and its
+distance are correct) and directly explains the user's screenshot and
+Round 9's Issue D, but should be verified/fixed on its own terms, not
+assumed to also resolve the inflation numbers.
+
+**Not yet fixed**: `aggregateSegmentEdges` needs to either (a) return a
+concatenated `path_points` array built from each underlying edge's own
+points (correct but more work — must stitch multiple edges' points
+together in the right order/direction), or (b) `buildRouteResult`'s
+smoothed-path branch needs a different strategy entirely for edges with
+real interior geometry (e.g. don't smooth across a funnel-upgraded edge
+in the first place). Needs its own investigation into which of those is
+right, plus a real before/after check (do the same segment-geometry
+classification done here, confirm curved segments actually appear,
+confirm total distance doesn't change) before considering it done.
