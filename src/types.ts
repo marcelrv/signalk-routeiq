@@ -187,8 +187,8 @@ export interface PluginConfig {
   safetyMarginBeam: number;      // meters, added to design beam
   defaultCoastDistance: number;
   wrongWayPenalty: number;
-  routingBBoxMargin: number;        // degrees, default 1.0 (~111km)
-  routingBBoxMaxExtent: number;     // degrees, default 10.0
+  routingBBoxMargin: number;        // degrees, default 1.0 (~111km) — internal search tuning, not in the settings schema
+  routingBBoxMaxExtent: number;     // degrees, default 10.0 — internal, not in the settings schema
   lineOfSightSampleInterval: number; // meters, default 500
   lineOfSightSearchRadius: number; // meters, default 800
   averageSpeedKnots: number;        // knots, default 6.0

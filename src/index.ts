@@ -44,8 +44,15 @@ export function pluginConstructor(app: ServerAPI) {
     start(options: any, _restart?: () => void) {
       console.log('[routeiq] Starting SignalK RouteIQ Nautical Route Planner Plugin...');
 
-      // Merge received configuration with defaults
-      config = { ...DEFAULT_CONFIG, ...options };
+      // Merge received configuration with defaults.
+      // routingBBoxMargin/routingBBoxMaxExtent are internal search tuning,
+      // removed from the settings schema (2026-07-18) — strip them from any
+      // previously-persisted config so a stale saved value (e.g. the old
+      // 0.1° default frozen into plugin-config-data) can never override the
+      // engine's current defaults.
+      const { routingBBoxMargin: _ignoredMargin, routingBBoxMaxExtent: _ignoredExtent,
+        ...userOptions } = (options ?? {}) as Record<string, unknown>;
+      config = { ...DEFAULT_CONFIG, ...userOptions };
 
       // Migrate legacy routingDatabase config to routingDataDir
       if (!config.routingDataDir && (options as any).routingDatabase) {
@@ -229,18 +236,6 @@ export function pluginConstructor(app: ServerAPI) {
             title: 'Wrong Way Penalty',
             description: 'Penalty multiplier for traveling against traffic flow',
             default: DEFAULT_CONFIG.wrongWayPenalty,
-          },
-          routingBBoxMargin: {
-            type: 'number',
-            title: 'Routing BBox Margin (degrees)',
-            description: 'Initial search bounding-box margin around start/end (default 0.1 ≈ 11km)',
-            default: DEFAULT_CONFIG.routingBBoxMargin,
-          },
-          routingBBoxMaxExtent: {
-            type: 'number',
-            title: 'Routing BBox Max Extent (degrees)',
-            description: 'Maximum bounding-box size before falling back to full graph',
-            default: DEFAULT_CONFIG.routingBBoxMaxExtent,
           },
           lineOfSightSampleInterval: {
             type: 'number',
