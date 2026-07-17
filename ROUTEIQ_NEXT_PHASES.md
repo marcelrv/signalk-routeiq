@@ -431,6 +431,131 @@ Round 10's still-open inflation investigation should fold in — flagging
 it here rather than guessing further, per this round's scope being
 display-correctness only, not route choice.
 
+## Round 13 — "route follows the navmesh outer contour": root cause is pipeline-side (single-point region attachment), routeiq confirmed working
+
+Full writeup in the sibling repo's `NEXT_PHASES.md`, "Phase 2 Hardening,
+Round 13". Summary of what was established **from this repo's side**
+(probes in `scratch_round13/*.mjs`, run against
+`zeeland_round10_locks.sqlite` with this repo at `a4a0db5`):
+
+- **This repo's navmesh machinery works**: `precomputeFunnelEdges` runs
+  for 15/15 regions, same-region funnel crossing returns 1.18x
+  straight-line at cost == distance, in-memory shortcut edges carry sane
+  attributes. Nothing to fix here for the core defect.
+- **The defect is graph data**: a pure-distance Dijkstra over the loaded
+  graph (penalties ignored) reproduces the same giant detours the engine
+  returns (27km for a 6.8km crossing) using zero shortcut/funnel edges —
+  navmesh regions attach to the rest of the graph at ~1 point
+  (`_stitch_component_pieces`'s union-find rejection, pipeline-side).
+- **The live server runs a stale Round-8-era database** (24/25 empty
+  `boundary_node_ids`) — the funnel mechanism is entirely disabled in
+  production regardless of any code fix. Redeploy needed once the
+  pipeline fix lands.
+- Secondary, flagged for later rounds: 25% of centerline edges carry
+  `min_depth=0` (charted drying/0-band floor), each eating the
+  `+1e6 × meters` soft penalty for every real vessel — the source of the
+  recurring "depth 0.0m" warnings and 1e10-scale costs; and the penalty
+  × edge-length scaling structurally favors many short penalized edges
+  over one long one.
+
+**Rounds 14+15 (next session, user-diagnosed fairway issue): waterway↔navmesh
+connection implemented pipeline-side, verified, deployed.** Waterway
+crossing points are now seam-tagged navmesh boundary nodes, and inland
+nodes inside coastal water participate in stitching (§5.2.2 resolved).
+Probe C: 7,801m (1.15x, zero penalized meters); probe B (original bug
+report): 37,274m, matching the pre-regression historical best. 41/41
+tests, loadGraph 1.94s, no lock bypass (200 requires_lock edges). Live
+server now runs the Round 15 build (backup:
+`data/zeeland_pre_round15.sqlite.bak`). Remaining top items are now
+routeiq-relevant: `min_depth=0` data poisoning and `getEdgePenalty`'s
+1e6×meters penalty scaling (a 211m flagged edge = 211,000km-equivalent —
+Round 14's interim regression showed the cliff). Probe scripts:
+`scratch_round13/probe5-7.mjs` (hard-constraint cut analysis). Full
+write-up: sibling repo `NEXT_PHASES.md`, "Rounds 14+15".
+
+**Outcome (same session): fixed pipeline-side ("Pass 0c" local-adjacency
+guarantee in `_stitch_component_pieces`), verified, and deployed.** The
+6.8km cross-Oosterschelde probe went 33,703m → 10,489m (1.54x
+straight-line) and now traverses real anchor shortcuts; region external
+attachment edges went 135 → 2,395 across the 15 regions; 41/41 tests
+pass; `loadGraph()` 1.72s (unchanged band). The live server now runs the
+Round 13 database (old one backed up as
+`data/zeeland_pre_round13.sqlite.bak`) and starts with zero
+empty-`boundary_node_ids` warnings. Full write-up: sibling repo
+`NEXT_PHASES.md`, "Round 13 outcome". The min_depth=0 and inland-detour
+items above remain open follow-ups.
+
+## Round 15 follow-up — reported "route through a fixed bridge" (Oude-Tonge → 51.4991,4.0670): reproduced, route is actually correct; the confusion is crossing naming
+
+Reproduced twice against the deployed Round 15 database (default config
+AND live config: coast distance 0.5nm, air margin 0.3, path-API dims
+draft 1.2/air 17.0): 37.8-38.2km, crossings list "Krammer locks, bridge
+in the N-257" twice, no air-draft warning. Coordinate-level check: the
+route crosses the N-257 line at **51.66115,4.16180 — exactly the charted
+"opening" (movable) span POI** of the southern Krammer lock. Physically
+correct routing.
+
+**The real, smaller issue this surfaced**: the Krammer complex has SIX
+identically-named bridge POIs ("Krammer locks, bridge in the N-257"):
+2 opening spans + 4 fixed spans (charted heights 0.0 / 0.1 / 0.1 / 18.4m
+— S-57 gives every span the same OBJNAM). The webapp's crossing
+label/marker cannot distinguish them, so a correct opening-span crossing
+can read as "went through a fixed bridge". Improvement candidates (not
+implemented): (a) append the span subtype and height to crossing names
+("… (opening span)" / "… (fixed, 18.4m)"), (b) attach the crossing to
+the span POI nearest the actual crossing coordinate, (c) dedupe the
+double-listed crossing. Also noted: fixed spans charted height=0.1
+escape Issue K's `VERCLR=0` fallback by design and correctly block as
+0.1m — those are the dam/gate sections, working as intended.
+
+## Round 16 — reported canal route through two fixed bridges: root-caused to bbox-expansion-never-fires-on-penalized-results; fixed, tested, deployed (uncommitted)
+
+Follow-up to the Round 15 "fixed bridge" report: the user's screenshot
+(same start/dest, Oude-Tonge → 51.4991,4.0670) showed a 23.9nmi route
+down the Schelde-Rijn canal crossing Vossemeerbrug + Tholensebrug (both
+fixed, 9.8m) against a required 17.3m air draft — NOT the correct
+Krammer-locks route my earlier repro produced. Systematic elimination
+(same DB generation × overlay × config permutations, scripts
+`scratch_round13/probe10-12.mjs`): the databases and the user-edits
+overlay were all innocent; **the flip is `routingBBoxMargin: 0.1` (live
+user setting; default 1.0) alone**. The correct route's Keeten/Mastgat
+stretch dips to lon 3.9602 — ~500m outside the 0.1-margin search box
+(west edge 3.9670) — and the engine's bbox-expansion loop **only fired
+on total failure, never on "found only a heavily-penalized route"**, so
+a 5.70e8-cost route (two fixed-bridge violations) silently won over the
+1.52e8 clean route just outside the box.
+
+**Fix (`src/routing.ts`)**: `PENALIZED_RESULT_RETRY_FACTOR = 100` +
+`isMateriallyPenalized()` (`totalCost > totalDistance × 100` — any
+1e6-scale penalty trips it, legitimate cost never does); both the main
+search loop and the via-leg loop now treat a materially-penalized
+success like a failure: expand the bbox and retry, keep the lower-cost
+result, stop on clean result / max extent / no improvement between
+attempts (the stall check matters: even correct routes can carry a
+minor depth-warning leg, so without it every such route would expand
+to max extent). New regression test `test/bbox-penalty-retry.test.ts`
+(clean-detour-outside-tight-bbox synthetic; also asserts the graceful
+fallback still returns the penalized route when max extent genuinely
+prevents reaching the clean one). 43/43 tests. Verified on the real
+scenario: with the live 0.1 margin the route now returns the Krammer
+result (38,161m, no air-draft warning); margin-1.0 and probes B/C
+unchanged. Deployed (server restarted).
+
+**Follow-up (user decision): `routingBBoxMargin`/`routingBBoxMaxExtent`
+removed from the settings schema entirely** — they're internal search
+tuning, not user-facing. `start()` now strips both keys from any
+previously-persisted config before merging, so stale saved values (like
+the frozen old 0.1 default that caused this whole round) can never
+override the engine defaults again. Verified live: saved JSON still
+contains 0.1, loaded config correctly shows 1.0. 43/43 tests.
+
+Also shipped this session (separate user request): **debug coordinate
+readout** in the webapp (`public/index.html`) — when the existing
+"Debug logging" toggle is on, a bottom-right overlay shows live cursor
+lat/lon (5 decimals) plus the last-clicked coordinate with a
+copy-to-clipboard button; passive listeners, no interference with
+existing map click handlers.
+
 Also noticed in passing (not fixed, out of scope): the very short
 `B→C` funnel shortcut edge found for the isolated test above has a
 duplicate point within its own `path_points` (`[51.590306932259715,
