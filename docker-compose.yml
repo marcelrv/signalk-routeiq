@@ -14,7 +14,7 @@ services:
       # Mount dev dir at a non-node_modules path so npm can create a managed
       # file: symlink from node_modules/signalk-routeiq → ../routeiq-dev.
       # npm preserves file: symlinks during its install tree operations.
-      - /home/node/signalkdev/routeiq:/home/node/.signalk/routeiq-dev
+      - /home/node/signalkdev/signalk-routeiq:/home/node/.signalk/routeiq-dev
     environment:
       - TZ=Europe/Amsterdam
       - SIGNALK_CONTAINER_ID=signalk-server
