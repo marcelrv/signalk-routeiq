@@ -132,12 +132,10 @@ describe('bbox expansion retries on a penalized (not just failed) result', () =>
 
     // No constraint-penalty inflation in the winning cost — this is exactly
     // the check that would fail under the old bug, where the search silently
-    // kept the penalized direct A-B result (cost > 1,000,000, in fact here
-    // > 2,000,000,000 since the penalty scales with the violating edge's
-    // length).
-    assert.ok(route.totalCost! < 1_000_000,
-      `expected a clean cost with no depth-violation penalty, got ${route.totalCost}`);
-    // Cost should track distance closely (cost_factor 1.0, no penalty).
+    // kept the penalized direct A-B result. Cost should track distance
+    // closely (cost_factor 1.0, no penalty) rather than asserting cost is
+    // below some magic threshold, since the violation-rate constants are an
+    // implementation detail the test shouldn't hardcode.
     assert.ok(Math.abs(route.totalCost! - route.totalDistance!) < 50,
       `expected cost ≈ distance for an unpenalized route, got cost=${route.totalCost} distance=${route.totalDistance}`);
 
@@ -166,11 +164,183 @@ describe('bbox expansion retries on a penalized (not just failed) result', () =>
     });
 
     assert.ok(route.totalDistance! < 3000, `expected the short direct A-B edge, got ${route.totalDistance}m`);
-    // Old-bug signature: cost dominated by the depth-violation penalty
-    // (penalty scales with the violating edge's length here, hence >2e9
-    // rather than merely >1e6 — either way it's nowhere near clean).
-    assert.ok(route.totalCost! > 1_000_000, `expected the depth-violation penalty to dominate cost, got ${route.totalCost}`);
+    // Cost should be dominated by the depth-violation surcharge rather than
+    // genuine distance/cost_factor: a clean edge here costs ≈ distance
+    // (cost_factor 1.0), so a cost far above distance is the signature of
+    // the violation rate kicking in — checked as a ratio rather than a
+    // magic absolute value, since the exact rate is an implementation
+    // detail (see VIOLATION_RATE_CONSTRAINT in src/routing.ts).
+    assert.ok(route.totalCost! > route.totalDistance! * 100,
+      `expected the depth-violation penalty to dominate cost, got cost=${route.totalCost} distance=${route.totalDistance}`);
     const draftWarning = (route.warnings || []).find(w => w.type === 'via_constrained');
     assert.ok(draftWarning, 'expected a depth-constraint warning on the fallback route');
+  });
+});
+
+// Round 19: the old flat +1,000,000-per-violation penalty made a violating
+// edge's cost independent of how long that edge actually was — any detour,
+// however absurd, would eventually be "cheap" by comparison once it grew
+// past the flat constant, but a short violating edge could never win
+// against even a very long clean detour (a single mis-flagged 211m
+// air-draft edge could cost ~211,000km-equivalent — see Round 14). Rate-
+// based scaling (VIOLATION_RATE_CONSTRAINT × violating meters, see
+// src/routing.ts) makes the tradeoff bounded and legible: a short violating
+// edge is preferred over a detour that costs more than the violation
+// surcharge, and loses to a detour that costs less.
+//
+//   A (52.000, 5.000) ------ direct, 2396m, depth-violating ------ B (52.000, 5.035)
+//     \                                                           /
+//      \ clean, detourLegDistance                clean, detourLegDistance
+//       \                                                       /
+//        C (51.984, 4.984)
+//
+// Same node geometry as the bbox-retry fixture above (A/B 2.4km apart, C
+// >2km from each) so the shallow-water "improve start/end node" heuristic
+// doesn't fire and silently re-target the search onto a different node
+// before the cost-tradeoff logic under test even runs — that heuristic
+// snaps the start point onto any node with a deep path within 2000m, and a
+// closer A/B spacing (which would otherwise be more natural for a 1000m
+// "direct" edge) put B itself inside that radius, defeating the test.
+//
+// The direct edge's total cost is fixed at 2396 + 2396*VIOLATION_RATE_CONSTRAINT
+// = 721,196. Only the per-leg distance assigned to the A-C/C-B detour edges
+// changes between the two cases below (C stays geographically close to A/B
+// so the default 1°-margin bbox always sees the whole graph in one pass —
+// this test isolates the cost comparison, not the bbox-retry mechanics
+// already covered above).
+describe('violation-rate tradeoff is bounded, not all-or-nothing (Round 19)', () => {
+  const fixturesDir = './test/fixtures/bbox-penalty-retry-tradeoff';
+  const A = { lat: 52.000, lon: 5.000 };
+  const B = { lat: 52.000, lon: 5.035 };
+  const C = { lat: 51.984, lon: 4.984 };
+  const NODE_A = 21, NODE_B = 22, NODE_C = 23;
+  const DIRECT_DISTANCE = 2396; // meters; direct A-B edge violates depth
+  // 2396 base + 2396 * 300 (VIOLATION_RATE_CONSTRAINT) surcharge.
+  const DIRECT_TOTAL_COST_APPROX = DIRECT_DISTANCE + DIRECT_DISTANCE * 300;
+
+  async function buildFixture(detourLegAC: number, detourLegCB: number): Promise<RoutingDatabase> {
+    if (!fs.existsSync(fixturesDir)) fs.mkdirSync(fixturesDir, { recursive: true });
+    const dbPath = path.join(fixturesDir, 'test_tradeoff.sqlite');
+    for (const p of [dbPath, path.join(fixturesDir, 'user-edits.sqlite')]) {
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+
+    const raw = new DatabaseSync(dbPath, { open: true });
+    const run = (sql: string, params: any[] = []) => raw.prepare(sql).run(...params);
+
+    run(`CREATE TABLE metadata (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      country TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      description TEXT,
+      last_update_date TEXT NOT NULL
+    )`);
+    run(`INSERT INTO metadata (country, name, description, last_update_date)
+         VALUES ('TEST', 'Tradeoff Region', 'Synthetic fixture', '2026-01-01T00:00:00Z')`);
+
+    run(`CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL, lon REAL, resolution REAL DEFAULT 0.0, node_depth REAL DEFAULT -1, region_id INTEGER)`);
+    run(`INSERT INTO nodes (id, lat, lon, region_id) VALUES
+      (${NODE_A}, ${A.lat}, ${A.lon}, 1),
+      (${NODE_B}, ${B.lat}, ${B.lon}, 1),
+      (${NODE_C}, ${C.lat}, ${C.lon}, 1)`);
+
+    run(`CREATE TABLE edge_type_enum (id INTEGER PRIMARY KEY, description TEXT NOT NULL)`);
+    run(`INSERT INTO edge_type_enum VALUES (0, 'coastal'), (1, 'inland')`);
+    run(`CREATE TABLE poi_type_enum (id INTEGER PRIMARY KEY, description TEXT NOT NULL)`);
+    run(`INSERT INTO poi_type_enum VALUES (0, 'harbour'), (1, 'lock'), (2, 'bridge'), (3, 'fairway'), (4, 'waterway')`);
+
+    run(`CREATE TABLE edges (
+      source INTEGER, target INTEGER, distance REAL,
+      min_depth REAL, max_air_draft REAL, min_width REAL,
+      cost_factor REAL DEFAULT 1.0, distance_to_land REAL,
+      edge_type_id INTEGER DEFAULT 1,
+      traffic_mode INTEGER DEFAULT 0
+    )`);
+    // Direct A<->B: shallow (min_depth 0.5 < required 2.3), violates depth.
+    run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode) VALUES
+      (${NODE_A}, ${NODE_B}, ${DIRECT_DISTANCE}, 0.5, 20.0, 10.0, 1.0, 5000, 1, 0),
+      (${NODE_B}, ${NODE_A}, ${DIRECT_DISTANCE}, 0.5, 20.0, 10.0, 1.0, 5000, 1, 0)`);
+    // Clean detour A<->C<->B, deep enough on both legs.
+    run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode) VALUES
+      (${NODE_A}, ${NODE_C}, ${detourLegAC}, 10.0, 20.0, 10.0, 1.0, 5000, 1, 0),
+      (${NODE_C}, ${NODE_A}, ${detourLegAC}, 10.0, 20.0, 10.0, 1.0, 5000, 1, 0),
+      (${NODE_C}, ${NODE_B}, ${detourLegCB}, 10.0, 20.0, 10.0, 1.0, 5000, 1, 0),
+      (${NODE_B}, ${NODE_C}, ${detourLegCB}, 10.0, 20.0, 10.0, 1.0, 5000, 1, 0)`);
+
+    run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
+
+    raw.close();
+
+    const db = new RoutingDatabase(fixturesDir);
+    await db.init();
+    await db.loadGraph();
+    return db;
+  }
+
+  async function cleanup(db: RoutingDatabase) {
+    await db.close();
+    for (const p of [
+      path.join(fixturesDir, 'test_tradeoff.sqlite'),
+      path.join(fixturesDir, 'user-edits.sqlite'),
+    ]) {
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+  }
+
+  it('picks the clean detour when its cost is below the violation surcharge', async () => {
+    // Detour legs 2089m/3919m (~6008m total, cost ≈ 6008 at cost_factor 1.0)
+    // is far cheaper than the 721,196 direct-edge total — the detour wins.
+    const db = await buildFixture(2089, 3919);
+    try {
+      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
+      engine.setVesselDimensions({ draft: 2.0, beam: 4.0, airDraft: 10.0 });
+
+      const route = await engine.calculateRoute({
+        start: { latitude: A.lat, longitude: A.lon },
+        end: { latitude: B.lat, longitude: B.lon },
+        minCoastDistance: 0,
+      });
+
+      assert.ok(route.totalDistance! > 5500 && route.totalDistance! < 6500,
+        `expected the ~6.0km clean detour via C, got ${route.totalDistance}m`);
+      assert.ok(route.totalCost! < DIRECT_TOTAL_COST_APPROX,
+        `expected the cheap detour to beat the direct edge's violation-inflated cost, got ${route.totalCost}`);
+      const draftWarning = (route.warnings || []).find(w => w.type === 'via_constrained');
+      assert.strictEqual(draftWarning, undefined, 'clean detour should carry no depth-constraint warning');
+    } finally {
+      await cleanup(db);
+    }
+  });
+
+  it('picks the direct violating edge (with warning) when the only detour costs more than the violation', async () => {
+    // Detour legs 500,000m each way (~1,000,000m total) cost more than the
+    // 721,196 direct-edge total — this is exactly the case that was
+    // impossible under the old flat +1,000,000 scaling, where a violating
+    // edge always lost regardless of how long the alternative detour was.
+    // (The detour legs' graph `distance` is set far larger than C's real
+    // geo separation from A/B on purpose — the A* heuristic uses geo
+    // distance and stays admissible either way, and this keeps C safely
+    // outside the start/end node-improvement search radius; see the
+    // geometry note above.)
+    const db = await buildFixture(500_000, 500_000);
+    try {
+      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
+      engine.setVesselDimensions({ draft: 2.0, beam: 4.0, airDraft: 10.0 });
+
+      const route = await engine.calculateRoute({
+        start: { latitude: A.lat, longitude: A.lon },
+        end: { latitude: B.lat, longitude: B.lon },
+        minCoastDistance: 0,
+      });
+
+      assert.ok(route.totalDistance! < 3000,
+        `expected the short direct A-B edge to win, got ${route.totalDistance}m`);
+      assert.ok(Math.abs(route.totalCost! - DIRECT_TOTAL_COST_APPROX) < 10,
+        `expected cost close to the direct edge's violation-inflated total, got ${route.totalCost}`);
+      const draftWarning = (route.warnings || []).find(w => w.type === 'via_constrained');
+      assert.ok(draftWarning, 'expected a depth-constraint warning on the direct route');
+    } finally {
+      await cleanup(db);
+    }
   });
 });

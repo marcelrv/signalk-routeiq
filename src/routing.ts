@@ -48,25 +48,31 @@ function bboxFromPoints(
   };
 }
 
-// A "successful" A* search can still be a bad route: getEdgePenalty adds
-// +1,000,000-scale penalties per violated constraint (air draft, depth,
-// width — see below) so a route through a forbidden edge is technically
-// findable but astronomically expensive rather than rejected outright. A
-// tight bounding box can hide the real, unconstrained route while still
-// leaving a penalized one reachable inside the box, which used to return
-// silently wrong routes: the bbox-expansion retry below only ever
-// triggered on "no route found", never on "found a terrible one".
+// A "successful" A* search can still be a bad route: getEdgePenalty adds a
+// per-meter violation surcharge for soft constraints (air draft, depth,
+// width — see VIOLATION_RATE_CONSTRAINT/VIOLATION_RATE_COAST below) so a
+// route through a forbidden edge is technically findable but expensive
+// rather than rejected outright. A tight bounding box can hide the real,
+// unconstrained route while still leaving a penalized one reachable inside
+// the box, which used to return silently wrong routes: the bbox-expansion
+// retry below only ever triggered on "no route found", never on "found a
+// terrible one".
 //
-// Genuine (unpenalized) cost is bounded by distance × cost_factor (fairway
-// floor 0.8, typical edges ~1.0-1.2) × small multipliers (e.g. the 1.2
-// via-point/fallback factor) — comfortably under 10x distance on any real
-// route. A single constraint violation adds +1e6, which on typical
-// waterway edge lengths (tens to low hundreds of meters) already dwarfs
-// any plausible unpenalized cost for the same distance. 100x distance is a
-// wide margin above legitimate cost multipliers while sitting far below
-// what even one violated edge contributes, so it cleanly separates
-// "route is fine" from "route is penalty-poisoned".
-const PENALIZED_RESULT_RETRY_FACTOR = 100;
+// Round 13-18 detected this ("materially penalized") by comparing cost to
+// distance × a flat factor. That broke once penalties became rate-based
+// (Round 19): the flat +1,000,000-per-violation constant used to dwarf any
+// plausible unpenalized cost on its own, so a cost/distance ratio was a
+// reliable tripwire; a bounded per-meter rate does not blow past any fixed
+// ratio the same way, and coast-distance violations (a soft comfort
+// preference, not a hard constraint) legitimately fire on many otherwise
+// fine routes and would make a ratio-based check trigger the retry almost
+// unconditionally near any coastline.
+//
+// So detection is now explicit rather than magnitude-based: see
+// pathViolationMeters, which walks the winning path's segments and sums the
+// length of any depth/air-draft/beam violation (coast-distance excluded on
+// purpose — see its doc comment). The retry triggers whenever that sum is
+// nonzero, i.e. the route touches even one hard-constraint-violating edge.
 
 // A* search state
 interface SearchState {
@@ -308,17 +314,18 @@ export class RoutingEngine {
       }
       // Fall through for non-via routes (bbox search below)
 
-      // Try A* with expanding bounding box. A search that "succeeds" but is
-      // materially penalized (forced through a constraint-violating edge —
-      // see PENALIZED_RESULT_RETRY_FACTOR) gets the same expansion treatment
-      // as an outright failure, since the real route may just be sitting
-      // outside the current box. The cheapest result seen across attempts is
-      // kept — expansion never returns something worse than already found.
+      // Try A* with expanding bounding box. A search that "succeeds" but
+      // only got there by crossing a depth/air-draft/beam-violating edge
+      // (see pathViolationMeters) gets the same expansion treatment as an
+      // outright failure, since the real route may just be sitting outside
+      // the current box. The best result seen across attempts is kept —
+      // see isBetterCandidate for the fewer-violating-meters-first ordering.
       let currentMargin = this.config.routingBBoxMargin;
       const maxMargin = this.config.routingBBoxMaxExtent;
       let bestResult: RouteResult | null = null;
       let bestCost = Infinity;
-      let previousAttemptCost: number | null = null;
+      let bestViolatingMeters = Infinity;
+      let previousAttempt: { violatingMeters: number; cost: number } | null = null;
       let retriedForPenalty = false;
 
       while (currentMargin <= maxMargin) {
@@ -336,26 +343,29 @@ export class RoutingEngine {
 
           const cost = result.features[0].properties.totalCost ?? 0;
           const distance = result.features[0].properties.totalDistance ?? 0;
-          if (cost < bestCost) {
+          const violatingMeters = this.pathViolationMeters(result, effectiveDims);
+          if (this.isBetterCandidate(violatingMeters, cost, bestViolatingMeters, bestCost)) {
             bestResult = result;
             bestCost = cost;
+            bestViolatingMeters = violatingMeters;
           }
 
-          const penalized = this.isMateriallyPenalized(result);
-          const stalled = previousAttemptCost !== null && cost >= previousAttemptCost;
+          const penalized = violatingMeters > 0;
+          const stalled = previousAttempt !== null &&
+            !this.isBetterCandidate(violatingMeters, cost, previousAttempt.violatingMeters, previousAttempt.cost);
 
           if (!penalized) {
             break;
           }
           if (currentMargin >= maxMargin || stalled) {
-            console.log(`Route search kept a penalized result (cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — bounding box expansion ${stalled ? 'stopped improving' : 'reached max extent'}`);
+            console.log(`Route search kept a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — bounding box expansion ${stalled ? 'stopped improving' : 'reached max extent'}`);
             break;
           }
 
           const newMargin = Math.min(currentMargin * 2, maxMargin);
-          console.log(`Route search found a penalized result (cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`);
+          console.log(`Route search found a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`);
           retriedForPenalty = true;
-          previousAttemptCost = cost;
+          previousAttempt = { violatingMeters, cost };
           currentMargin = newMargin;
         } catch {
           // Expand bounding box and retry
@@ -374,7 +384,7 @@ export class RoutingEngine {
       if (bestResult) {
         const result = bestResult;
         if (retriedForPenalty) {
-          console.log(`Route search penalized-result retry ${this.isMateriallyPenalized(result) ? 'did not clear the penalty' : 'won'} (final cost ${bestCost.toFixed(0)})`);
+          console.log(`Route search penalized-result retry ${bestViolatingMeters > 0 ? 'did not clear the penalty' : 'won'} (final cost ${bestCost.toFixed(0)}, ${bestViolatingMeters.toFixed(0)}m constraint-violating)`);
         }
 
         // Connect user's start/end to the route coordinates
@@ -702,7 +712,8 @@ export class RoutingEngine {
     const segmentMaxMargin = this.config.routingBBoxMaxExtent;
     let bestResult: RouteResult | null = null;
     let bestCost = Infinity;
-    let previousAttemptCost: number | null = null;
+    let bestViolatingMeters = Infinity;
+    let previousAttempt: { violatingMeters: number; cost: number } | null = null;
     let retriedForPenalty = false;
 
     while (currentMargin <= segmentMaxMargin) {
@@ -712,25 +723,28 @@ export class RoutingEngine {
 
         const cost = result.features[0].properties.totalCost ?? 0;
         const distance = result.features[0].properties.totalDistance ?? 0;
-        if (cost < bestCost) {
+        const violatingMeters = this.pathViolationMeters(result, dims);
+        if (this.isBetterCandidate(violatingMeters, cost, bestViolatingMeters, bestCost)) {
           bestResult = result;
           bestCost = cost;
+          bestViolatingMeters = violatingMeters;
         }
 
-        const penalized = this.isMateriallyPenalized(result);
-        const stalled = previousAttemptCost !== null && cost >= previousAttemptCost;
+        const penalized = violatingMeters > 0;
+        const stalled = previousAttempt !== null &&
+          !this.isBetterCandidate(violatingMeters, cost, previousAttempt.violatingMeters, previousAttempt.cost);
 
         if (!penalized) break;
         bbox = undefined;
         if (currentMargin >= segmentMaxMargin || stalled) {
-          console.log(`Route search for ${label} kept a penalized result (cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — bounding box expansion ${stalled ? 'stopped improving' : 'reached max extent'}`);
+          console.log(`Route search for ${label} kept a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — bounding box expansion ${stalled ? 'stopped improving' : 'reached max extent'}`);
           break;
         }
 
         const newMargin = Math.min(currentMargin * 2, segmentMaxMargin);
-        console.log(`Route search for ${label} found a penalized result (cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`);
+        console.log(`Route search for ${label} found a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`);
         retriedForPenalty = true;
-        previousAttemptCost = cost;
+        previousAttempt = { violatingMeters, cost };
         currentMargin = newMargin;
       } catch {
         bbox = undefined;
@@ -745,7 +759,7 @@ export class RoutingEngine {
 
     if (bestResult) {
       if (retriedForPenalty) {
-        console.log(`Route search for ${label} penalized-result retry ${this.isMateriallyPenalized(bestResult) ? 'did not clear the penalty' : 'won'} (final cost ${bestCost.toFixed(0)})`);
+        console.log(`Route search for ${label} penalized-result retry ${bestViolatingMeters > 0 ? 'did not clear the penalty' : 'won'} (final cost ${bestCost.toFixed(0)}, ${bestViolatingMeters.toFixed(0)}m constraint-violating)`);
       }
       this.addViolationWarnings(bestResult, warnings, label, startPt, endPt, dims);
       return bestResult;
@@ -1594,6 +1608,13 @@ export class RoutingEngine {
         }
 
         const baseCost = this.calculateEdgeCost(edge, effDistance);
+        // penalty is a sum of per-meter violation RATES (see
+        // VIOLATION_RATE_CONSTRAINT/VIOLATION_RATE_COAST) — multiplying by
+        // the edge's own length keeps the surcharge proportional to how
+        // much violating distance is actually being crossed, rather than a
+        // flat per-edge charge that would bias the search toward many
+        // short violating edges over one long one. Math.max(1, ...) only
+        // guards against a zero-length edge silently escaping the penalty.
         const edgeCost = baseCost + (penalty * Math.max(1, edge.distance));
 
         const tentativeG = gScore.get(current.nodeId)! + edgeCost;
@@ -1684,18 +1705,77 @@ export class RoutingEngine {
   }
 
   /**
-   * True when a successful search result's cost is dominated by constraint
-   * penalties (see PENALIZED_RESULT_RETRY_FACTOR) rather than genuine
-   * distance/cost_factor — i.e. the route only "succeeded" by crossing an
-   * edge that violates draft/beam/air-draft, and a bbox expansion should be
-   * attempted in case a clean route exists just outside the current box.
+   * Total length (meters) of segments in a result whose depth, air-draft,
+   * or beam falls short of the given vessel's requirement — i.e. the
+   * portion of the route that only "succeeded" by crossing a hard-
+   * constraint-violating edge (see VIOLATION_RATE_CONSTRAINT). Zero means
+   * the path is clean on these three classes.
+   *
+   * Coast-distance is deliberately excluded: VIOLATION_RATE_COAST is a
+   * comfort preference (stay N meters off the coast), not a physical
+   * limit, and it legitimately fires on plenty of otherwise-fine routes
+   * near any coastline. Counting it here would make the bbox-expansion
+   * retry (below) trigger almost unconditionally instead of only when a
+   * route is actually forced through a depth/air/beam violation.
    */
-  private isMateriallyPenalized(result: RouteResult): boolean {
-    const props = result.features[0]?.properties;
-    const cost = props?.totalCost ?? 0;
-    const distance = props?.totalDistance ?? 0;
-    return distance > 0 && cost > distance * PENALIZED_RESULT_RETRY_FACTOR;
+  private pathViolationMeters(result: RouteResult, dims: VesselDimensions): number {
+    const segments = result.features[0]?.properties.segments;
+    if (!segments) return 0;
+    const minDepth = (dims.draft || 2.0) + this.config.safetyMarginDraft;
+    const minAirDraft = (dims.airDraft || 0) + this.config.safetyMarginAirDraft;
+    const minBeam = (dims.beam || 4.0) + this.config.safetyMarginBeam;
+
+    let meters = 0;
+    for (const seg of segments) {
+      const depthViolation = seg.minDepth >= 0 && seg.minDepth < minDepth;
+      const airDraftViolation = seg.maxAirDraft >= 0 && seg.maxAirDraft < minAirDraft;
+      const beamViolation = typeof seg.minWidth === 'number' && seg.minWidth >= 0 && seg.minWidth < minBeam;
+      if (depthViolation || airDraftViolation || beamViolation) {
+        meters += seg.distance || 0;
+      }
+    }
+    return meters;
   }
+
+  /**
+   * Ordering used to pick the "best" result across bbox-expansion retries
+   * (see pathViolationMeters): fewer constraint-violating meters always
+   * wins first, regardless of cost — the whole point of retrying with a
+   * wider box is to escape one that's hiding a clean route, so a clean
+   * result must beat a penalized one even if the penalized one happens to
+   * be cheaper on paper. Cost only breaks ties between two results at the
+   * same violation level (typically two clean routes, or two routes
+   * forced through the same amount of violation).
+   */
+  private isBetterCandidate(
+    violatingMetersA: number, costA: number,
+    violatingMetersB: number, costB: number,
+  ): boolean {
+    if (violatingMetersA !== violatingMetersB) return violatingMetersA < violatingMetersB;
+    return costA < costB;
+  }
+
+  // Per-class violation RATES: unitless "one violating meter costs N clean
+  // meters", multiplied by edge.distance in the A* edge-cost term below
+  // (getEdgePenalty returns the sum of rates for whichever classes an edge
+  // violates; multiple violated classes stack, e.g. depth+air = 600x/m).
+  // Replaces the old flat +1,000,000 (constraint) / +50,000 (coast) added
+  // per edge regardless of its length, which made a single mis-flagged
+  // edge cost more than a 100x detour (Round 14 regression) and made many
+  // short violating edges collectively cheaper than one long clean edge
+  // (a contour-hugging bias) since the flat constant dwarfed edge.distance.
+  //
+  // depth/air-draft/beam: physical constraint violations — strongly
+  // avoided, but a genuinely-only-option crossing should still beat an
+  // absurd detour. At 300x, a 211m violating edge costs ~63km-equivalent:
+  // enough to lose to almost any real detour, but not enough to lose to a
+  // 100x-longer one.
+  private static readonly VIOLATION_RATE_CONSTRAINT = 300;
+  // coast-distance: a comfort preference (stay clear of the coast by the
+  // requested margin), not a hard physical limit — softer than the
+  // constraint classes above so it doesn't dominate route choice the way
+  // it did at the old flat +50,000.
+  private static readonly VIOLATION_RATE_COAST = 50;
 
   private getEdgePenalty(
     edge: EdgeRow & { lat: number; lon: number },
@@ -1715,21 +1795,21 @@ export class RoutingEngine {
     let penalty = 0;
 
     if (typeof edge.max_air_draft === 'number' && edge.max_air_draft >= 0 && edge.max_air_draft < (dims.airDraft || 0) + this.config.safetyMarginAirDraft) {
-      penalty += 1000000;
+      penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
       if (skipReasons) skipReasons.airDraft++;
     }
 
     const minDepth = (dims.draft || 2.0) + this.config.safetyMarginDraft;
     if (typeof edge.min_depth === 'number' && edge.min_depth >= 0 && edge.min_depth < minDepth) {
-      penalty += 1000000;
+      penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
       if (skipReasons) skipReasons.draft++;
     }
     if (typeof edge.min_width === 'number' && edge.min_width >= 0 && edge.min_width < (dims.beam || 4.0) + this.config.safetyMarginBeam) {
-      penalty += 1000000;
+      penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
       if (skipReasons) skipReasons.beam++;
     }
     if (edge.edge_type_id === EDGE_TYPE_COASTAL && edge.distance_to_land < minCoastDistanceMeters) {
-      penalty += 50000;
+      penalty += RoutingEngine.VIOLATION_RATE_COAST;
       if (skipReasons) skipReasons.coastDistance++;
     }
 
