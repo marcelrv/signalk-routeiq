@@ -556,6 +556,35 @@ lat/lon (5 decimals) plus the last-clicked coordinate with a
 copy-to-clipboard button; passive listeners, no interference with
 existing map click handlers.
 
+## Round 17 — "near-identical routes, one shows 20x shallow" report: warning dash painted at the wrong place (webapp index misalignment); fixed + verified
+
+User report (two screenshots, near-identical routes, one with 17
+"depth 0.0m" legs and an orange dashed stretch in the Keeten, one
+clean). Reproduced both exactly (`scratch_round13/probe13/14.mjs`).
+Two findings:
+
+1. **The warnings themselves are genuine and destination-dependent, not
+   nondeterministic**: all 17 flagged legs are charted DRVAL1 0/0.5/1.0m
+   bands in the *final approach* to the first route's destination, which
+   sits at the edge of the Verdronken Land van Zuid-Beveland drying
+   flats (51.49-51.50, 4.10-4.13). The second route's destination (2.5km
+   NW) approaches through deep water — correctly zero warnings. The
+   shared corridor is clean in both.
+2. **The orange dash was painted mid-route (Keeten) instead of at those
+   approach legs — a real webapp bug**: `getAllCoords` concatenated
+   per-segment 2-point features WITHOUT deduplicating shared seam
+   coordinates (every interior point doubled), while `renderCustomRoute`'s
+   warning-index mapping advanced its cursor assuming deduped coords —
+   so warning flags landed at ~half their true position along the
+   route. Fixed by deduplicating consecutive identical coordinates once
+   in `getAllCoords` (all consumers — hover sync, itinerary snapping,
+   major-node extraction, legacy segment mapping — checked and now
+   consistent; also removes spurious zero-length "turns" at seam
+   points). Scripted verification (`scratch_round13/verify_index_fix.mjs`):
+   all 17 warning transitions now within the genuine shallow zone, none
+   north of 51.56; clean route has zero; pre-fix control reproduced the
+   misplacement exactly.
+
 Also noticed in passing (not fixed, out of scope): the very short
 `B→C` funnel shortcut edge found for the isolated test above has a
 duplicate point within its own `path_points` (`[51.590306932259715,
