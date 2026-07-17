@@ -262,6 +262,45 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 .debug-toggle input[type="checkbox"] { accent-color: #3b8fd4; width: 14px; height: 14px; cursor: pointer; }
 .debug-toggle span { color: #9bb8da; font-size: 12px; }
 
+/* ---------- debug coordinate readout (bottom-right; only shown while "Debug logging" is on) ---------- */
+/* Sits above the leaflet attribution control (bottom-right) and stays clear of the
+   settings-pane-tab / route-pane-tab corner buttons on mobile (see media query below). */
+#debug-coords-overlay {
+  display: none;
+  position: absolute;
+  right: 10px;
+  bottom: 28px;
+  z-index: 998;
+  pointer-events: none;
+  background: var(--bg-panel);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 11px;
+  color: #9bb8da;
+  line-height: 1.6;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+  white-space: nowrap;
+}
+#debug-coords-overlay.visible { display: block; }
+.debug-coords-line { display: flex; align-items: center; gap: 6px; }
+.debug-coords-copy {
+  pointer-events: auto;
+  background: rgba(59,143,212,0.2);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  color: #e0edf5;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 5px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.debug-coords-copy:hover { background: rgba(59,143,212,0.35); }
+.debug-coords-copy.copied { color: #22c55e; border-color: rgba(34,197,94,0.5); }
+
 /* ---------- graph editor ---------- */
 #editor-panel { font-size: 12px; }
 #editor-panel .panel-title { margin-bottom: 8px; }
@@ -1200,6 +1239,9 @@ label.switch-row {
 
   /* keep the leaflet zoom control clear of the bottom controls */
   .leaflet-top.leaflet-left { top: 60px; }
+
+  /* clear the bottom-right settings-pane-tab (52x44 at bottom:12/right:12) */
+  #debug-coords-overlay { right: 12px; bottom: 64px; font-size: 12px; }
 }
 
 @media (pointer: coarse) {
@@ -1226,6 +1268,13 @@ label.switch-row {
     <div id="time-scrubber-hourbar"></div>
     <input id="time-scrubber" type="range" min="0" max="1440" step="15" value="0" />
   </div>
+</div>
+
+<!-- Debug coordinate readout: only shown while View Options > "Debug logging" is on.
+     Lets a user pin down the exact lat/lon of a routing-bug spot to report it. -->
+<div id="debug-coords-overlay">
+  <div class="debug-coords-line"><span id="debug-coords-cur">cur: —</span></div>
+  <div class="debug-coords-line"><span id="debug-coords-click">click: —</span><button id="debug-coords-copy" class="debug-coords-copy" type="button" title="Copy last-clicked coordinate">📋</button></div>
 </div>
 
 <!-- Loading overlay -->
@@ -2984,6 +3033,57 @@ label.switch-row {
     state.editMode = this.checked;
     toggleEditMode(state.editMode);
   });
+
+  // ---- Debug coordinate readout ----
+  // Only relevant while "Debug logging" is on: a live cursor position + the
+  // last-clicked position, in a corner overlay, so bug reports can quote
+  // exact lat/lon for a problem spot.
+  (function () {
+    var overlay = document.getElementById('debug-coords-overlay');
+    var curEl = document.getElementById('debug-coords-cur');
+    var clickEl = document.getElementById('debug-coords-click');
+    var copyBtn = document.getElementById('debug-coords-copy');
+    var lastClicked = null; // {lat, lng} of the last map click while debug logging was on
+
+    function fmt(latlng) {
+      return latlng.lat.toFixed(5) + ', ' + latlng.lng.toFixed(5);
+    }
+
+    function updateDebugCoordsVisibility() {
+      overlay.classList.toggle('visible', isDebug());
+    }
+
+    // Passive listeners: never stopPropagation/preventDefault, so existing
+    // map click handlers (start/dest/via, editor add-node, etc.) are unaffected.
+    map.on('mousemove', function (e) {
+      if (!isDebug()) return;
+      curEl.textContent = 'cur: ' + fmt(e.latlng);
+    });
+    map.on('click', function (e) {
+      if (!isDebug()) return;
+      lastClicked = e.latlng;
+      clickEl.textContent = 'click: ' + fmt(e.latlng);
+    });
+
+    copyBtn.addEventListener('click', function () {
+      if (!lastClicked) return;
+      var text = lastClicked.lat.toFixed(5) + ', ' + lastClicked.lng.toFixed(5);
+      var showCopied = function () {
+        copyBtn.textContent = '✓';
+        copyBtn.classList.add('copied');
+        setTimeout(function () {
+          copyBtn.textContent = '📋';
+          copyBtn.classList.remove('copied');
+        }, 1000);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(showCopied, function () { /* clipboard denied — no-op */ });
+      }
+    });
+
+    document.getElementById('debug-cb').addEventListener('change', updateDebugCoordsVisibility);
+    updateDebugCoordsVisibility();
+  })();
 
   // ---- Graph Editor functions ----
 
