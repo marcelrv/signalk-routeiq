@@ -593,3 +593,31 @@ pre-existing degenerate case in the funnel algorithm for very short
 edges, unrelated to this fix (`aggregateSegmentEdges` just concatenates
 whatever each edge already stores). Worth a look if anyone's touching
 `Navmesh.funnelBetweenNodes` next.
+
+## Rounds 18+19 — NOAA-scale data fixes + penalty rescale (both verified, merged, deployed)
+
+**Round 18 (pipeline, commit 9e0d45e there)**: Puerto Rico (154 NOAA ENC
+cells) exposed two data-scaling defects — multi-scale DEPARE cell overlap
+made the first-containing-polygon depth sampler pick effectively random
+bands (65.7% of PR edges min_depth=0), and 2,835 obstruction points
+hard-blocked the north coast outright. Fixed: per-sample-point max-DRVAL1
+among containing polygons; obstructions downgraded to depth constraints
+where sounded (VALSOU) or always-underwater (WATLEV 3/4), hard block kept
+for dry/awash/unknown. PR: depth-0 65.7%->17.3%, obstacle blocks
+3,990->12, San Juan->Fajardo NO ROUTE -> 93.6km. Zeeland unchanged — its
+residual 1.0-1.5m flags verified as genuine charted depth.
+
+**Round 19 (this repo, merge of round19-penalty-rescale, 45/45 tests)**:
+soft-constraint penalties rescaled from +1e6 x meters (a 211m flagged
+edge ~ 211,000km-equivalent — the Round 14 regression class) to per-class
+per-meter rates: VIOLATION_RATE_CONSTRAINT=300 (depth/air/beam),
+VIOLATION_RATE_COAST=50. Bbox penalized-result retry now triggers on
+explicit violating-meters tracking (scale-independent), best-result
+comparator is lexicographic (fewer violating meters, then cost). Route
+choices verified unchanged on all guards (Krammer via locks, Zeelandbrug
+opening, probes B/C); costs deflated ~3000x to meaningful magnitudes.
+
+**Deployed multi-region**: zeeland.sqlite (r18) + puertorico.sqlite (r18)
+loaded together — 63,619 nodes / 247,728 edges / 560 POIs, PR's known
+1/12 empty-boundary region logged loudly. Zeeland backup:
+zeeland_pre_round18.sqlite.bak.
