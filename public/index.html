@@ -4064,6 +4064,30 @@ label.switch-row {
     return [];
   }
 
+  // Consecutive coordinates that are numerically identical collapse to one.
+  // The server emits one 2-point LineString feature per route segment
+  // (splitToSegmentFeatures in src/routing.ts), and consecutive features
+  // share their seam coordinate (feature i's toCoord and feature i+1's
+  // fromCoord are literally the same array element from the original path).
+  // Concatenating those features' coordinates without dedup therefore
+  // produces every interior seam point TWICE in a row. All downstream
+  // index-based consumers (renderCustomRoute's warning-mapping cursor,
+  // mapSegmentsToCoordRanges, extractMajorNodes, closestCoordIndex, and the
+  // map<->route-pane hover-highlight index ranges) assume one coordinate per
+  // path vertex, so we normalize to that representation once, here, rather
+  // than duplicating dedup logic (or duplicated-index math) in every caller.
+  function dedupeConsecutiveCoords(coords) {
+    if (coords.length < 2) return coords;
+    const EPS = 1e-9;
+    const out = [coords[0]];
+    for (let i = 1; i < coords.length; i++) {
+      const prev = out[out.length - 1];
+      const c = coords[i];
+      if (Math.abs(c[0] - prev[0]) > EPS || Math.abs(c[1] - prev[1]) > EPS) out.push(c);
+    }
+    return out;
+  }
+
   // Flatten any RouteResult GeoJSON shape into a single coordinate array.
   // Handles FeatureCollection, Feature, LineString, and MultiLineString.
   function getAllCoords(geoJson) {
@@ -4071,10 +4095,10 @@ label.switch-row {
     if (geoJson.type === 'FeatureCollection' && Array.isArray(geoJson.features)) {
       let out = [];
       for (const f of geoJson.features) out = out.concat(extractCoords(f.geometry));
-      return out;
+      return dedupeConsecutiveCoords(out);
     }
-    if (geoJson.type === 'Feature') return extractCoords(geoJson.geometry);
-    return extractCoords(geoJson);
+    if (geoJson.type === 'Feature') return dedupeConsecutiveCoords(extractCoords(geoJson.geometry));
+    return dedupeConsecutiveCoords(extractCoords(geoJson));
   }
 
   function closestCoordIndex(coords, lat, lng) {
