@@ -48,6 +48,26 @@ function bboxFromPoints(
   };
 }
 
+// A "successful" A* search can still be a bad route: getEdgePenalty adds
+// +1,000,000-scale penalties per violated constraint (air draft, depth,
+// width — see below) so a route through a forbidden edge is technically
+// findable but astronomically expensive rather than rejected outright. A
+// tight bounding box can hide the real, unconstrained route while still
+// leaving a penalized one reachable inside the box, which used to return
+// silently wrong routes: the bbox-expansion retry below only ever
+// triggered on "no route found", never on "found a terrible one".
+//
+// Genuine (unpenalized) cost is bounded by distance × cost_factor (fairway
+// floor 0.8, typical edges ~1.0-1.2) × small multipliers (e.g. the 1.2
+// via-point/fallback factor) — comfortably under 10x distance on any real
+// route. A single constraint violation adds +1e6, which on typical
+// waterway edge lengths (tens to low hundreds of meters) already dwarfs
+// any plausible unpenalized cost for the same distance. 100x distance is a
+// wide margin above legitimate cost multipliers while sitting far below
+// what even one violated edge contributes, so it cleanly separates
+// "route is fine" from "route is penalty-poisoned".
+const PENALIZED_RESULT_RETRY_FACTOR = 100;
+
 // A* search state
 interface SearchState {
   nodeId: number;
@@ -288,9 +308,18 @@ export class RoutingEngine {
       }
       // Fall through for non-via routes (bbox search below)
 
-      // Try A* with expanding bounding box
+      // Try A* with expanding bounding box. A search that "succeeds" but is
+      // materially penalized (forced through a constraint-violating edge —
+      // see PENALIZED_RESULT_RETRY_FACTOR) gets the same expansion treatment
+      // as an outright failure, since the real route may just be sitting
+      // outside the current box. The cheapest result seen across attempts is
+      // kept — expansion never returns something worse than already found.
       let currentMargin = this.config.routingBBoxMargin;
       const maxMargin = this.config.routingBBoxMaxExtent;
+      let bestResult: RouteResult | null = null;
+      let bestCost = Infinity;
+      let previousAttemptCost: number | null = null;
+      let retriedForPenalty = false;
 
       while (currentMargin <= maxMargin) {
         const bbox = bboxFromPoints(start, end, currentMargin);
@@ -305,23 +334,29 @@ export class RoutingEngine {
             env,
           );
 
-          // Connect user's start/end to the route coordinates
-          await this.connectUserPoint(start, result, 'start');
-          await this.connectUserPoint(end, result, 'end');
+          const cost = result.features[0].properties.totalCost ?? 0;
+          const distance = result.features[0].properties.totalDistance ?? 0;
+          if (cost < bestCost) {
+            bestResult = result;
+            bestCost = cost;
+          }
 
-          // Check for constraint violations (draft, beam, air draft) on the found path
-          const violationWarnings: RouteWarning[] = [];
-          this.addViolationWarnings(result, violationWarnings, 'destination', start, end, effectiveDims);
+          const penalized = this.isMateriallyPenalized(result);
+          const stalled = previousAttemptCost !== null && cost >= previousAttemptCost;
 
-          // Attach any warning types
-          result.warnings = [
-            ...(result.warnings || []),
-            ...bboxWarnings,
-            ...violationWarnings,
-          ];
-          if (result.warnings.length === 0) delete result.warnings;
-          await this.finalizeRoute(result, [], env);
-          return result;
+          if (!penalized) {
+            break;
+          }
+          if (currentMargin >= maxMargin || stalled) {
+            console.log(`Route search kept a penalized result (cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — bounding box expansion ${stalled ? 'stopped improving' : 'reached max extent'}`);
+            break;
+          }
+
+          const newMargin = Math.min(currentMargin * 2, maxMargin);
+          console.log(`Route search found a penalized result (cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`);
+          retriedForPenalty = true;
+          previousAttemptCost = cost;
+          currentMargin = newMargin;
         } catch {
           // Expand bounding box and retry
           if (currentMargin < maxMargin) {
@@ -334,6 +369,31 @@ export class RoutingEngine {
             break;
           }
         }
+      }
+
+      if (bestResult) {
+        const result = bestResult;
+        if (retriedForPenalty) {
+          console.log(`Route search penalized-result retry ${this.isMateriallyPenalized(result) ? 'did not clear the penalty' : 'won'} (final cost ${bestCost.toFixed(0)})`);
+        }
+
+        // Connect user's start/end to the route coordinates
+        await this.connectUserPoint(start, result, 'start');
+        await this.connectUserPoint(end, result, 'end');
+
+        // Check for constraint violations (draft, beam, air draft) on the found path
+        const violationWarnings: RouteWarning[] = [];
+        this.addViolationWarnings(result, violationWarnings, 'destination', start, end, effectiveDims);
+
+        // Attach any warning types
+        result.warnings = [
+          ...(result.warnings || []),
+          ...bboxWarnings,
+          ...violationWarnings,
+        ];
+        if (result.warnings.length === 0) delete result.warnings;
+        await this.finalizeRoute(result, [], env);
+        return result;
       }
 
       // All bbox attempts failed — try fallback routing (unconstrained graph).
@@ -640,13 +700,38 @@ export class RoutingEngine {
 
     let currentMargin = this.config.routingBBoxMargin;
     const segmentMaxMargin = this.config.routingBBoxMaxExtent;
+    let bestResult: RouteResult | null = null;
+    let bestCost = Infinity;
+    let previousAttemptCost: number | null = null;
+    let retriedForPenalty = false;
 
     while (currentMargin <= segmentMaxMargin) {
       const segmentBbox = bbox ?? bboxFromPoints(startPt, endPt, currentMargin);
       try {
         const result = await this.astarSearch(startLat, startLon, endLat, endLon, coastDistanceMeters, dims, segmentBbox, env);
-        this.addViolationWarnings(result, warnings, label, startPt, endPt, dims);
-        return result;
+
+        const cost = result.features[0].properties.totalCost ?? 0;
+        const distance = result.features[0].properties.totalDistance ?? 0;
+        if (cost < bestCost) {
+          bestResult = result;
+          bestCost = cost;
+        }
+
+        const penalized = this.isMateriallyPenalized(result);
+        const stalled = previousAttemptCost !== null && cost >= previousAttemptCost;
+
+        if (!penalized) break;
+        bbox = undefined;
+        if (currentMargin >= segmentMaxMargin || stalled) {
+          console.log(`Route search for ${label} kept a penalized result (cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — bounding box expansion ${stalled ? 'stopped improving' : 'reached max extent'}`);
+          break;
+        }
+
+        const newMargin = Math.min(currentMargin * 2, segmentMaxMargin);
+        console.log(`Route search for ${label} found a penalized result (cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`);
+        retriedForPenalty = true;
+        previousAttemptCost = cost;
+        currentMargin = newMargin;
       } catch {
         bbox = undefined;
         if (currentMargin >= segmentMaxMargin) break;
@@ -656,6 +741,14 @@ export class RoutingEngine {
         }
         currentMargin = newMargin;
       }
+    }
+
+    if (bestResult) {
+      if (retriedForPenalty) {
+        console.log(`Route search for ${label} penalized-result retry ${this.isMateriallyPenalized(bestResult) ? 'did not clear the penalty' : 'won'} (final cost ${bestCost.toFixed(0)})`);
+      }
+      this.addViolationWarnings(bestResult, warnings, label, startPt, endPt, dims);
+      return bestResult;
     }
 
     // A* failed entirely — graph is physically disconnected. Bridge the gap.
@@ -1588,6 +1681,20 @@ export class RoutingEngine {
     }
 
     return result;
+  }
+
+  /**
+   * True when a successful search result's cost is dominated by constraint
+   * penalties (see PENALIZED_RESULT_RETRY_FACTOR) rather than genuine
+   * distance/cost_factor — i.e. the route only "succeeded" by crossing an
+   * edge that violates draft/beam/air-draft, and a bbox expansion should be
+   * attempted in case a clean route exists just outside the current box.
+   */
+  private isMateriallyPenalized(result: RouteResult): boolean {
+    const props = result.features[0]?.properties;
+    const cost = props?.totalCost ?? 0;
+    const distance = props?.totalDistance ?? 0;
+    return distance > 0 && cost > distance * PENALIZED_RESULT_RETRY_FACTOR;
   }
 
   private getEdgePenalty(
