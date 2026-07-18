@@ -467,6 +467,12 @@ export class RoutingEngine {
     _via: Array<{ latitude: number; longitude: number }>,
     dims: VesselDimensions,
     env?: RouteEnv,
+    // When this result is a LEG of a via route it must stay un-finalized:
+    // finalizeRoute ends in splitToSegmentFeatures, which replaces
+    // features[0] with per-segment features that carry no
+    // properties.segments — routeViaPoints' merge then crashes with
+    // "segments is not iterable". The via caller finalizes once at the end.
+    finalize: boolean = true,
   ): Promise<RouteResult> {
     const warnings: RouteWarning[] = [];
     const reachableFromStart = this.db.getReachableNodes(startNode);
@@ -520,7 +526,7 @@ export class RoutingEngine {
       await this.connectUserPoint(start, route, 'start');
       await this.connectUserPoint(end, route, 'end');
 
-      await this.finalizeRoute(route, [], env);
+      if (finalize) await this.finalizeRoute(route, [], env);
       return route;
     }
 
@@ -776,7 +782,7 @@ export class RoutingEngine {
         to: endPt,
       });
       try {
-        const fallback = await this.fallbackRoute(startNode, endNode, startPt, endPt, coastDistanceMeters, [], dims);
+        const fallback = await this.fallbackRoute(startNode, endNode, startPt, endPt, coastDistanceMeters, [], dims, env, false);
         if (fallback.warnings) {
           warnings.push(...fallback.warnings);
           fallback.warnings = undefined;
