@@ -636,8 +636,14 @@ function renderItinerary(itinerary) {
         }
         const cn = document.createElement('span');
         cn.className = 'cname';
+        // Span info (subtype/height) is baked into c.name by the server when
+        // known (e.g. "... (opening span)" / "... (fixed, 18.4m)"). Only
+        // synthesize a separate suffix for older/raw data that lacks it.
+        const nameHasSpanInfo = /\((?:opening span|fixed(?:,[^)]*)?)\)/.test(e0.name || '');
         let info = '';
-        if (e0.type === 'bridge') {
+        if (nameHasSpanInfo) {
+          info = '';
+        } else if (e0.type === 'bridge') {
           const fixed = entries.find((e) => e.subtype === 'fixed');
           if (fixed && typeof fixed.height === 'number') {
             info = ' (' + fixed.height.toFixed(1) + ' m' + (hasOpening ? ' / opening' : '') + ')';

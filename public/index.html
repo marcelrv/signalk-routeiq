@@ -5210,8 +5210,11 @@ label.switch-row {
               const e0 = entries[0];
               // Color: fixed bridge = red, lock = yellow, opening = green
               const color = e0.type === 'lock' ? '#f59e0b' : entries.some(e => e.subtype === 'fixed') ? '#ef4444' : '#22c55e';
+              // Span info (subtype/height) is baked into c.name by the server
+              // when known (e.g. "... (opening span)" / "... (fixed, 18.4m)").
+              // Only synthesize a separate badge for older/raw data that lacks it.
               let info = '';
-              if (e0.type === 'bridge') {
+              if (e0.type === 'bridge' && !/\((?:opening span|fixed(?:,[^)]*)?)\)/.test(e0.name)) {
                 const fixedEntry = entries.find(e => e.subtype === 'fixed');
                 const hasOpening = entries.some(e => e.subtype === 'opening');
                 if (fixedEntry && fixedEntry.height) {

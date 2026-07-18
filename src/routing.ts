@@ -2157,6 +2157,17 @@ export class RoutingEngine {
     };
   }
 
+  // Human-readable span suffix for a bridge crossing, e.g. " (opening span)"
+  // or " (fixed, 18.4m)". S-57 gives every span of a bridge the same OBJNAM,
+  // so this is what lets a route report distinguish which span was crossed.
+  private static formatSpanSuffix(subtype: string | undefined, height: number | undefined): string {
+    if (subtype === 'opening') return ' (opening span)';
+    if (subtype === 'fixed') {
+      return typeof height === 'number' ? ` (fixed, ${height.toFixed(1)}m)` : ' (fixed span)';
+    }
+    return '';
+  }
+
   private async detectCrossings(coordinates: [number, number][]): Promise<RouteCrossing[]> {
     if (coordinates.length === 0) return [];
 
@@ -2175,49 +2186,97 @@ export class RoutingEngine {
 
     const bridgePois = pois.filter(p => p.typeId === POI_TYPE_BRIDGE);
     const lockPois = pois.filter(p => p.typeId === POI_TYPE_LOCK);
-    const crossings: RouteCrossing[] = [];
-    const seenIds = new Set<number>();
-    const seenCrossingKeys = new Set<string>();
-    const MAX_DIST = 150;
-    const crossingKey = (poi: typeof bridgePois[0]): string => {
-      const subtype = (poi.properties as Record<string, unknown>)?.subtype as string | undefined;
-      return `${poi.name}|${poi.typeId}|${subtype || ''}`;
-    };
+    const MAX_DIST = 150; // m: how close the route must pass to a POI to count as a crossing
+    const MERGE_ROUTE_DIST = 300; // m along-route: same-name events closer than this are one physical crossing
 
-    for (const [lon, lat] of coordinates) {
-      for (const poi of bridgePois) {
-        if (seenIds.has(poi.id)) continue;
-        if (this.haversineDistance(lat, lon, poi.lat, poi.lon) <= MAX_DIST) {
-          seenIds.add(poi.id);
-          const key = crossingKey(poi);
-          if (seenCrossingKeys.has(key)) continue;
-          seenCrossingKeys.add(key);
-          crossings.push({
-            type: 'bridge',
-            name: poi.name,
-            subtype: (poi.properties as Record<string, unknown>)?.subtype as string | undefined,
-            height: (poi.properties as Record<string, unknown>)?.height as number | undefined,
-            position: { latitude: poi.lat, longitude: poi.lon },
-          });
-        }
-      }
-      for (const poi of lockPois) {
-        if (seenIds.has(poi.id)) continue;
-        if (this.haversineDistance(lat, lon, poi.lat, poi.lon) <= MAX_DIST) {
-          seenIds.add(poi.id);
-          const key = crossingKey(poi);
-          if (seenCrossingKeys.has(key)) continue;
-          seenCrossingKeys.add(key);
-          crossings.push({
-            type: 'lock',
-            name: poi.name,
-            position: { latitude: poi.lat, longitude: poi.lon },
-          });
-        }
-      }
+    // Cumulative along-route distance per coordinate, used only to decide
+    // whether two same-named hits are the same physical crossing or two
+    // distinct passages of a like-named feature further down the route.
+    const cumDist: number[] = [0];
+    for (let i = 1; i < coordinates.length; i++) {
+      const [lon1, lat1] = coordinates[i - 1];
+      const [lon2, lat2] = coordinates[i];
+      cumDist.push(cumDist[i - 1] + this.haversineDistance(lat1, lon1, lat2, lon2));
     }
 
-    return crossings;
+    type Poi = typeof bridgePois[0];
+
+    // For a set of same-typed POIs: group by name (S-57 gives every span of
+    // one bridge/lock complex the same OBJNAM), then walk the route once per
+    // name group. At each coordinate within MAX_DIST, attach the *nearest*
+    // POI in the group (nearest-span attachment). Consecutive in-range
+    // coordinates collapse into a single run (one physical crossing); runs
+    // that are close together along the route are merged too, so a cluster
+    // of spans near one crossing point never produces more than one entry.
+    const detectForGroup = (
+      groupPois: Poi[],
+      build: (poi: Poi) => RouteCrossing,
+    ): RouteCrossing[] => {
+      const byName = new Map<string, Poi[]>();
+      for (const poi of groupPois) {
+        const arr = byName.get(poi.name);
+        if (arr) arr.push(poi); else byName.set(poi.name, [poi]);
+      }
+
+      const out: Array<{ crossing: RouteCrossing; dist: number; coordIdx: number }> = [];
+      for (const group of byName.values()) {
+        let current: { poi: Poi; dist: number; coordIdx: number } | null = null;
+        const runs: Array<{ poi: Poi; dist: number; coordIdx: number }> = [];
+        for (let i = 0; i < coordinates.length; i++) {
+          const [lon, lat] = coordinates[i];
+          let bestPoi: Poi | null = null;
+          let bestDist = Infinity;
+          for (const poi of group) {
+            const d = this.haversineDistance(lat, lon, poi.lat, poi.lon);
+            if (d <= MAX_DIST && d < bestDist) { bestDist = d; bestPoi = poi; }
+          }
+          if (bestPoi) {
+            if (!current || bestDist < current.dist) current = { poi: bestPoi, dist: bestDist, coordIdx: i };
+          } else if (current) {
+            runs.push(current);
+            current = null;
+          }
+        }
+        if (current) runs.push(current);
+
+        // Merge runs *within this name group* that are close together along
+        // the route into one crossing, keeping the geometrically nearest span.
+        const merged: Array<{ poi: Poi; dist: number; coordIdx: number }> = [];
+        for (const run of runs) {
+          const prev = merged.length > 0 ? merged[merged.length - 1] : undefined;
+          if (prev && cumDist[run.coordIdx] - cumDist[prev.coordIdx] < MERGE_ROUTE_DIST) {
+            if (run.dist < prev.dist) merged[merged.length - 1] = run;
+          } else {
+            merged.push(run);
+          }
+        }
+        for (const run of merged) {
+          out.push({ crossing: build(run.poi), dist: run.dist, coordIdx: run.coordIdx });
+        }
+      }
+      out.sort((a, b) => a.coordIdx - b.coordIdx);
+      return out.map(e => e.crossing);
+    };
+
+    const bridgeCrossings = detectForGroup(bridgePois, (poi) => {
+      const props = poi.properties as Record<string, unknown>;
+      const subtype = props?.subtype as string | undefined;
+      const height = props?.height as number | undefined;
+      return {
+        type: 'bridge',
+        name: `${poi.name}${RoutingEngine.formatSpanSuffix(subtype, height)}`,
+        subtype,
+        height,
+        position: { latitude: poi.lat, longitude: poi.lon },
+      };
+    });
+    const lockCrossings = detectForGroup(lockPois, (poi) => ({
+      type: 'lock',
+      name: poi.name,
+      position: { latitude: poi.lat, longitude: poi.lon },
+    }));
+
+    return [...bridgeCrossings, ...lockCrossings];
   }
 
   private addViolationWarnings(
