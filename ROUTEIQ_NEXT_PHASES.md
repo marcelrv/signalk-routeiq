@@ -621,3 +621,32 @@ opening, probes B/C); costs deflated ~3000x to meaningful magnitudes.
 loaded together — 63,619 nodes / 247,728 edges / 560 POIs, PR's known
 1/12 empty-boundary region logged loudly. Zeeland backup:
 zeeland_pre_round18.sqlite.bak.
+
+## Rounds 20+21 — crossing span naming + Issue G; Phase 2 Hardening backlog CLEARED
+
+**Round 20 (this repo, merge of round20-crossing-naming, 45/45)**:
+`detectCrossings` now attaches the geometrically nearest same-named span
+POI, merges same-name runs within 300m route distance, and appends span
+info to crossing names — "Krammer locks, bridge in the N-257 (opening
+span)" instead of the same bare name twice. Webapp/plotter badges skip
+redundant suffixes. Verified on real data: the deduped crossing is the
+opening POI 14.3m from the true crossing point.
+
+**Round 21 (pipeline, commit 1e327ae there)**: Issue G fixed — the
+depth-split closing no longer erases genuine enclosed drying/shallow
+separators (Yerseke: 0 -> 14/15 holes survive, 99.9% by area), scoped to
+interior rings so Round 8's fragmentation fix cannot regress. All
+structural/probe gates pass. Secondary: the Zeelandbrug air-flagged
+ring edges were confirmed CORRECT DATA (genuine VERCLR=11.0 fixed-span
+intersections) — closed as working-as-intended, not a bug.
+
+**Deployed**: zeeland.sqlite = round21 build + merged R19/R20 dist;
+multi-region with puertorico.sqlite (64,520 nodes / 251,054 edges).
+Backup: zeeland_pre_round21.sqlite.bak.
+
+**Phase 2 Hardening status after Rounds 13-21: no open correctness
+items.** Remaining known-and-accepted: PR's 1/12 empty-boundary region
+(logged loudly at load), PR offshore fragment components, and genuine
+charted-shallow warnings that are now correctly priced and correctly
+drawn. Next real work is Phase 3 (PHASE_3_DESIGN.md) / Phase 4
+(PHASE_4_DESIGN.md).
