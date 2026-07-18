@@ -857,6 +857,14 @@ export class RoutingDatabase {
     distance: number; min_depth: number; max_air_draft: number; min_width: number;
     edge_type_id: number; edge_kind_id: number; traffic_mode: number;
     cost_factor: number;
+    /** Interior [lat,lon] points (source→target order, same as the internal
+     *  EdgeRow.path_points and the pts array buildRouteResult walks — NOT
+     *  GeoJSON [lon,lat] order) for edges whose real geometry is a curved
+     *  funnel path rather than the source-target straight chord. Omitted
+     *  entirely (not an empty array) when the edge has no such geometry, to
+     *  keep the common-case payload the same size as before this field
+     *  existed. Round 23b (see NEXT_PHASES.md §5.3). */
+    path_points?: Array<[number, number]>;
   }>> {
     const results: Array<{
       source: number; target: number;
@@ -865,6 +873,7 @@ export class RoutingDatabase {
       distance: number; min_depth: number; max_air_draft: number; min_width: number;
       edge_type_id: number; edge_kind_id: number; traffic_mode: number;
       cost_factor: number;
+      path_points?: Array<[number, number]>;
     }> = [];
     for (const [, edges] of this.edgesBySource) {
       for (const e of edges) {
@@ -880,6 +889,7 @@ export class RoutingDatabase {
             max_air_draft: e.max_air_draft, min_width: e.min_width,
             edge_type_id: e.edge_type_id, edge_kind_id: e.edge_kind_id ?? EDGE_KIND_CENTERLINE, traffic_mode: e.traffic_mode,
             cost_factor: e.cost_factor,
+            ...(e.path_points && e.path_points.length > 0 ? { path_points: e.path_points } : {}),
           });
           if (results.length >= limit) break;
         }
