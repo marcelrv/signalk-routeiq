@@ -661,3 +661,16 @@ debug API and draws real curves — the Ceiba "land-crossing navmesh"
 artifact is closed. Known trade-off documented in the sibling repo:
 +10.6% on very long open-ocean routes from tile-seam crossings;
 revisit via anchor/hierarchy work (Phase 3f) or the tile-size knob.
+
+## Round 24 — "segments is not iterable" crash on via routes (fixed, 8013a66)
+
+Live user report on PR: "Routing failed: finalResult.features[0]
+.properties.segments is not iterable". Root cause (pre-existing, made
+easy to hit by PR's 482 disconnected offshore fragments): when a
+via-route LEG lands in tryRouteSegment's disconnected-graph fallback,
+fallbackRoute finalized the leg result — splitToSegmentFeatures strips
+properties.segments — and routeViaPoints' merge crashed. Fix:
+finalize flag (leg call passes false; via pipeline finalizes once on
+the merged result; leg fallback now also receives the tidal env).
+Regression test test/via-disconnected-leg.test.ts reproduces the exact
+error pre-fix; 46/46 post-fix. Deployed.
