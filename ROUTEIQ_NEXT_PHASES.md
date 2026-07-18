@@ -650,3 +650,14 @@ items.** Remaining known-and-accepted: PR's 1/12 empty-boundary region
 charted-shallow warnings that are now correctly priced and correctly
 drawn. Next real work is Phase 3 (PHASE_3_DESIGN.md) / Phase 4
 (PHASE_4_DESIGN.md).
+
+## Round 23 — deployed: tiled ocean regions + real edge geometry
+
+Pipeline tiling (sibling 7aa98d9) killed the PR giant-region cost:
+loadGraph 76.6s -> 8.8s, server startup-to-ready 32s for both regions —
+the post-restart "route timeout" window is effectively gone. This
+repo's 48b2da5 (merged) carries path_points through the graph-edges
+debug API and draws real curves — the Ceiba "land-crossing navmesh"
+artifact is closed. Known trade-off documented in the sibling repo:
++10.6% on very long open-ocean routes from tile-seam crossings;
+revisit via anchor/hierarchy work (Phase 3f) or the tile-size knob.
