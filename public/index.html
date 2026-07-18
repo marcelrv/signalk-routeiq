@@ -2499,7 +2499,15 @@ label.switch-row {
           const dash = e.edge_type_id === 0 ? COASTAL_DASH : null;
           const opacity = e.traffic_mode !== 0 ? 0.85 : 0.6;
           const opts = { color, weight: 3, opacity, dashArray: dash };
-          const line = L.polyline([[e.source_lat, e.source_lon], [e.target_lat, e.target_lon]], opts);
+          // Draw through the real curved geometry when the server sent one
+          // (funnel-upgraded navmesh-boundary edges / anchor shortcuts) —
+          // otherwise fall back to the straight source-target chord, same as
+          // before. path_points is [lat,lon] source->target order, matching
+          // Leaflet's own coordinate order, so no reordering is needed.
+          const latlngs = [[e.source_lat, e.source_lon]];
+          if (e.path_points && e.path_points.length) latlngs.push(...e.path_points);
+          latlngs.push([e.target_lat, e.target_lon]);
+          const line = L.polyline(latlngs, opts);
           if (state.editMode) {
             line._edgeData = e;
             line.on('click', function (e) {
