@@ -44,13 +44,32 @@ interface PoiRow {
   lon: number;
 }
 
+interface SchemaFlags {
+  hasCrossesLand: boolean;
+  hasCrossesObstacle: boolean;
+  hasNodeDepth: boolean;
+  hasRegionId: boolean;
+  hasEdgeKind: boolean;
+}
+
 interface DbHandle {
   db: DatabaseSync;
   path: string;
 }
 
-const handles: DbHandle[] = [];
+// `handles` is tombstoned, not spliced, on a per-file close (closeDb): a
+// closed slot becomes `null` in place rather than being removed, so every
+// dbIndex handed out by `init`/`openDb` stays valid (and stable) for the
+// rest of the worker's lifetime — the main thread's provenance bookkeeping
+// (edgesBySource entries, navmesh regions, etc. tagged with a dbIndex) would
+// otherwise silently point at the wrong handle after any close. Every loop
+// below that walks `handles` must skip `null` slots.
+const handles: (DbHandle | null)[] = [];
 const filenames: string[] = [];
+/** Sentinel dbIndex used to tag rows that came from the user-edits overlay
+ *  rather than any real per-file handle — never matches a real dbIndex, so
+ *  overlay rows are never touched by a per-file unload. */
+const OVERLAY_DB_INDEX = -1;
 let hasCrossesLand = false;
 let hasCrossesObstacle = false;
 let hasNodeDepth = false;
@@ -60,6 +79,64 @@ let overlayHandle: DbHandle | null = null;
 
 if (!parentPort) {
   throw new Error('db-worker must be run as a worker thread');
+}
+
+function detectSchemaFlags(db: DatabaseSync): SchemaFlags & { edgeCols: Array<{ name: string }>; nodeCols: Array<{ name: string }> } {
+  const edgeCols = db.prepare("PRAGMA table_info('edges')").all() as Array<{ name: string }>;
+  const nodeCols = db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>;
+  return {
+    hasCrossesLand: edgeCols.some(c => c.name === 'crosses_land'),
+    hasCrossesObstacle: edgeCols.some(c => c.name === 'crosses_obstacle'),
+    hasEdgeKind: edgeCols.some(c => c.name === 'edge_kind_id'),
+    hasNodeDepth: nodeCols.some(c => c.name === 'node_depth'),
+    hasRegionId: nodeCols.some(c => c.name === 'region_id'),
+    edgeCols, nodeCols,
+  };
+}
+
+function filenameOf(dbPath: string): string {
+  const parts = dbPath.replace(/\\/g, '/').split('/');
+  return parts[parts.length - 1];
+}
+
+/** Read a single database's metadata row in the same tolerant shape
+ *  `getMetadata` uses (missing columns/table degrade to nulls rather than
+ *  throwing) — shared by `peekMetadata` (short-lived handle) and
+ *  `getMetadata` (long-lived handles). */
+function readMetadataRow(db: DatabaseSync, filename: string): {
+  id: number; country: string; name: string; description: string | null;
+  lastUpdateDate: string; tags: string | null; boundingBox: string | null;
+  boundaryGeometry: string | null; schemaVersion: number | null;
+  contributor: string | null; url: string | null; filename: string;
+} | null {
+  try {
+    const metaCols = db.prepare("PRAGMA table_info('metadata')").all() as Array<{ name: string }>;
+    if (metaCols.length === 0) return null;
+    const colNames = new Set(metaCols.map(c => c.name));
+    const sql = `SELECT id, country, name, description, last_update_date,
+      ${colNames.has('tags') ? 'tags' : 'NULL AS tags'},
+      ${colNames.has('bounding_box') ? 'bounding_box' : 'NULL AS bounding_box'},
+      ${colNames.has('boundary_geometry') ? 'boundary_geometry' : 'NULL AS boundary_geometry'},
+      ${colNames.has('schema_version') ? 'schema_version' : 'NULL AS schema_version'},
+      ${colNames.has('contributor') ? 'contributor' : "'' AS contributor"},
+      ${colNames.has('url') ? 'url' : "'' AS url"}
+      FROM metadata LIMIT 1`;
+    const r = db.prepare(sql).get() as any;
+    if (!r) return null;
+    return {
+      id: r.id, country: r.country, name: r.name, description: r.description,
+      lastUpdateDate: r.last_update_date,
+      tags: r.tags ?? null,
+      boundingBox: r.bounding_box ?? null,
+      boundaryGeometry: r.boundary_geometry ?? null,
+      schemaVersion: r.schema_version ?? null,
+      contributor: r.contributor ?? null,
+      url: r.url ?? null,
+      filename,
+    };
+  } catch {
+    return null;
+  }
 }
 
 parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
@@ -84,21 +161,19 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
               db.close();
               continue;
             }
-            const edgeCols = db.prepare("PRAGMA table_info('edges')").all() as Array<{ name: string }>;
-            if (edgeCols.length === 0) {
+            const flags = detectSchemaFlags(db);
+            if (flags.edgeCols.length === 0) {
               console.warn(`[db-worker] Skipping ${dbPath}: edges table not found`);
               db.close();
               continue;
             }
             // Merge schema flags across all valid databases
-            hasCrossesLand = hasCrossesLand || edgeCols.some(c => c.name === 'crosses_land');
-            hasCrossesObstacle = hasCrossesObstacle || edgeCols.some(c => c.name === 'crosses_obstacle');
-            hasEdgeKind = hasEdgeKind || edgeCols.some(c => c.name === 'edge_kind_id');
-            const nodeCols = db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>;
-            hasNodeDepth = hasNodeDepth || nodeCols.some(c => c.name === 'node_depth');
-            hasRegionId = hasRegionId || nodeCols.some(c => c.name === 'region_id');
-            const parts = dbPath.replace(/\\/g, '/').split('/');
-            const filename = parts[parts.length - 1];
+            hasCrossesLand = hasCrossesLand || flags.hasCrossesLand;
+            hasCrossesObstacle = hasCrossesObstacle || flags.hasCrossesObstacle;
+            hasEdgeKind = hasEdgeKind || flags.hasEdgeKind;
+            hasNodeDepth = hasNodeDepth || flags.hasNodeDepth;
+            hasRegionId = hasRegionId || flags.hasRegionId;
+            const filename = filenameOf(dbPath);
             handles.push({ db, path: dbPath });
             filenames.push(filename);
             console.log(`[db-worker] Loaded database: ${dbPath}`);
@@ -112,6 +187,103 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
           break;
         }
         parentPort!.postMessage({ id, type, result: { hasCrossesLand, hasCrossesObstacle, hasNodeDepth, hasRegionId, filenames: loadedFilenames } });
+        break;
+      }
+      case 'peekMetadata': {
+        // Open each file just long enough to read its metadata row and
+        // schema-capability flags, then close it — a coverage index must
+        // never hold N file handles open just to know N bounding boxes.
+        const { dbPaths } = payload!;
+        const results: Array<{
+          path: string; filename: string;
+          coverage: { boundingBox: any; boundaryGeometry: any };
+          meta: ReturnType<typeof readMetadataRow>;
+          flags: SchemaFlags;
+        }> = [];
+        for (const dbPath of dbPaths) {
+          let db: DatabaseSync | null = null;
+          try {
+            db = new DatabaseSync(dbPath);
+            const row = db.prepare('SELECT COUNT(*) as count FROM nodes').get() as unknown as { count: number } | undefined;
+            if (!row) {
+              console.warn(`[db-worker] peekMetadata: skipping ${dbPath}: nodes table not found`);
+              continue;
+            }
+            const { edgeCols, nodeCols, ...flags } = detectSchemaFlags(db);
+            if (edgeCols.length === 0) {
+              console.warn(`[db-worker] peekMetadata: skipping ${dbPath}: edges table not found`);
+              continue;
+            }
+            void nodeCols;
+            const filename = filenameOf(dbPath);
+            const meta = readMetadataRow(db, filename);
+            results.push({
+              path: dbPath,
+              filename,
+              coverage: {
+                boundingBox: meta?.boundingBox ? JSON.parse(meta.boundingBox) : null,
+                boundaryGeometry: meta?.boundaryGeometry ? JSON.parse(meta.boundaryGeometry) : null,
+              },
+              meta,
+              flags,
+            });
+          } catch (err: any) {
+            console.warn(`[db-worker] peekMetadata: skipping invalid database ${dbPath}: ${err.message ?? String(err)}`);
+          } finally {
+            if (db) { try { db.close(); } catch { /* already closed */ } }
+          }
+        }
+        parentPort!.postMessage({ id, type, result: results });
+        break;
+      }
+      case 'openDb': {
+        // Open exactly one handle (dynamic per-file load) and append it to
+        // `handles` — always appended, never inserted into a tombstoned
+        // slot, so a dbIndex is assigned once and never reused for the life
+        // of the worker.
+        const { dbPath } = payload!;
+        const db = new DatabaseSync(dbPath);
+        const row = db.prepare('SELECT COUNT(*) as count FROM nodes').get() as unknown as { count: number } | undefined;
+        if (!row) {
+          db.close();
+          throw new Error(`Invalid database (no nodes table): ${dbPath}`);
+        }
+        const { edgeCols, nodeCols, ...flags } = detectSchemaFlags(db);
+        void nodeCols;
+        if (edgeCols.length === 0) {
+          db.close();
+          throw new Error(`Invalid database (no edges table): ${dbPath}`);
+        }
+        // Sticky OR-merge, same convention as bulk `init` — a flag once true
+        // (e.g. some loaded file has crosses_land) stays true for the life of
+        // the worker even if that specific file is later closed, so
+        // loadNodes/loadEdges' generated SQL stays valid for every handle
+        // that was ever opened concurrently with it. Heterogeneous schemas
+        // across dynamically-loaded files are a theoretical edge case today
+        // (every current pipeline output shares one schema version).
+        hasCrossesLand = hasCrossesLand || flags.hasCrossesLand;
+        hasCrossesObstacle = hasCrossesObstacle || flags.hasCrossesObstacle;
+        hasEdgeKind = hasEdgeKind || flags.hasEdgeKind;
+        hasNodeDepth = hasNodeDepth || flags.hasNodeDepth;
+        hasRegionId = hasRegionId || flags.hasRegionId;
+
+        const filename = filenameOf(dbPath);
+        const dbIndex = handles.length;
+        handles.push({ db, path: dbPath });
+        filenames.push(filename);
+        console.log(`[db-worker] Opened database on demand: ${dbPath} (dbIndex=${dbIndex})`);
+        parentPort!.postMessage({ id, type, result: { dbIndex, filename, flags } });
+        break;
+      }
+      case 'closeDb': {
+        const { dbIndex } = payload!;
+        const h = handles[dbIndex];
+        if (h) {
+          try { h.db.close(); } catch { /* already closed */ }
+          handles[dbIndex] = null;
+          console.log(`[db-worker] Closed database dbIndex=${dbIndex} (${h.path})`);
+        }
+        parentPort!.postMessage({ id, type, result: { success: true } });
         break;
       }
       case 'openOverlay': {
@@ -187,44 +359,62 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         break;
       }
       case 'loadNodes': {
+        // No payload (or no dbIndexes) = every open handle + overlay, the
+        // original "all handles, once" behavior non-dynamic mode still
+        // relies on byte-for-byte. With dbIndexes set, only those handles,
+        // and overlay rows only when includeOverlay is explicitly true (the
+        // caller is responsible for merging the overlay exactly once).
+        const { dbIndexes, includeOverlay } = (payload ?? {}) as { dbIndexes?: number[]; includeOverlay?: boolean };
+        const wantOverlay = dbIndexes === undefined ? true : includeOverlay === true;
+        const targets: Array<{ h: DbHandle; i: number }> = dbIndexes === undefined
+          ? handles.reduce<Array<{ h: DbHandle; i: number }>>((acc, h, i) => { if (h) acc.push({ h, i }); return acc; }, [])
+          : dbIndexes.reduce<Array<{ h: DbHandle; i: number }>>((acc, i) => { const h = handles[i]; if (h) acc.push({ h, i }); return acc; }, []);
+
         const regionIdCol = hasRegionId ? 'region_id' : '0 AS region_id';
-        const allNodes: NodeRow[] = [];
-        for (const h of handles) {
-          allNodes.push(...h.db.prepare(`SELECT id, lat, lon, node_depth, ${regionIdCol} FROM nodes`).all() as unknown as NodeRow[]);
+        const allNodes: Array<NodeRow & { db_index: number }> = [];
+        for (const { h, i } of targets) {
+          const rows = h.db.prepare(`SELECT id, lat, lon, node_depth, ${regionIdCol} FROM nodes`).all() as unknown as NodeRow[];
+          for (const r of rows) allNodes.push({ ...r, db_index: i });
         }
         // Merge in overlay-added nodes (region_id = 0)
-        if (overlayHandle) {
+        if (wantOverlay && overlayHandle) {
           const overlayNodes = overlayHandle.db.prepare('SELECT id, lat, lon, node_depth FROM nodes').all() as unknown as Array<{ id: number; lat: number; lon: number; node_depth: number }>;
           for (const n of overlayNodes) {
-            allNodes.push({ ...n, region_id: 0 } as NodeRow);
+            allNodes.push({ ...n, region_id: 0, db_index: OVERLAY_DB_INDEX });
           }
         }
         parentPort!.postMessage({ id, type, result: allNodes });
         break;
       }
       case 'loadEdges': {
+        const { dbIndexes, includeOverlay } = (payload ?? {}) as { dbIndexes?: number[]; includeOverlay?: boolean };
+        const wantOverlay = dbIndexes === undefined ? true : includeOverlay === true;
+        const targets: Array<{ h: DbHandle; i: number }> = dbIndexes === undefined
+          ? handles.reduce<Array<{ h: DbHandle; i: number }>>((acc, h, i) => { if (h) acc.push({ h, i }); return acc; }, [])
+          : dbIndexes.reduce<Array<{ h: DbHandle; i: number }>>((acc, i) => { const h = handles[i]; if (h) acc.push({ h, i }); return acc; }, []);
+
         const crossesCol = hasCrossesLand ? ', crosses_land' : '';
         const obstacleCol = hasCrossesObstacle ? ', crosses_obstacle' : '';
         const edgeKindCol = hasEdgeKind ? ', edge_kind_id' : ', 0 AS edge_kind_id';
-        let allEdges: EdgeRow[] = [];
-        for (const h of handles) {
+        let allEdges: Array<EdgeRow & { db_index: number }> = [];
+        for (const { h, i } of targets) {
           const edges = h.db.prepare(
             `SELECT source, target, distance, min_depth, max_air_draft, min_width,
                     cost_factor, distance_to_land,
                     edge_type_id, traffic_mode${crossesCol}${obstacleCol}${edgeKindCol}
              FROM edges`
           ).all() as unknown as EdgeRow[];
-          allEdges = allEdges.concat(edges);
+          allEdges = allEdges.concat(edges.map(e => ({ ...e, db_index: i })));
         }
         // Merge in overlay-added edges
-        if (overlayHandle) {
+        if (wantOverlay && overlayHandle) {
           const overlayEdges = overlayHandle.db.prepare(
             `SELECT source, target, distance, min_depth, max_air_draft, min_width,
                     cost_factor, distance_to_land, edge_type_id, traffic_mode,
                     0 AS edge_kind_id
              FROM edges`
           ).all() as unknown as EdgeRow[];
-          allEdges = allEdges.concat(overlayEdges);
+          allEdges = allEdges.concat(overlayEdges.map(e => ({ ...e, db_index: OVERLAY_DB_INDEX })));
         }
         const CHUNK = 50000;
         for (let i = 0; i < allEdges.length; i += CHUNK) {
@@ -235,13 +425,18 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         break;
       }
       case 'loadPois': {
-        const allPois: PoiRow[] = [];
-        for (const h of handles) {
+        const { dbIndexes } = (payload ?? {}) as { dbIndexes?: number[] };
+        const targets: Array<{ h: DbHandle; i: number }> = dbIndexes === undefined
+          ? handles.reduce<Array<{ h: DbHandle; i: number }>>((acc, h, i) => { if (h) acc.push({ h, i }); return acc; }, [])
+          : dbIndexes.reduce<Array<{ h: DbHandle; i: number }>>((acc, i) => { const h = handles[i]; if (h) acc.push({ h, i }); return acc; }, []);
+        const allPois: Array<PoiRow & { db_index: number }> = [];
+        for (const { h, i } of targets) {
           try {
             // Some databases may not have a pois table
             const cols = h.db.prepare("PRAGMA table_info('pois')").all() as Array<{ name: string }>;
             if (cols.length === 0) continue;
-            allPois.push(...h.db.prepare('SELECT id, name, type_id, properties, lat, lon FROM pois').all() as unknown as PoiRow[]);
+            const rows = h.db.prepare('SELECT id, name, type_id, properties, lat, lon FROM pois').all() as unknown as PoiRow[];
+            for (const r of rows) allPois.push({ ...r, db_index: i });
           } catch {
             // Skip databases that don't have the pois table
             continue;
@@ -251,8 +446,12 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         break;
       }
       case 'loadNavmeshRegions': {
-        const allRegions: NavmeshRegionRow[] = [];
-        for (const h of handles) {
+        const { dbIndexes } = (payload ?? {}) as { dbIndexes?: number[] };
+        const targets: Array<{ h: DbHandle; i: number }> = dbIndexes === undefined
+          ? handles.reduce<Array<{ h: DbHandle; i: number }>>((acc, h, i) => { if (h) acc.push({ h, i }); return acc; }, [])
+          : dbIndexes.reduce<Array<{ h: DbHandle; i: number }>>((acc, i) => { const h = handles[i]; if (h) acc.push({ h, i }); return acc; }, []);
+        const allRegions: Array<NavmeshRegionRow & { db_index: number }> = [];
+        for (const { h, i } of targets) {
           try {
             const cols = h.db.prepare("PRAGMA table_info('navmesh_regions')").all() as Array<{ name: string }>;
             if (cols.length === 0) continue; // Phase-0-only DB — no navmesh_regions table, skip gracefully
@@ -261,7 +460,8 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
             const sql = `SELECT region_id, boundary_geometry, vertices, triangles,
                                 ${adjacencyCol}, boundary_node_ids, depth_ceiling_m
                          FROM navmesh_regions`;
-            allRegions.push(...h.db.prepare(sql).all() as unknown as NavmeshRegionRow[]);
+            const rows = h.db.prepare(sql).all() as unknown as NavmeshRegionRow[];
+            for (const r of rows) allRegions.push({ ...r, db_index: i });
           } catch {
             // Skip databases with a malformed/legacy navmesh_regions table
             continue;
@@ -278,54 +478,15 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
           contributor: string | null; url: string | null; filename: string;
         }> = [];
         for (const h of handles) {
-          try {
-            const metaCols = h.db.prepare("PRAGMA table_info('metadata')").all() as Array<{ name: string }>;
-            const colNames = new Set(metaCols.map(c => c.name));
-            const hasTags = colNames.has('tags');
-            const hasBbox = colNames.has('bounding_box');
-            const hasBoundary = colNames.has('boundary_geometry');
-            const hasSchemaVer = colNames.has('schema_version');
-            const hasContributor = colNames.has('contributor');
-            const hasUrl = colNames.has('url');
-
-            const sql = `SELECT id, country, name, description, last_update_date,
-              ${hasTags ? 'tags' : 'NULL AS tags'},
-              ${hasBbox ? 'bounding_box' : 'NULL AS bounding_box'},
-              ${hasBoundary ? 'boundary_geometry' : 'NULL AS boundary_geometry'},
-              ${hasSchemaVer ? 'schema_version' : 'NULL AS schema_version'},
-              ${hasContributor ? 'contributor' : "'' AS contributor"},
-              ${hasUrl ? 'url' : "'' AS url"}
-              FROM metadata ORDER BY id`;
-            const rows = h.db.prepare(sql).all() as Array<any>;
-            const parts = h.path.replace(/\\/g, '/').split('/');
-            const filename = parts[parts.length - 1];
-            for (const r of rows) {
-              results.push({
-                id: r.id, country: r.country, name: r.name, description: r.description,
-                lastUpdateDate: r.last_update_date,
-                tags: r.tags ?? null,
-                boundingBox: r.bounding_box ?? null,
-                boundaryGeometry: r.boundary_geometry ?? null,
-                schemaVersion: r.schema_version ?? null,
-                contributor: r.contributor ?? null,
-                url: r.url ?? null,
-                filename,
-              });
-            }
-            // If the DB has no metadata rows, still include a minimal entry so it shows in the installed list
-            if (rows.length === 0) {
-              results.push({
-                id: 0, country: '', name: filename.replace('.sqlite', ''), description: null,
-                lastUpdateDate: '', tags: null,
-                boundingBox: null, boundaryGeometry: null,
-                schemaVersion: null, contributor: null, url: null,
-                filename,
-              });
-            }
-          } catch {
-            // metadata table might not exist in legacy DBs — include a minimal entry
-            const parts = h.path.replace(/\\/g, '/').split('/');
-            const filename = parts[parts.length - 1];
+          if (!h) continue;
+          const filename = filenameOf(h.path);
+          const row = readMetadataRow(h.db, filename);
+          if (row) {
+            results.push(row);
+          } else {
+            // No metadata table/row — still include a minimal entry so it
+            // shows in the installed list (metadata table might not exist
+            // in legacy DBs).
             results.push({
               id: 0, country: '', name: filename.replace('.sqlite', ''), description: null,
               lastUpdateDate: '', tags: null,
@@ -430,6 +591,7 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
       }
       case 'close': {
         for (const h of handles) {
+          if (!h) continue;
           try { h.db.close(); } catch { /* already closed */ }
         }
         handles.length = 0;

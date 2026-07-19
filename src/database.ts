@@ -59,6 +59,13 @@ export interface EdgeRow {
    *  edge (set only when this edge_kind_id=1 edge was upgraded from a straight
    *  fallback chord to a real taut path by precomputeFunnelEdges). */
   path_points?: Array<[number, number]>;
+  /** Worker handle index this edge came from (-1 = overlay), or the dbIndex
+   *  of the navmesh region that produced it when it's a synthetic
+   *  funnel/anchor-shortcut edge (see addFunnelShortcutEdge). Only
+   *  meaningful in dynamic-loading mode, where unloadDatabaseGraph uses it
+   *  to remove exactly one database's edges (real and synthetic) without
+   *  touching any other loaded database's. */
+  dbIndex?: number;
 }
 
 interface PoiRow {
@@ -68,6 +75,42 @@ interface PoiRow {
   properties: string | null;
   lat: number;
   lon: number;
+  /** Worker handle index this row was loaded from (-1 = overlay). Only
+   *  populated in dynamic-loading mode; used by unloadDatabaseGraph to know
+   *  which POIs belong to the database being evicted. */
+  dbIndex?: number;
+}
+
+/** A navmesh region tagged with the worker dbIndex of the database it was
+ *  loaded from, so unloadDatabaseGraph can drop exactly the regions (and,
+ *  via addFunnelShortcutEdge, the synthetic funnel/anchor edges) that came
+ *  from an evicted database. Non-dynamic mode also tags regions this way
+ *  (harmless — dbIndex is simply never used for eviction there). */
+type NavmeshRegionWithDb = Navmesh.NavmeshRegion & { dbIndex: number };
+
+/** Coverage/state entry for one locally-discovered .sqlite file — the
+ *  backing store for GET .../databases/loaded in both dynamic and
+ *  non-dynamic mode (§4a task 1/5). Built by peekMetadata in dynamic mode
+ *  before anything loads; derived from the bulk load's metadata in
+ *  non-dynamic mode, where every file is always 'loaded'. */
+export interface DatabaseCoverageEntry {
+  filename: string;
+  path: string;
+  /** Parsed metadata.bounding_box JSON — kept in the same
+   *  {min_lat,min_lon,max_lat,max_lon} shape getDatabaseInfo() already
+   *  exposes elsewhere in this file's public API, rather than converted to
+   *  camelCase. */
+  bbox: { min_lat: number; min_lon: number; max_lat: number; max_lon: number } | null;
+  boundary: GeoJSON.Polygon | GeoJSON.MultiPolygon | null;
+  state: 'not_loaded' | 'loading' | 'loaded';
+  /** Worker-side handle index once loaded; null while not_loaded. */
+  dbIndex: number | null;
+  meta: {
+    id: number; country: string; name: string; description: string | null;
+    lastUpdateDate: string; tags: string | null; boundingBox: string | null;
+    boundaryGeometry: string | null; schemaVersion: number | null;
+    contributor: string | null; url: string | null; filename: string;
+  } | null;
 }
 
 export interface EdgeSnapResult {
@@ -89,7 +132,7 @@ export class RoutingDatabase {
   private nodes: Map<number, { lat: number; lon: number; regionId: number; nodeDepth: number }> = new Map();
   private edgesBySource: Map<number, Array<EdgeRow & { lat: number; lon: number }>> = new Map();
   private pois: PoiRow[] = [];
-  private navmeshRegions: Navmesh.NavmeshRegion[] = [];
+  private navmeshRegions: NavmeshRegionWithDb[] = [];
   private spatialGrid: Map<string, number[]> = new Map();
   private hasCrossesLand: boolean = false;
   private hasCrossesObstacle: boolean = false;
@@ -108,11 +151,70 @@ export class RoutingDatabase {
   /** Cached database list for graph editor (populated during init) */
   private cachedDatabaseList: Array<{ index: number; filename: string; path: string }> = [];
 
-  /** True once loadGraph() completes successfully */
+  /** True once loadGraph() completes successfully (in dynamic mode, once
+   *  init()'s peek completes — see loadGraph()'s no-op branch). */
   private graphLoaded: boolean = false;
 
-  constructor(dbDir: string) {
+  /** §4a: when false (default), behavior is byte-for-byte identical to
+   *  every deployment before this feature existed — init()/loadGraph() open
+   *  and load every .sqlite in the data directory up front, same as always.
+   *  When true, init() only peeks metadata/coverage and loadGraph() is a
+   *  no-op; individual databases load on demand via loadDatabaseGraph(),
+   *  triggered by ensureRegionsLoaded() or the /databases/load endpoint. */
+  private dynamicLoading: boolean;
+
+  /** filename -> coverage/state. Built by peekMetadata in dynamic mode
+   *  before anything is opened; derived from the bulk load's metadata in
+   *  non-dynamic mode (every file reported 'loaded'). Backing store for
+   *  GET .../databases/loaded in both modes. */
+  private coverageIndex: Map<string, DatabaseCoverageEntry> = new Map();
+
+  /** dbIndex -> node ids that database contributed to `nodes`, so
+   *  unloadDatabaseGraph knows which ids to consider removing. Only
+   *  populated by the per-file dynamic loader (loadDatabaseGraph). */
+  private nodesByDbIndex: Map<number, Set<number>> = new Map();
+
+  /** node id -> number of currently-loaded databases containing it.
+   *  Coordinate-hash collisions at region seams mean a node id is not
+   *  always unique to one database (PHASE_4_DESIGN.md §4a.1) — a node is
+   *  only actually removed from `nodes` once this refcount reaches zero. */
+  private nodeDbCount: Map<number, number> = new Map();
+
+  /** True once the user-edits overlay's own added nodes/edges rows have
+   *  been merged into memory at least once. In dynamic mode, every
+   *  subsequent per-file load passes includeOverlay=false to db-worker so
+   *  those rows are never merged a second time (which would duplicate them
+   *  in edgesBySource). Reset only by close()/reload(). */
+  private overlayMergedOnce: boolean = false;
+
+  /** In-flight loadDatabaseGraph() calls keyed by filename, so concurrent
+   *  callers racing to trigger the same on-demand load (e.g. two route
+   *  requests landing in the same not-yet-loaded region) await the same
+   *  load instead of double-loading it. */
+  private loadingPromises: Map<string, Promise<void>> = new Map();
+
+  /** Routes currently executing (see RoutingEngine.calculateRoute's
+   *  beginRoute/endRoute wrapper) — unloadDatabaseGraph refuses while this
+   *  is > 0, a simple guard against evicting a database's graph data out
+   *  from under an in-progress search (PHASE_4_DESIGN.md §4a task 2). */
+  private activeRouteCount: number = 0;
+
+  constructor(dbDir: string, dynamicLoading: boolean = false) {
     this.dbDir = dbDir;
+    this.dynamicLoading = dynamicLoading;
+  }
+
+  isDynamicLoadingEnabled(): boolean {
+    return this.dynamicLoading;
+  }
+
+  /** See activeRouteCount. Called by RoutingEngine.calculateRoute. */
+  beginRoute(): void {
+    this.activeRouteCount++;
+  }
+
+  endRoute(): void {
+    if (this.activeRouteCount > 0) this.activeRouteCount--;
   }
 
   private sendMessage(type: string, payload?: any): Promise<any> {
@@ -185,17 +287,54 @@ export class RoutingDatabase {
     });
 
     const dbPaths = files.map(f => join(this.dbDir, f));
-    const schema = await this.sendMessage('init', { dbPaths });
-    this.hasCrossesLand = schema.hasCrossesLand;
-    this.hasCrossesObstacle = schema.hasCrossesObstacle;
-    this.hasNodeDepth = schema.hasNodeDepth;
-    this.hasRegionId = schema.hasRegionId;
-    this.loadedDbFilenames = schema.filenames || [];
-    this.cachedDatabaseList = dbPaths.map((p, i) => ({
-      index: i,
-      filename: this.loadedDbFilenames[i] || p.split('/').pop() || '',
-      path: p,
-    }));
+
+    if (!this.dynamicLoading) {
+      // Exactly today's behavior: open every handle up front and load
+      // everything in loadGraph(). This is the default for every existing
+      // deployment and must not change (PHASE_4_DESIGN.md §4a task 6).
+      const schema = await this.sendMessage('init', { dbPaths });
+      this.hasCrossesLand = schema.hasCrossesLand;
+      this.hasCrossesObstacle = schema.hasCrossesObstacle;
+      this.hasNodeDepth = schema.hasNodeDepth;
+      this.hasRegionId = schema.hasRegionId;
+      this.loadedDbFilenames = schema.filenames || [];
+      this.cachedDatabaseList = dbPaths.map((p, i) => ({
+        index: i,
+        filename: this.loadedDbFilenames[i] || p.split('/').pop() || '',
+        path: p,
+      }));
+    } else {
+      // Dynamic loading: peek every file's metadata/coverage/schema-flags
+      // without opening a lasting handle for any of them (§4a task 1). Real
+      // graph data loads later, on demand — see loadDatabaseGraph() and
+      // ensureRegionsLoaded().
+      const peeked: Array<{
+        path: string; filename: string;
+        coverage: { boundingBox: DatabaseCoverageEntry['bbox']; boundaryGeometry: DatabaseCoverageEntry['boundary'] };
+        meta: DatabaseCoverageEntry['meta'];
+        flags: { hasCrossesLand: boolean; hasCrossesObstacle: boolean; hasNodeDepth: boolean; hasRegionId: boolean; hasEdgeKind: boolean };
+      }> = await this.sendMessage('peekMetadata', { dbPaths });
+
+      this.coverageIndex.clear();
+      for (const p of peeked) {
+        this.hasCrossesLand = this.hasCrossesLand || p.flags.hasCrossesLand;
+        this.hasCrossesObstacle = this.hasCrossesObstacle || p.flags.hasCrossesObstacle;
+        this.hasNodeDepth = this.hasNodeDepth || p.flags.hasNodeDepth;
+        this.hasRegionId = this.hasRegionId || p.flags.hasRegionId;
+        this.coverageIndex.set(p.filename, {
+          filename: p.filename,
+          path: p.path,
+          bbox: p.coverage.boundingBox ?? null,
+          boundary: p.coverage.boundaryGeometry ?? null,
+          state: 'not_loaded',
+          dbIndex: null,
+          meta: p.meta,
+        });
+      }
+      this.loadedDbFilenames = [];
+      this.cachedDatabaseList = [];
+      console.log(`[routeiq] Dynamic loading enabled: peeked ${peeked.length} database(s) in ${this.dbDir}, none loaded yet`);
+    }
 
     // Open overlay (user-edits.sqlite) — created if not exists
     const overlayPath = join(this.dbDir, 'user-edits.sqlite');
@@ -303,6 +442,17 @@ export class RoutingDatabase {
   }
 
   async loadGraph(): Promise<void> {
+    if (this.dynamicLoading) {
+      // Dynamic mode never bulk-loads at startup — init()'s peekMetadata
+      // already built the coverage index, which is enough to mark the
+      // engine ready-for-on-demand. loadDatabaseGraph() (via
+      // ensureRegionsLoaded(), called from RoutingEngine.calculateRoute, or
+      // the POST /databases/load endpoint) loads a specific region's actual
+      // graph data later, the first time it's needed.
+      this.graphLoaded = true;
+      return;
+    }
+
     const allNodes: Array<{ id: number; lat: number; lon: number; node_depth: number; region_id?: number }> = await this.sendMessage('loadNodes');
     for (const n of allNodes) {
       this.nodes.set(n.id, { lat: n.lat, lon: n.lon, regionId: n.region_id ?? 0, nodeDepth: n.node_depth });
@@ -349,12 +499,49 @@ export class RoutingDatabase {
     const rawRegions: Array<{
       region_id: number; boundary_geometry: string; vertices: string;
       triangles: string; triangle_adjacency: string | null;
-      boundary_node_ids: string; depth_ceiling_m: number;
+      boundary_node_ids: string; depth_ceiling_m: number; db_index?: number;
     }> = await this.sendMessage('loadNavmeshRegions');
-    this.navmeshRegions = rawRegions.map(r => Navmesh.buildNavmeshRegion(r, (id) => this.nodes.get(id)));
+    this.navmeshRegions = rawRegions.map(r => ({
+      ...Navmesh.buildNavmeshRegion(r, (id) => this.nodes.get(id)),
+      dbIndex: r.db_index ?? -1,
+    }));
     this.precomputeFunnelEdges();
 
     this.graphLoaded = true;
+
+    // Populate the coverage index too so GET .../databases/loaded reports
+    // something sensible in non-dynamic mode as well — every
+    // locally-discovered file, all 'loaded' (today's unconditional
+    // load-everything behavior, just also exposed through that new
+    // endpoint).
+    this.rebuildCoverageIndexAfterBulkLoad();
+  }
+
+  /** Non-dynamic-mode counterpart to init()'s peekMetadata coverage-index
+   *  build — derives the same DatabaseCoverageEntry shape from the bulk
+   *  load's already-fetched metadataCache, so GET .../databases/loaded has
+   *  something to report without changing anything about the bulk load
+   *  itself. Never throws — malformed metadata JSON just leaves that file's
+   *  coverage fields null, same tolerance as the rest of this file. */
+  private rebuildCoverageIndexAfterBulkLoad(): void {
+    this.coverageIndex.clear();
+    for (const entry of this.cachedDatabaseList) {
+      const meta = this.metadataCache.find(m => m.filename === entry.filename) ?? null;
+      let bbox: DatabaseCoverageEntry['bbox'] = null;
+      let boundary: DatabaseCoverageEntry['boundary'] = null;
+      try {
+        if (meta?.boundingBox) bbox = JSON.parse(meta.boundingBox);
+        if (meta?.boundaryGeometry) boundary = JSON.parse(meta.boundaryGeometry);
+      } catch { /* malformed metadata JSON — leave coverage null, non-fatal */ }
+      this.coverageIndex.set(entry.filename, {
+        filename: entry.filename,
+        path: entry.path,
+        bbox, boundary,
+        state: 'loaded',
+        dbIndex: entry.index,
+        meta,
+      });
+    }
   }
 
   /**
@@ -365,10 +552,15 @@ export class RoutingDatabase {
    * anchors (see NEXT_PHASES.md's "Boundary Shortcut Sparsification" fix) —
    * done once here, at graph-load time, so astarSearch's per-edge relaxation
    * loop never has to know navmesh regions exist at all.
+   *
+   * Defaults to every currently-loaded region (the non-dynamic bulk-load
+   * behavior). Dynamic mode's per-file loader passes just the newly-loaded
+   * database's own regions, so an incremental load never recomputes work
+   * already done for regions loaded earlier (§4a task 2).
    */
-  private precomputeFunnelEdges(): void {
+  private precomputeFunnelEdges(regions: NavmeshRegionWithDb[] = this.navmeshRegions): void {
     let emptyCount = 0;
-    this.navmeshRegions.forEach((region, index) => {
+    regions.forEach((region, index) => {
       if (region.boundaryNodeIds.length === 0) {
         emptyCount++;
         // region_id is not a unique key in real generated databases (all rows
@@ -383,7 +575,7 @@ export class RoutingDatabase {
       this.addAnchorShortcutEdges(region);
     });
     if (emptyCount > 0) {
-      console.warn(`[routeiq] ${emptyCount}/${this.navmeshRegions.length} navmesh regions have empty ` +
+      console.warn(`[routeiq] ${emptyCount}/${regions.length} navmesh regions have empty ` +
         'boundary_node_ids — funnel-upgrade coverage is degraded for this database.');
     }
   }
@@ -437,7 +629,7 @@ export class RoutingDatabase {
    * link from every other boundary node to its nearest 1-2 anchors (by real
    * geometric distance — see Round 4 comment below on why not ring index).
    */
-  private addAnchorShortcutEdges(region: Navmesh.NavmeshRegion): void {
+  private addAnchorShortcutEdges(region: NavmeshRegionWithDb): void {
     const anchors = region.anchorNodeIds;
     if (anchors.length < 2) return;
 
@@ -482,7 +674,7 @@ export class RoutingDatabase {
    *  load-time-only edges, never persisted). No-op if a ring-adjacency
    *  edge_kind_id=1 edge already connects the pair directly — that one is
    *  handled (and upgraded) by `upgradeRingBoundaryEdges` instead. */
-  private addFunnelShortcutEdge(region: Navmesh.NavmeshRegion, nodeA: number, nodeB: number): void {
+  private addFunnelShortcutEdge(region: NavmeshRegionWithDb, nodeA: number, nodeB: number): void {
     if (nodeA === nodeB) return;
     const alreadyDirectEdge = this.edgesBySource.get(nodeA)?.some(
       e => e.target === nodeB && e.edge_kind_id === EDGE_KIND_NAVMESH_BOUNDARY,
@@ -508,6 +700,11 @@ export class RoutingDatabase {
       edge_type_id: EDGE_TYPE_COASTAL,
       traffic_mode: TRAFFIC_TWO_WAY,
       edge_kind_id: EDGE_KIND_NAVMESH_BOUNDARY,
+      // Tags this synthetic edge with the dbIndex of the region that
+      // created it, so unloadDatabaseGraph can remove it along with the
+      // rest of that database's edges — these never exist in any .sqlite
+      // file, so they'd otherwise leak in memory across an unload.
+      dbIndex: region.dbIndex,
     };
 
     if (!this.edgesBySource.has(nodeA)) this.edgesBySource.set(nodeA, []);
@@ -523,6 +720,262 @@ export class RoutingDatabase {
       lat: a.lat, lon: a.lon, source_lat: b.lat, source_lon: b.lon,
       path_points: reversePath,
     });
+  }
+
+  // ---------------------------------------------------------------------
+  // §4a dynamic database loading — per-file load/unload, coverage index,
+  // and on-demand resolution for route requests. Everything below is a
+  // no-op (ensureRegionsLoaded) or simply unreachable from the API
+  // (loadDatabaseGraph/unloadDatabaseGraph are only ever invoked when
+  // dynamicLoading is true — see api.ts's /databases/load, /unload) when
+  // dynamicLoading is false, so none of it can affect non-dynamic behavior.
+  // ---------------------------------------------------------------------
+
+  /** Coverage/state for every locally-known database, in both modes — the
+   *  backing data for GET .../databases/loaded. */
+  getCoverageStatus(): Array<{ filename: string; state: 'not_loaded' | 'loading' | 'loaded'; coverage: DatabaseCoverageEntry['bbox']; nodes?: number }> {
+    const result: Array<{ filename: string; state: 'not_loaded' | 'loading' | 'loaded'; coverage: DatabaseCoverageEntry['bbox']; nodes?: number }> = [];
+    for (const entry of this.coverageIndex.values()) {
+      const nodes = entry.dbIndex !== null ? this.nodesByDbIndex.get(entry.dbIndex)?.size : undefined;
+      result.push({ filename: entry.filename, state: entry.state, coverage: entry.bbox, nodes });
+    }
+    return result;
+  }
+
+  /** True iff `filename` is a database this RoutingDatabase knows about
+   *  locally (peeked or bulk-loaded), regardless of its current state. */
+  hasKnownDatabase(filename: string): boolean {
+    return this.coverageIndex.has(filename);
+  }
+
+  /**
+   * Dynamic-loading mode only (no-op otherwise): given a route request's
+   * anchor points (start/end/via — waypoint containment only for this
+   * phase, not the transit-bbox a route might also pass through — see
+   * PHASE_4_DESIGN.md §4a.1 task 4 for that follow-up), load every
+   * not-yet-loaded database whose metadata bounding box contains one of
+   * them, synchronously, before the caller proceeds to search the graph.
+   * Called from RoutingEngine.calculateRoute before any node lookup.
+   */
+  async ensureRegionsLoaded(points: Array<{ latitude: number; longitude: number }>): Promise<void> {
+    if (!this.dynamicLoading) return;
+    const toLoad = new Set<string>();
+    for (const p of points) {
+      for (const entry of this.coverageIndex.values()) {
+        if (entry.state === 'loaded' || !entry.bbox) continue;
+        if (p.latitude >= entry.bbox.min_lat && p.latitude <= entry.bbox.max_lat &&
+            p.longitude >= entry.bbox.min_lon && p.longitude <= entry.bbox.max_lon) {
+          toLoad.add(entry.filename);
+        }
+      }
+    }
+    for (const filename of toLoad) {
+      const t0 = Date.now();
+      console.log(`[routeiq] Route request falls inside not-yet-loaded database ${filename} — loading inline before search`);
+      await this.loadDatabaseGraph(filename);
+      console.log(`[routeiq] Inline on-demand load of ${filename} completed in ${Date.now() - t0}ms`);
+    }
+  }
+
+  /**
+   * Load exactly one locally-known database's nodes/edges/pois/navmesh
+   * regions and merge them into the already-in-memory graph (dynamic mode
+   * only — coverageIndex is empty in non-dynamic mode, so this always
+   * throws "Unknown database" there, which is intentional: unload/reload of
+   * a single file isn't a supported operation on the bulk-load path).
+   * Idempotent — a no-op if already loaded — and concurrent callers for the
+   * same filename share a single in-flight load rather than double-loading.
+   */
+  async loadDatabaseGraph(filename: string): Promise<void> {
+    const entry = this.coverageIndex.get(filename);
+    if (!entry) throw new Error(`Unknown database: ${filename}`);
+    if (entry.state === 'loaded') return;
+
+    const inflight = this.loadingPromises.get(filename);
+    if (inflight) { await inflight; return; }
+
+    const promise = this.loadDatabaseGraphInner(filename, entry);
+    this.loadingPromises.set(filename, promise);
+    try {
+      await promise;
+    } finally {
+      this.loadingPromises.delete(filename);
+    }
+  }
+
+  private async loadDatabaseGraphInner(filename: string, entry: DatabaseCoverageEntry): Promise<void> {
+    entry.state = 'loading';
+    try {
+      const opened: {
+        dbIndex: number; filename: string;
+        flags: { hasCrossesLand: boolean; hasCrossesObstacle: boolean; hasNodeDepth: boolean; hasRegionId: boolean; hasEdgeKind: boolean };
+      } = await this.sendMessage('openDb', { dbPath: entry.path });
+      const dbIndex = opened.dbIndex;
+      this.hasCrossesLand = this.hasCrossesLand || opened.flags.hasCrossesLand;
+      this.hasCrossesObstacle = this.hasCrossesObstacle || opened.flags.hasCrossesObstacle;
+      this.hasNodeDepth = this.hasNodeDepth || opened.flags.hasNodeDepth;
+      this.hasRegionId = this.hasRegionId || opened.flags.hasRegionId;
+
+      // The overlay's own added nodes/edges rows must be merged into memory
+      // exactly once across the whole process lifetime, no matter how many
+      // per-file loads happen afterward — merging them again on a later
+      // load would duplicate them in edgesBySource.
+      const includeOverlay = !this.overlayMergedOnce;
+
+      const nodes: Array<{ id: number; lat: number; lon: number; node_depth: number; region_id?: number; db_index: number }> =
+        await this.sendMessage('loadNodes', { dbIndexes: [dbIndex], includeOverlay });
+
+      const nodeIdSet = this.nodesByDbIndex.get(dbIndex) ?? new Set<number>();
+      for (const n of nodes) {
+        this.nodes.set(n.id, { lat: n.lat, lon: n.lon, regionId: n.region_id ?? 0, nodeDepth: n.node_depth });
+        if (n.db_index === dbIndex) {
+          // Real per-file node (not an overlay row) — track provenance and
+          // bump the refcount so a coordinate-hash collision with another
+          // loaded database's node id (rare, but possible at region seams —
+          // PHASE_4_DESIGN.md §4a.1) doesn't get deleted out from under the
+          // other database when just one of the two is unloaded later.
+          nodeIdSet.add(n.id);
+          this.nodeDbCount.set(n.id, (this.nodeDbCount.get(n.id) ?? 0) + 1);
+        }
+        // Overlay-added nodes (db_index === -1) are never refcounted against
+        // a specific file — only close()/reload() drops them.
+      }
+      this.nodesByDbIndex.set(dbIndex, nodeIdSet);
+
+      // Overlay deletions apply regardless of includeOverlay (they're a
+      // filter, not a merge, and cheap enough to just refetch every load).
+      const deletedNodeIds: number[] = await this.sendMessage('getDeletedNodeIds');
+      const deletedEdges: Array<{ source: number; target: number }> = await this.sendMessage('getDeletedEdgePairs');
+      for (const nid of deletedNodeIds) {
+        if (this.nodes.delete(nid)) {
+          nodeIdSet.delete(nid);
+        }
+      }
+      const deletedNodeSet = new Set(deletedNodeIds);
+      const deletedEdgeSet = new Set(deletedEdges.map(d => `${d.source}:${d.target}`));
+
+      const edges: Array<EdgeRow & { db_index: number }> = await this.sendMessage('loadEdges', { dbIndexes: [dbIndex], includeOverlay });
+      let edgeCount = 0;
+      for (const edge of edges) {
+        if (deletedNodeSet.has(edge.source) || deletedNodeSet.has(edge.target)) continue;
+        if (deletedEdgeSet.has(`${edge.source}:${edge.target}`)) continue;
+        const s = this.nodes.get(edge.source);
+        const t = this.nodes.get(edge.target);
+        if (!s || !t) continue;
+        edge.lat = t.lat;
+        edge.lon = t.lon;
+        (edge as any).source_lat = s.lat;
+        (edge as any).source_lon = s.lon;
+        edge.dbIndex = edge.db_index;
+        if (!this.edgesBySource.has(edge.source)) this.edgesBySource.set(edge.source, []);
+        this.edgesBySource.get(edge.source)!.push(edge as any);
+        edgeCount++;
+      }
+
+      this.buildSpatialIndex();
+
+      const pois: Array<{ id: number; name: string; type_id: number; properties: string | null; lat: number; lon: number; db_index: number }> =
+        await this.sendMessage('loadPois', { dbIndexes: [dbIndex] });
+      for (const p of pois) this.pois.push({ ...p, dbIndex: p.db_index });
+
+      this.metadataCache = await this.getMetadata();
+
+      const rawRegions: Array<{
+        region_id: number; boundary_geometry: string; vertices: string;
+        triangles: string; triangle_adjacency: string | null;
+        boundary_node_ids: string; depth_ceiling_m: number; db_index: number;
+      }> = await this.sendMessage('loadNavmeshRegions', { dbIndexes: [dbIndex] });
+      const newRegions: NavmeshRegionWithDb[] = rawRegions.map(r => ({
+        ...Navmesh.buildNavmeshRegion(r, (id) => this.nodes.get(id)),
+        dbIndex,
+      }));
+      this.navmeshRegions.push(...newRegions);
+      // Only precompute funnel/anchor edges for the regions this load just
+      // added — regions from already-loaded databases were done on their
+      // own load and must not be recomputed here (§4a task 2).
+      if (newRegions.length > 0) this.precomputeFunnelEdges(newRegions);
+
+      if (includeOverlay) this.overlayMergedOnce = true;
+
+      entry.dbIndex = dbIndex;
+      entry.state = 'loaded';
+      this.loadedDbFilenames.push(filename);
+      this.cachedDatabaseList.push({ index: dbIndex, filename, path: entry.path });
+
+      console.log(`[routeiq] Loaded database ${filename} (dbIndex=${dbIndex}): ` +
+        `${nodeIdSet.size} nodes, ${edgeCount} edges, ${pois.length} POIs, ${newRegions.length} navmesh regions`);
+    } catch (err) {
+      // Leave the coverage entry loadable again on failure rather than
+      // stuck 'loading' forever.
+      entry.state = 'not_loaded';
+      throw err;
+    }
+  }
+
+  /**
+   * Remove exactly one database's contribution from the in-memory graph:
+   * its edges (including synthetic funnel/anchor-shortcut edges, tagged
+   * with this dbIndex by addFunnelShortcutEdge), its navmesh regions, its
+   * POIs, and its nodes — except any node id another still-loaded database
+   * also contributed (coordinate-hash collision at a region seam; tracked
+   * via nodeDbCount's refcount). Refuses when this is the only loaded
+   * database, or while a route calculation is in progress (see
+   * beginRoute/endRoute) — evicting graph data out from under an
+   * in-progress search is worse than a temporarily-stale eviction request.
+   */
+  async unloadDatabaseGraph(filename: string): Promise<{ nodesRemoved: number; edgesRemoved: number }> {
+    const entry = this.coverageIndex.get(filename);
+    if (!entry) throw new Error(`Unknown database: ${filename}`);
+    if (entry.state !== 'loaded' || entry.dbIndex === null) {
+      throw new Error(`Database ${filename} is not currently loaded`);
+    }
+    const loadedCount = Array.from(this.coverageIndex.values()).filter(e => e.state === 'loaded').length;
+    if (loadedCount <= 1) {
+      throw new Error('Cannot unload the only loaded database — routing would have no coverage left');
+    }
+    if (this.activeRouteCount > 0) {
+      throw new Error('Cannot unload a database while a route calculation is in progress');
+    }
+
+    const dbIndex = entry.dbIndex;
+
+    let edgesRemoved = 0;
+    for (const [src, edges] of this.edgesBySource) {
+      const filtered = edges.filter(e => e.dbIndex !== dbIndex);
+      edgesRemoved += edges.length - filtered.length;
+      if (filtered.length === 0) this.edgesBySource.delete(src);
+      else if (filtered.length !== edges.length) this.edgesBySource.set(src, filtered);
+    }
+
+    const nodeIds = this.nodesByDbIndex.get(dbIndex) ?? new Set<number>();
+    let nodesRemoved = 0;
+    for (const nodeId of nodeIds) {
+      const remaining = (this.nodeDbCount.get(nodeId) ?? 1) - 1;
+      if (remaining <= 0) {
+        this.nodeDbCount.delete(nodeId);
+        this.nodes.delete(nodeId);
+        nodesRemoved++;
+      } else {
+        this.nodeDbCount.set(nodeId, remaining);
+      }
+    }
+    this.nodesByDbIndex.delete(dbIndex);
+
+    this.navmeshRegions = this.navmeshRegions.filter(r => r.dbIndex !== dbIndex);
+    this.pois = this.pois.filter(p => p.dbIndex !== dbIndex);
+
+    await this.sendMessage('closeDb', { dbIndex });
+
+    this.buildSpatialIndex();
+
+    entry.state = 'not_loaded';
+    entry.dbIndex = null;
+    this.loadedDbFilenames = this.loadedDbFilenames.filter(f => f !== filename);
+    this.cachedDatabaseList = this.cachedDatabaseList.filter(d => d.filename !== filename);
+    this.metadataCache = this.metadataCache.filter(m => m.filename !== filename);
+
+    console.log(`[routeiq] Unloaded database ${filename} (dbIndex=${dbIndex}): removed ${nodesRemoved} nodes, ${edgesRemoved} edges`);
+    return { nodesRemoved, edgesRemoved };
   }
 
   async getNodeById(id: number): Promise<{ lat: number; lon: number; regionId: number; nodeDepth: number } | null> {
@@ -824,6 +1277,15 @@ export class RoutingDatabase {
       edges: edgeCount,
       pois: this.pois.length,
     };
+  }
+
+  /** Number of distinct source nodes with at least one outgoing edge.
+   *  Exposed for §4a dynamic-loading tests: a load/unload/reload cycle
+   *  should return this to its pre-load value, catching any leaked
+   *  synthetic funnel/anchor-shortcut edge (or leaked source-key entry)
+   *  that unloadDatabaseGraph failed to remove. */
+  getEdgesBySourceSize(): number {
+    return this.edgesBySource.size;
   }
 
   async getNodesInBBox(
@@ -1256,6 +1718,12 @@ export class RoutingDatabase {
     this.landGeojsonPath = null;
     this.landBBoxIndex = null;
     this.graphLoaded = false;
+    this.coverageIndex.clear();
+    this.nodesByDbIndex.clear();
+    this.nodeDbCount.clear();
+    this.loadingPromises.clear();
+    this.overlayMergedOnce = false;
+    this.activeRouteCount = 0;
   }
 
   /**

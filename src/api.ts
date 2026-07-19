@@ -146,6 +146,15 @@ export class ApiHandler {
 
     // POST /signalk/v1/api/router/databases/download — download a database file
     this.router.post('/databases/download', this.handleDownloadDatabase.bind(this));
+
+    // GET /signalk/v1/api/router/databases/loaded — §4a per-file coverage/state
+    this.router.get('/databases/loaded', this.handleDatabasesLoaded.bind(this));
+
+    // POST /signalk/v1/api/router/databases/load — §4a manual per-file load
+    this.router.post('/databases/load', this.handleDatabaseLoad.bind(this));
+
+    // POST /signalk/v1/api/router/databases/unload — §4a manual per-file unload
+    this.router.post('/databases/unload', this.handleDatabaseUnload.bind(this));
   }
 
   /**
@@ -1029,6 +1038,98 @@ export class ApiHandler {
       const message = error instanceof Error ? error.message : 'Unknown error';
       console.error('[routeiq] Database download error:', error);
       res.status(500).json({ error: `Download failed: ${message}` });
+      next(error);
+    }
+  }
+
+  /**
+   * §4a per-file coverage/state — works in both modes. Non-dynamic mode
+   * always reports every locally-discovered file 'loaded' (today's
+   * unconditional load-everything behavior); dynamic mode reports each
+   * file's real not_loaded/loading/loaded state from the coverage index
+   * built by peekMetadata at startup.
+   * GET /signalk/v1/api/router/databases/loaded
+   */
+  private async handleDatabasesLoaded(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.db) {
+      res.status(503).json({ error: 'Database not ready' });
+      return;
+    }
+    try {
+      res.json({ databases: this.db.getCoverageStatus() });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: message });
+      next(error);
+    }
+  }
+
+  /**
+   * §4a manual per-file load — dynamic-loading mode only; a no-op concept in
+   * non-dynamic mode (everything is already loaded), so that mode rejects
+   * it with 400 rather than pretending to support a state machine it
+   * doesn't have.
+   * POST /signalk/v1/api/router/databases/load  body: { filename }
+   */
+  private async handleDatabaseLoad(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+    if (!this.requireAuth(req, res)) return;
+    if (!this.db!.isDynamicLoadingEnabled()) {
+      res.status(400).json({ error: 'Dynamic loading is not enabled (config.dynamicLoading is false) — every database is already loaded' });
+      return;
+    }
+    try {
+      const { filename } = req.body ?? {};
+      if (!filename || typeof filename !== 'string') {
+        res.status(400).json({ error: 'Missing required field: filename' });
+        return;
+      }
+      if (!this.db!.hasKnownDatabase(filename)) {
+        res.status(404).json({ error: `Unknown database: ${filename}` });
+        return;
+      }
+      await this.db!.loadDatabaseGraph(filename);
+      res.json({ success: true, filename, databases: this.db!.getCoverageStatus() });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ error: message });
+      next(error);
+    }
+  }
+
+  /**
+   * §4a manual per-file unload — same dynamic-mode-only restriction as load.
+   * Refuses (409) when the file isn't currently loaded, or when unloading
+   * would leave zero loaded databases, or while a route calculation is in
+   * flight — RoutingDatabase.unloadDatabaseGraph enforces all three and
+   * this handler just maps its rejection to 409.
+   * POST /signalk/v1/api/router/databases/unload  body: { filename }
+   */
+  private async handleDatabaseUnload(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+    if (!this.requireAuth(req, res)) return;
+    if (!this.db!.isDynamicLoadingEnabled()) {
+      res.status(400).json({ error: 'Dynamic loading is not enabled (config.dynamicLoading is false) — databases cannot be unloaded' });
+      return;
+    }
+    try {
+      const { filename } = req.body ?? {};
+      if (!filename || typeof filename !== 'string') {
+        res.status(400).json({ error: 'Missing required field: filename' });
+        return;
+      }
+      if (!this.db!.hasKnownDatabase(filename)) {
+        res.status(404).json({ error: `Unknown database: ${filename}` });
+        return;
+      }
+      const result = await this.db!.unloadDatabaseGraph(filename);
+      res.json({ success: true, filename, ...result, databases: this.db!.getCoverageStatus() });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      // unloadDatabaseGraph's own guards (not loaded / would leave zero
+      // loaded / route in flight) are conflicts with current server state,
+      // not a generic server error.
+      res.status(409).json({ error: message });
       next(error);
     }
   }

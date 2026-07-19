@@ -96,7 +96,7 @@ export function pluginConstructor(app: ServerAPI) {
         routingEngine = null;
 
         try {
-          database = new RoutingDatabase(dataDir);
+          database = new RoutingDatabase(dataDir, config.dynamicLoading);
           await database.init();
           await database.loadGraph();
           const stats = await database.getStats();
@@ -255,6 +255,12 @@ export function pluginConstructor(app: ServerAPI) {
             description: 'URL to the index.json catalog for downloading routing databases',
             default: DEFAULT_CONFIG.catalogUrl,
           },
+          dynamicLoading: {
+            type: 'boolean',
+            title: 'Dynamic Database Loading',
+            description: 'Peek installed databases at startup instead of loading all of them; load each region into memory only when a route actually needs it. Leave off for a single-region deployment — there is nothing to gain and startup behavior is unchanged.',
+            default: DEFAULT_CONFIG.dynamicLoading,
+          },
         },
       };
     },
@@ -303,7 +309,7 @@ export function pluginConstructor(app: ServerAPI) {
       if (!config.routingDataDir) {
         throw new Error('routingDataDir is not configured');
       }
-      database = new RoutingDatabase(config.routingDataDir);
+      database = new RoutingDatabase(config.routingDataDir, config.dynamicLoading);
       await database.init();
       await database.loadGraph();
       const stats = await database.getStats();

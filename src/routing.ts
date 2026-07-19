@@ -260,10 +260,31 @@ export class RoutingEngine {
    *
    * The bounding box starts tight around start+end (plus margin) and expands
    * on failure, so short routes are very fast.
+   *
+   * Thin wrapper around calculateRouteImpl: counts this request as "in
+   * flight" for the whole calculation (§4a — RoutingDatabase.unloadDatabaseGraph
+   * refuses to evict a database while any route is executing) without
+   * touching the body of the actual search logic.
    */
   async calculateRoute(request: RoutingRequest): Promise<RouteResult> {
+    this.db.beginRoute();
+    try {
+      return await this.calculateRouteImpl(request);
+    } finally {
+      this.db.endRoute();
+    }
+  }
+
+  private async calculateRouteImpl(request: RoutingRequest): Promise<RouteResult> {
     const { start, end, via = [], minCoastDistance, draft, beam, airDraft } = request;
     const effectiveCoastDistance = minCoastDistance ?? this.config.defaultCoastDistance;
+
+    // §4a dynamic loading: no-op in non-dynamic mode. In dynamic mode, load
+    // (inline, before the search runs) any not-yet-loaded database whose
+    // coverage bbox contains start/end/any via point — waypoint containment
+    // only for this phase, not the full transit-bbox a route might also
+    // pass through (PHASE_4_DESIGN.md §4a.1 task 4 is that follow-up).
+    await this.db.ensureRegionsLoaded([start, end, ...via]);
 
     // Build per-request effective dimensions without mutating shared engine state.
     // Concurrent requests each get their own local copy, avoiding race conditions.

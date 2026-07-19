@@ -197,6 +197,13 @@ export interface PluginConfig {
   considerTides: boolean;           // default for the per-request "use tides" toggle
   maxTidalCurrentKnots: number;     // spring-current calibration for the estimated flow model
   tidesApiBase: string;             // base URL of the server hosting signalk-tides
+  // §4a: when false (default), routingDataDir's .sqlite files are all opened
+  // and loaded up front at startup, same as every deployment before this
+  // option existed. When true, startup only peeks each file's metadata/
+  // coverage (cheap), and individual databases load into memory on demand —
+  // the first time a route request needs them, or via the
+  // /databases/load|unload control endpoints. See PHASE_4_DESIGN.md §4a.
+  dynamicLoading: boolean;
 }
 
 // Default plugin configuration
@@ -217,4 +224,5 @@ export const DEFAULT_CONFIG: PluginConfig = {
   considerTides: false,
   maxTidalCurrentKnots: 2.0,
   tidesApiBase: 'http://localhost:3000',
+  dynamicLoading: false,
 };
