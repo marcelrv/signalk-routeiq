@@ -66,6 +66,39 @@ never skipped. **This is routeiq-side confirmation that there's no
 writeup and the real (different, pipeline-side) issue found along the
 way: see Round 9 below.
 
+## Webapp UX — manual-route editing, possible next improvements
+
+Background: a 2026-07-18 UX review of the manual/auto route editing in
+`public/index.html` produced 10 suggestions. Items 1–5 (drag-the-line via
+insertion, leg-scoped context menu, hover-highlight of the affected leg,
+final-leg `destMode` toggle on the destination marker, Shift+click for
+straight-line points + visible manual-mode cursor) were implemented
+immediately. The remaining five are queued here, we need to decide if we want these or not, so they are pending evaluation:
+
+- **Live preview rubber-band line** — in manual mode (or while dragging a
+  ghost point on the route line), draw a dashed orange preview line from
+  the last waypoint to the cursor so the user sees what a click will
+  create before committing.
+- **Insert plain-tap vias by leg projection, not nearest coordinate** —
+  `sortViasWithModes()` picks the closest coordinate on the whole route,
+  which misplaces points when the route doubles back (peninsula, river).
+  Project the new point perpendicularly onto each leg between existing
+  waypoints and insert into the nearest leg instead. (Segment-click and
+  drag insertion already bypass this; this fixes the remaining plain-tap
+  path.)
+- **Waypoint list panel** — ordered sidebar list (Start, Via 1…n, Dest)
+  with per-leg auto/straight toggle icons, delete buttons and
+  drag-to-reorder; hovering a row highlights the corresponding leg on the
+  map. Second, explicit editing surface for users who don't discover the
+  map gestures.
+- **Feedback toast after leg-mode changes** — e.g. "Leg 2 → 3 is now a
+  straight line · Undo". The dash-pattern change alone is subtle when the
+  leg was already nearly straight.
+- **One-time coach mark** — the first time a full route exists, show a
+  dismissible tip teaching the gestures ("Drag the route line to reshape
+  it · Shift+click for a straight-line point · right-click a leg for
+  options"). The hint-bar text is too terse to teach the model.
+
 ## Blocked — waiting on pipeline-side work
 
 - **Round 9 master-finding re-verification** — re-time `loadGraph()`

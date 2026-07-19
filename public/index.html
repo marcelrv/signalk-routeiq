@@ -1158,6 +1158,10 @@ label.switch-row {
 }
 #manual-banner.visible { display: flex; }
 
+/* Manual (draw) mode: crosshair over the map so it's obvious every tap
+   places a straight-line point. */
+#map.manual-cursor { cursor: crosshair; }
+
 /* ---------- responsive: small chartplotters / tablets / phones ---------- */
 .toolbar-btn { min-height: var(--tap-target); min-width: var(--tap-target); }
 
@@ -1362,7 +1366,7 @@ label.switch-row {
   <div id="route-pane-inner">
     <div class="panel-title">Route</div>
     <div id="hint-line" class="info-line" style="color:#9bb8da;font-size:11px;padding-bottom:2px;border-bottom:1px solid rgba(79,148,212,0.2);margin-bottom:2px">
-      <span id="hint-action">Tap map: 1st=Start, 2nd=Dest, 3rd+=Via · right-click for menu</span>
+      <span id="hint-action">Tap map: 1st=Start, 2nd=Dest, 3rd+=Via · Shift+tap=straight leg · right-click for menu</span>
     </div>
     <div id="start-info" class="info-line"><span class="label">START</span><span class="coords">—</span></div>
     <div id="dest-info" class="info-line"><span class="label">DEST</span><span class="coords">—</span></div>
@@ -1375,7 +1379,7 @@ label.switch-row {
       <button id="gpx-btn" class="toolbar-btn" title="Download GPX">💾</button>
       <button id="push-btn" class="toolbar-btn push-btn" title="Save to Signal K">📤</button>
     </div>
-    <div id="manual-banner"><span>&#9998; Manual mode — new points draw straight lines</span></div>
+    <div id="manual-banner"><span>&#9998; Manual mode — new points draw straight lines (Shift+tap does this anytime)</span></div>
     <div id="tide-controls" style="display:none;padding:4px 0 2px;border-top:1px solid rgba(79,148,212,0.15);margin-top:2px">
       <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#9bb8da;cursor:pointer">
         <input id="tide-cb" type="checkbox" />
@@ -2210,9 +2214,10 @@ label.switch-row {
     btn.classList.toggle('active', state.manualMode);
     btn.setAttribute('aria-pressed', state.manualMode ? 'true' : 'false');
     document.getElementById('manual-banner').classList.toggle('visible', state.manualMode);
+    map.getContainer().classList.toggle('manual-cursor', state.manualMode);
     document.getElementById('hint-action').textContent = state.manualMode
       ? 'Manual mode: taps add straight-line points'
-      : 'Tap map: 1st=Start, 2nd=Dest, 3rd+=Via · right-click for menu';
+      : 'Tap map: 1st=Start, 2nd=Dest, 3rd+=Via · Shift+tap=straight leg · right-click for menu';
   }
   document.getElementById('manual-btn').addEventListener('click', function () {
     setManualMode(!state.manualMode);
@@ -2222,9 +2227,12 @@ label.switch-row {
   // ==================== map context menu ====================
   const ctxMenuEl = document.getElementById('map-context-menu');
 
-  function closeContextMenu() { ctxMenuEl.classList.remove('visible'); }
+  function closeContextMenu() { ctxMenuEl.classList.remove('visible'); clearBothHighlights(); }
 
-  function ctxItem(icon, label, danger, onClick) {
+  // hoverRange: optional {fromIdx, toIdx} — while the pointer is over this
+  // item, highlight that stretch of the route on the map/itinerary pane so
+  // it's obvious which leg an item like "Make this leg auto-routed" affects.
+  function ctxItem(icon, label, danger, onClick, hoverRange) {
     const div = document.createElement('div');
     div.className = 'ctx-item' + (danger ? ' ctx-danger' : '');
     div.innerHTML = '<span class="ctx-icon">' + icon + '</span><span>' + label + '</span>';
@@ -2233,14 +2241,41 @@ label.switch-row {
       closeContextMenu();
       onClick();
     });
+    if (hoverRange) {
+      div.addEventListener('mouseenter', function () {
+        highlightMapByCoordRange(hoverRange.fromIdx, hoverRange.toIdx);
+        highlightPaneByCoordRange(hoverRange.fromIdx, hoverRange.toIdx);
+      });
+      div.addEventListener('mouseleave', clearBothHighlights);
+    }
     return div;
   }
 
   // opts.removeTarget: {kind:'start'|'dest'|'via', viaIdx?} — set when the
   // menu was opened on a waypoint marker instead of empty map.
+  // opts.legTarget: {legIdx, fromIdx, toIdx} — set when the menu was opened
+  // on a rendered route segment (see attachSegmentContextMenu).
   function openContextMenu(latlng, clientX, clientY, opts) {
     opts = opts || {};
     ctxMenuEl.innerHTML = '';
+
+    if (opts.legTarget) {
+      const lt = opts.legTarget;
+      const range = { fromIdx: lt.fromIdx, toIdx: lt.toIdx };
+      const isManualLeg = legMode(lt.legIdx) === 'manual';
+      ctxMenuEl.appendChild(ctxItem(isManualLeg ? '🧭' : '✏',
+        isManualLeg ? 'Make this leg auto-routed' : 'Make this leg straight (manual)', false, function () {
+        setLegMode(lt.legIdx, isManualLeg ? 'auto' : 'manual');
+        pushHistory();
+        applyWaypoints();
+      }, range));
+      ctxMenuEl.appendChild(ctxItem('🟣', 'Insert via point here', false, function () {
+        insertViaIntoLeg(lt.legIdx, latlng);
+        pushHistory();
+        applyWaypoints();
+      }, range));
+      ctxMenuEl.appendChild(document.createElement('div')).className = 'ctx-sep';
+    }
 
     if (opts.removeTarget) {
       const t = opts.removeTarget;
@@ -2262,7 +2297,16 @@ label.switch-row {
           state.viaModes[t.viaIdx] = isManual ? 'auto' : 'manual';
           pushHistory();
           applyWaypoints();
-        }));
+        }, legCoordRange(t.viaIdx)));
+      } else if (t.kind === 'dest' && state.lastGeoJson) {
+        const finalLegIdx = state.viaPoints.length;
+        const isManualFinal = state.destMode === 'manual';
+        ctxMenuEl.appendChild(ctxItem(isManualFinal ? '🧭' : '✏',
+          isManualFinal ? 'Make final leg auto-routed' : 'Make final leg straight (manual)', false, function () {
+          state.destMode = isManualFinal ? 'auto' : 'manual';
+          pushHistory();
+          applyWaypoints();
+        }, legCoordRange(finalLegIdx)));
       }
       ctxMenuEl.appendChild(document.createElement('div')).className = 'ctx-sep';
     }
@@ -3509,7 +3553,14 @@ label.switch-row {
         })
         .catch(function (r) { editorFetchError(r, 'Add node'); });
     } else {
+      // A segment drag (item 1) or its trailing no-op click already handled
+      // this gesture — don't also place a waypoint from the same click.
+      if (suppressRouteClick) return;
       var ll = e.latlng;
+      // Shift+tap always adds a straight-line ("manual") leg, regardless of
+      // the manual-mode toolbar toggle — a quick one-off without switching
+      // modes and back.
+      var mode = (e.originalEvent && e.originalEvent.shiftKey) ? 'manual' : currentLegMode();
       if (!state.startLatLng) {
         state.startLatLng = ll;
         state.startPoiName = '';
@@ -3518,12 +3569,12 @@ label.switch-row {
       } else if (!state.destLatLng) {
         state.destLatLng = ll;
         state.destPoiName = '';
-        state.destMode = currentLegMode();
+        state.destMode = mode;
         state.waypointNext = 'start';
         lookupNearestPoi(ll.lat, ll.lng, 'dest');
       } else {
         state.viaPoints.push(ll);
-        state.viaModes.push(currentLegMode());
+        state.viaModes.push(mode);
         sortViasWithModes();
       }
       pushHistory();
@@ -3588,9 +3639,12 @@ label.switch-row {
   });
 
   // Click on the drawn route inserts a via point at that spot (it sorts into
-  // its position along the route, so dragging isn't needed to refine a leg).
+  // its position along the route). Suppressed right after a segment
+  // mousedown/mouseup cycle (item 1's drag-to-insert / plain-click-does-
+  // nothing on the grab line) so the same gesture isn't handled twice.
   routeLayers.on('click', function (e) {
     L.DomEvent.stopPropagation(e);
+    if (suppressRouteClick) return;
     if (state.startLatLng && state.destLatLng) {
       addViaPoint(e.latlng, currentLegMode());
     }
@@ -4128,6 +4182,93 @@ label.switch-row {
     return coords.length >= 2 ? coords : null;
   }
 
+  // ==================== leg <-> route-coordinate mapping ====================
+  // Waypoint anchors along the rendered route: start (coord 0), each via
+  // point (nearest route coord to it), then destination (last coord). Leg k
+  // runs from anchor k to anchor k+1, and its mode is state.viaModes[k] when
+  // k < viaPoints.length, else state.destMode (the final leg) — same
+  // convention as sortViasWithModes() above.
+  function legAnchors(coords) {
+    const anchors = [0];
+    for (const vp of state.viaPoints) anchors.push(closestCoordIndex(coords, vp.lat, vp.lng));
+    anchors.push(coords.length - 1);
+    for (let i = 1; i < anchors.length; i++) {
+      if (anchors[i] < anchors[i - 1]) anchors[i] = anchors[i - 1]; // force monotonic
+    }
+    return anchors;
+  }
+
+  // Coordinate range [fromIdx, toIdx] spanned by a leg, for highlighting.
+  function legCoordRange(legIdx) {
+    const coords = getRouteCoords(state.lastGeoJson);
+    if (!coords) return { fromIdx: 0, toIdx: 0 };
+    const anchors = legAnchors(coords);
+    const k = Math.max(0, Math.min(legIdx, anchors.length - 2));
+    return { fromIdx: anchors[k], toIdx: anchors[k + 1] };
+  }
+
+  // Nearest route *edge* (segment coords[i] -> coords[i+1]) to `latlng`,
+  // restricted to edges [fromIdx, toIdx-1] — used to pin a mousedown /
+  // right-click on a rendered segment to the exact leg it landed on (a
+  // single rendered segment can span more than one leg when there's no
+  // style change at the via point). Must be edge-based, not nearest-coord:
+  // a straight manual leg has no interior coords, so the coord nearest to a
+  // click in its middle is a waypoint shared by TWO legs — the edge under
+  // the click belongs to exactly one.
+  function nearestEdgeIdxInRange(latlng, fromIdx, toIdx) {
+    const coords = getRouteCoords(state.lastGeoJson);
+    if (!coords) return fromIdx;
+    const lngScale = Math.cos(latlng.lat * Math.PI / 180);
+    const px = latlng.lng * lngScale, py = latlng.lat;
+    let minD = Infinity, best = Math.max(0, fromIdx);
+    const last = Math.min(toIdx - 1, coords.length - 2);
+    for (let i = Math.max(0, fromIdx); i <= last; i++) {
+      const ax = coords[i][0] * lngScale, ay = coords[i][1];
+      const bx = coords[i + 1][0] * lngScale, by = coords[i + 1][1];
+      const dx = bx - ax, dy = by - ay;
+      const len2 = dx * dx + dy * dy;
+      let t = len2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      const ex = ax + t * dx - px, ey = ay + t * dy - py;
+      const d = ex * ex + ey * ey;
+      if (d < minD) { minD = d; best = i; }
+    }
+    return best;
+  }
+
+  // Which leg owns route edge `edgeIdx`: the k with anchors[k] <= edgeIdx
+  // < anchors[k+1]. The strict upper bound is what keeps a waypoint coord
+  // (shared endpoint of two legs) from resolving to the earlier leg.
+  function legIndexForEdgeIdx(edgeIdx) {
+    const coords = getRouteCoords(state.lastGeoJson);
+    if (!coords) return 0;
+    const anchors = legAnchors(coords);
+    for (let k = 0; k < anchors.length - 1; k++) {
+      if (edgeIdx < anchors[k + 1]) return k;
+    }
+    return anchors.length - 2;
+  }
+
+  function legMode(legIdx) {
+    return legIdx < state.viaModes.length ? (state.viaModes[legIdx] || 'auto') : (state.destMode || 'auto');
+  }
+
+  function setLegMode(legIdx, mode) {
+    if (legIdx < state.viaModes.length) state.viaModes[legIdx] = mode;
+    else state.destMode = mode;
+  }
+
+  // Insert a via point into leg `legIdx`, splitting it into two legs that
+  // both keep that leg's current mode. Unlike addViaPoint(), this does NOT
+  // sort — the caller (drag-to-insert / leg context menu) already knows
+  // exactly which leg the point belongs to, so re-sorting by nearest-coord
+  // could put it in the wrong place for a leg that loops back on itself.
+  function insertViaIntoLeg(legIdx, latlng) {
+    const mode = legMode(legIdx);
+    state.viaPoints.splice(legIdx, 0, latlng);
+    state.viaModes.splice(legIdx, 0, mode);
+  }
+
   function highlightMapByCoordRange(fromIdx, toIdx) {
     clearMapHighlight();
     for (const seg of state.routeSegments) {
@@ -4184,6 +4325,116 @@ label.switch-row {
     L.marker(latlng, { icon }).addTo(state.junctionMarkers);
   }
 
+  // ==================== drag-the-route-line to insert a via ====================
+  // Google-Maps-style rubber-banding: press on the route, drag, release to
+  // drop a new via point into whichever leg was grabbed. A plain press-
+  // release with no real movement intentionally does nothing (see
+  // suppressRouteClick), so it doesn't fight with the leg context menu
+  // (right-click) or the older click-to-add-via handler on routeLayers.
+  let segmentDrag = null; // { legIdx, ghost, startPoint, moved }
+
+  // Briefly true right after a segment mousedown/mouseup cycle, so the
+  // pre-existing routeLayers 'click' (click-to-add-via) and the map's own
+  // click-to-place-waypoint handler don't ALSO react to the same gesture —
+  // the drag handlers below are the single source of truth for left-click
+  // interaction with the rendered route line.
+  let suppressRouteClick = false;
+
+  function onSegmentDragMove(domEvt) {
+    if (!segmentDrag) return;
+    const latlng = map.mouseEventToLatLng(domEvt);
+    segmentDrag.ghost.setLatLng(latlng);
+    const p = map.latLngToContainerPoint(latlng);
+    if (p.distanceTo(segmentDrag.startPoint) > 5) segmentDrag.moved = true;
+  }
+
+  function onSegmentDragUp(domEvt) {
+    document.removeEventListener('mousemove', onSegmentDragMove);
+    document.removeEventListener('mouseup', onSegmentDragUp);
+    map.dragging.enable();
+    if (!segmentDrag) return;
+    const drag = segmentDrag;
+    segmentDrag = null;
+    map.removeLayer(drag.ghost);
+    if (drag.moved) {
+      const latlng = map.mouseEventToLatLng(domEvt);
+      insertViaIntoLeg(drag.legIdx, latlng);
+      pushHistory();
+      applyWaypoints();
+    }
+    // Let the browser's own 'click' (which follows this mouseup) see the
+    // flag as true so nothing else reacts to it, then clear on the next tick.
+    setTimeout(function () { suppressRouteClick = false; }, 0);
+  }
+
+  // Desktop-only (mouse events): a touch/pointer-event variant was left out
+  // to keep this change focused — touch users still have the leg context
+  // menu (long-press → contextmenu on most mobile browsers) and the plain
+  // "add via" via marker toggle.
+  // The leg currently highlighted under the pointer. Drag and the leg
+  // context menu act on THIS leg — the highlight is the user's indication
+  // of what they're about to edit, so it must also be the source of truth.
+  // The per-event edge search is only the fallback when no hover fired
+  // (e.g. touch, or a contextmenu without preceding mouseover).
+  let hoveredLegIdx = null;
+
+  function legIdxForEventOnSegment(latlng, segStartIdx, segEndIdx) {
+    if (hoveredLegIdx != null) return hoveredLegIdx;
+    return legIndexForEdgeIdx(nearestEdgeIdxInRange(latlng, segStartIdx, segEndIdx));
+  }
+
+  // Grab-line hover: highlight the whole LEG under the cursor (not just the
+  // rendered sub-segment) and remember it. mousemove too, because one grab
+  // line can span more than one leg and mouseover only fires on entry.
+  function attachLegHoverHandlers(grabLine, segStartIdx, segEndIdx) {
+    function update(e) {
+      if (segmentDrag) return; // don't re-highlight mid-drag
+      const legIdx = legIndexForEdgeIdx(nearestEdgeIdxInRange(e.latlng, segStartIdx, segEndIdx));
+      if (legIdx === hoveredLegIdx) return;
+      hoveredLegIdx = legIdx;
+      const range = legCoordRange(legIdx);
+      highlightMapByCoordRange(range.fromIdx, range.toIdx);
+      highlightPaneByCoordRange(range.fromIdx, range.toIdx);
+    }
+    grabLine.on('mouseover', update);
+    grabLine.on('mousemove', update);
+    grabLine.on('mouseout', function () {
+      hoveredLegIdx = null;
+      if (!segmentDrag) clearBothHighlights();
+    });
+  }
+
+  function attachSegmentDragHandlers(grabLine, segStartIdx, segEndIdx) {
+    grabLine.on('mousedown', function (e) {
+      if (state.editMode) return;
+      if (e.originalEvent.button !== 0) return; // left button only
+      L.DomEvent.stopPropagation(e);
+      L.DomEvent.preventDefault(e.originalEvent);
+
+      const legIdx = legIdxForEventOnSegment(e.latlng, segStartIdx, segEndIdx);
+
+      suppressRouteClick = true;
+      map.dragging.disable();
+      const ghost = L.marker(e.latlng, { icon: makeViaIcon('+', false), opacity: 0.75, interactive: false }).addTo(map);
+      segmentDrag = { legIdx: legIdx, ghost: ghost, startPoint: map.latLngToContainerPoint(e.latlng), moved: false };
+
+      document.addEventListener('mousemove', onSegmentDragMove);
+      document.addEventListener('mouseup', onSegmentDragUp);
+    });
+  }
+
+  function attachSegmentContextMenu(grabLine, segStartIdx, segEndIdx) {
+    grabLine.on('contextmenu', function (e) {
+      if (state.editMode) return;
+      L.DomEvent.stopPropagation(e);
+      L.DomEvent.preventDefault(e.originalEvent);
+      const legIdx = legIdxForEventOnSegment(e.latlng, segStartIdx, segEndIdx);
+      const range = legCoordRange(legIdx);
+      openContextMenu(e.latlng, e.originalEvent.clientX, e.originalEvent.clientY,
+        { legTarget: { legIdx: legIdx, fromIdx: range.fromIdx, toIdx: range.toIdx } });
+    });
+  }
+
   function addPolylineHoverHandlers(polyline, fromIdx, toIdx) {
     polyline.on('mouseover', function () {
       highlightMapByCoordRange(fromIdx, toIdx);
@@ -4195,6 +4446,8 @@ label.switch-row {
   function renderCustomRoute(geoJson) {
     state.routeLayers.clearLayers();
     state.routeSegments = [];
+    // The old grab lines are gone, so their mouseout will never fire.
+    hoveredLegIdx = null;
     state.junctionMarkers = L.layerGroup().addTo(state.routeLayers);
     if (!geoJson) return;
 
@@ -4269,6 +4522,9 @@ label.switch-row {
     for (let i = 1; i < coordManual.length; i++) {
       if (coordManual[i] !== coordManual[i - 1]) splitSet.add(i);
     }
+    // Also split at every waypoint anchor so no rendered polyline spans a
+    // leg boundary — leg hover-highlighting selects whole polylines.
+    for (const a of legAnchors(coords)) splitSet.add(a);
     splitSet.add(coords.length - 1);
 
     const splitPoints = [...splitSet].sort((a, b) => a - b);
@@ -4290,6 +4546,15 @@ label.switch-row {
       const polyline = L.polyline(seg, style).addTo(state.routeLayers);
       state.routeSegments.push({ polyline, startIdx: s, endIdx: e, isWarning: isWarn, isManual: isManual, originalStyle: style });
       addPolylineHoverHandlers(polyline, s, e);
+
+      // Wide, invisible line on top of the visible one: a much easier target
+      // to grab for dragging out a new via point (Google-Maps style) and for
+      // right-clicking the leg context menu — the 4px visible line is too
+      // thin to reliably hit.
+      const grabLine = L.polyline(seg, { weight: 18, opacity: 0, color: '#000' }).addTo(state.routeLayers);
+      attachLegHoverHandlers(grabLine, s, e);
+      attachSegmentDragHandlers(grabLine, s, e);
+      attachSegmentContextMenu(grabLine, s, e);
     }
     state.routeLayers.bringToFront();
     // In edit mode the graph itself is what's being worked on: keep edges/nodes
@@ -4321,7 +4586,10 @@ label.switch-row {
     show: false,
     addWaypoints: false,
     draggableWaypoints: false,
-    fitSelectedRoutes: true,
+    // Never let LRM auto-fit: with interactive editing every drag/insert/mode
+    // toggle recalculates the route, and a zoom jump on each edit is jarring.
+    // We fit once per fresh route in the routesfound handler instead.
+    fitSelectedRoutes: false,
     lineOptions: { styles: [{ color: 'transparent', weight: 0 }] },
     createMarker: function () { return null; },
     plan: L.Routing.plan([], {
@@ -4331,10 +4599,18 @@ label.switch-row {
     }),
   }).addTo(map);
 
+  // Fit the map only when a route first appears (or after a clear), not on
+  // every edit — replaces LRM's fitSelectedRoutes, which refit on each recalc.
+  let routeAutoFitted = false;
+
   // capture the latest route result for export / push
   routingControl.on('routesfound', function (e) {
     if (e.routes && e.routes.length > 0) {
       state.latestRoute = e.routes[0];
+      if (!routeAutoFitted && e.routes[0].coordinates && e.routes[0].coordinates.length > 1) {
+        routeAutoFitted = true;
+        map.fitBounds(L.latLngBounds(e.routes[0].coordinates), { padding: [40, 40] });
+      }
     }
     try {
       renderCustomRoute(state.lastGeoJson);
@@ -4430,6 +4706,7 @@ label.switch-row {
       state.routeLayers.clearLayers();
       state.lastGeoJson = null;
       clearRoutePane();
+      routeAutoFitted = false;
     }
     updateMarkers();
     updateInfo();
@@ -4473,6 +4750,7 @@ label.switch-row {
       state.routeLayers.clearLayers();
       state.lastGeoJson = null;
       clearRoutePane();
+      routeAutoFitted = false;
     } else {
       if (wpts[0] && wpts[0].latLng)  state.startLatLng = wpts[0].latLng;
       if (wpts.length > 1 && wpts[wpts.length - 1].latLng) state.destLatLng = wpts[wpts.length - 1].latLng;
