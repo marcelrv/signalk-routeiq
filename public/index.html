@@ -951,7 +951,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   --good: #22c55e;
   --warn: #f59e0b;
   --bad: #ef4444;
-  --manual: #f97316; /* manual (hand-drawn) route segments */
+  --manual: #d946ef; /* manual (hand-drawn) route segments */
   --text: #e0edf5;
   --text-dim: #9bb8da;
   --text-faint: #6d96c0;
@@ -1139,10 +1139,10 @@ label.switch-row {
 }
 .toolbar-btn:disabled:hover { background: transparent; border-color: rgba(79,148,212,0.3); }
 .toolbar-btn.manual-btn.active {
-  background: rgba(249, 115, 22, 0.22);
+  background: rgba(217, 70, 239, 0.22);
   border-color: var(--manual);
-  color: #fdba74;
-  box-shadow: 0 0 0 1px rgba(249,115,22,0.35);
+  color: #f0abfc;
+  box-shadow: 0 0 0 1px rgba(217,70,239,0.35);
 }
 #manual-banner {
   display: none;
@@ -1150,11 +1150,11 @@ label.switch-row {
   gap: 8px;
   margin: 4px 0 2px;
   padding: 6px 10px;
-  background: rgba(249, 115, 22, 0.13);
-  border: 1px dashed rgba(249, 115, 22, 0.55);
+  background: rgba(217, 70, 239, 0.13);
+  border: 1px dashed rgba(217, 70, 239, 0.55);
   border-radius: 7px;
   font-size: 11px;
-  color: #fdba74;
+  color: #f0abfc;
 }
 #manual-banner.visible { display: flex; }
 
@@ -3662,13 +3662,13 @@ label.switch-row {
     iconSize: [32, 32],
     iconAnchor: [16, 16],
   });
-  // Via markers: purple circle for auto-routed legs, orange diamond for
+  // Via markers: purple circle for auto-routed legs, magenta diamond for
   // manual (hand-drawn straight) legs so the two are distinguishable at a glance.
   function makeViaIcon(n, isManual) {
     if (isManual) {
       return L.divIcon({
         className: '',
-        html: '<div style="width:26px;height:26px;background:#f97316;border:3px solid #fff;transform:rotate(45deg);border-radius:6px;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,.4)">' +
+        html: '<div style="width:26px;height:26px;background:#d946ef;border:3px solid #fff;transform:rotate(45deg);border-radius:6px;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,.4)">' +
               '<span style="transform:rotate(-45deg);font-weight:700;font-size:12px;color:#fff">' + n + '</span></div>',
         iconSize: [28, 28],
         iconAnchor: [14, 14],
@@ -4536,10 +4536,10 @@ label.switch-row {
       if (seg.length < 2) continue;
       const isManual = !!coordManual[s];
       const isWarn = !isManual && warnIdx.has(s);
-      // Manual (hand-drawn) legs: dashed orange. Auto legs: solid blue,
+      // Manual (hand-drawn) legs: dashed magenta. Auto legs: solid blue,
       // or dashed amber when a constraint warning applies.
       const style = isManual
-        ? { color: '#f97316', opacity: 0.95, weight: 4, dashArray: '10, 8' }
+        ? { color: '#d946ef', opacity: 0.95, weight: 4, dashArray: '10, 8' }
         : isWarn
           ? { color: '#f59e0b', opacity: 0.9, weight: 4, dashArray: '8, 6' }
           : { color: '#3b8fd4', opacity: 0.9, weight: 4 };

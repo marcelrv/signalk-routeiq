@@ -76,7 +76,7 @@ straight-line points + visible manual-mode cursor) were implemented
 immediately. The remaining five are queued here, we need to decide if we want these or not, so they are pending evaluation:
 
 - **Live preview rubber-band line** — in manual mode (or while dragging a
-  ghost point on the route line), draw a dashed orange preview line from
+  ghost point on the route line), draw a dashed magenta preview line from
   the last waypoint to the cursor so the user sees what a click will
   create before committing.
 - **Insert plain-tap vias by leg projection, not nearest coordinate** —
