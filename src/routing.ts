@@ -584,10 +584,13 @@ export class RoutingEngine {
       const legEnv = env ? { ...env, offsetSec: elapsedSec } : undefined;
       let segmentResult: RouteResult | null;
       if (nextPoint.mode === 'manual') {
-        // User-drawn straight line, bypassing the graph. The endpoint snaps to
-        // a nearby graph node (when one exists) so a following auto leg picks
-        // up exactly where the manual line ends.
-        const manual = await this.buildManualLeg(currentStart, nextPoint, `Via point ${i + 1}`, warnings);
+        // User-drawn straight line, bypassing the graph. Snap the endpoint to
+        // a nearby graph node only when the NEXT leg is auto-routed, so it
+        // picks up exactly where the manual line ends; between two manual
+        // legs (or before a manual final leg) the line must pass exactly
+        // through the user's clicked point.
+        const nextLegMode = i + 1 < via.length ? (via[i + 1].mode ?? 'auto') : (endMode ?? 'auto');
+        const manual = await this.buildManualLeg(currentStart, nextPoint, `Via point ${i + 1}`, warnings, nextLegMode !== 'manual');
         segmentResult = manual.route;
         nextPoint = { ...nextPoint, ...manual.snappedEnd };
       } else {
