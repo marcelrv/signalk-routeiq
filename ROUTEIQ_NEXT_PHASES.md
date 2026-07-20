@@ -12,6 +12,224 @@ generation/pipeline side in the sibling repo. (Originally named
 repos' file lists — and open editor tabs — aren't identically named; now
 `ROUTEIQ_NEXT_PHASES.md` after the plugin's rebrand.)
 
+## Committed next milestone — US East Coast multi-region routing (Round 25)
+
+> **STITCHING MECHANISM: see [`signalk-router-pipeline/STITCHING_DESIGN.md`](../signalk-router-pipeline/STITCHING_DESIGN.md)**
+> (design note, for review). Two experiments (2026-07-20) ruled out
+> build-time seam-ID coincidence; the recommended mechanism is a routeiq
+> **runtime proximity matcher** (overlap band + closest-node-first
+> connectors), paused pending user review before implementation.
+>
+> **STATUS CORRECTION (2026-07-20, verified against committed code, not
+> docs):** Phase 4a / WS2 **runtime core is already implemented and
+> committed** — `94a0a27` "Phase 4a core: dynamic database loading (peek,
+> per-file load/unload, on-demand)". It provides `peekMetadata` + coverage
+> index, per-file `loadDatabaseGraph`/`unloadDatabaseGraph`, node-ID merge
+> via `nodesByDbIndex`/`nodeDbCount` contributor ref-counting, inline
+> route-triggered on-demand load, and `/databases/loaded|load|unload`
+> endpoints + a webapp coverage toggle. `dynamicLoading` default is flipped
+> `false→true` in the working tree (uncommitted), because loading ~527MB of
+> US East Coast files unconditionally already hit a V8 heap OOM. **The WS2
+> task list below was written before this was known and reads as if
+> unstarted — treat it as reference/spec, not a to-do.** Genuinely
+> remaining work: (1) **pipeline** build-phase overlap + seam-node
+> coincidence (`signalk-router-pipeline`, see its NEXT_PHASES "Next
+> milestone" — the real stitching work); (2) a routeiq **coincident-node
+> merge + edge-dedupe test** (the merge path exists but is untested for
+> shared IDs and has no explicit identical-edge dedupe); (3) optional
+> **position-triggered** auto-load/evict + `loadRadiusNm`/`unloadAfterIdleNm`/
+> `maxLoadedRegions` (not implemented; on-demand route loading already
+> covers correctness).
+
+**Decided 2026-07-20** (priority review of `PHASE_3_DESIGN.md` /
+`PHASE_4_DESIGN.md`). Scale-out (3e) is the de-facto active track (PR
+shipped R18/R22, ocean tiling R23, US East Coast files now being
+generated as individual per-area `.sqlite` files), so the near-term
+critical path is **scale-out → cross-database stitching → dynamic
+loading**, not the Phase 3 data-fusion track (3a/3b/3d) the design doc
+listed "first." **This milestone is WS2 only** (dynamic database
+loading, **default on**). Cross-database stitching is handled primarily at
+**build time** — adjacent files are generated with a fixed overlap band
+whose boundary nodes snap to a global grid, so coincident seam nodes get
+identical hash IDs and are merged into one node on load (see WS2 task 2 and
+the pipeline doc). The heavy runtime synthetic-edge matcher (old WS1) is
+**deferred to a later round as a fallback** for legacy/un-gridded files —
+it is not needed for the grid-snapped happy path. The pipeline/cross-repo
+half (build-phase overlap, global snapping grid, boundary-node stamp) lives
+in `signalk-router-pipeline/NEXT_PHASES.md`, "Next milestone — US East Coast
+multi-region routing"; keep the two in sync.
+
+### Locked design decisions (do not re-litigate)
+
+- **Primary stitching = build-time, automatic (not a runtime matcher).**
+  Adjacent files are built with a fixed overlap band (pipeline side, no
+  neighbour awareness) whose boundary/overlap-band nodes snap to a **single
+  global lat/lon grid**. Because node IDs are coordinate-hash-derived,
+  coincident seam nodes then get **identical IDs** in both builds and are
+  merged into one node when the loader brings a second DB into the in-memory
+  graph — the graph is stitched with zero runtime synthetic edges. Chosen
+  over neighbour-aware overlap because a global grid preserves per-file
+  independence (each build references a shared *constant*, never another
+  file); neighbour-aware coupling fights the "independently re-downloadable
+  DB" invariant and buys nothing the grid doesn't. See the pipeline doc's
+  overlap/grid decision for the full rationale.
+- **Runtime synthetic-edge matcher = DEFERRED fallback (not this
+  milestone).** For legacy/un-gridded/abutting files where node IDs don't
+  coincide, a later round adds the §4a.1 matcher (closest-node-first KNN,
+  ≤2 connectors/node, LOS land check, stamp/envelope-band candidates,
+  provenance registry). Kept out of scope here — the grid-snapped happy
+  path doesn't need it, and building it now would gold-plate a fallback
+  before the primary path is proven.
+- **Scope = WS2 (4a dynamic-loading core), default on.** 3c community
+  overrides is the intended fast-follow, deliberately **out** of this
+  milestone to keep the bite managable.
+
+### WS1 — Cross-database stitching (DEFERRED — fallback for a later round)
+
+**Not in this milestone.** With build-time overlap + global-grid snapping
+(above), grid-snapped seam nodes coincide by ID and are merged on load, so
+no runtime synthetic edges are needed for the happy path. This section is
+retained as the spec for the eventual fallback matcher, to be built later
+only for legacy/un-gridded/abutting files. Design basis: `PHASE_4_DESIGN.md`
+§4a.1. Synthetic runtime edges only — never written into any `.sqlite`
+(databases stay independently re-downloadable), same in-memory convention
+as funnel anchor-shortcuts.
+
+1. **Overlap matcher (default path).** For each pair of loaded DBs whose
+   coverage envelopes (`metadata.bounding_box`) intersect: collect each
+   DB's nodes inside the intersection band (bbox-prefiltered), pair them
+   across DBs by ascending distance (closest-first), dedupe near-identical
+   pairs (<~5m → treat as one node, remap edges), and for the rest add a
+   short synthetic connector. Cap ≤2 connectors per node.
+2. **Fallback matcher (no overlap).** When two loaded DBs' envelopes are
+   within `stitchRadiusM` (~500m) but do **not** overlap: candidate nodes
+   = stamped `is_data_boundary` nodes if the file carries them, else nodes
+   within `stitchBandM` (~250m) of `metadata.boundary_geometry`. Same
+   closest-first KNN pairing, ≤2/node.
+3. **Land + attribute gating** (both paths): gate every connector through
+   the existing runtime line-of-sight land check (`isLineCrossingLand`
+   sampling — build-time polygon data isn't available at runtime).
+   Connector attributes are conservative: distance-based cost, `min_depth`
+   = min of the two endpoint depths, short by construction so uncertainty
+   stays bounded.
+4. **Provenance registry — the part WS2 makes mandatory.** Register every
+   stitch edge with `{dbIndexA, dbIndexB}` provenance in a separate
+   registry, NOT mixed anonymously into `edgesBySource`. Loading a region
+   stitches only the new DB against each already-loaded neighbor
+   (incremental — cost scales with the new rim, not the whole world).
+   Evicting a region removes exactly the stitch edges referencing it.
+
+**WS1 tests** (`test/`, real fixtures per the `zeelandbrug.test.ts`
+precedent):
+- Primary committed regression: clip the existing Zeeland data into two
+  **overlapping** halves, load both, assert a route whose start/end sit in
+  different halves crosses the seam and matches (within tolerance) the
+  single-file route for the same coordinates. Cheap, self-contained, no US
+  data needed.
+- Assert no stitch connector crosses land (LOS check fires).
+- Assert the near-identical-node dedupe path (place two coincident nodes
+  across DBs, assert one merged node, zero connectors).
+- Assert the fallback matcher on an **abutting** (non-overlapping) fixture
+  pair, once with stamped nodes and once relying on envelope-band.
+- Assert evicting one DB removes exactly its stitch edges (registry
+  provenance) and leaves the rest of the graph intact.
+
+### WS2 — Dynamic database loading, 4a core (§4a tasks 1–4)
+
+Today `RoutingDatabase.init()` (`src/database.ts:126`) opens *every*
+`.sqlite` and full-loads it, unconditionally — unviable for N US East
+Coast tiles (R22 measured ~76s for one region pre-tiling). New
+`dynamicLoading` config flag, **default `on`** — the multi-region future is
+the standard path, not an opt-in. Single-region UX is preserved by one
+rule: **if exactly one local DB is present, eager-load it at startup**
+(nothing to choose, so no behavior change for today's deployments). The
+real cost of default-on is that the `202`/position/evict paths become
+load-bearing for every deployment from day one, so they must be robust and
+well-tested before the flip — reflected in the test list below.
+
+1. **`peekMetadata(dbPaths)` worker message** + `RegionCoverageIndex:
+   Map<filename,{bbox,boundary,state}>`. Opens each file only long enough
+   to `SELECT bounding_box, boundary_geometry FROM metadata`. Turns
+   startup from "load N regions" into "peek N regions."
+2. **Per-file load/evict plumbing** in `db-worker.ts` — refactor today's
+   "all handles, once" `loadNodes`/`loadEdges` loops into something
+   callable per-handle, merging/removing one DB's nodes+edges from the
+   in-memory graph. State machine: `not_loaded` → `loading` → `loaded`.
+   **Node-ID merge on load (the stitching enabler):** when a newly-loaded
+   DB contains a node ID already present (a grid-snapped coincident seam
+   node from an overlapping neighbour), merge into the existing node and
+   union their edge lists rather than treating them as separate — this is
+   what turns build-time overlap+grid-snap into an automatically-connected
+   cross-region graph, no synthetic edges. On evict, remove that DB's own
+   nodes/edges, but keep a merged seam node alive if a still-loaded
+   neighbour also contributed it (reference-count contributors per node).
+3. **Position trigger** — subscribe to `navigation.position` (new
+   plumbing, confirmed not present today). Throttled (re-evaluate on >1nm
+   movement): proactively load any `not_loaded` region whose boundary is
+   within `loadRadiusNm`; evict a `loaded` region more than
+   `unloadAfterIdleNm` outside its boundary (**eviction off by default** —
+   dropping a region mid-route is a worse failure than using more memory).
+4. **Route-triggered on-demand load** — if a route's start/end/waypoint,
+   **or any `not_loaded` region intersecting the search bbox** (the
+   start-end-chord + `adaptiveMargin` bbox `tryRouteSegment` already
+   computes — transit regions, not just waypoint containment), is not
+   loaded, load it before searching. Long loads return `202 Accepted` with
+   a status handle (extend the existing `isReady()`→`503` precedent in
+   `api.ts`), never block the HTTP request for tens of seconds.
+5. **Config** (`types.ts`): `dynamicLoading` (**default `on`**; the
+   single-DB eager-load rule above is unconditional, not a separate flag),
+   `loadRadiusNm`, `unloadAfterIdleNm`, `maxLoadedRegions` (hard cap as a
+   second safety net).
+
+Trailing (same milestone, lower half — can land just after 1–5):
+`GET /signalk/v1/api/router/databases/loaded` + webapp "loading region…"
+indicator that re-issues the original request when the region flips to
+`loaded`.
+
+**WS2 tests**:
+- `peekMetadata` returns coverage for every local file without paying a
+  full load (assert nodes/edges NOT populated after peek).
+- Per-file load merges exactly that file's nodes/edges; evict removes
+  exactly them; graph intact otherwise.
+- Position update inside `loadRadiusNm` triggers a load; beyond
+  `unloadAfterIdleNm` triggers an evict (when enabled).
+- Route with start in a `not_loaded` region returns `202`, then succeeds
+  after the region loads; a route transiting a `not_loaded` region (no
+  waypoint in it) still loads it.
+- **Single-DB eager-load: a lone local DB is `loaded` and route-ready at
+  startup** (no `202` on first request), same as today.
+- **Cross-region routing via grid-snapped seam nodes**: load two
+  overlapping, grid-snapped adjacent fixtures; assert their coincident seam
+  nodes merged to shared IDs (one node, unioned edges) and a route across
+  the seam succeeds with **no** synthetic stitch edges present.
+- **Regression: `dynamicLoading:on` with one region reproduces today's
+  behavior** (ready at startup, same routes) — guard the common case.
+
+### Sequencing
+
+Tasks 1–2 (peek + per-file load/evict + node-ID merge) → task 3 (position
+trigger) → task 4 (route-triggered load + `202`) → trailing UX. The
+build-time overlap+grid-snap work (pipeline doc) must land alongside, since
+it's what makes task 2's node merge produce a connected cross-region graph.
+The deferred WS1 runtime matcher is a later round, only for un-gridded
+files.
+
+### PR-sized chunks
+
+| PR | Scope | Files | Depends on |
+|---|---|---|---|
+| **PR1** | Per-file load/evict/merge refactor: extract per-handle load/evict, load state machine (`not_loaded`/`loading`/`loaded`), **node-ID merge on load** (union edges when an ID already exists) + per-node contributor ref-count for safe eviction. `init()` still loads **all** DBs so end-state is byte-identical to today — a pure refactor. | `db-worker.ts`, `database.ts` | — |
+| **PR2** | `peekMetadata` worker msg + `RegionCoverageIndex`; config (`dynamicLoading` default `on`, `loadRadiusNm`, `unloadAfterIdleNm`, `maxLoadedRegions`); single-DB eager-load rule. `init()` peeks-not-loads when `on` (and >1 DB). | `db-worker.ts`, `database.ts`, `types.ts` | PR1 |
+| **PR3** | Route-triggered on-demand load: load any `not_loaded` region intersecting the search bbox (transit regions too), `202 Accepted` + status handle. | `api.ts`, `routing.ts`, `db-worker.ts` | PR2 |
+| **PR4** | `navigation.position` subscription + throttled (>1nm) auto-load within `loadRadiusNm`; opt-in evict beyond `unloadAfterIdleNm`. | plugin entry, `api.ts` | PR2 |
+| **PR5** | `GET /databases/loaded` + webapp loading indicator with auto-retry. | `api.ts`, `public/index.html` | PR3/PR4 |
+
+PR3 and PR4 parallelize once PR2 lands. Each PR: build + test via Docker
+(no local node — see `AGENTS.md`/`AGENTS.local.md`), on its own branch,
+existing suite must stay green.
+
+---
+
 ## Ready to start now — no pipeline dependency
 
 Everything below can be picked up immediately, independent of any
