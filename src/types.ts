@@ -197,12 +197,17 @@ export interface PluginConfig {
   considerTides: boolean;           // default for the per-request "use tides" toggle
   maxTidalCurrentKnots: number;     // spring-current calibration for the estimated flow model
   tidesApiBase: string;             // base URL of the server hosting signalk-tides
-  // §4a: when false (default), routingDataDir's .sqlite files are all opened
-  // and loaded up front at startup, same as every deployment before this
-  // option existed. When true, startup only peeks each file's metadata/
-  // coverage (cheap), and individual databases load into memory on demand —
-  // the first time a route request needs them, or via the
-  // /databases/load|unload control endpoints. See PHASE_4_DESIGN.md §4a.
+  // §4a: when true (default since 2026-07-20), startup only peeks each
+  // file's metadata/coverage (cheap), and individual databases load into
+  // memory on demand — the first time a route request needs them, or via
+  // the /databases/load|unload control endpoints. When false,
+  // routingDataDir's .sqlite files are all opened and loaded up front at
+  // startup. Default flipped from false to true after loading multiple
+  // real US East Coast region files (~527MB combined) unconditionally
+  // crashed the dev SignalK server with a V8 heap OOM — the original
+  // false default assumed every deployment had exactly one region file,
+  // which stopped being true once per-region publishing started. See
+  // PHASE_4_DESIGN.md §4a and NEXT_PHASES.md's 2026-07-20 entry.
   dynamicLoading: boolean;
 }
 
@@ -224,5 +229,5 @@ export const DEFAULT_CONFIG: PluginConfig = {
   considerTides: false,
   maxTidalCurrentKnots: 2.0,
   tidesApiBase: 'http://localhost:3000',
-  dynamicLoading: false,
+  dynamicLoading: true,
 };

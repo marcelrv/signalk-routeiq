@@ -9,8 +9,11 @@ import { DEFAULT_CONFIG } from '../dist/types.js';
 
 // §4a — dynamic database loading (PHASE_4_DESIGN.md). Covers:
 //  (a) non-dynamic mode is unaffected — already covered by every other
-//      *.test.js file staying green with dynamicLoading left at its
-//      DEFAULT_CONFIG default (false); not re-tested here.
+//      *.test.js file staying green with `new RoutingDatabase(dir)` left at
+//      its own constructor default (false; DEFAULT_CONFIG.dynamicLoading
+//      itself defaults to true as of 2026-07-20, but those tests construct
+//      RoutingDatabase directly and never read that config field); not
+//      re-tested here.
 //  (b) dynamic mode: init() peeks without loading; a route request inside
 //      a not-yet-loaded database's bbox triggers an inline on-demand load
 //      and returns the same result as the non-dynamic bulk-load path.
