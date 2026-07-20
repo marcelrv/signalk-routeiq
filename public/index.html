@@ -1388,6 +1388,7 @@ label.switch-row {
       <label class="switch-row"><span class="switch-label">POIs (harbours, locks…)</span><input id="poi-cb" type="checkbox" /></label>
       <label class="switch-row"><span class="switch-label">Waterways</span><input id="waterways-cb" type="checkbox" /></label>
       <label class="switch-row"><span class="switch-label">Tide / current stations</span><input id="stations-cb" type="checkbox" /></label>
+      <label class="switch-row" title="Outlines the geographic coverage of each installed routing database"><span class="switch-label">Database coverage</span><input id="coverage-cb" type="checkbox" /></label>
       <div style="height:1px;background:rgba(79,148,212,0.2);margin:8px 0"></div>
       <label class="switch-row"><span class="switch-label">Edit nodes &amp; edges</span><input id="edit-cb" type="checkbox" /></label>
       <label class="switch-row"><span class="switch-label">Debug logging</span><input id="debug-cb" type="checkbox" /></label>
@@ -2516,12 +2517,14 @@ label.switch-row {
   const edgesLayer = L.featureGroup().addTo(map);
   const poiLayer = L.featureGroup().addTo(map);
   const stationsLayer = L.featureGroup().addTo(map);
+  const coverageLayer = L.featureGroup().addTo(map);
   const currentGridLayer = L.featureGroup().addTo(map);
   let waterwaysVisible = false;
   let graphVisible = false;
   let edgesVisible = false;
   let poiVisible = false;
   let stationsVisible = false;
+  let coverageVisible = false;
   let stationsWindowStart = 0; // ms, start of the fetched 24h current timelines
   const currentStationMarkers = {}; // station id -> { marker, timeline }
 
@@ -2538,6 +2541,7 @@ label.switch-row {
   function graphEdgesUrl() { return getApiBase() + '/signalk/v1/api/router/graph/edges?bbox=' + getBboxStr() + '&limit=5000'; }
   function poisUrl()        { return getApiBase() + '/signalk/v1/api/router/pois?bbox=' + getBboxStr() + '&limit=4000'; }
   function waterwaysUrl()   { return getApiBase() + '/signalk/v1/api/router/waterways?bbox=' + getBboxStr(); }
+  function databasesUrl()   { return getApiBase() + '/signalk/v1/api/router/databases'; }
 
   // Tide/current stations come straight from their own plugins on this same
   // Signal K server (signalk-tides, signalk-tidal-currents) — not proxied
@@ -2748,6 +2752,36 @@ label.switch-row {
         L.geoJSON(data, {
           style: { color: '#f97316', weight: 2, opacity: 0.7 },
         }).addTo(waterwaysLayer);
+      })
+      .catch(() => {});
+  }
+
+  // Outline of each installed routing database's coverage — boundaryGeometry
+  // when the DB has one (real coastline-hugging shape), else its bounding
+  // box. Static per install (doesn't depend on the viewport), so fetched
+  // once per toggle-on rather than on every pan/zoom like the other layers.
+  function fetchCoverage() {
+    if (!coverageVisible) return;
+    coverageLayer.clearLayers();
+    fetch(databasesUrl())
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data || !data.databases) return;
+        data.databases.forEach(function (db, i) {
+          const color = DM_COLORS[i % DM_COLORS.length];
+          const style = { color: color, weight: 2, opacity: 0.85, fillColor: color, fillOpacity: 0.08 };
+          let layer = null;
+          if (db.boundaryGeometry) {
+            layer = L.geoJSON(db.boundaryGeometry, { style: style });
+          } else if (db.boundingBox) {
+            const bb = db.boundingBox;
+            layer = L.rectangle([[bb.min_lat, bb.min_lon], [bb.max_lat, bb.max_lon]], style);
+          }
+          if (!layer) return;
+          const label = escapeHtml((db.name || db.filename || 'Unknown') + (db.country ? ' (' + db.country + ')' : ''));
+          layer.bindTooltip(label, { sticky: true });
+          layer.addTo(coverageLayer);
+        });
       })
       .catch(() => {});
   }
@@ -3158,6 +3192,11 @@ label.switch-row {
     waterwaysVisible = this.checked;
     if (waterwaysVisible) fetchWaterways();
     else waterwaysLayer.clearLayers();
+  });
+  document.getElementById('coverage-cb').addEventListener('change', function () {
+    coverageVisible = this.checked;
+    if (coverageVisible) fetchCoverage();
+    else coverageLayer.clearLayers();
   });
 
   document.getElementById('edit-cb').addEventListener('change', function () {
@@ -6127,6 +6166,7 @@ label.switch-row {
         // Refresh installed list and switch to Installed tab
         dmFetchInstalled();
         document.querySelector('.dm-tab[data-tab="installed"]').click();
+        if (coverageVisible) fetchCoverage();
       } else {
         btn.textContent = 'Download';
         btn.disabled = false;
