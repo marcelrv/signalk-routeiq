@@ -193,7 +193,7 @@ export interface PluginConfig {
   lineOfSightSearchRadius: number; // meters, default 800
   averageSpeedKnots: number;        // knots, default 6.0
   waypointTolerance: number;        // meters, max deviation when simplifying to waypoints (default 30)
-  catalogUrl: string;               // URL to the index.json catalog for downloadable databases
+  catalogUrl: string;               // URL to the routing-index.json catalog for downloadable databases
   considerTides: boolean;           // default for the per-request "use tides" toggle
   maxTidalCurrentKnots: number;     // spring-current calibration for the estimated flow model
   tidesApiBase: string;             // base URL of the server hosting signalk-tides
@@ -220,7 +220,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   lineOfSightSearchRadius: 0,
   averageSpeedKnots: 6.0,
   waypointTolerance: 30,
-  catalogUrl: 'https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/index.json',
+  catalogUrl: 'https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/routing-index.json',
   considerTides: false,
   maxTidalCurrentKnots: 2.0,
   tidesApiBase: 'http://localhost:3000',

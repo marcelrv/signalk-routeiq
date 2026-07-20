@@ -227,7 +227,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 }
 
 /* ---------- settings (top-right) ---------- */
-#settings-panel { top: 20px; right: 28px; }
+#settings-panel { top: 68px; right: 28px; }
 #settings-panel input[type="number"] {
   width: 100%;
   background: rgba(255,255,255,0.07);
@@ -264,7 +264,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
 /* ---------- debug coordinate readout (bottom-right; only shown while "Debug logging" is on) ---------- */
 /* Sits above the leaflet attribution control (bottom-right) and stays clear of the
-   settings-pane-tab / route-pane-tab corner buttons on mobile (see media query below). */
+   route-pane-tab corner button on mobile (see media query below). */
 #debug-coords-overlay {
   display: none;
   position: absolute;
@@ -442,7 +442,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
 /* settings pane collapse */
 #settings-panel.collapsed #settings-pane-inner,
-#settings-panel.collapsed .panel-title,
+#settings-panel.collapsed .panel-header,
 #settings-panel.collapsed label,
 #settings-panel.collapsed input,
 #settings-panel.collapsed .conn-dot,
@@ -457,32 +457,69 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   border: none;
   overflow: hidden;
 }
-#settings-pane-tab {
+
+/* ---------- settings hamburger (top-right, replaces the old edge arrow) ---------- */
+#settings-hamburger-btn {
   position: fixed;
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 28px;
-  height: 48px;
+  right: 28px;
+  top: 20px;
+  width: 40px;
+  height: 40px;
   background: rgba(11, 26, 43, 0.92);
   backdrop-filter: blur(10px);
   border: 1px solid rgba(79, 148, 212, 0.35);
-  border-right: none;
-  border-radius: 8px 0 0 8px;
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   color: #5c9bd5;
-  font-size: 12px;
+  font-size: 16px;
   user-select: none;
   transition: background 0.15s, color 0.15s;
-  z-index: 1001;
+  z-index: 1010;
 }
-#settings-pane-tab:hover {
+#settings-hamburger-btn:hover,
+#settings-hamburger-btn[aria-expanded="true"] {
   background: rgba(31, 99, 145, 0.5);
   color: #7ab8f0;
 }
+#settings-hamburger-menu {
+  position: fixed;
+  right: 28px;
+  top: 64px;
+  z-index: 1009;
+  min-width: 220px;
+  display: none;
+  background: var(--bg-panel);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  box-shadow: 0 10px 36px rgba(0,0,0,0.55);
+  padding: 5px;
+  font-size: 13px;
+}
+#settings-hamburger-menu.visible { display: block; }
+.hamburger-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 0 12px;
+  min-height: var(--tap-target);
+  border-radius: 7px;
+  background: none;
+  border: none;
+  color: #c8dcee;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+.hamburger-item:hover { background: rgba(59, 143, 212, 0.18); }
+.hamburger-item.active-tab { background: rgba(59, 143, 212, 0.3); color: var(--text); }
+.hamburger-sep { height: 1px; background: rgba(79,148,212,0.2); margin: 4px 8px; }
 #route-pane-inner {
   flex: 1;
   overflow-y: auto;
@@ -1008,37 +1045,30 @@ label.switch-row {
   outline-offset: 2px;
 }
 
-/* ---------- settings panel tabs ---------- */
-.panel-tabs {
+/* ---------- settings panel header (title + close, inside the panel) ---------- */
+.panel-header {
   display: flex;
-  gap: 4px;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 10px;
-  background: rgba(255,255,255,0.05);
-  border-radius: 8px;
-  padding: 3px;
 }
-.panel-tab {
-  flex: 1;
-  min-height: var(--tap-target);
-  background: transparent;
+.panel-header .panel-title { margin-bottom: 0; }
+#settings-close-btn {
+  background: none;
   border: none;
-  border-radius: 6px;
   color: var(--text-faint);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.4px;
+  font-size: 18px;
+  line-height: 1;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  padding: 2px 4px;
+  min-width: var(--tap-target);
+  min-height: var(--tap-target);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  transition: color 0.15s;
 }
-.panel-tab:hover { color: var(--text-dim); }
-.panel-tab.active {
-  background: rgba(59, 143, 212, 0.3);
-  color: var(--text);
-}
+#settings-close-btn:hover { color: var(--text); }
 
 /* ---------- map context menu ---------- */
 #map-context-menu {
@@ -1215,18 +1245,17 @@ label.switch-row {
     border-bottom: none;
     z-index: 1003;
   }
-  #settings-pane-tab {
+  #settings-hamburger-btn {
     right: 12px;
-    top: auto;
-    bottom: 12px;
-    transform: none;
-    width: 52px;
+    top: 12px;
+    width: 44px;
     height: 44px;
     border-radius: 10px;
     border: 1px solid var(--border-soft);
-    font-size: 16px;
-    z-index: 1004; /* stays tappable above the open slide-over */
+    font-size: 18px;
+    z-index: 1011; /* stays tappable above the open slide-over */
   }
+  #settings-hamburger-menu { right: 12px; top: 60px; }
 
   #search-panel { width: calc(100vw - 120px); max-width: 340px; top: 12px; }
   #search-input { min-height: 44px; }
@@ -1243,9 +1272,10 @@ label.switch-row {
 
   /* keep the leaflet zoom control clear of the bottom controls */
   .leaflet-top.leaflet-left { top: 60px; }
+  /* keep the scale bar clear of the route-pane-tab button (52x44 at bottom:12/left:12) */
+  .leaflet-bottom.leaflet-left { bottom: 64px; }
 
-  /* clear the bottom-right settings-pane-tab (52x44 at bottom:12/right:12) */
-  #debug-coords-overlay { right: 12px; bottom: 64px; font-size: 12px; }
+  #debug-coords-overlay { right: 12px; bottom: 12px; font-size: 12px; }
 }
 
 @media (pointer: coarse) {
@@ -1303,15 +1333,22 @@ label.switch-row {
   <div id="search-results"></div>
 </div>
 
-<!-- Settings tab (outside panel to avoid overflow clipping) -->
-<div id="settings-pane-tab">◀</div>
+<!-- Settings hamburger (top-right): replaces the old edge arrow. Expands to the
+     Routing/Charts/View sections plus the routing-data download manager. -->
+<button id="settings-hamburger-btn" title="Menu" aria-haspopup="true" aria-expanded="false">&#9776;</button>
+<div id="settings-hamburger-menu" role="menu">
+  <button class="hamburger-item active-tab" data-tab="routing" role="menuitem">&#9881; Routing</button>
+  <button class="hamburger-item" data-tab="charts" role="menuitem">&#128506; Charts</button>
+  <button class="hamburger-item" data-tab="view" role="menuitem">&#128065; View</button>
+  <div class="hamburger-sep"></div>
+  <button id="manage-data-btn" class="hamburger-item" role="menuitem">&#11015; Manage Routing Data</button>
+</div>
 <!-- Settings -->
 <div id="settings-panel" class="panel collapsed">
   <div id="settings-pane-inner">
-    <div class="panel-tabs" role="tablist">
-      <button class="panel-tab active" data-tab="routing" role="tab" aria-selected="true">&#9881; Routing</button>
-      <button class="panel-tab" data-tab="charts" role="tab" aria-selected="false">&#128506; Charts</button>
-      <button class="panel-tab" data-tab="view" role="tab" aria-selected="false">&#128065; View</button>
+    <div class="panel-header">
+      <span id="settings-panel-title" class="panel-title">Routing</span>
+      <button id="settings-close-btn" title="Close" aria-label="Close">&times;</button>
     </div>
 
     <!-- Routing Settings: everything that changes the calculated route -->
@@ -1336,7 +1373,6 @@ label.switch-row {
         <div id="boat-beam" class="info-line"><span class="label">ROUTING BEAM</span><span class="value">—</span></div>
         <div id="boat-airdraft" class="info-line"><span class="label">ROUTING AIR</span><span class="value">—</span></div>
       </div>
-      <button id="manage-data-btn" style="margin-top:12px;width:100%;min-height:var(--tap-target);background:#1f6391;border:none;border-radius:8px;padding:8px 0;color:#fff;font-weight:600;cursor:pointer;font-size:12px;transition:background 0.15s">Manage Routing Data</button>
     </div>
 
     <!-- Charts: base map + nautical chart selection (Signal K resources/charts API) -->
@@ -1787,6 +1823,8 @@ label.switch-row {
     maxZoom: 18,
     zoomControl: true,
   });
+
+  L.control.scale({ position: 'bottomleft', imperial: false }).addTo(map);
 
   // ==================== chart sources ====================
   // Base map / nautical chart selection backed by the Signal K
@@ -2417,19 +2455,60 @@ label.switch-row {
       .then(function (yes) { if (yes) doClearRoute(); });
   }
 
-  // ==================== settings panel tabs ====================
-  document.querySelectorAll('#settings-panel .panel-tab').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      document.querySelectorAll('#settings-panel .panel-tab').forEach(function (b) {
-        b.classList.toggle('active', b === btn);
-        b.setAttribute('aria-selected', b === btn ? 'true' : 'false');
-      });
-      const tab = btn.dataset.tab;
-      document.getElementById('settings-tab-routing').style.display = tab === 'routing' ? '' : 'none';
-      document.getElementById('settings-tab-charts').style.display = tab === 'charts' ? '' : 'none';
-      document.getElementById('settings-tab-view').style.display = tab === 'view' ? '' : 'none';
+  // ==================== settings hamburger menu ====================
+  (function () {
+    const hamburgerBtn = document.getElementById('settings-hamburger-btn');
+    const hamburgerMenu = document.getElementById('settings-hamburger-menu');
+    const settingsPanel = document.getElementById('settings-panel');
+    const settingsTitle = document.getElementById('settings-panel-title');
+    const tabLabels = { routing: 'Routing', charts: 'Charts', view: 'View' };
+
+    function closeMenu() {
+      hamburgerMenu.classList.remove('visible');
+      hamburgerBtn.setAttribute('aria-expanded', 'false');
+    }
+
+    hamburgerBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (!settingsPanel.classList.contains('collapsed')) {
+        // panel already open: close it instead of showing the menu again
+        settingsPanel.classList.add('collapsed');
+        closeMenu();
+        return;
+      }
+      const willShow = !hamburgerMenu.classList.contains('visible');
+      hamburgerMenu.classList.toggle('visible', willShow);
+      hamburgerBtn.setAttribute('aria-expanded', willShow ? 'true' : 'false');
     });
-  });
+
+    document.querySelectorAll('#settings-hamburger-menu .hamburger-item[data-tab]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const tab = btn.dataset.tab;
+        document.querySelectorAll('#settings-hamburger-menu .hamburger-item[data-tab]').forEach(function (b) {
+          b.classList.toggle('active-tab', b === btn);
+        });
+        document.getElementById('settings-tab-routing').style.display = tab === 'routing' ? '' : 'none';
+        document.getElementById('settings-tab-charts').style.display = tab === 'charts' ? '' : 'none';
+        document.getElementById('settings-tab-view').style.display = tab === 'view' ? '' : 'none';
+        settingsTitle.textContent = tabLabels[tab] || '';
+        settingsPanel.classList.remove('collapsed');
+        closeMenu();
+      });
+    });
+
+    // "Manage Routing Data" opens the download modal directly (handled elsewhere); just close the menu.
+    document.getElementById('manage-data-btn').addEventListener('click', closeMenu);
+
+    document.getElementById('settings-close-btn').addEventListener('click', function () {
+      settingsPanel.classList.add('collapsed');
+    });
+
+    document.addEventListener('click', function (e) {
+      if (!hamburgerMenu.classList.contains('visible')) return;
+      if (e.target.closest('#settings-hamburger-menu') || e.target.closest('#settings-hamburger-btn')) return;
+      closeMenu();
+    });
+  })();
 
   // ---- overlay layers for debug / visualization ----
   const waterwaysLayer = L.featureGroup().addTo(map);
@@ -5673,16 +5752,11 @@ label.switch-row {
     clearBothHighlights();
   }, true);
 
-  // ---- collapse toggles ----
+  // ---- collapse toggle (route pane) ----
   document.getElementById('route-pane-tab').addEventListener('click', function () {
     const pane = document.getElementById('route-pane');
     pane.classList.toggle('collapsed');
     this.textContent = pane.classList.contains('collapsed') ? '\u25b6' : '\u25c0';
-  });
-  document.getElementById('settings-pane-tab').addEventListener('click', function () {
-    const pane = document.getElementById('settings-panel');
-    pane.classList.toggle('collapsed');
-    this.textContent = pane.classList.contains('collapsed') ? '\u25c0' : '\u25b6';
   });
 
   // ---- Data Manager (download dialog) ----

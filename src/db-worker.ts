@@ -139,6 +139,25 @@ function readMetadataRow(db: DatabaseSync, filename: string): {
   }
 }
 
+/** Per-file node/edge/POI counts for a single open handle — each handle is
+ *  its own sqlite connection to one installed .sqlite, so this is a true
+ *  per-database count, unlike the in-memory graph totals (which are the
+ *  union of whatever databases happen to be currently loaded). */
+function readStatsRow(db: DatabaseSync): { nodes: number; edges: number; pois: number } {
+  const nodes = (db.prepare('SELECT COUNT(*) as c FROM nodes').get() as { c: number } | undefined)?.c ?? 0;
+  const edges = (db.prepare('SELECT COUNT(*) as c FROM edges').get() as { c: number } | undefined)?.c ?? 0;
+  let pois = 0;
+  try {
+    const cols = db.prepare("PRAGMA table_info('pois')").all() as Array<{ name: string }>;
+    if (cols.length > 0) {
+      pois = (db.prepare('SELECT COUNT(*) as c FROM pois').get() as { c: number } | undefined)?.c ?? 0;
+    }
+  } catch {
+    // no pois table
+  }
+  return { nodes, edges, pois };
+}
+
 parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
   const { id, type, payload } = msg;
   try {
@@ -476,13 +495,15 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
           lastUpdateDate: string; tags: string | null; boundingBox: string | null;
           boundaryGeometry: string | null; schemaVersion: number | null;
           contributor: string | null; url: string | null; filename: string;
+          stats: { nodes: number; edges: number; pois: number };
         }> = [];
         for (const h of handles) {
           if (!h) continue;
           const filename = filenameOf(h.path);
           const row = readMetadataRow(h.db, filename);
+          const stats = readStatsRow(h.db);
           if (row) {
-            results.push(row);
+            results.push({ ...row, stats });
           } else {
             // No metadata table/row — still include a minimal entry so it
             // shows in the installed list (metadata table might not exist
@@ -492,7 +513,7 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
               lastUpdateDate: '', tags: null,
               boundingBox: null, boundaryGeometry: null,
               schemaVersion: null, contributor: null, url: null,
-              filename,
+              filename, stats,
             });
           }
         }

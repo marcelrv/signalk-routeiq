@@ -252,7 +252,7 @@ export function pluginConstructor(app: ServerAPI) {
           catalogUrl: {
             type: 'string',
             title: 'Database Catalog URL',
-            description: 'URL to the index.json catalog for downloading routing databases',
+            description: 'URL to the routing-index.json catalog for downloading routing databases',
             default: DEFAULT_CONFIG.catalogUrl,
           },
           dynamicLoading: {

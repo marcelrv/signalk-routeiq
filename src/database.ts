@@ -143,6 +143,7 @@ export class RoutingDatabase {
     lastUpdateDate: string; tags: string | null; boundingBox: string | null;
     boundaryGeometry: string | null; schemaVersion: number | null;
     contributor: string | null; url: string | null; filename: string;
+    stats: { nodes: number; edges: number; pois: number };
   }> = [];
 
   /** Basenames of .sqlite files successfully loaded */
@@ -289,9 +290,11 @@ export class RoutingDatabase {
     const dbPaths = files.map(f => join(this.dbDir, f));
 
     if (!this.dynamicLoading) {
-      // Exactly today's behavior: open every handle up front and load
-      // everything in loadGraph(). This is the default for every existing
-      // deployment and must not change (PHASE_4_DESIGN.md §4a task 6).
+      // Legacy path (dynamicLoading explicitly set to false): open every
+      // handle up front and load everything in loadGraph(). No longer the
+      // default (flipped 2026-07-20, see types.ts) — kept for deployments
+      // that genuinely have one region file and want today's simpler
+      // eager-load behavior instead of the on-demand path.
       const schema = await this.sendMessage('init', { dbPaths });
       this.hasCrossesLand = schema.hasCrossesLand;
       this.hasCrossesObstacle = schema.hasCrossesObstacle;
@@ -351,6 +354,7 @@ export class RoutingDatabase {
     lastUpdateDate: string; tags: string | null; boundingBox: string | null;
     boundaryGeometry: string | null; schemaVersion: number | null;
     contributor: string | null; url: string | null; filename: string;
+    stats: { nodes: number; edges: number; pois: number };
   }>> {
     return this.sendMessage('getMetadata');
   }
@@ -363,13 +367,11 @@ export class RoutingDatabase {
     stats: { nodes: number; edges: number; pois: number };
   }>> {
     const meta = this.metadataCache.length > 0 ? this.metadataCache : await this.getMetadata();
-    const stats = await this.getStats();
     return meta.map(m => ({
       ...m,
       tags: m.tags ? JSON.parse(m.tags) : [],
       boundingBox: m.boundingBox ? JSON.parse(m.boundingBox) : null,
       boundaryGeometry: m.boundaryGeometry ? JSON.parse(m.boundaryGeometry) : null,
-      stats: { nodes: stats.nodes, edges: stats.edges, pois: stats.pois },
     }));
   }
 
