@@ -41,6 +41,47 @@ repos' file lists — and open editor tabs — aren't identically named; now
 > `maxLoadedRegions` (not implemented; on-demand route loading already
 > covers correctness).
 
+### Dynamic-loading UX follow-ups (surfaced 2026-07-21, live testing)
+
+Flipping `dynamicLoading` default-on (committed `3bfbcd0`) fixed the
+multi-region OOM but introduced a real UX regression: with many installed
+regions and nothing triggered, **startup loads nothing**, so the webapp
+reads as "no databases" even though every region is peeked with valid
+coverage. Hit live during Round 25 stitched-pair testing. Fixes, in
+priority order:
+
+1. **DONE — coverage overlay shows all installed DBs, coloured by state**
+   (routeiq `47b6226`). The Database coverage toggle read `/databases`
+   (loaded-only); now reads `/databases/loaded` (all + state) and draws
+   loaded = solid green (precise boundary when available), not-loaded =
+   dashed grey box, with the load state in the tooltip. Surroundings are
+   visible again regardless of load state.
+
+2. **Position-based startup eager-load (the real fix — §4a trigger 1, the
+   still-unbuilt "PR4").** Subscribe to `navigation.position` (confirmed NOT
+   subscribed today — only `subscribeToVesselDimensions` exists,
+   `src/index.ts`), and at startup + on >~1nm movement, eager-load the
+   region(s) whose coverage contains the vessel position (or is within
+   `loadRadiusNm`). A positioned vessel then boots with its local region
+   loaded and routable instead of empty. This is exactly the trigger the
+   §4a design specced; the shipped 4a core (`94a0a27`) only implemented
+   route-triggered on-demand load, never the position trigger.
+
+3. **Single-DB eager-load rule.** Verify/implement the §4a design rule: if
+   exactly one installed DB, load it at startup unconditionally (nothing to
+   choose) — keeps the common single-region deployment ready-at-boot even
+   with `dynamicLoading` on.
+
+4. **Clearer empty state.** Replace a bare "no databases" with e.g.
+   "N regions available — none loaded yet (dynamic loading)", so a
+   not-yet-triggered state doesn't read as a failure.
+
+Config: `loadRadiusNm` (proactive band); consider an `eagerLoadAtPosition`
+flag (default on) so the behaviour is opt-out. Tests: a `navigation.position`
+inside a region's bbox ⇒ that region is `loaded` at startup and a route
+there needs no manual load; no position + >1 DB ⇒ the clearer message
+shows; a lone DB always boots loaded.
+
 **Decided 2026-07-20** (priority review of `PHASE_3_DESIGN.md` /
 `PHASE_4_DESIGN.md`). Scale-out (3e) is the de-facto active track (PR
 shipped R18/R22, ocean tiling R23, US East Coast files now being
