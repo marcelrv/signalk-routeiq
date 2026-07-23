@@ -85,6 +85,29 @@ inside a region's bbox ⇒ that region is `loaded` at startup and a route
 there needs no manual load; no position + >1 DB ⇒ the clearer message
 shows; a lone DB always boots loaded.
 
+**Also shipped 2026-07-21 — transit-region on-demand loading** (§4a.1 task 4,
+`a4611d0`). `ensureRegionsForBbox` loads every region whose coverage
+intersects a route's search bbox, not just waypoint-containing ones — so a
+route now traverses regions it merely passes through instead of drawing a
+straight chord over them. 57/57 tests; verified live (route START 4.21 → DEST
+3.83 now loads both the west clip (contains DEST) and the east clip (transit)).
+
+**Non-urgent follow-ups (2026-07-21):**
+
+1. **Cap on regions loaded per request.** `ensureRegionsForBbox` loads *every*
+   not-loaded region intersecting the search bbox, uncapped — a very wide
+   route (up to `routingBBoxMaxExtent`, 10°) over a densely-tiled area could
+   load many regions in one request. Fine at current dataset size; add the
+   `maxLoadedRegions` cap (the §4a config knob, still unimplemented) if
+   regions get smaller/denser.
+2. **Loading indicator for on-demand region loads.** Route- and
+   position-triggered loads are inline/blocking today, so a request that
+   triggers a new region load just takes longer with no UI feedback (tens of
+   seconds at full-country scale). Surface it — at minimum a "Loading
+   <region>…" spinner/toast while the load runs, ideally the non-blocking
+   `202`/status-poll pattern from §4a task 5 (designed but never built; the
+   shipped 4a does inline loads instead).
+
 **Decided 2026-07-20** (priority review of `PHASE_3_DESIGN.md` /
 `PHASE_4_DESIGN.md`). Scale-out (3e) is the de-facto active track (PR
 shipped R18/R22, ocean tiling R23, US East Coast files now being
