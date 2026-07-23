@@ -2763,27 +2763,46 @@ label.switch-row {
   function fetchCoverage() {
     if (!coverageVisible) return;
     coverageLayer.clearLayers();
-    fetch(databasesUrl())
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (!data || !data.databases) return;
-        data.databases.forEach(function (db, i) {
-          const color = DM_COLORS[i % DM_COLORS.length];
-          const style = { color: color, weight: 2, opacity: 0.85, fillColor: color, fillOpacity: 0.08 };
-          let layer = null;
-          if (db.boundaryGeometry) {
-            layer = L.geoJSON(db.boundaryGeometry, { style: style });
-          } else if (db.boundingBox) {
-            const bb = db.boundingBox;
-            layer = L.rectangle([[bb.min_lat, bb.min_lon], [bb.max_lat, bb.max_lon]], style);
-          }
-          if (!layer) return;
-          const label = escapeHtml((db.name || db.filename || 'Unknown') + (db.country ? ' (' + db.country + ')' : ''));
-          layer.bindTooltip(label, { sticky: true });
-          layer.addTo(coverageLayer);
-        });
-      })
-      .catch(() => {});
+    // Draw EVERY installed database's coverage, loaded or not, colouring by
+    // load state so the operator can see what's available around them, not
+    // only what happens to be in memory. /databases/loaded lists all
+    // installed DBs with {state, coverage-bbox}; /databases returns the
+    // richer metadata (precise boundaryGeometry, name, country) but only for
+    // currently-loaded DBs. Merge: the state list decides what to draw; the
+    // rich list upgrades a loaded DB's box to its real coastline shape.
+    Promise.all([
+      fetch(getApiBase() + '/signalk/v1/api/router/databases/loaded').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(databasesUrl()).then(r => r.ok ? r.json() : null).catch(() => null)
+    ]).then(function (res) {
+      const stateList = (res[0] && res[0].databases) || null;
+      const richList = (res[1] && res[1].databases) || [];
+      const richByFile = {};
+      richList.forEach(function (d) { if (d.filename) richByFile[d.filename] = d; });
+      // Fall back to the loaded-only rich list on an older server that lacks
+      // /databases/loaded (treat everything it returns as loaded).
+      const list = stateList || richList.map(function (d) {
+        return { filename: d.filename, state: 'loaded', coverage: d.boundingBox };
+      });
+      list.forEach(function (db) {
+        const loaded = db.state === 'loaded';
+        const meta = richByFile[db.filename] || {};
+        const style = loaded
+          ? { color: '#22c55e', weight: 2, opacity: 0.9, fillColor: '#22c55e', fillOpacity: 0.10 }
+          : { color: '#94a3b8', weight: 1.5, opacity: 0.75, fillColor: '#94a3b8', fillOpacity: 0.04, dashArray: '6,5' };
+        let layer = null;
+        if (loaded && meta.boundaryGeometry) {
+          layer = L.geoJSON(meta.boundaryGeometry, { style: style });
+        } else {
+          const bb = db.coverage || meta.boundingBox;
+          if (bb) layer = L.rectangle([[bb.min_lat, bb.min_lon], [bb.max_lat, bb.max_lon]], style);
+        }
+        if (!layer) return;
+        const nm = meta.name || db.filename || 'Unknown';
+        const label = escapeHtml(nm + (meta.country ? ' (' + meta.country + ')' : '') + ' — ' + (loaded ? 'loaded' : 'not loaded'));
+        layer.bindTooltip(label, { sticky: true });
+        layer.addTo(coverageLayer);
+      });
+    }).catch(() => {});
   }
 
   function tideStationIcon() {
