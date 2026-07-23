@@ -47,8 +47,11 @@ Flipping `dynamicLoading` default-on (committed `3bfbcd0`) fixed the
 multi-region OOM but introduced a real UX regression: with many installed
 regions and nothing triggered, **startup loads nothing**, so the webapp
 reads as "no databases" even though every region is peeked with valid
-coverage. Hit live during Round 25 stitched-pair testing. Fixes, in
-priority order:
+coverage. Hit live during Round 25 stitched-pair testing.
+
+**ALL FOUR SHIPPED 2026-07-21** (coverage overlay `47b6226`; position
+eager-load + single-DB rule + empty-state `7a45094`; build clean, 56/56
+tests). Items retained below as the record. Fixes, in priority order:
 
 1. **DONE — coverage overlay shows all installed DBs, coloured by state**
    (routeiq `47b6226`). The Database coverage toggle read `/databases`
