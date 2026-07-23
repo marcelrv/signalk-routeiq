@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
-import { PoiResult } from './types.js';
+import { BBox, PoiResult } from './types.js';
 import * as Navmesh from './navmesh.js';
 
 // Node type constants (encoded in the node ID via coordinate hashing)
@@ -756,12 +756,16 @@ export class RoutingDatabase {
 
   /**
    * Dynamic-loading mode only (no-op otherwise): given a route request's
-   * anchor points (start/end/via — waypoint containment only for this
-   * phase, not the transit-bbox a route might also pass through — see
-   * PHASE_4_DESIGN.md §4a.1 task 4 for that follow-up), load every
-   * not-yet-loaded database whose metadata bounding box contains one of
-   * them, synchronously, before the caller proceeds to search the graph.
-   * Called from RoutingEngine.calculateRoute before any node lookup.
+   * anchor points (start/end/via), load every not-yet-loaded database whose
+   * metadata bounding box contains one of them, synchronously, before the
+   * caller proceeds to search the graph. Called from
+   * RoutingEngine.calculateRoute before any node lookup.
+   *
+   * Waypoint containment only — a route can also *transit* a database it
+   * has no waypoint inside (e.g. a strait between start and end). That case
+   * is handled separately by ensureRegionsForBbox, called per search
+   * attempt/segment once the search's bounding box is known (PHASE_4_DESIGN.md
+   * §4a.1 task 4).
    */
   async ensureRegionsLoaded(points: Array<{ latitude: number; longitude: number }>): Promise<void> {
     if (!this.dynamicLoading) return;
@@ -778,6 +782,36 @@ export class RoutingDatabase {
     for (const filename of toLoad) {
       const t0 = Date.now();
       console.log(`[routeiq] Route request falls inside not-yet-loaded database ${filename} — loading inline before search`);
+      await this.loadDatabaseGraph(filename);
+      console.log(`[routeiq] Inline on-demand load of ${filename} completed in ${Date.now() - t0}ms`);
+    }
+  }
+
+  /**
+   * Dynamic-loading mode only (no-op otherwise): given the bounding box a
+   * route search is about to examine — already bounded by
+   * routingBBoxMaxExtent, see routing.ts's tryRouteSegment/calculateRouteImpl —
+   * load every not-yet-loaded database whose coverage bbox *intersects* it
+   * (standard AABB overlap test), synchronously, before the caller proceeds
+   * to search the graph. This is what makes transit regions available: a
+   * database the route passes through but has no start/dest/via waypoint
+   * inside (ensureRegionsLoaded above only covers waypoint containment).
+   * Called from RoutingEngine per search attempt/segment, immediately
+   * before astarSearch — PHASE_4_DESIGN.md §4a.1 task 4.
+   */
+  async ensureRegionsForBbox(bbox: BBox): Promise<void> {
+    if (!this.dynamicLoading) return;
+    const toLoad = new Set<string>();
+    for (const entry of this.coverageIndex.values()) {
+      if (entry.state === 'loaded' || !entry.bbox) continue;
+      const intersects =
+        entry.bbox.min_lat <= bbox.maxLat && entry.bbox.max_lat >= bbox.minLat &&
+        entry.bbox.min_lon <= bbox.maxLon && entry.bbox.max_lon >= bbox.minLon;
+      if (intersects) toLoad.add(entry.filename);
+    }
+    for (const filename of toLoad) {
+      const t0 = Date.now();
+      console.log(`[routeiq] Route search bounding box overlaps not-yet-loaded database ${filename} — loading inline before search`);
       await this.loadDatabaseGraph(filename);
       console.log(`[routeiq] Inline on-demand load of ${filename} completed in ${Date.now() - t0}ms`);
     }

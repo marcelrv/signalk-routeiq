@@ -340,4 +340,108 @@ describe('§4a dynamic database loading', () => {
       }
     });
   });
+
+  describe('§4a.1 task 4 — transit-region on-demand loading', () => {
+    // Three plain (non-navmesh) regions in a west-to-east line:
+    // TRANSIT-START -- TRANSIT-MID -- TRANSIT-END. A route request from a
+    // point inside TRANSIT-START to a point inside TRANSIT-END has no
+    // waypoint anywhere near TRANSIT-MID, but the search bounding box (the
+    // start-end chord, expanded by margin, capped by routingBBoxMaxExtent)
+    // spans clean across it — reproducing the live bug this task fixes:
+    // before ensureRegionsForBbox, TRANSIT-MID never loaded and a route
+    // drew a straight chord across it instead of a shot at routing through
+    // it. The route computation itself is expected to fail here (the three
+    // regions' graphs aren't connected to each other), which is fine — the
+    // assertion is about *loading*, not route success.
+    const transitDir = './test/fixtures/dynamic-loading-transit';
+    const startPath = path.join(transitDir, 'transit-start.sqlite');
+    const midPath = path.join(transitDir, 'transit-mid.sqlite');
+    const endPath = path.join(transitDir, 'transit-end.sqlite');
+
+    const START_BBOX = { min_lat: 9.9, min_lon: 9.9, max_lat: 11.1, max_lon: 11.1 };
+    const MID_BBOX = { min_lat: 9.9, min_lon: 14.9, max_lat: 11.1, max_lon: 16.1 };
+    const END_BBOX = { min_lat: 9.9, min_lon: 19.9, max_lat: 11.1, max_lon: 21.1 };
+
+    function buildPlainRegion(
+      dbPath: string, country: string, bbox: typeof START_BBOX,
+      pointA: [number, number], pointB: [number, number],
+    ): void {
+      const sdb = new DatabaseSync(dbPath, { open: true });
+      const run = (sql: string, params: unknown[] = []) => sdb.prepare(sql).run(...(params as any[]));
+      run(`CREATE TABLE metadata (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, country TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL, description TEXT, last_update_date TEXT NOT NULL,
+        bounding_box TEXT
+      )`);
+      run(`INSERT INTO metadata (country, name, description, last_update_date, bounding_box)
+           VALUES (?, ?, 'Transit-loading fixture', '2026-01-01T00:00:00Z', ?)`,
+        [country, `Transit region ${country}`, JSON.stringify(bbox)]);
+      const idA = nodeIdFor(pointA[0], pointA[1]);
+      const idB = nodeIdFor(pointB[0], pointB[1]);
+      run(`CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL, lon REAL, resolution REAL DEFAULT 0.0, node_depth REAL DEFAULT -1, region_id INTEGER)`);
+      run(`INSERT INTO nodes (id, lat, lon, region_id) VALUES (?, ?, ?, 1)`, [idA, pointA[0], pointA[1]]);
+      run(`INSERT INTO nodes (id, lat, lon, region_id) VALUES (?, ?, ?, 1)`, [idB, pointB[0], pointB[1]]);
+      run(`CREATE TABLE edges (
+        source INTEGER, target INTEGER, distance REAL,
+        min_depth REAL, max_air_draft REAL, min_width REAL,
+        cost_factor REAL DEFAULT 1.0, distance_to_land REAL,
+        edge_type_id INTEGER DEFAULT 0, traffic_mode INTEGER DEFAULT 0,
+        edge_kind_id INTEGER DEFAULT 0
+      )`);
+      const d = Math.round(haversine(pointA[0], pointA[1], pointB[0], pointB[1]));
+      run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES (?, ?, ?, 5.0, 20.0, 10.0, 1.0, 500, 0, 0, 0)`,
+        [idA, idB, d]);
+      run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES (?, ?, ?, 5.0, 20.0, 10.0, 1.0, 500, 0, 0, 0)`,
+        [idB, idA, d]);
+      sdb.close();
+    }
+
+    let transitDb: RoutingDatabase;
+
+    before(async () => {
+      if (!fs.existsSync(transitDir)) fs.mkdirSync(transitDir, { recursive: true });
+      for (const p of [startPath, midPath, endPath]) if (fs.existsSync(p)) fs.unlinkSync(p);
+      buildPlainRegion(startPath, 'TSTART', START_BBOX, [10.4, 10.4], [10.6, 10.6]);
+      buildPlainRegion(midPath, 'TMID', MID_BBOX, [10.4, 15.4], [10.6, 15.6]);
+      buildPlainRegion(endPath, 'TEND', END_BBOX, [10.4, 20.4], [10.6, 20.6]);
+
+      transitDb = new RoutingDatabase(transitDir, true);
+      await transitDb.init();
+      await transitDb.loadGraph(); // no-op in dynamic mode
+    });
+
+    after(async () => {
+      await transitDb.close();
+      for (const p of [startPath, midPath, endPath]) if (fs.existsSync(p)) fs.unlinkSync(p);
+    });
+
+    it('a route request loads a transited region with no start/dest/via waypoint inside it', async () => {
+      const before = new Map(transitDb.getCoverageStatus().map(s => [s.filename, s.state]));
+      assert.strictEqual(before.get('transit-start.sqlite'), 'not_loaded');
+      assert.strictEqual(before.get('transit-mid.sqlite'), 'not_loaded');
+      assert.strictEqual(before.get('transit-end.sqlite'), 'not_loaded');
+
+      const engine = new RoutingEngine(transitDb, DEFAULT_CONFIG);
+      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+
+      const start = { latitude: 10.5, longitude: 10.5 }; // inside transit-start, nowhere near mid/end
+      const end = { latitude: 10.5, longitude: 20.5 };    // inside transit-end, nowhere near mid/start
+
+      try {
+        await engine.calculateRoute({ start, end, minCoastDistance: 0 });
+      } catch {
+        // Expected: the three regions' graphs are disconnected from each
+        // other, so no actual path exists. Loading — the thing under test
+        // — happens up front, before the search runs, regardless.
+      }
+
+      const after = new Map(transitDb.getCoverageStatus().map(s => [s.filename, s.state]));
+      assert.strictEqual(after.get('transit-start.sqlite'), 'loaded', 'start region should load (waypoint containment)');
+      assert.strictEqual(after.get('transit-end.sqlite'), 'loaded', 'end region should load (waypoint containment)');
+      assert.strictEqual(
+        after.get('transit-mid.sqlite'), 'loaded',
+        'transit region — no waypoint inside it, but on the direct path between start and end — should load too (§4a.1 task 4)',
+      );
+    });
+  });
 });

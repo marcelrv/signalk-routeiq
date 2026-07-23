@@ -343,6 +343,16 @@ export class RoutingEngine {
       // see isBetterCandidate for the fewer-violating-meters-first ordering.
       let currentMargin = this.config.routingBBoxMargin;
       const maxMargin = this.config.routingBBoxMaxExtent;
+
+      // §4a.1 task 4: preload transit regions — databases the search bbox
+      // passes through but that have no start/end waypoint inside them
+      // (ensureRegionsLoaded above only covers waypoint containment). Use
+      // the maximal bbox this expansion loop could ever reach (margin
+      // capped at routingBBoxMaxExtent) so a mid-route region is already in
+      // memory before the first search attempt, without loading beyond
+      // what the search could actually examine.
+      await this.db.ensureRegionsForBbox(bboxFromPoints(start, end, maxMargin));
+
       let bestResult: RouteResult | null = null;
       let bestCost = Infinity;
       let bestViolatingMeters = Infinity;
@@ -740,6 +750,15 @@ export class RoutingEngine {
 
     let currentMargin = this.config.routingBBoxMargin;
     const segmentMaxMargin = this.config.routingBBoxMaxExtent;
+
+    // §4a.1 task 4: preload transit regions for this segment. Even when a
+    // fixed `bbox` was passed in (e.g. routeViaPoints' adaptiveMargin box),
+    // an expansion attempt that falls through to bboxFromPoints below can
+    // still reach the full segmentMaxMargin box (see `bbox = undefined`
+    // below), so load for that maximal extent up front rather than
+    // re-checking coverage on every expansion.
+    await this.db.ensureRegionsForBbox(bboxFromPoints(startPt, endPt, segmentMaxMargin));
+
     let bestResult: RouteResult | null = null;
     let bestCost = Infinity;
     let bestViolatingMeters = Infinity;
