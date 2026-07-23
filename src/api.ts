@@ -876,7 +876,7 @@ export class ApiHandler {
   private async handleDatabasesStatus(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.db) {
       // Return 200 (not 503) so the frontend can read the error field
-      res.json({ loaded: false, filenames: [], initError: this.initError });
+      res.json({ loaded: false, filenames: [], available: 0, initError: this.initError });
       return;
     }
     try {

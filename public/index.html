@@ -4069,19 +4069,27 @@ label.switch-row {
             showError(status.initError, isNoDatabases);
             return;
           }
+          var loadedCount = (status.filenames && status.filenames.length) || 0;
+          var availableCount = status.available || 0;
           if (dbsEl) {
-            dbsEl.textContent = (status.filenames && status.filenames.length > 0)
+            dbsEl.textContent = loadedCount > 0
               ? status.filenames.join(', ')
-              : 'No databases found';
+              : (availableCount > 0
+                  ? availableCount + ' region(s) available — none loaded yet (dynamic loading)'
+                  : 'No databases found');
           }
           if (status.loaded) {
-            if (subtitleEl) subtitleEl.textContent = 'Loaded ' + (status.filenames.length || 0) + ' database(s)';
+            if (subtitleEl) subtitleEl.textContent = loadedCount > 0
+              ? 'Loaded ' + loadedCount + ' database(s)'
+              : (availableCount > 0
+                  ? availableCount + ' region(s) available — loading on demand'
+                  : 'No databases installed');
             setTimeout(function() {
               if (overlay) overlay.classList.add('hidden');
               stop();
               setTimeout(function() { var ov = document.getElementById('loading-overlay'); if (ov) ov.style.display = 'none'; }, 500);
             }, 800);
-          } else if (!status.loaded && status.filenames && status.filenames.length === 0) {
+          } else if (!status.loaded && loadedCount === 0 && availableCount === 0) {
             // No databases at all — not an error, just empty install
             showError(null, true);
           } else {

@@ -29,6 +29,10 @@ export function pluginConstructor(app: ServerAPI) {
   let config: PluginConfig = { ...DEFAULT_CONFIG };
   let vesselDimensions = { draft: 0, beam: 4, airDraft: 0 };
   let subscriptionCancelled: (() => void) | null = null;
+  let positionSubscriptionCancelled: (() => void) | null = null;
+  // Last position we ran an eager-load for; used to throttle so a moving
+  // vessel doesn't re-evaluate coverage on every position delta.
+  let lastEagerLoadPos: { lat: number; lon: number } | null = null;
 
   const pluginId = 'signalk-routeiq';
   const __filename = new URL(import.meta.url).pathname;
@@ -135,6 +139,12 @@ export function pluginConstructor(app: ServerAPI) {
         subscriptionCancelled();
         subscriptionCancelled = null;
       }
+      // Unsubscribe from navigation.position
+      if (positionSubscriptionCancelled) {
+        positionSubscriptionCancelled();
+        positionSubscriptionCancelled = null;
+      }
+      lastEagerLoadPos = null;
 
       // Close database connection
       if (database) {
@@ -261,6 +271,18 @@ export function pluginConstructor(app: ServerAPI) {
             description: 'Peek installed databases at startup instead of loading all of them; load each region into memory only when a route actually needs it. Leave off for a single-region deployment — there is nothing to gain and startup behavior is unchanged.',
             default: DEFAULT_CONFIG.dynamicLoading,
           },
+          eagerLoadAtPosition: {
+            type: 'boolean',
+            title: 'Eager-load region at vessel position',
+            description: 'With dynamic loading on, load the region under the vessel at startup and as it moves (via navigation.position), so a positioned vessel boots ready-to-route instead of empty. No effect when dynamic loading is off.',
+            default: DEFAULT_CONFIG.eagerLoadAtPosition,
+          },
+          loadRadiusNm: {
+            type: 'number',
+            title: 'Proactive load radius (nm)',
+            description: 'Load a region when the vessel is within this many nautical miles of it, before it actually crosses in. 0 = only load the region the vessel is inside.',
+            default: DEFAULT_CONFIG.loadRadiusNm,
+          },
         },
       };
     },
@@ -326,6 +348,17 @@ export function pluginConstructor(app: ServerAPI) {
 
       // Subscribe to future vessel dimension changes
       await subscribeToVesselDimensions(app);
+
+      // §4a: with dynamic loading on, boot the region under the vessel (and,
+      // for a single-region install, the sole database) rather than an empty
+      // graph, then keep it current via a navigation.position subscription.
+      if (config.dynamicLoading) {
+        await database.eagerLoadIfSingle();
+        if (config.eagerLoadAtPosition) {
+          await fetchInitialPosition(app);
+          await subscribeToPosition(app);
+        }
+      }
       console.log('[routeiq] Plugin started successfully');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -431,6 +464,102 @@ export function pluginConstructor(app: ServerAPI) {
       }
     } catch (error) {
       console.warn('[routeiq] Failed to subscribe to vessel dimensions:', error);
+    }
+  }
+
+  /**
+   * Fetch the current vessel position from the SK path API and eager-load the
+   * region under it (a subscription may not fire for an already-known position).
+   */
+  async function fetchInitialPosition(app: ServerAPI) {
+    try {
+      const appAny = app as any;
+      let pos: any;
+      if (typeof appAny.getSelfPath === 'function') {
+        pos = appAny.getSelfPath('navigation.position');
+      } else if (typeof appAny.getPath === 'function') {
+        pos = appAny.getPath('vessels.self.navigation.position');
+      }
+      const ll = extractLatLon(pos);
+      if (ll) await maybeEagerLoad(ll.lat, ll.lon);
+      else console.log('[routeiq] No vessel position yet — regions will load on movement or on the first route request');
+    } catch (error) {
+      console.warn('[routeiq] Failed to fetch initial vessel position:', error);
+    }
+  }
+
+  /**
+   * Subscribe to navigation.position and eager-load the covering region as the
+   * vessel moves (throttled via maybeEagerLoad).
+   */
+  async function subscribeToPosition(app: ServerAPI) {
+    try {
+      const appAny = app as any;
+      if (typeof appAny.subscriptionmanager?.subscribe === 'function') {
+        const command = {
+          context: 'vessels.self',
+          subscribe: [{ path: 'navigation.position', period: 10000, format: 'delta' }],
+        };
+        const unsubscribeFns: (() => void)[] = [];
+        appAny.subscriptionmanager.subscribe(
+          command,
+          unsubscribeFns,
+          () => {},
+          (update: any) => { handlePositionUpdate(update); },
+        );
+        positionSubscriptionCancelled = () => { unsubscribeFns.forEach(fn => fn()); };
+      } else if (typeof appAny.subscribe === 'function') {
+        const subscription = { context: 'vessels.self', subscribe: [{ path: 'navigation.position' }] };
+        positionSubscriptionCancelled = appAny.subscribe(subscription, (update: any) => { handlePositionUpdate(update); });
+      }
+    } catch (error) {
+      console.warn('[routeiq] Failed to subscribe to navigation.position:', error);
+    }
+  }
+
+  /** Extract {lat, lon} from a Signal K position value (handles {value:{latitude,longitude}} and plain shapes). */
+  function extractLatLon(v: any): { lat: number; lon: number } | null {
+    if (!v) return null;
+    const p = (v.value && typeof v.value === 'object') ? v.value : v;
+    const lat = typeof p.latitude === 'number' ? p.latitude : undefined;
+    const lon = typeof p.longitude === 'number' ? p.longitude : undefined;
+    if (typeof lat === 'number' && typeof lon === 'number') return { lat, lon };
+    return null;
+  }
+
+  /** Handle a navigation.position delta: pull lat/lon and eager-load. */
+  function handlePositionUpdate(delta: any) {
+    if (!database) return;
+    let ll: { lat: number; lon: number } | null = null;
+    const updates = delta.updates || [];
+    for (const update of updates) {
+      const values = update.values || [];
+      for (const entry of values) {
+        if ((entry.path || '') === 'navigation.position') ll = extractLatLon(entry.value) || ll;
+      }
+    }
+    if (!ll && delta.vessels) {
+      for (const vessel of Object.values(delta.vessels) as any[]) {
+        ll = extractLatLon(vessel.navigation && vessel.navigation.position) || ll;
+      }
+    }
+    if (ll) void maybeEagerLoad(ll.lat, ll.lon);
+  }
+
+  /** Throttled eager-load: only re-evaluate coverage once the vessel has moved
+   *  ~1nm from the last position loaded for, to avoid churning per delta. */
+  async function maybeEagerLoad(lat: number, lon: number) {
+    if (!database || !config.dynamicLoading || !config.eagerLoadAtPosition) return;
+    if (lastEagerLoadPos) {
+      const dLat = (lat - lastEagerLoadPos.lat) * 60;
+      const dLon = (lon - lastEagerLoadPos.lon) * 60 * Math.cos(lat * Math.PI / 180);
+      if (Math.sqrt(dLat * dLat + dLon * dLon) < 1.0) return;
+    }
+    lastEagerLoadPos = { lat, lon };
+    try {
+      await database.eagerLoadForPosition(lat, lon, config.loadRadiusNm);
+    } catch (e) {
+      console.warn('[routeiq] Eager position load failed:', e);
     }
   }
 

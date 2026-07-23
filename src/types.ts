@@ -209,6 +209,15 @@ export interface PluginConfig {
   // which stopped being true once per-region publishing started. See
   // PHASE_4_DESIGN.md §4a and NEXT_PHASES.md's 2026-07-20 entry.
   dynamicLoading: boolean;
+  // §4a trigger 1: when dynamicLoading is on, subscribe to navigation.position
+  // and eager-load the region under the vessel at startup + on movement, so a
+  // positioned vessel boots with its local region loaded instead of an empty
+  // graph. Default on; opt out to keep loading purely route-triggered.
+  eagerLoadAtPosition: boolean;
+  // Proactive load band (nautical miles) around the vessel position — a region
+  // within this distance of the vessel loads before it actually crosses in.
+  // 0 = containment only (load only the region the vessel is inside).
+  loadRadiusNm: number;
 }
 
 // Default plugin configuration
@@ -230,4 +239,6 @@ export const DEFAULT_CONFIG: PluginConfig = {
   maxTidalCurrentKnots: 2.0,
   tidesApiBase: 'http://localhost:3000',
   dynamicLoading: true,
+  eagerLoadAtPosition: true,
+  loadRadiusNm: 0,
 };

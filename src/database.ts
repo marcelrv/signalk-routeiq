@@ -375,11 +375,15 @@ export class RoutingDatabase {
     }));
   }
 
-  /** Return loading status info */
-  getLoadingStatus(): { loaded: boolean; filenames: string[] } {
+  /** Return loading status info. `available` is the number of installed
+   *  databases known to the plugin (peeked in dynamic mode, all loaded in
+   *  non-dynamic mode) — lets the UI distinguish "nothing installed" from
+   *  "installed but none loaded yet under dynamic loading". */
+  getLoadingStatus(): { loaded: boolean; filenames: string[]; available: number } {
     return {
       loaded: this.graphLoaded,
       filenames: this.loadedDbFilenames,
+      available: this.coverageIndex.size,
     };
   }
 
@@ -776,6 +780,58 @@ export class RoutingDatabase {
       console.log(`[routeiq] Route request falls inside not-yet-loaded database ${filename} — loading inline before search`);
       await this.loadDatabaseGraph(filename);
       console.log(`[routeiq] Inline on-demand load of ${filename} completed in ${Date.now() - t0}ms`);
+    }
+  }
+
+  /** Dynamic mode only: eager-load every not-yet-loaded database whose
+   *  coverage bbox contains the vessel position, optionally expanded by a
+   *  `radiusNm` proactive band (load a region just before the vessel crosses
+   *  into it). Called at startup once a position is known and on each
+   *  throttled position update — so a positioned vessel boots with its local
+   *  region loaded and routable instead of an empty graph. No-op in
+   *  non-dynamic mode (everything is already loaded). */
+  async eagerLoadForPosition(lat: number, lon: number, radiusNm: number = 0): Promise<void> {
+    if (!this.dynamicLoading) return;
+    // ~1 nm of latitude ≈ 1/60°; scale longitude by cos(lat) so the band is
+    // roughly circular. Cheap prefilter — the containment test below is what
+    // actually decides membership.
+    const dLat = radiusNm / 60;
+    const dLon = radiusNm / 60 / Math.max(0.1, Math.cos(lat * Math.PI / 180));
+    const toLoad = new Set<string>();
+    for (const entry of this.coverageIndex.values()) {
+      if (entry.state !== 'not_loaded' || !entry.bbox) continue;
+      if (lat >= entry.bbox.min_lat - dLat && lat <= entry.bbox.max_lat + dLat &&
+          lon >= entry.bbox.min_lon - dLon && lon <= entry.bbox.max_lon + dLon) {
+        toLoad.add(entry.filename);
+      }
+    }
+    for (const filename of toLoad) {
+      const t0 = Date.now();
+      console.log(`[routeiq] Vessel position (${lat.toFixed(4)},${lon.toFixed(4)}) is inside not-yet-loaded database ${filename} — eager-loading`);
+      try {
+        await this.loadDatabaseGraph(filename);
+        console.log(`[routeiq] Eager position load of ${filename} completed in ${Date.now() - t0}ms`);
+      } catch (e) {
+        console.warn(`[routeiq] Eager position load of ${filename} failed: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+  }
+
+  /** Dynamic mode only: if exactly one database is installed, load it at
+   *  startup unconditionally — a single-region deployment has nothing to
+   *  choose between, so it should be ready-at-boot even with dynamicLoading
+   *  on, rather than presenting an empty graph until a route or position
+   *  triggers the sole region. No-op in non-dynamic mode. */
+  async eagerLoadIfSingle(): Promise<void> {
+    if (!this.dynamicLoading) return;
+    if (this.coverageIndex.size !== 1) return;
+    const [only] = this.coverageIndex.values();
+    if (!only || only.state === 'loaded') return;
+    console.log(`[routeiq] Single installed database ${only.filename} — eager-loading at startup`);
+    try {
+      await this.loadDatabaseGraph(only.filename);
+    } catch (e) {
+      console.warn(`[routeiq] Single-database eager load failed: ${e instanceof Error ? e.message : e}`);
     }
   }
 
