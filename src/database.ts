@@ -466,87 +466,62 @@ export class RoutingDatabase {
       return;
     }
     if (files.length === 0) {
-      this.mergeMetadataIntoCoverageIndex([], []);
+      this.mergeMetadataIntoCoverageIndex([]);
       return;
     }
 
     const dbPaths = files.map(f => join(this.dbDir, f));
-    const workerPath = join(dirname(fileURLToPath(import.meta.url)), 'db-worker.js');
-    const worker = new Worker(workerPath);
 
     try {
-      const result = await new Promise<any[]>((resolve, reject) => {
-        const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
-        let msgId = 0;
-        worker.on('message', (msg: { id: number; type: string; result?: any; error?: string }) => {
-          const p = pending.get(msg.id);
-          if (!p) return;
-          pending.delete(msg.id);
-          if (msg.error) p.reject(new Error(msg.error));
-          else p.resolve(msg.result);
-        });
-        worker.on('error', reject);
+      // Reuse the existing main worker's peekMetadata support instead of
+      // spinning up a second Worker: it opens each file on a short-lived
+      // handle just long enough to read metadata/coverage/stats and closes
+      // it again, without touching `handles` — so a metadata refresh can
+      // never disturb any database this worker already has loaded (unlike
+      // `init`, which would reset `handles` and drop them).
+      const peeked: Array<{
+        path: string; filename: string;
+        coverage: { boundingBox: DatabaseCoverageEntry['bbox']; boundaryGeometry: DatabaseCoverageEntry['boundary'] };
+        meta: DatabaseCoverageEntry['meta'];
+        stats: DatabaseCoverageEntry['stats'];
+      }> = await this.sendMessage('peekMetadata', { dbPaths });
 
-        const send = (type: string, payload?: any) => new Promise<any>((res, rej) => {
-          const id = ++msgId;
-          pending.set(id, { resolve: res, reject: rej });
-          worker.postMessage({ id, type, payload });
-        });
-
-        (async () => {
-          await send('init', { dbPaths });
-          const meta = await send('getMetadata');
-          send('close').catch(() => {});
-          setTimeout(() => worker.terminate(), 100);
-          resolve(meta);
-        })().catch(reject);
-      });
-
-      this.mergeMetadataIntoCoverageIndex(result, dbPaths);
-    } catch {
-      worker.terminate();
+      this.mergeMetadataIntoCoverageIndex(peeked);
+    } catch (err) {
+      console.warn(`[routeiq] reloadMetadata: peekMetadata failed, coverage index left unchanged: ${err instanceof Error ? err.message : err}`);
     }
   }
 
   /** Shared by reloadMetadata() (and conceptually the same shape
-   *  rebuildCoverageIndexAfterBulkLoad() builds for the initial bulk load):
-   *  merge a fresh metadata array into coverageIndex, keyed by filename.
+   *  init()'s dynamic-mode peek loop builds for the initial boot-time peek):
+   *  merge a fresh peekMetadata array into coverageIndex, keyed by filename.
    *  Preserves each existing entry's `state`/`dbIndex` (a metadata refresh
    *  never itself loads or unloads a database's graph data) and only adds
    *  brand-new entries as 'not_loaded'. Entries whose filename isn't in
-   *  `metaList` and are still 'not_loaded' are dropped (the file is gone
-   *  from disk); a 'loading'/'loaded' entry is left alone even if its file
+   *  `peeked` and are still 'not_loaded' are dropped (the file is gone from
+   *  disk); a 'loading'/'loaded' entry is left alone even if its file
    *  vanished, since this method never touches in-memory graph data. */
   private mergeMetadataIntoCoverageIndex(
-    metaList: Array<{
-      id: number; country: string; name: string; description: string | null;
-      lastUpdateDate: string; tags: string | null; boundingBox: string | null;
-      boundaryGeometry: string | null; schemaVersion: number | null;
-      contributor: string | null; url: string | null; filename: string;
-      stats: { nodes: number; edges: number; pois: number };
+    peeked: Array<{
+      path: string; filename: string;
+      coverage: { boundingBox: DatabaseCoverageEntry['bbox']; boundaryGeometry: DatabaseCoverageEntry['boundary'] };
+      meta: DatabaseCoverageEntry['meta'];
+      stats: DatabaseCoverageEntry['stats'];
     }>,
-    dbPaths: string[],
   ): void {
     const seen = new Set<string>();
-    for (const m of metaList) {
-      seen.add(m.filename);
-      let bbox: DatabaseCoverageEntry['bbox'] = null;
-      let boundary: DatabaseCoverageEntry['boundary'] = null;
-      try {
-        if (m.boundingBox) bbox = JSON.parse(m.boundingBox);
-        if (m.boundaryGeometry) boundary = JSON.parse(m.boundaryGeometry);
-      } catch { /* malformed metadata JSON — leave coverage null, non-fatal */ }
-      const { stats, ...metaFields } = m;
-      const existing = this.coverageIndex.get(m.filename);
-      const path = dbPaths.find(p => p.endsWith(`/${m.filename}`)) ?? join(this.dbDir, m.filename);
-      this.coverageIndex.set(m.filename, {
-        filename: m.filename,
-        path,
-        bbox, boundary,
+    for (const p of peeked) {
+      seen.add(p.filename);
+      const existing = this.coverageIndex.get(p.filename);
+      this.coverageIndex.set(p.filename, {
+        filename: p.filename,
+        path: p.path,
+        bbox: p.coverage.boundingBox ?? null,
+        boundary: p.coverage.boundaryGeometry ?? null,
         state: existing?.state ?? 'not_loaded',
         dbIndex: existing?.dbIndex ?? null,
-        meta: metaFields,
-        stats: stats ?? null,
+        meta: p.meta,
+        stats: p.stats ?? null,
       });
     }
     for (const [filename, entry] of this.coverageIndex) {
@@ -1342,8 +1317,8 @@ export class RoutingDatabase {
 
             if (distance < bestDist) {
               bestDist = distance;
-              const distToSource = this.haversineDistance(latitude, longitude, s.lat, s.lon);
-              const distToTarget = this.haversineDistance(latitude, longitude, t.lat, t.lon);
+              const distToSource = this.haversineMeters(latitude, longitude, s.lat, s.lon);
+              const distToTarget = this.haversineMeters(latitude, longitude, t.lat, t.lon);
               const nearNode = distToSource <= distToTarget ? edge.source : edge.target;
               const farNode = nearNode === edge.source ? edge.target : edge.source;
               best = { source: edge.source, target: edge.target, fraction, point, distance, nearNode, farNode, edge };
@@ -1669,17 +1644,6 @@ export class RoutingDatabase {
     }
   }
 
-  private haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-    const R = 6371000;
-    const toRad = (deg: number) => (deg * Math.PI) / 180;
-    const dLat = toRad(lat2 - lat1);
-    const dLon = toRad(lon2 - lon1);
-    const a = Math.sin(dLat / 2) ** 2 +
-              Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-              Math.sin(dLon / 2) ** 2;
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  }
-
   hasNodeWithinRadius(lat: number, lon: number, radiusMeters: number): boolean {
     if (!this.graphLoaded) return false;
     const cellSize = 0.01;
@@ -1695,7 +1659,7 @@ export class RoutingDatabase {
         if (!ids) continue;
         for (const id of ids) {
           const c = this.nodes.get(id)!;
-          const d = this.haversineDistance(lat, lon, c.lat, c.lon);
+          const d = this.haversineMeters(lat, lon, c.lat, c.lon);
           if (d <= radiusMeters) return true;
         }
       }
@@ -1816,7 +1780,7 @@ export class RoutingDatabase {
       const s = this.nodes.get(source);
       const t = this.nodes.get(target);
       if (s && t) {
-        updates.distance = Math.round(this.haversineDistance(s.lat, s.lon, t.lat, t.lon));
+        updates.distance = Math.round(this.haversineMeters(s.lat, s.lon, t.lat, t.lon));
       }
     }
     // Send full edge context so the overlay can store a complete row
@@ -1873,7 +1837,7 @@ export class RoutingDatabase {
     const t = this.nodes.get(edge.target);
     if (!s || !t) throw new Error('Source or target node not found');
     if (!edge.distance || edge.distance <= 0) {
-      edge.distance = Math.round(this.haversineDistance(s.lat, s.lon, t.lat, t.lon));
+      edge.distance = Math.round(this.haversineMeters(s.lat, s.lon, t.lat, t.lon));
     }
     await this.sendMessage('insertEdge', { dbIndex, ...edge });
     const newEdge: EdgeRow & { lat: number; lon: number } = {
