@@ -25,6 +25,10 @@ interface SkResourcesApp {
   resourcesApi: { setResource(type: string, id: string, value: unknown): Promise<void> };
 }
 
+/** Cap on `via` array length — each via point triggers a sequential A* search,
+ *  and /route is unauthenticated, so an unbounded array is a CPU DoS vector. */
+const MAX_VIA_POINTS = 25;
+
 export class ApiHandler {
   private router: Router;
   private routingEngine: RoutingEngine | null;
@@ -224,6 +228,10 @@ export class ApiHandler {
           return;
         }
       }
+      if (request.via && request.via.length > MAX_VIA_POINTS) {
+        res.status(400).json({ error: `Too many via points (max ${MAX_VIA_POINTS})` });
+        return;
+      }
       if (request.endMode !== undefined && request.endMode !== 'auto' && request.endMode !== 'manual') {
         res.status(400).json({ error: "Invalid endMode — expected 'auto' or 'manual'" });
         return;
@@ -264,6 +272,10 @@ export class ApiHandler {
       };
       if (!request.start || !request.end) {
         res.status(400).json({ error: 'Missing required fields: start and end coordinates' });
+        return;
+      }
+      if (request.via && request.via.length > MAX_VIA_POINTS) {
+        res.status(400).json({ error: `Too many via points (max ${MAX_VIA_POINTS})` });
         return;
       }
       if (request.departureTime !== undefined && !Number.isFinite(Date.parse(request.departureTime))) {
@@ -990,16 +1002,9 @@ export class ApiHandler {
         return;
       }
 
-      // Remove all old .sqlite files before writing the new one
-      const oldFiles = fs.readdirSync(dataDir).filter(f => f.endsWith('.sqlite') && f !== saveFilename);
-      for (const f of oldFiles) {
-        try {
-          fs.unlinkSync(path.join(dataDir, f));
-          console.log(`[routeiq] Removed old database: ${f}`);
-        } catch (e) {
-          console.warn(`[routeiq] Failed to remove old database ${f}: ${e}`);
-        }
-      }
+      // Multi-region dynamic loading keeps every installed database around;
+      // writing to destPath below overwrites a same-named file in place, so
+      // re-downloading a region updates it without touching other regions.
       fs.writeFileSync(destPath, saveBuffer);
 
       console.log(`[routeiq] Database saved: ${saveFilename} (${saveBuffer.length} bytes)`);
