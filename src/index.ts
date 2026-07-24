@@ -115,7 +115,7 @@ export function pluginConstructor(app: ServerAPI) {
         routingEngine = null;
 
         try {
-          database = new RoutingDatabase(dataDir, config.dynamicLoading);
+          database = new RoutingDatabase(dataDir, config.dynamicLoading, config.maxLoadedRegions);
           await database.init();
           await database.loadGraph();
           const stats = await database.getStats();
@@ -298,6 +298,12 @@ export function pluginConstructor(app: ServerAPI) {
             description: 'Load a region when the vessel is within this many nautical miles of it, before it actually crosses in. 0 = only load the region the vessel is inside.',
             default: DEFAULT_CONFIG.loadRadiusNm,
           },
+          maxLoadedRegions: {
+            type: 'number',
+            title: 'Max loaded regions (dynamic loading)',
+            description: 'Only applies with dynamic loading on. Keep at most this many regions loaded in memory, evicting the least-recently-used region once a route finishes and none is in progress. 0 = unlimited (keep every region ever loaded).',
+            default: DEFAULT_CONFIG.maxLoadedRegions,
+          },
         },
       };
     },
@@ -346,7 +352,7 @@ export function pluginConstructor(app: ServerAPI) {
       if (!config.routingDataDir) {
         throw new Error('routingDataDir is not configured');
       }
-      database = new RoutingDatabase(config.routingDataDir, config.dynamicLoading);
+      database = new RoutingDatabase(config.routingDataDir, config.dynamicLoading, config.maxLoadedRegions);
       await database.init();
       await database.loadGraph();
       const stats = await database.getStats();

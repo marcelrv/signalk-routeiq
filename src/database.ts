@@ -207,9 +207,37 @@ export class RoutingDatabase {
    *  from under an in-progress search (PHASE_4_DESIGN.md §4a task 2). */
   private activeRouteCount: number = 0;
 
-  constructor(dbDir: string, dynamicLoading: boolean = false) {
+  /** §4a M5: bounded working-set cap. 0 (default) = unlimited, byte-for-byte
+   *  today's behavior — enforceRegionCap() no-ops. >0 = keep at most this
+   *  many databases in the 'loaded' state, evicting least-recently-used ones
+   *  (see regionLastUsedAt) once no route is in flight. Only meaningful when
+   *  dynamicLoading is also true. */
+  private maxLoadedRegions: number;
+
+  /** filename -> monotonic "last used" counter, driving LRU eviction in
+   *  enforceRegionCap(). Bumped every time a region is loaded or found
+   *  relevant to a route/position request (loadDatabaseGraphInner on
+   *  success, and by ensureRegionsLoaded/ensureRegionsForBbox/
+   *  eagerLoadForPosition for every region they touch — including ones
+   *  already loaded — so an actively-used region is never the eviction
+   *  candidate). A monotonic counter rather than Date.now() avoids clock-tie
+   *  ambiguity between two regions touched in the same millisecond. Only
+   *  ever consulted when maxLoadedRegions > 0. */
+  private regionLastUsedAt: Map<string, number> = new Map();
+
+  /** Source of the monotonic values in regionLastUsedAt. */
+  private lruCounter: number = 0;
+
+  constructor(dbDir: string, dynamicLoading: boolean = false, maxLoadedRegions: number = 0) {
     this.dbDir = dbDir;
     this.dynamicLoading = dynamicLoading;
+    this.maxLoadedRegions = maxLoadedRegions;
+  }
+
+  /** Bump filename's LRU recency to "most recently used". See
+   *  regionLastUsedAt. */
+  private touchRegion(filename: string): void {
+    this.regionLastUsedAt.set(filename, ++this.lruCounter);
   }
 
   isDynamicLoadingEnabled(): boolean {
@@ -223,6 +251,22 @@ export class RoutingDatabase {
 
   endRoute(): void {
     if (this.activeRouteCount > 0) this.activeRouteCount--;
+    if (this.activeRouteCount === 0) {
+      // §4a M5: trim the working set now that no route is in flight. Fire-
+      // and-forget — endRoute is sync and callers don't need to wait for
+      // eviction. enforceRegionCap() re-checks activeRouteCount === 0 (and
+      // unloadDatabaseGraph guards on it too), so a new route beginning
+      // before this settles just makes enforcement a no-op, never unsafe.
+      void this.enforceRegionCap().catch(() => {});
+    }
+  }
+
+  /** Test seam only: enforceRegionCap() runs fire-and-forget off endRoute()
+   *  so production code never awaits it; tests that need a deterministic
+   *  point to assert post-eviction state can await this instead of racing
+   *  the background pass. Behaves identically to what endRoute() triggers. */
+  async enforceRegionCapForTest(): Promise<void> {
+    await this.enforceRegionCap();
   }
 
   /** Basenames of every currently-loaded (state === 'loaded') database,
@@ -872,10 +916,14 @@ export class RoutingDatabase {
     const toLoad = new Set<string>();
     for (const p of points) {
       for (const entry of this.coverageIndex.values()) {
-        if (entry.state === 'loaded' || !entry.bbox) continue;
+        if (!entry.bbox) continue;
         if (p.latitude >= entry.bbox.min_lat && p.latitude <= entry.bbox.max_lat &&
             p.longitude >= entry.bbox.min_lon && p.longitude <= entry.bbox.max_lon) {
-          toLoad.add(entry.filename);
+          // §4a M5: touch every region this request falls inside, whether or
+          // not it's already loaded — an actively-relevant region must never
+          // look like the LRU candidate to enforceRegionCap().
+          this.touchRegion(entry.filename);
+          if (entry.state !== 'loaded') toLoad.add(entry.filename);
         }
       }
     }
@@ -903,11 +951,16 @@ export class RoutingDatabase {
     if (!this.dynamicLoading) return;
     const toLoad = new Set<string>();
     for (const entry of this.coverageIndex.values()) {
-      if (entry.state === 'loaded' || !entry.bbox) continue;
+      if (!entry.bbox) continue;
       const intersects =
         entry.bbox.min_lat <= bbox.maxLat && entry.bbox.max_lat >= bbox.minLat &&
         entry.bbox.min_lon <= bbox.maxLon && entry.bbox.max_lon >= bbox.minLon;
-      if (intersects) toLoad.add(entry.filename);
+      if (intersects) {
+        // §4a M5: see ensureRegionsLoaded — touch relevant regions whether
+        // newly loaded or already loaded.
+        this.touchRegion(entry.filename);
+        if (entry.state !== 'loaded') toLoad.add(entry.filename);
+      }
     }
     for (const filename of toLoad) {
       const t0 = Date.now();
@@ -933,10 +986,13 @@ export class RoutingDatabase {
     const dLon = radiusNm / 60 / Math.max(0.1, Math.cos(lat * Math.PI / 180));
     const toLoad = new Set<string>();
     for (const entry of this.coverageIndex.values()) {
-      if (entry.state !== 'not_loaded' || !entry.bbox) continue;
+      if (!entry.bbox) continue;
       if (lat >= entry.bbox.min_lat - dLat && lat <= entry.bbox.max_lat + dLat &&
           lon >= entry.bbox.min_lon - dLon && lon <= entry.bbox.max_lon + dLon) {
-        toLoad.add(entry.filename);
+        // §4a M5: touch every region within the band, whether or not it's
+        // already loaded — see ensureRegionsLoaded.
+        this.touchRegion(entry.filename);
+        if (entry.state === 'not_loaded') toLoad.add(entry.filename);
       }
     }
     for (const filename of toLoad) {
@@ -1104,6 +1160,9 @@ export class RoutingDatabase {
 
       entry.dbIndex = dbIndex;
       entry.state = 'loaded';
+      // §4a M5: a freshly-loaded region is by definition the most recently
+      // used one.
+      this.touchRegion(filename);
 
       console.log(`[routeiq] Loaded database ${filename} (dbIndex=${dbIndex}): ` +
         `${nodeIdSet.size} nodes, ${edgeCount} edges, ${pois.length} POIs, ${newRegions.length} navmesh regions`);
@@ -1181,6 +1240,53 @@ export class RoutingDatabase {
 
     console.log(`[routeiq] Unloaded database ${filename} (dbIndex=${dbIndex}): removed ${nodesRemoved} nodes, ${edgesRemoved} edges`);
     return { nodesRemoved, edgesRemoved };
+  }
+
+  /**
+   * §4a M5: bounded working set. No-op unless dynamic loading is on and
+   * maxLoadedRegions > 0 (the default, 0, is unlimited — byte-for-byte
+   * today's behavior). No-op while a route is in flight (activeRouteCount >
+   * 0) — never evict out from under an in-progress or about-to-run search;
+   * endRoute() is the only caller, and only once activeRouteCount reaches 0.
+   *
+   * While more databases are 'loaded' than maxLoadedRegions allows, evicts
+   * the least-recently-used one (smallest regionLastUsedAt; a region never
+   * touched sorts as oldest) via unloadDatabaseGraph, which itself refuses
+   * to drop the last loaded database or run while a route is active — both
+   * cases are also checked here to avoid looping, and either one aborts the
+   * whole enforcement pass rather than crashing a route.
+   */
+  private async enforceRegionCap(): Promise<void> {
+    if (!this.dynamicLoading || this.maxLoadedRegions <= 0) return;
+    if (this.activeRouteCount > 0) return;
+
+    for (;;) {
+      const loaded = Array.from(this.coverageIndex.values()).filter(e => e.state === 'loaded');
+      if (loaded.length <= this.maxLoadedRegions || loaded.length <= 1) return;
+      if (this.activeRouteCount > 0) return;
+
+      let victim: DatabaseCoverageEntry | null = null;
+      let victimScore = Infinity;
+      for (const entry of loaded) {
+        const score = this.regionLastUsedAt.get(entry.filename) ?? -Infinity;
+        if (score < victimScore) {
+          victimScore = score;
+          victim = entry;
+        }
+      }
+      if (!victim) return;
+
+      try {
+        await this.unloadDatabaseGraph(victim.filename);
+        this.regionLastUsedAt.delete(victim.filename);
+      } catch (e) {
+        // Last-loaded-database guard or a route that started concurrently —
+        // either way, stop enforcing rather than loop or throw out of a
+        // fire-and-forget background pass.
+        console.warn(`[routeiq] enforceRegionCap: stopping (${e instanceof Error ? e.message : e})`);
+        return;
+      }
+    }
   }
 
   async getNodeById(id: number): Promise<{ lat: number; lon: number; regionId: number; nodeDepth: number } | null> {
@@ -2028,6 +2134,8 @@ export class RoutingDatabase {
     this.loadingPromises.clear();
     this.overlayMergedOnce = false;
     this.activeRouteCount = 0;
+    this.regionLastUsedAt.clear();
+    this.lruCounter = 0;
   }
 
   /**

@@ -467,6 +467,105 @@ describe('§4a dynamic database loading', () => {
     });
   });
 
+  describe('§4a M5: bounded working set (maxLoadedRegions LRU cap)', () => {
+    it('maxLoadedRegions=0 (default) keeps every loaded region — no eviction', async () => {
+      buildFixtures();
+      const db = new RoutingDatabase(fixturesDir, true, 0);
+      try {
+        await db.init();
+        await db.loadGraph(); // no-op in dynamic mode
+
+        await db.loadDatabaseGraph('region-a.sqlite');
+        await db.loadDatabaseGraph('region-b.sqlite');
+
+        // Drive a route (beginRoute/endRoute) exactly like RoutingEngine
+        // does, then give the fire-and-forget enforcement pass a chance to
+        // run via the test seam — with the cap off it must be a no-op.
+        db.beginRoute();
+        db.endRoute();
+        await db.enforceRegionCapForTest();
+
+        const status = new Map(db.getCoverageStatus().map(s => [s.filename, s.state]));
+        assert.strictEqual(status.get('region-a.sqlite'), 'loaded');
+        assert.strictEqual(status.get('region-b.sqlite'), 'loaded');
+      } finally {
+        await db.close();
+        cleanupFixtures();
+      }
+    });
+
+    it('maxLoadedRegions=1 evicts the least-recently-used region once a route completes', async () => {
+      buildFixtures();
+      const db = new RoutingDatabase(fixturesDir, true, 1);
+      try {
+        await db.init();
+        await db.loadGraph(); // no-op in dynamic mode
+
+        // Load region A first (older), then region B (more recently used —
+        // loadDatabaseGraphInner touches recency on every successful load).
+        await db.loadDatabaseGraph('region-a.sqlite');
+        await db.loadDatabaseGraph('region-b.sqlite');
+
+        let status = new Map(db.getCoverageStatus().map(s => [s.filename, s.state]));
+        assert.strictEqual(status.get('region-a.sqlite'), 'loaded');
+        assert.strictEqual(status.get('region-b.sqlite'), 'loaded');
+
+        // Simulate a route finishing: beginRoute/endRoute is exactly the
+        // wrapper RoutingEngine.calculateRoute uses around a search
+        // (routing.ts). enforceRegionCap() is fire-and-forget off endRoute,
+        // so await the public test seam for a deterministic assertion point
+        // rather than racing the background pass.
+        db.beginRoute();
+        db.endRoute();
+        await db.enforceRegionCapForTest();
+
+        status = new Map(db.getCoverageStatus().map(s => [s.filename, s.state]));
+        assert.strictEqual(status.get('region-a.sqlite'), 'not_loaded',
+          'region A is the least-recently-used region and should be evicted');
+        assert.strictEqual(status.get('region-b.sqlite'), 'loaded',
+          'region B was more recently used and should be the one kept');
+
+        const loadedCount = db.getCoverageStatus().filter(s => s.state === 'loaded').length;
+        assert.strictEqual(loadedCount, 1, 'loaded count should be trimmed to the cap');
+      } finally {
+        await db.close();
+        cleanupFixtures();
+      }
+    });
+
+    it('a route in progress blocks eviction — enforceRegionCap no-ops while activeRouteCount > 0', async () => {
+      buildFixtures();
+      const db = new RoutingDatabase(fixturesDir, true, 1);
+      try {
+        await db.init();
+        await db.loadGraph();
+
+        await db.loadDatabaseGraph('region-a.sqlite');
+        await db.loadDatabaseGraph('region-b.sqlite');
+
+        // beginRoute() without a matching endRoute() simulates a route still
+        // in flight — enforcement must not evict anything while that holds.
+        db.beginRoute();
+        await db.enforceRegionCapForTest();
+
+        const status = new Map(db.getCoverageStatus().map(s => [s.filename, s.state]));
+        assert.strictEqual(status.get('region-a.sqlite'), 'loaded');
+        assert.strictEqual(status.get('region-b.sqlite'), 'loaded');
+
+        // Ending the route now (activeRouteCount -> 0) allows the next
+        // enforcement pass to trim as usual.
+        db.endRoute();
+        await db.enforceRegionCapForTest();
+        const after = new Map(db.getCoverageStatus().map(s => [s.filename, s.state]));
+        assert.strictEqual(after.get('region-a.sqlite'), 'not_loaded');
+        assert.strictEqual(after.get('region-b.sqlite'), 'loaded');
+      } finally {
+        await db.close();
+        cleanupFixtures();
+      }
+    });
+  });
+
   describe('unload rejects unknown filenames', () => {
     it('loadDatabaseGraph/unloadDatabaseGraph reject a filename the coverage index has never seen', async () => {
       buildFixtures();
