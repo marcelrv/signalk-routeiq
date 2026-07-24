@@ -1019,7 +1019,14 @@ export class RoutingDatabase {
 
       const nodeIdSet = this.nodesByDbIndex.get(dbIndex) ?? new Set<number>();
       for (const n of nodes) {
+        // Only ids not already in `this.nodes` are genuinely new to the
+        // in-memory grid — a shared-id/refcount collision (region-seam
+        // coordinate hash collision, or this same node already loaded from
+        // another database) must NOT be re-inserted, or the id would appear
+        // twice in its grid cell and corrupt every grid-backed query (M6).
+        const isNewNode = !this.nodes.has(n.id);
         this.nodes.set(n.id, { lat: n.lat, lon: n.lon, regionId: n.region_id ?? 0, nodeDepth: n.node_depth });
+        if (isNewNode) this.gridInsertNode(n.id, n.lat, n.lon);
         if (n.db_index === dbIndex) {
           // Real per-file node (not an overlay row) — track provenance and
           // bump the refcount so a coordinate-hash collision with another
@@ -1039,8 +1046,13 @@ export class RoutingDatabase {
       const deletedNodeIds: number[] = await this.sendMessage('getDeletedNodeIds');
       const deletedEdges: Array<{ source: number; target: number }> = await this.sendMessage('getDeletedEdgePairs');
       for (const nid of deletedNodeIds) {
+        // Capture coords before deleting — needed to find the grid cell the
+        // node was inserted into (a node's id encodes its coordinate, so the
+        // cell it hashes to never changes across loads).
+        const removedCoords = this.nodes.get(nid);
         if (this.nodes.delete(nid)) {
           nodeIdSet.delete(nid);
+          if (removedCoords) this.gridRemoveNode(nid, removedCoords.lat, removedCoords.lon);
         }
       }
       const deletedNodeSet = new Set(deletedNodeIds);
@@ -1064,7 +1076,10 @@ export class RoutingDatabase {
         edgeCount++;
       }
 
-      this.buildSpatialIndex();
+      // spatialGrid is maintained incrementally above (gridInsertNode on new
+      // nodes, gridRemoveNode on overlay deletions) — no full rebuild needed
+      // here (M6). buildSpatialIndex() is still used by the bulk loadGraph()
+      // path below, where one full build after the whole load is simplest.
 
       const pois: Array<{ id: number; name: string; type_id: number; properties: string | null; lat: number; lon: number; db_index: number }> =
         await this.sendMessage('loadPois', { dbIndexes: [dbIndex] });
@@ -1141,7 +1156,11 @@ export class RoutingDatabase {
       const remaining = (this.nodeDbCount.get(nodeId) ?? 1) - 1;
       if (remaining <= 0) {
         this.nodeDbCount.delete(nodeId);
+        // Capture coords before deleting — same reasoning as
+        // loadDatabaseGraphInner's overlay-deletion handling above.
+        const removedCoords = this.nodes.get(nodeId);
         this.nodes.delete(nodeId);
+        if (removedCoords) this.gridRemoveNode(nodeId, removedCoords.lat, removedCoords.lon);
         nodesRemoved++;
       } else {
         this.nodeDbCount.set(nodeId, remaining);
@@ -1154,7 +1173,8 @@ export class RoutingDatabase {
 
     await this.sendMessage('closeDb', { dbIndex });
 
-    this.buildSpatialIndex();
+    // spatialGrid is maintained incrementally above (gridRemoveNode for
+    // exactly the nodes actually removed) — no full rebuild needed (M6).
 
     entry.state = 'not_loaded';
     entry.dbIndex = null;
@@ -1213,9 +1233,14 @@ export class RoutingDatabase {
     const latRad = latitude * Math.PI / 180;
     const cosLat = Math.cos(latRad);
     const marginDeg = maxDistanceMeters / 111320;
-    for (const [id, c] of this.nodes) {
+    // cos(lat)-corrected longitude margin (see gridCandidateIds) — the same
+    // superset the old full-scan prefilter below re-applies exactly.
+    const marginLonDeg = marginDeg / cosLat;
+    for (const id of this.gridCandidateIds(latitude, longitude, marginDeg, marginLonDeg)) {
+      const c = this.nodes.get(id);
+      if (!c) continue;
       if (Math.abs(c.lat - latitude) > marginDeg) continue;
-      if (Math.abs(c.lon - longitude) > marginDeg / cosLat) continue;
+      if (Math.abs(c.lon - longitude) > marginLonDeg) continue;
       const dLat = (c.lat - latitude) * Math.PI / 180;
       const dLon = (c.lon - longitude) * Math.PI / 180;
       const a = Math.sin(dLat / 2) ** 2 + cosLat * Math.cos(c.lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
@@ -1230,11 +1255,14 @@ export class RoutingDatabase {
     const latRad = latitude * Math.PI / 180;
     const cosLat = Math.cos(latRad);
     const marginDeg = maxDistMeters / 111320;
+    const marginLonDeg = marginDeg / cosLat;
     const candidates: Array<{ id: number; lat: number; lon: number; distance: number }> = [];
-    for (const [id, c] of this.nodes) {
+    for (const id of this.gridCandidateIds(latitude, longitude, marginDeg, marginLonDeg)) {
+      const c = this.nodes.get(id);
+      if (!c) continue;
       if (c.regionId === 0) continue;
       if (Math.abs(c.lat - latitude) > marginDeg) continue;
-      if (Math.abs(c.lon - longitude) > marginDeg / cosLat) continue;
+      if (Math.abs(c.lon - longitude) > marginLonDeg) continue;
       const d = this.haversineMeters(latitude, longitude, c.lat, c.lon);
       if (d <= maxDistMeters) candidates.push({ id, lat: c.lat, lon: c.lon, distance: d });
     }
@@ -1262,9 +1290,12 @@ export class RoutingDatabase {
     const latRad = latitude * Math.PI / 180;
     const cosLat = Math.cos(latRad);
     const marginDeg = radiusMeters / 111320;
-    for (const [id, c] of this.nodes) {
+    const marginLonDeg = marginDeg / cosLat;
+    for (const id of this.gridCandidateIds(latitude, longitude, marginDeg, marginLonDeg)) {
+      const c = this.nodes.get(id);
+      if (!c) continue;
       if (Math.abs(c.lat - latitude) > marginDeg) continue;
-      if (Math.abs(c.lon - longitude) > marginDeg / cosLat) continue;
+      if (Math.abs(c.lon - longitude) > marginLonDeg) continue;
       const dLat = (c.lat - latitude) * Math.PI / 180;
       const dLon = (c.lon - longitude) * Math.PI / 180;
       const a = Math.sin(dLat / 2) ** 2 + cosLat * Math.cos(c.lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
@@ -1479,14 +1510,32 @@ export class RoutingDatabase {
     limit: number = 5000,
   ): Promise<Array<{ id: number; lat: number; lon: number; min_depth: number; region_id: number }>> {
     const results: Array<{ id: number; lat: number; lon: number; min_depth: number; region_id: number }> = [];
-    for (const [id, c] of this.nodes) {
-      if (c.lat >= minLat && c.lat <= maxLat && c.lon >= minLon && c.lon <= maxLon) {
-        results.push({
-          id, lat: c.lat, lon: c.lon,
-          min_depth: c.nodeDepth,
-          region_id: c.regionId,
-        });
-        if (results.length >= limit) break;
+    // Box query, not a radius query — no cos(lat) correction needed: iterate
+    // every grid cell whose row/col range overlaps [minLat,maxLat] x
+    // [minLon,maxLon] exactly (same Math.floor cell math buildSpatialIndex
+    // uses), then apply the same exact box test the old full scan used.
+    const cellSize = 0.01;
+    const minRow = Math.floor(minLat / cellSize);
+    const maxRow = Math.floor(maxLat / cellSize);
+    const minCol = Math.floor(minLon / cellSize);
+    const maxCol = Math.floor(maxLon / cellSize);
+    outer:
+    for (let row = minRow; row <= maxRow; row++) {
+      for (let col = minCol; col <= maxCol; col++) {
+        const ids = this.spatialGrid.get(`${row}:${col}`);
+        if (!ids) continue;
+        for (const id of ids) {
+          const c = this.nodes.get(id);
+          if (!c) continue;
+          if (c.lat >= minLat && c.lat <= maxLat && c.lon >= minLon && c.lon <= maxLon) {
+            results.push({
+              id, lat: c.lat, lon: c.lon,
+              min_depth: c.nodeDepth,
+              region_id: c.regionId,
+            });
+            if (results.length >= limit) break outer;
+          }
+        }
       }
     }
     results.sort((a, b) => a.id - b.id);
@@ -1642,6 +1691,79 @@ export class RoutingDatabase {
       }
       ids.push(id);
     }
+  }
+
+  /** Incremental counterpart to buildSpatialIndex(): insert a single node id
+   *  into the grid cell its (lat, lon) hashes to, using the exact same
+   *  cellSize/Math.floor math. Used by the incremental mutation sites
+   *  (loadDatabaseGraphInner, addNode) instead of a full rebuild — see M6 in
+   *  the spatial-index refactor notes. Caller must only pass ids not already
+   *  present in the grid — inserting an id that's already present would
+   *  duplicate it in its cell array, corrupting every grid-backed query
+   *  (each id must appear at most once across the whole grid). */
+  private gridInsertNode(id: number, lat: number, lon: number): void {
+    const cellSize = 0.01;
+    const col = Math.floor(lon / cellSize);
+    const row = Math.floor(lat / cellSize);
+    const key = `${row}:${col}`;
+    let ids = this.spatialGrid.get(key);
+    if (!ids) {
+      ids = [];
+      this.spatialGrid.set(key, ids);
+    }
+    ids.push(id);
+  }
+
+  /** Incremental counterpart to buildSpatialIndex(): remove a single node id
+   *  from the grid cell its (lat, lon) hashes to, deleting the cell entry
+   *  entirely once it's empty (matching what a from-scratch rebuild would
+   *  produce — an empty array left behind would make gridCandidateIds do
+   *  pointless work forever, and would change nothing else, but there's no
+   *  reason to leave the litter). Used by the incremental mutation sites
+   *  (loadDatabaseGraphInner's overlay-deletion handling, unloadDatabaseGraph,
+   *  addNode's upsert-move case, deleteNode) instead of a full rebuild. */
+  private gridRemoveNode(id: number, lat: number, lon: number): void {
+    const cellSize = 0.01;
+    const col = Math.floor(lon / cellSize);
+    const row = Math.floor(lat / cellSize);
+    const key = `${row}:${col}`;
+    const ids = this.spatialGrid.get(key);
+    if (!ids) return;
+    const idx = ids.indexOf(id);
+    if (idx === -1) return;
+    ids.splice(idx, 1);
+    if (ids.length === 0) this.spatialGrid.delete(key);
+  }
+
+  /** Gather every node id in every grid cell overlapping the axis-aligned
+   *  box [latitude-marginLatDeg, latitude+marginLatDeg] x
+   *  [longitude-marginLonDeg, longitude+marginLonDeg] — a SUPERSET of any
+   *  node within marginLatDeg/marginLonDeg of (latitude, longitude), never a
+   *  subset: the row/col bounds are found by flooring the box's own edges
+   *  with the exact same math buildSpatialIndex uses to assign a node to a
+   *  cell, so any node whose coordinate lies inside the box necessarily
+   *  falls in a visited cell (possibly along with some that don't — callers
+   *  re-apply the same exact distance/margin filter the former full-scan
+   *  code used on top of this, so results are unaffected; this only prunes
+   *  candidates that filter would have rejected anyway). Callers doing a
+   *  radius query pass a cos(lat)-corrected marginLonDeg (see M4 in the
+   *  refactor notes) since 1° of longitude covers less ground than 1° of
+   *  latitude away from the equator — using a plain marginLatDeg for both
+   *  axes would under-cover longitude and silently drop real candidates. */
+  private gridCandidateIds(latitude: number, longitude: number, marginLatDeg: number, marginLonDeg: number): number[] {
+    const cellSize = 0.01;
+    const minRow = Math.floor((latitude - marginLatDeg) / cellSize);
+    const maxRow = Math.floor((latitude + marginLatDeg) / cellSize);
+    const minCol = Math.floor((longitude - marginLonDeg) / cellSize);
+    const maxCol = Math.floor((longitude + marginLonDeg) / cellSize);
+    const result: number[] = [];
+    for (let row = minRow; row <= maxRow; row++) {
+      for (let col = minCol; col <= maxCol; col++) {
+        const ids = this.spatialGrid.get(`${row}:${col}`);
+        if (ids) result.push(...ids);
+      }
+    }
+    return result;
   }
 
   hasNodeWithinRadius(lat: number, lon: number, radiusMeters: number): boolean {
@@ -1804,7 +1926,12 @@ export class RoutingDatabase {
       const filtered = edges.filter(e => e.target !== nodeId);
       if (filtered.length !== edges.length) this.edgesBySource.set(src, filtered);
     }
+    // Capture coords before deleting so the grid entry (which was otherwise
+    // left stale here — a latent bug, since queries now rely on the grid
+    // instead of a full scan) can be removed from the correct cell too.
+    const existing = this.nodes.get(nodeId);
     this.nodes.delete(nodeId);
+    if (existing) this.gridRemoveNode(nodeId, existing.lat, existing.lon);
     await this.sendMessage('deleteNode', { dbIndex, nodeId });
   }
 
@@ -1819,12 +1946,18 @@ export class RoutingDatabase {
 
   async addNode(dbIndex: number, node: { id: number; lat: number; lon: number; node_depth?: number }): Promise<void> {
     await this.sendMessage('insertNode', { dbIndex, ...node });
+    // This is an upsert (see handleUpsertNode) — an existing node id can be
+    // re-added at a different (lat, lon), which would move it to a
+    // different grid cell. Remove the stale grid entry at its old cell
+    // first (no-op if this id is genuinely new) before inserting fresh, or
+    // the id would be left behind in the wrong cell as well as duplicated.
+    const existing = this.nodes.get(node.id);
+    if (existing) this.gridRemoveNode(node.id, existing.lat, existing.lon);
     this.nodes.set(node.id, {
       lat: node.lat, lon: node.lon, regionId: 0,
       nodeDepth: node.node_depth ?? -1,
     });
-    this.spatialGrid.clear();
-    this.buildSpatialIndex();
+    this.gridInsertNode(node.id, node.lat, node.lon);
   }
 
   async addEdge(dbIndex: number, edge: {

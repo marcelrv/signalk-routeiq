@@ -94,6 +94,40 @@ const C: [number, number] = [50, 50];
 const D: [number, number] = [50.01, 50.01];
 const REGION_B_BBOX = { min_lat: 49.9, min_lon: 49.9, max_lat: 50.1, max_lon: 50.1 };
 
+// M4/M6 spatial-index refactor (database.ts) differential check: the exact
+// set of nodes both fixture databases contain, known independently of
+// RoutingDatabase's internals (this is just the same VERTICES/C/D the
+// fixture builder above inserts into the two sqlite files). Used below to
+// brute-force an expected answer for the grid-backed query methods
+// (findNearestNode/getNodesInRadius/findKNearestMainGraphNodes/
+// getNodesInBBox) without touching RoutingDatabase's private `nodes` map —
+// a from-scratch reference computed the same way the pre-refactor full-scan
+// code computed it, so a passing test proves the grid is not silently
+// dropping or misplacing candidates (the exact failure mode a cos(lat)
+// under-correction or an incremental-update bug would produce).
+const KNOWN_NODES: Array<{ id: number; lat: number; lon: number }> = [
+  ...VERTICES.map(([lat, lon], i) => ({ id: REGION_A_NODE_IDS[i], lat, lon })),
+  { id: nodeIdFor(C[0], C[1]), lat: C[0], lon: C[1] },
+  { id: nodeIdFor(D[0], D[1]), lat: D[0], lon: D[1] },
+];
+
+function bruteForceNearest(lat: number, lon: number, maxDist: number): number | null {
+  let bestId: number | null = null;
+  let bestDist = maxDist;
+  for (const n of KNOWN_NODES) {
+    const d = haversine(lat, lon, n.lat, n.lon);
+    if (d < bestDist) { bestDist = d; bestId = n.id; }
+  }
+  return bestId;
+}
+
+function bruteForceWithinRadius(lat: number, lon: number, radius: number): Array<{ id: number; distance: number }> {
+  return KNOWN_NODES
+    .map(n => ({ id: n.id, distance: haversine(lat, lon, n.lat, n.lon) }))
+    .filter(n => n.distance <= radius)
+    .sort((a, b) => a.distance - b.distance);
+}
+
 describe('§4a dynamic database loading', () => {
   const fixturesDir = './test/fixtures/dynamic-loading';
   const regionAPath = path.join(fixturesDir, 'region-a.sqlite');
@@ -303,6 +337,64 @@ describe('§4a dynamic database loading', () => {
       const edge = db.getEdgeSync(REGION_A_NODE_IDS[0], REGION_A_NODE_IDS[2]);
       assert.ok(edge, 'expected addFunnelShortcutEdge to have synthesized V0->V2');
       assert.strictEqual(edge!.edge_kind_id, 1 /* EDGE_KIND_NAVMESH_BOUNDARY */);
+    });
+
+    // Spatial-index refactor (database.ts M4/M6) differential check: with
+    // both databases loaded (region A's 4 nodes around (10-11, 10-11) and
+    // region B's 2 nodes around (50, 50)), the grid-backed query methods
+    // must agree exactly with an independent brute-force computation over
+    // the fixture's own known node list — proving the grid never drops a
+    // candidate the old full scan would have found (the failure mode a
+    // missing cos(lat) longitude correction, an off-by-one cell range, or a
+    // stale incremental-update would produce).
+    it('spatial-index refactor: grid-backed queries agree with an independent brute-force check', async () => {
+      // Deliberately off-center/off-diagonal: the exact center (10.5,10.5)
+      // and the exact C-D midpoint (50.005,50.005) are precise geometric
+      // ties between two fixture nodes (equal haversine distance to the
+      // double, e.g. V0 and V1 both at lon 10.5) — a real but order-
+      // dependent ambiguity that the old full-scan code resolved by Map
+      // insertion order and the grid-backed code may resolve differently
+      // (different candidate visiting order), without either being "wrong"
+      // (same minimal distance either way). Picking points with a strictly
+      // closest node sidesteps that inherent ambiguity so this test asserts
+      // real candidate-set correctness, not arbitrary tie-breaking order.
+      const queryPoints: Array<[number, number]> = [
+        [10.4, 10.6],     // inside region A's square, off-center — V1 uniquely nearest
+        [10, 10],         // exactly on V0
+        [10.999, 10.001], // just inside V3's corner
+        [50.006, 50.004], // near region B's C/D pair, off their midpoint — D uniquely nearest
+        [0, 0],           // farther than maxDist from every known node
+      ];
+
+      for (const [lat, lon] of queryPoints) {
+        const expectedNearest = bruteForceNearest(lat, lon, 500000);
+        const actualNearest = await db.findNearestNode(lat, lon, 500000);
+        assert.strictEqual(actualNearest, expectedNearest, `findNearestNode mismatch at (${lat},${lon})`);
+
+        const expectedRadius = bruteForceWithinRadius(lat, lon, 500000).map(n => n.id);
+        const actualRadius = (await db.getNodesInRadius(lat, lon, 500000)).map(n => n.id);
+        assert.deepStrictEqual(actualRadius, expectedRadius, `getNodesInRadius mismatch at (${lat},${lon})`);
+
+        // Every KNOWN_NODES entry has a non-zero region_id (region A: 1,
+        // region B: 2), so findKNearestMainGraphNodes's c.regionId===0 skip
+        // never excludes any of them here — same candidate set as above.
+        const expectedK = bruteForceWithinRadius(lat, lon, 500000).slice(0, 3).map(n => n.id);
+        const actualK = (await db.findKNearestMainGraphNodes(lat, lon, 3, 500000)).map(n => n.id);
+        assert.deepStrictEqual(actualK, expectedK, `findKNearestMainGraphNodes mismatch at (${lat},${lon})`);
+      }
+
+      // Box query: region A's own bbox should return exactly its 4 nodes,
+      // none of region B's (which sit at (50,50), nowhere near this box).
+      const bboxResult = await db.getNodesInBBox(9.9, 9.9, 11.1, 11.1, 100);
+      assert.deepStrictEqual(
+        bboxResult.map(n => n.id).sort((a, b) => a - b),
+        [...REGION_A_NODE_IDS].sort((a, b) => a - b),
+      );
+
+      // hasNodeWithinRadius sanity check (also grid-backed — findNearestEdge's
+      // sibling method, unconverted by M4 but exercising the same grid).
+      assert.strictEqual(db.hasNodeWithinRadius(10.5, 10.5, 500000), true);
+      assert.strictEqual(db.hasNodeWithinRadius(0, 0, 1000), false);
     });
 
     it('routes across the fixture while both databases are loaded', async () => {
