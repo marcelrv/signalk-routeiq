@@ -14,6 +14,17 @@ import { GpxExporter } from './gpx-export.js';
 import { RoutingEngine } from './routing.js';
 import { PluginConfig, RouteResult, RoutingRequest } from './types.js';
 
+/** Auth fields Signal K's tokensecurity middleware sets on the request. */
+interface SkAuthedRequest {
+  skIsAuthenticated?: boolean;
+  skPrincipal?: { permissions?: string };
+}
+
+/** Narrow surface of the Signal K server app needed to persist a resource. */
+interface SkResourcesApp {
+  resourcesApi: { setResource(type: string, id: string, value: unknown): Promise<void> };
+}
+
 export class ApiHandler {
   private router: Router;
   private routingEngine: RoutingEngine | null;
@@ -389,7 +400,7 @@ export class ApiHandler {
       const skRoute = GpxExporter.toSignalKRoute(route, name, uuid);
 
       // Persist via the Resource API (goes through resources-provider plugin)
-      await (this.app as any).resourcesApi.setResource('routes', uuid, skRoute);
+      await (this.app as unknown as SkResourcesApp).resourcesApi.setResource('routes', uuid, skRoute);
 
       res.json({
         success: true,
@@ -449,9 +460,8 @@ export class ApiHandler {
       return;
     }
     try {
-      const engine = this.routingEngine! as any;
-      const vessel = engine.vesselDimensions as any;
-      const cfg = engine.config as any;
+      const vessel = this.routingEngine!.vesselDims;
+      const cfg = this.routingEngine!.config;
       const effectiveDraft = Math.round(((vessel.draft || 2.0) + (cfg.safetyMarginDraft || 0.3)) * 10) / 10;
       const effectiveBeam = Math.round(((vessel.beam || 4.0) + (cfg.safetyMarginBeam || 2.0)) * 10) / 10;
       const effectiveAirDraft = Math.round(((vessel.airDraft || 0) + (cfg.safetyMarginAirDraft || 1.5)) * 10) / 10;
@@ -590,7 +600,7 @@ export class ApiHandler {
    * When security is disabled, skIsAuthenticated is set to true by SK.
    */
   private requireAuth(req: Request, res: Response): boolean {
-    const skReq = req as any;
+    const skReq = req as unknown as SkAuthedRequest;
     if (skReq.skIsAuthenticated !== true) {
       res.status(401).json({ error: 'Authentication required. Please log into the Signal K admin UI.' });
       return false;

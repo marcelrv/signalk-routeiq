@@ -162,14 +162,14 @@ class MinHeap<T> {
 
 export class RoutingEngine {
   private db: RoutingDatabase;
-  private config: PluginConfig;
+  private _config: PluginConfig;
   private vesselDimensions: VesselDimensions;
   private tides: TidesClient | null = null;
   private currents: CurrentsClient | null = null;
 
   constructor(db: RoutingDatabase, config: PluginConfig, vesselDimensions?: VesselDimensions) {
     this.db = db;
-    this.config = config;
+    this._config = config;
     this.vesselDimensions = vesselDimensions || {
       draft: 0,   // unknown until SignalK provides it
       beam: 4,    // reaseonable default until SignalK provides it
@@ -186,6 +186,10 @@ export class RoutingEngine {
 
   get vesselDims(): VesselDimensions {
     return { ...this.vesselDimensions };
+  }
+
+  get config(): PluginConfig {
+    return this._config;
   }
 
   setTidesClient(client: TidesClient | null): void {

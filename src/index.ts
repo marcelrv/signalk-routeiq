@@ -17,6 +17,21 @@ import { RoutingEngine } from './routing.js';
 import { CurrentsClient, TidesClient } from './tides.js';
 import { DEFAULT_CONFIG, PluginConfig } from './types.js';
 
+/**
+ * Narrow surface of the Signal K server API this plugin actually calls.
+ * The real `ServerAPI` type doesn't declare these members (they vary across
+ * server versions / are augmented at runtime), so callers cast into this
+ * shape once at each boundary instead of reaching for `any`.
+ */
+interface SkAppSurface {
+  getSelfPath?(path: string): unknown;
+  getPath?(path: string): unknown;
+  subscriptionmanager?: {
+    subscribe(command: unknown, unsubscribes: (() => void)[], errorCallback: (err: unknown) => void, callback: (update: unknown) => void): void;
+  };
+  subscribe?(subscription: unknown, callback: (update: unknown) => void): (() => void);
+}
+
 // Plugin state
 let database: RoutingDatabase | null = null;
 let routingEngine: RoutingEngine | null = null;
@@ -374,26 +389,26 @@ export function pluginConstructor(app: ServerAPI) {
    */
   async function fetchInitialVesselDimensions(app: ServerAPI) {
     try {
-      const appAny = app as any;
+      const app_ = app as unknown as SkAppSurface;
       let draft: number | undefined;
       let beam: number | undefined;
       let airDraft: number | undefined;
 
       // Try getSelfPath (preferred)
-      if (typeof appAny.getSelfPath === 'function') {
-        const draftPath = appAny.getSelfPath('design.draft');
+      if (typeof app_.getSelfPath === 'function') {
+        const draftPath = app_.getSelfPath('design.draft');
         draft = extractNumberValue(draftPath);
-        const beamPath = appAny.getSelfPath('design.beam');
+        const beamPath = app_.getSelfPath('design.beam');
         beam = extractNumberValue(beamPath);
-        const airDraftPath = appAny.getSelfPath('design.airHeight');
+        const airDraftPath = app_.getSelfPath('design.airHeight');
         airDraft = extractNumberValue(airDraftPath);
-      } else if (typeof appAny.getPath === 'function') {
+      } else if (typeof app_.getPath === 'function') {
         // Fallback: full path
-        const draftPath = appAny.getPath('vessels.self.design.draft');
+        const draftPath = app_.getPath('vessels.self.design.draft');
         draft = extractNumberValue(draftPath);
-        const beamPath = appAny.getPath('vessels.self.design.beam');
+        const beamPath = app_.getPath('vessels.self.design.beam');
         beam = extractNumberValue(beamPath);
-        const airDraftPath = appAny.getPath('vessels.self.design.airHeight');
+        const airDraftPath = app_.getPath('vessels.self.design.airHeight');
         airDraft = extractNumberValue(airDraftPath);
       }
 
@@ -429,8 +444,8 @@ export function pluginConstructor(app: ServerAPI) {
    */
   async function subscribeToVesselDimensions(app: ServerAPI) {
     try {
-      const appAny = app as any;
-      if (typeof appAny.subscriptionmanager?.subscribe === 'function') {
+      const app_ = app as unknown as SkAppSurface;
+      if (typeof app_.subscriptionmanager?.subscribe === 'function') {
         const command = {
           context: 'vessels.self',
           subscribe: [
@@ -440,7 +455,7 @@ export function pluginConstructor(app: ServerAPI) {
           ],
         };
         const unsubscribeFns: (() => void)[] = [];
-        appAny.subscriptionmanager.subscribe(
+        app_.subscriptionmanager.subscribe(
           command,
           unsubscribeFns,     // collect unsubscribe callbacks
           () => {},           // errorCallback
@@ -451,14 +466,14 @@ export function pluginConstructor(app: ServerAPI) {
         subscriptionCancelled = () => {
           unsubscribeFns.forEach(fn => fn());
         };
-      } else if (typeof appAny.subscribe === 'function') {
+      } else if (typeof app_.subscribe === 'function') {
         // fallback: older API
         const subscription = { context: 'vessels.self', subscribe: [
           { path: 'design.draft' },
           { path: 'design.beam' },
           { path: 'design.airHeight' },
         ]};
-        subscriptionCancelled = appAny.subscribe(subscription, (update: any) => {
+        subscriptionCancelled = app_.subscribe(subscription, (update: any) => {
           handleVesselUpdate(update);
         });
       }
@@ -473,12 +488,12 @@ export function pluginConstructor(app: ServerAPI) {
    */
   async function fetchInitialPosition(app: ServerAPI) {
     try {
-      const appAny = app as any;
+      const app_ = app as unknown as SkAppSurface;
       let pos: any;
-      if (typeof appAny.getSelfPath === 'function') {
-        pos = appAny.getSelfPath('navigation.position');
-      } else if (typeof appAny.getPath === 'function') {
-        pos = appAny.getPath('vessels.self.navigation.position');
+      if (typeof app_.getSelfPath === 'function') {
+        pos = app_.getSelfPath('navigation.position');
+      } else if (typeof app_.getPath === 'function') {
+        pos = app_.getPath('vessels.self.navigation.position');
       }
       const ll = extractLatLon(pos);
       if (ll) await maybeEagerLoad(ll.lat, ll.lon);
@@ -494,23 +509,23 @@ export function pluginConstructor(app: ServerAPI) {
    */
   async function subscribeToPosition(app: ServerAPI) {
     try {
-      const appAny = app as any;
-      if (typeof appAny.subscriptionmanager?.subscribe === 'function') {
+      const app_ = app as unknown as SkAppSurface;
+      if (typeof app_.subscriptionmanager?.subscribe === 'function') {
         const command = {
           context: 'vessels.self',
           subscribe: [{ path: 'navigation.position', period: 10000, format: 'delta' }],
         };
         const unsubscribeFns: (() => void)[] = [];
-        appAny.subscriptionmanager.subscribe(
+        app_.subscriptionmanager.subscribe(
           command,
           unsubscribeFns,
           () => {},
           (update: any) => { handlePositionUpdate(update); },
         );
         positionSubscriptionCancelled = () => { unsubscribeFns.forEach(fn => fn()); };
-      } else if (typeof appAny.subscribe === 'function') {
+      } else if (typeof app_.subscribe === 'function') {
         const subscription = { context: 'vessels.self', subscribe: [{ path: 'navigation.position' }] };
-        positionSubscriptionCancelled = appAny.subscribe(subscription, (update: any) => { handlePositionUpdate(update); });
+        positionSubscriptionCancelled = app_.subscribe(subscription, (update: any) => { handlePositionUpdate(update); });
       }
     } catch (error) {
       console.warn('[routeiq] Failed to subscribe to navigation.position:', error);
