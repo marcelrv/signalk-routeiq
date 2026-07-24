@@ -1566,6 +1566,15 @@ export class RoutingEngine {
     while (!openSet.isEmpty() && iterations < maxIterations) {
       iterations++;
 
+      // Yield to the macrotask queue periodically so a long CPU-bound search
+      // doesn't starve the SignalK server's event loop (I/O, NMEA, WebSocket
+      // broadcasts). await on the synchronously-resolved getOutgoingEdges below
+      // only drains microtasks, which never lets macrotasks run — setImmediate
+      // does. ~10k iterations keeps each blocking burst to a few ms.
+      if (iterations % 10000 === 0) {
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+
       // Once any goal candidate is known, no future pop can beat it once the
       // open set's best remaining f (an admissible lower bound on true
       // remaining cost, including any navmesh suffix) is no better than that
