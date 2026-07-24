@@ -7,6 +7,8 @@ import crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as zlib from 'node:zlib';
+import { pipeline } from 'node:stream/promises';
+import { Readable } from 'node:stream';
 import { ServerAPI } from '@signalk/server-api';
 import { NextFunction, Request, Response, Router } from 'express';
 import { RoutingDatabase } from './database.js';
@@ -979,15 +981,13 @@ export class ApiHandler {
         return;
       }
 
-      const buffer = Buffer.from(await response.arrayBuffer());
-
-      // If the downloaded file is .sqlite.gz, decompress it
+      // Compute the on-disk filename (strip .gz for compressed downloads)
+      // and validate it BEFORE touching the filesystem or the response body
+      // — never open a write stream to an unvalidated path.
       let saveFilename = filename;
-      let saveBuffer = buffer;
-      if (filename.endsWith('.sqlite.gz')) {
+      const isGzip = filename.endsWith('.sqlite.gz');
+      if (isGzip) {
         saveFilename = filename.slice(0, -3); // strip .gz
-        saveBuffer = zlib.gunzipSync(buffer);
-        console.log(`[routeiq] Decompressed ${filename} -> ${saveFilename} (${buffer.length} -> ${saveBuffer.length} bytes)`);
       }
 
       // Reject filenames that could escape the data directory (path traversal)
@@ -1002,12 +1002,36 @@ export class ApiHandler {
         return;
       }
 
+      // Stream the response body straight to disk instead of buffering the
+      // whole file in RAM — regional DBs can be hundreds of MB, which OOMs
+      // low-memory devices (Raspberry Pi). Write to a temp file first and
+      // rename on success, so a failed/partial download never leaves a
+      // corrupt .sqlite in place.
+      //
       // Multi-region dynamic loading keeps every installed database around;
-      // writing to destPath below overwrites a same-named file in place, so
+      // renaming to destPath below overwrites a same-named file in place, so
       // re-downloading a region updates it without touching other regions.
-      fs.writeFileSync(destPath, saveBuffer);
+      const tmpPath = destPath + '.tmp';
+      if (!response.body) {
+        res.status(502).json({ error: 'Download failed: empty response body' });
+        return;
+      }
+      try {
+        const src = Readable.fromWeb(response.body as any);
+        if (isGzip) {
+          await pipeline(src, zlib.createGunzip(), fs.createWriteStream(tmpPath));
+          console.log(`[routeiq] Decompressed ${filename} -> ${saveFilename}`);
+        } else {
+          await pipeline(src, fs.createWriteStream(tmpPath));
+        }
+        fs.renameSync(tmpPath, destPath);
+      } catch (e) {
+        try { fs.unlinkSync(tmpPath); } catch { /* ignore missing tmp file */ }
+        throw e;
+      }
 
-      console.log(`[routeiq] Database saved: ${saveFilename} (${saveBuffer.length} bytes)`);
+      const sizeBytes = fs.statSync(destPath).size;
+      console.log(`[routeiq] Database saved: ${saveFilename} (${sizeBytes} bytes)`);
 
       // Refresh metadata cache so the new DB shows in the installed list
       try {
@@ -1032,8 +1056,8 @@ export class ApiHandler {
       res.json({
         success: true,
         filename: saveFilename,
-        sizeBytes: saveBuffer.length,
-        message: `Downloaded and installed ${saveFilename} (${(saveBuffer.length / 1048576).toFixed(1)} MB)`,
+        sizeBytes,
+        message: `Downloaded and installed ${saveFilename} (${(sizeBytes / 1048576).toFixed(1)} MB)`,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
