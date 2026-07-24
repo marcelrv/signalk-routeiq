@@ -2233,18 +2233,43 @@ export class RoutingEngine {
   private async detectCrossings(coordinates: [number, number][]): Promise<RouteCrossing[]> {
     if (coordinates.length === 0) return [];
 
-    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
-    for (const [lon, lat] of coordinates) {
-      if (lat < minLat) minLat = lat;
-      if (lat > maxLat) maxLat = lat;
-      if (lon < minLon) minLon = lon;
-      if (lon > maxLon) maxLon = lon;
+    const MARGIN = 0.002; // ~222 m, comfortably larger than MAX_DIST (150 m) below
+    const CHUNK = 64; // points per segmented bbox query
+
+    // Segmented, deduped POI fetch: instead of one query over the bbox of
+    // the entire route (which pulls in every POI in that rectangle, not
+    // just ones near the polyline), walk the route in fixed-size chunks and
+    // query each chunk's own (much smaller) bbox. Consecutive chunks share
+    // their boundary point so a crossing right at a chunk edge is still
+    // covered by both neighboring queries.
+    //
+    // Correctness: every route vertex lies in some chunk, and each chunk's
+    // query box is that chunk's vertex extent expanded by MARGIN >= MAX_DIST,
+    // so any POI within MAX_DIST of any vertex is inside at least one
+    // chunk's box. The union of chunk results is therefore a superset of
+    // the single-whole-route-bbox result restricted to the near-route
+    // corridor, and deduping by id turns that union into a proper set —
+    // so detectCrossings' output is unchanged; only far-off-route POIs that
+    // would have been fetched-then-rejected are never fetched at all.
+    const poiById = new Map<number, Awaited<ReturnType<typeof this.db.getPoisInBBox>>[number]>();
+    for (let i = 0; i < coordinates.length; i += CHUNK) {
+      const end = Math.min(i + CHUNK, coordinates.length - 1);
+      let cMinLat = Infinity, cMaxLat = -Infinity, cMinLon = Infinity, cMaxLon = -Infinity;
+      for (let j = i; j <= end; j++) {
+        const [lon, lat] = coordinates[j];
+        if (lat < cMinLat) cMinLat = lat;
+        if (lat > cMaxLat) cMaxLat = lat;
+        if (lon < cMinLon) cMinLon = lon;
+        if (lon > cMaxLon) cMaxLon = lon;
+      }
+      const chunkPois = await this.db.getPoisInBBox(
+        cMinLat - MARGIN, cMinLon - MARGIN,
+        cMaxLat + MARGIN, cMaxLon + MARGIN,
+      );
+      for (const poi of chunkPois) poiById.set(poi.id, poi);
+      if (end >= coordinates.length - 1) break;
     }
-    const MARGIN = 0.002;
-    const pois = await this.db.getPoisInBBox(
-      minLat - MARGIN, minLon - MARGIN,
-      maxLat + MARGIN, maxLon + MARGIN,
-    );
+    const pois = [...poiById.values()];
 
     const bridgePois = pois.filter(p => p.typeId === POI_TYPE_BRIDGE);
     const lockPois = pois.filter(p => p.typeId === POI_TYPE_LOCK);
