@@ -2,6 +2,7 @@
   "name": "signalk-routeiq",
   "version": "0.1.0",
   "description": "SignalK Nautical Route Planner - Offline tide and vessel-aware routing",
+  "license": "Apache-2.0",
   "keywords": ["signalk-node-server-plugin", "signalk-webapp"],
   "signalk": {
     "displayName": "RouteIQ",

@@ -59,7 +59,7 @@ backend/local_scripts/
 
 # Machine-specific agent notes — never commit
 AGENTS.local.md
-.claude/settings.local.json
+.claude/
 
 # Private/local-only planning notes — never commit
 todo.local.md

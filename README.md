@@ -4,7 +4,7 @@
 
 An offline-first, vessel-aware nautical route planner designed to run natively as a webapp and plugin within the Signal K ecosystem. Optimized for inland waterways and coastal navigation, it dynamically calculates safe routes based on a vessel's physical dimensions (draft, beam, air draft) and user safety preferences.
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)
 ![TypeScript](https://img.shields.io/badge/typescript-%3E%3D5.0.0-blue.svg)
 
@@ -171,7 +171,7 @@ npm test
 
 ## License
 
-MIT License - see LICENSE file for details
+Apache License 2.0 - see LICENSE file for details
 
 ## Contributing
 
