@@ -972,7 +972,7 @@ export class ApiHandler {
       }
 
       // Ensure data directory exists
-      try { fs.mkdirSync(dataDir, { recursive: true }); } catch { /* ignore */ }
+      try { await fs.promises.mkdir(dataDir, { recursive: true }); } catch { /* ignore */ }
 
       console.log(`[routeiq] Downloading database: ${url}`);
       const response = await fetch(url, { signal: AbortSignal.timeout(120000) });
@@ -1024,13 +1024,13 @@ export class ApiHandler {
         } else {
           await pipeline(src, fs.createWriteStream(tmpPath));
         }
-        fs.renameSync(tmpPath, destPath);
+        await fs.promises.rename(tmpPath, destPath);
       } catch (e) {
-        try { fs.unlinkSync(tmpPath); } catch { /* ignore missing tmp file */ }
+        try { await fs.promises.unlink(tmpPath); } catch { /* ignore missing tmp file */ }
         throw e;
       }
 
-      const sizeBytes = fs.statSync(destPath).size;
+      const sizeBytes = (await fs.promises.stat(destPath)).size;
       console.log(`[routeiq] Database saved: ${saveFilename} (${sizeBytes} bytes)`);
 
       // Refresh metadata cache so the new DB shows in the installed list
@@ -1170,12 +1170,15 @@ export class ApiHandler {
         res.status(400).json({ error: 'Invalid filename: path escapes data directory' });
         return;
       }
-      if (!fs.existsSync(targetPath)) {
-        res.status(404).json({ error: `Database not found: ${filename}` });
-        return;
+      try {
+        await fs.promises.unlink(targetPath);
+      } catch (e: any) {
+        if (e && e.code === 'ENOENT') {
+          res.status(404).json({ error: `Database not found: ${filename}` });
+          return;
+        }
+        throw e;
       }
-
-      fs.unlinkSync(targetPath);
       console.log(`[routeiq] Database deleted: ${filename}`);
 
       try {
