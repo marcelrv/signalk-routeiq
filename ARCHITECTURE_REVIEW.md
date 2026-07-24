@@ -18,18 +18,23 @@ first as a standalone security patch. **H1 and H2 are the same problem** (four
 endpoints exist because there are four in-memory stores) and must be fixed
 together, as a staged refactor.
 
-> **Progress (2026-07-24):**
+> **Progress (2026-07-24) — all three high-severity items DONE:**
 > - **H3 — DONE**, commit `b75ec12`. `requireAuth` added to
->   `/databases/download`; CORS comment corrected.
-> - **H1/H2 Stages 1–2 — DONE**, commit `dc86b03`. `coverageIndex` is now the
->   single source of truth; `loadedDbFilenames`, `cachedDatabaseList`, and
->   `metadataCache` removed; all four read models derive from it; regression
->   test added; 60/60 tests pass.
-> - **H1/H2 Stage 3 (final) — PENDING** (simplified — see below). Because
->   RouteIQ is **not published** and its only API consumer is the bundled
->   `public/index.html`, the backwards-compat alias/deprecation window is
->   unnecessary: canonicalize one endpoint, migrate the frontend, and delete
->   the redundant endpoints in a **single** change.
+>   `/databases/download`; CORS comment corrected. (This also resolves **M1**.)
+> - **H1/H2 Stage 1 — DONE**, commit `dc86b03`. `coverageIndex` is the single
+>   source of truth; `loadedDbFilenames`, `cachedDatabaseList`, and
+>   `metadataCache` removed; all read models derive from it; regression test
+>   added.
+> - **H1/H2 Stage 3 (endpoint merge) — DONE**, commit `dcd0393`. Four read
+>   endpoints → two: canonical `GET /databases` (`getDatabaseCatalog`) + the
+>   `GET /databases/status` boot poller; `/databases/loaded` and
+>   `/graph/databases` deleted; both frontend merge sites collapsed to one
+>   fetch. Verified live against the container (unified shape served, removed
+>   routes 404). 60/60 tests pass.
+> - **NOT yet done — Stage 2 (retire the second worker in `reloadMetadata`).**
+>   The Stage 1 change repointed `reloadMetadata` to merge into `coverageIndex`
+>   but left its second-`Worker` spawn in place. That cleanup is tracked as
+>   **M2** below, not done here.
 
 ### H3 — Unauthenticated destructive database download (do first)
 
@@ -106,33 +111,41 @@ suite green):
   second-worker plumbing. (The download path hot-reloads the whole DB right after
   anyway — `src/api.ts:1015-1032` — so this call is largely redundant.)
 
-**Stage 3 (final) — canonicalize one endpoint, migrate the frontend, delete the
-rest, in a single change.** No alias/deprecation window: RouteIQ is unpublished
-and the only consumer is `public/index.html`, so there is no external contract to
-preserve.
-- Promote `GET /databases` to the canonical catalog endpoint, returning the full
-  per-record shape: `filename`, `state`, `coverage` (bbox), `dbIndex`, `stats`,
-  and `meta` — a superset of today's `/databases` + `/databases/loaded` +
-  `/databases/status`. It must list **all installed** databases with their state
-  (not just loaded ones), since that is what the Data Manager UI needs.
-- Repoint every `public/index.html` fetch site: the Data Manager / coverage
-  overlay that reads `/databases/loaded` (`:2806`, `:6516`), `/databases/status`
-  (`:4085`), `/databases` (`:5898`), and `/graph/databases` → all to the one
-  canonical `/databases`. Delete the reconciliation logic and the comments that
-  explain how the two used to differ (`:2800`, `:6509`).
-- Delete the now-unused routes and handlers: `GET /databases/loaded`,
-  `GET /databases/status`, `GET /graph/databases` (and, in `database.ts`, fold
-  `getCoverageStatus`/`getLoadingStatus`/`getDatabaseList` into the one method
-  backing `/databases`, or keep whichever internal helper the graph editor still
-  needs). **Keep** the action endpoints untouched: `/databases/available`,
-  `/databases/download`, `/databases/load`, `/databases/unload`,
-  `/databases/delete` — those are operations, not catalog reads.
+**Stage 3 (final) — merge the two rich catalog endpoints, delete the dead one,
+migrate the frontend, in a single change.** No alias/deprecation window: RouteIQ
+is unpublished and the only consumer is `public/index.html`.
+
+Scope refined after reading the frontend consumers:
+- **Merge `GET /databases` + `GET /databases/loaded` → one canonical
+  `GET /databases`.** These are the two the Data Manager fetches *together* and
+  reconciles client-side (`fetchCoverage`, `:2813`+`:5898` and `:6606`). The
+  canonical endpoint returns one record per **installed** database:
+  `{ filename, state, coverage (bbox), dbIndex, stats, ...meta }` (meta incl.
+  `boundingBox`/`boundaryGeometry`/`tags`/name/country). Update both frontend
+  merge sites to a single fetch; delete the reconciliation logic/comments
+  (`:2800`, `:6599`). Delete the `/databases/loaded` route + `getCoverageStatus`.
+- **Delete `GET /graph/databases` + `getDatabaseList`** — not referenced anywhere
+  in `public/` (dead), and `dbIndex` is now available on the canonical record for
+  any future editor use.
+- **KEEP `GET /databases/status`** (`getLoadingStatus`). It is NOT catalog
+  duplication — it is the lightweight boot poller the loading overlay hits every
+  ~1.5s (`:4092`), returning `{ loaded, filenames, available, initError }` and a
+  200 even when the DB isn't ready so `initError` can surface. Different purpose,
+  different response contract; post-Stage-2 it already derives from
+  `coverageIndex`, so no drift. Folding it into a full catalog would risk the boot
+  path and make startup poll a heavy payload.
+- **KEEP the action endpoints:** `/databases/available`, `/databases/download`,
+  `/databases/load`, `/databases/unload`, `/databases/delete` — operations, not
+  catalog reads.
+
+Net: 4 read endpoints → 2 (a canonical catalog + a boot-status probe), and the
+frontend's dual-fetch reconciliation goes away.
 
 **Sequencing & risk.** Stages 1–2 (done) were pure internal refactor — lowest
-risk, and they made Stage 3 mechanical: with one backing store, the endpoint
-merge is just deleting routes and pointing the UI at the survivor. Stage 3's risk
-is entirely in the frontend (the Data Manager UI must keep rendering install/load
-state correctly) — verify it live against the running `signalk-server` container
+risk, and they made this mechanical: with one backing store, the merge is mostly
+deleting a route and pointing the UI at the survivor. The remaining risk is
+entirely in the frontend (the Data Manager UI must keep rendering install/load
+state correctly) — verify live against the running `signalk-server` container
 after the change. H3 was done first (unrelated, urgent).
 
 **Tests to add.** A load → unload → reload cycle asserting all four read models
