@@ -1,0 +1,76 @@
+# Publishes to npm whenever a GitHub Release is published. Expects the
+# release's tag (e.g. "v0.1.0-alpha.1") to match package.json's version —
+# bump package.json (and CHANGELOG.md) in a normal commit first, merge it,
+# THEN create the matching GitHub Release; this workflow refuses to publish
+# if the two disagree, so a stale tag can't accidentally ship the wrong code.
+#
+# Publishes under the npm dist-tag matching the version's pre-release
+# identifier (e.g. 0.1.0-alpha.1 -> "alpha"), so `npm install signalk-routeiq`
+# without a version specifier never resolves to an alpha/beta/rc build.
+# Versions with no pre-release identifier publish as "latest" as usual.
+#
+# Uses npm Trusted Publishing (OIDC) — no NPM_TOKEN secret at all. One-time
+# setup on npmjs.com, AFTER the package has been published at least once
+# (trusted publishing is configured on the existing package's settings page,
+# so the very first release of a brand-new package name must be published
+# manually with `npm publish`/`npm login`): package page → Settings →
+# "Trusted Publisher" → Add GitHub Actions publisher, with:
+#   Organization or user: <the GitHub owner, e.g. marcelrv>
+#   Repository:            signalk-routeiq
+#   Workflow filename:     publish-npm.yml   (must match this file's name exactly)
+#   Environment:           (leave blank unless you add one below)
+# `permissions: id-token: write` below is what lets npm CLI exchange this
+# job's OIDC token for a short-lived publish credential automatically.
+
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for OIDC trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing needs a recent npm CLI (11.5.1+) — newer than
+      # what Node 22's bundled npm may ship, so upgrade explicitly rather
+      # than depending on whatever setup-node happened to install.
+      - run: npm install -g npm@latest
+
+      - name: Verify package.json version matches the release tag
+        run: |
+          PKG_VERSION="v$(node -p "require('./package.json').version")"
+          TAG="${{ github.event.release.tag_name }}"
+          if [ "$PKG_VERSION" != "$TAG" ]; then
+            echo "package.json version ($PKG_VERSION) does not match release tag ($TAG) — bump package.json first."
+            exit 1
+          fi
+
+      - name: Determine npm dist-tag from version pre-release identifier
+        id: dist-tag
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          PRERELEASE_ID="$(node -p "(require('./package.json').version.match(/-([a-zA-Z]+)/) || [])[1] || ''")"
+          TAG="${PRERELEASE_ID:-latest}"
+          echo "Publishing $VERSION under dist-tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Run tests
+        run: npm test
+        env:
+          NODE_OPTIONS: --experimental-sqlite
+
+      - run: npm publish --provenance --tag ${{ steps.dist-tag.outputs.tag }}

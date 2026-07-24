@@ -1,9 +1,16 @@
 {
   "name": "signalk-routeiq",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.1",
   "description": "SignalK Nautical Route Planner - Offline tide and vessel-aware routing",
   "license": "Apache-2.0",
   "keywords": ["signalk-node-server-plugin", "signalk-webapp"],
+  "files": [
+    "dist",
+    "public",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "signalk": {
     "displayName": "RouteIQ",
     "appIcon": "icon.svg"
@@ -22,7 +29,8 @@
     "test": "node --test --test-force-exit dist-test/routing.test.js dist-test/navmesh.test.js dist-test/navmesh-integration.test.js dist-test/zeelandbrug.test.js dist-test/bbox-penalty-retry.test.js dist-test/via-disconnected-leg.test.js dist-test/dynamic-loading.test.js dist-test/vessel-validation.test.js",
     "test:unit": "node --test --test-force-exit dist-test/unit/*.test.js",
     "test:integration": "node --test --test-force-exit dist-test/integration/*.test.js",
-    "deploy": "bash deploy.sh"
+    "deploy": "bash deploy.sh",
+    "prepublishOnly": "tsc"
   },
   "dependencies": {
     "@signalk/server-api": "^2.0.0",
