@@ -14,7 +14,7 @@ import { NextFunction, Request, Response, Router } from 'express';
 import { RoutingDatabase } from './database.js';
 import { GpxExporter } from './gpx-export.js';
 import { RoutingEngine } from './routing.js';
-import { PluginConfig, RouteResult, RoutingRequest } from './types.js';
+import { PluginConfig, RouteResult, RoutingRequest, VesselDimensions } from './types.js';
 
 /** Auth fields Signal K's tokensecurity middleware sets on the request. */
 interface SkAuthedRequest {
@@ -30,6 +30,65 @@ interface SkResourcesApp {
 /** Cap on `via` array length — each via point triggers a sequential A* search,
  *  and /route is unauthenticated, so an unbounded array is a CPU DoS vector. */
 const MAX_VIA_POINTS = 25;
+
+/** Plausible upper bounds (meters) per vessel dimension. Values are rejected
+ *  rather than coerced because a bad one fails *open* on a safety constraint
+ *  instead of erroring: getEdgePenalty compares `edge.min_depth < draft +
+ *  safetyMarginDraft`, so a string draft makes that sum a string and every
+ *  comparison NaN-false (no edge is ever too shallow), and a negative draft
+ *  puts the threshold below every real depth. Same shape for air draft and
+ *  beam. */
+const VESSEL_DIM_MAX_M: Record<'draft' | 'beam' | 'airDraft', number> = {
+  draft: 30,
+  beam: 100,
+  airDraft: 150,
+};
+
+/** Shared validation for the draft/beam/airDraft trio, which arrives both as
+ *  the global default (PUT /vessel) and as per-request overrides (POST /route,
+ *  /route/departures). `null`/`undefined` mean "not supplied" and are dropped,
+ *  so a partial update never clobbers an already-set dimension — the caller
+ *  gets back only the keys that were actually present and valid. */
+export function pickVesselDimensions(
+  body: Record<string, unknown> | undefined,
+): { dims: VesselDimensions } | { error: string } {
+  const dims: VesselDimensions = {};
+  for (const key of ['draft', 'beam', 'airDraft'] as const) {
+    const value = body?.[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      return { error: `Invalid ${key} — expected a number in meters` };
+    }
+    if (value < 0 || value > VESSEL_DIM_MAX_M[key]) {
+      return { error: `Invalid ${key} — expected 0..${VESSEL_DIM_MAX_M[key]} meters` };
+    }
+    dims[key] = value;
+  }
+  return { dims };
+}
+
+/** Normalizes the vessel-dimension and coast-distance overrides on a routing
+ *  request in place (null -> undefined, so the engine falls back to the
+ *  configured defaults). Returns an error string if any is unusable. See
+ *  VESSEL_DIM_MAX_M for why these can't just be coerced. */
+export function validateRequestConstraints(request: RoutingRequest): string | null {
+  const picked = pickVesselDimensions(request as unknown as Record<string, unknown>);
+  if ('error' in picked) return picked.error;
+  request.draft = picked.dims.draft;
+  request.beam = picked.dims.beam;
+  request.airDraft = picked.dims.airDraft;
+
+  if (request.minCoastDistance === null) request.minCoastDistance = undefined;
+  if (request.minCoastDistance !== undefined) {
+    if (typeof request.minCoastDistance !== 'number' || !Number.isFinite(request.minCoastDistance)) {
+      return 'Invalid minCoastDistance — expected a number in nautical miles';
+    }
+    if (request.minCoastDistance < 0 || request.minCoastDistance > 100) {
+      return 'Invalid minCoastDistance — expected 0..100 nautical miles';
+    }
+  }
+  return null;
+}
 
 export class ApiHandler {
   private router: Router;
@@ -128,7 +187,7 @@ export class ApiHandler {
     // GET /signalk/v1/api/router/vessel
     this.router.get('/vessel', this.handleGetVessel.bind(this));
 
-    // PUT /signalk/v1/api/router/vessel
+    // PUT /signalk/v1/api/router/vessel (admin — writes the server-wide defaults)
     this.router.put('/vessel', this.handleUpdateVessel.bind(this));
 
     // GET /signalk/v1/api/router/graph/nodes?bbox=minLon,minLat,maxLon,maxLat
@@ -244,6 +303,12 @@ export class ApiHandler {
         return;
       }
 
+      const constraintError = validateRequestConstraints(request);
+      if (constraintError) {
+        res.status(400).json({ error: constraintError });
+        return;
+      }
+
       const route: RouteResult = await this.routingEngine!.calculateRoute(request);
 
       res.json(route);
@@ -282,6 +347,11 @@ export class ApiHandler {
       }
       if (request.departureTime !== undefined && !Number.isFinite(Date.parse(request.departureTime))) {
         res.status(400).json({ error: 'Invalid departureTime — expected an ISO 8601 date string' });
+        return;
+      }
+      const constraintError = validateRequestConstraints(request);
+      if (constraintError) {
+        res.status(400).json({ error: constraintError });
         return;
       }
       const hours = Math.min(48, Math.max(1, Number(scanHours) || 24));
@@ -490,16 +560,25 @@ export class ApiHandler {
   /**
    * Handle update vessel dimensions request
    * PUT /signalk/v1/api/router/vessel
+   *
+   * Admin-only: these are the server-wide defaults every route without
+   * explicit overrides is planned against, and they survive until the plugin
+   * restarts (the Signal K design.* paths are only read once, at startup).
    */
   private async handleUpdateVessel(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.isReady()) {
       res.status(503).json({ error: 'Routing engine not ready, still initializing' });
       return;
     }
+    if (!this.requireAuth(req, res)) return;
     try {
-      const dimensions = req.body;
-      this.routingEngine!.setVesselDimensions(dimensions);
-      res.json({ success: true, vessel: dimensions });
+      const picked = pickVesselDimensions(req.body);
+      if ('error' in picked) {
+        res.status(400).json({ error: picked.error });
+        return;
+      }
+      this.routingEngine!.setVesselDimensions(picked.dims);
+      res.json({ success: true, vessel: this.routingEngine!.vesselDims });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: message });
@@ -603,14 +682,16 @@ export class ApiHandler {
   }
 
   /**
-   * Auth check for graph-editor mutations.
+   * Auth check for state-changing endpoints (graph edits, database
+   * install/load, server-wide vessel defaults).
    *
    * Signal K's tokensecurity middleware runs before plugin routes and sets
    * `req.skIsAuthenticated` (bool) and `req.skPrincipal.permissions` after
    * validating the JWT from the JAUTHENTICATION cookie or Bearer header.
    * Checking the cookie string directly does NOT validate the token.
    *
-   * Requires admin permission because graph edits are destructive.
+   * Requires admin permission because these writes are destructive or
+   * affect every client's routes.
    * When security is disabled, skIsAuthenticated is set to true by SK.
    */
   private requireAuth(req: Request, res: Response): boolean {
@@ -620,7 +701,7 @@ export class ApiHandler {
       return false;
     }
     if (skReq.skPrincipal && skReq.skPrincipal.permissions !== 'admin') {
-      res.status(403).json({ error: 'Admin permission required for graph editing.' });
+      res.status(403).json({ error: 'Admin permission required.' });
       return false;
     }
     return true;
@@ -899,6 +980,22 @@ export class ApiHandler {
   }
 
   /**
+   * Directory the configured catalog file lives in, normalized and with a
+   * trailing slash (e.g. https://host/owner/repo/main/) — the single source
+   * of truth for both the download URLs this server advertises and the ones
+   * handleDownloadDatabase will accept. Null if catalogUrl is unset or
+   * unparseable.
+   */
+  private catalogBaseUrl(): string | null {
+    if (!this.config.catalogUrl) return null;
+    try {
+      return new URL('.', this.config.catalogUrl).href;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Handle fetch available databases from remote catalog
    * GET /signalk/v1/api/router/databases/available
    */
@@ -916,9 +1013,8 @@ export class ApiHandler {
       }
       const catalog = await response.json() as any;
       // Derive the base URL from the catalog URL for constructing download links
-      const catalogUrlStr = catalogUrl.toString();
-      const baseUrl = catalogUrlStr.substring(0, catalogUrlStr.lastIndexOf('/') + 1);
-      if (catalog.regions && Array.isArray(catalog.regions)) {
+      const baseUrl = this.catalogBaseUrl();
+      if (baseUrl && catalog.regions && Array.isArray(catalog.regions)) {
         for (const region of catalog.regions) {
           if (region.file) {
             region.downloadUrl = baseUrl + region.file;
@@ -954,16 +1050,28 @@ export class ApiHandler {
         return;
       }
 
-      // Validate that the download URL comes from the configured catalog origin (SSRF prevention)
+      // Only accept URLs under the catalog's own directory — the exact set
+      // handleAvailableDatabases advertises. An origin-only check is not
+      // enough on a shared host: the default catalog lives on
+      // raw.githubusercontent.com, whose origin every GitHub user's repo
+      // shares, so any of them would have passed.
       if (!this.config.catalogUrl) {
         res.status(400).json({ error: 'No catalog URL configured; cannot validate download origin' });
         return;
       }
+      const trustedBase = this.catalogBaseUrl();
+      if (!trustedBase) {
+        res.status(400).json({ error: 'Configured catalog URL is not a valid URL' });
+        return;
+      }
       try {
-        const allowedOrigin = new URL(this.config.catalogUrl).origin;
-        const reqOrigin = new URL(url).origin;
-        if (reqOrigin !== allowedOrigin) {
-          res.status(400).json({ error: `Download URL must originate from the configured catalog server (${allowedOrigin})` });
+        // Compare the *parsed* href, not the raw string: dot segments and
+        // percent-encoding are normalized away first, so a URL that merely
+        // starts with the trusted prefix but resolves elsewhere
+        // (…/main/../../other/evil.sqlite) is rejected.
+        const normalized = new URL(url).href;
+        if (!normalized.startsWith(trustedBase)) {
+          res.status(400).json({ error: `Download URL must be under the configured catalog path (${trustedBase})` });
           return;
         }
       } catch {
@@ -1016,6 +1124,7 @@ export class ApiHandler {
         res.status(502).json({ error: 'Download failed: empty response body' });
         return;
       }
+      let closedForRename = false;
       try {
         const src = Readable.fromWeb(response.body as any);
         if (isGzip) {
@@ -1024,7 +1133,21 @@ export class ApiHandler {
         } else {
           await pipeline(src, fs.createWriteStream(tmpPath));
         }
-        await fs.promises.rename(tmpPath, destPath);
+        try {
+          await fs.promises.rename(tmpPath, destPath);
+        } catch (e: any) {
+          // Re-downloading an already-installed region renames over a file the
+          // db-worker may still hold open. POSIX allows that (the old inode
+          // stays alive for the open handle until the hot-reload below swaps
+          // it out), but Windows refuses with EPERM/EBUSY. Drop the handles
+          // and retry — the hot-reload rebuilds the database either way.
+          const code = e?.code;
+          if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') throw e;
+          console.warn(`[routeiq] Rename blocked (${code}); closing database handles and retrying`);
+          await this.db!.close();
+          closedForRename = true;
+          await fs.promises.rename(tmpPath, destPath);
+        }
       } catch (e) {
         try { await fs.promises.unlink(tmpPath); } catch { /* ignore missing tmp file */ }
         throw e;
@@ -1033,9 +1156,11 @@ export class ApiHandler {
       const sizeBytes = (await fs.promises.stat(destPath)).size;
       console.log(`[routeiq] Database saved: ${saveFilename} (${sizeBytes} bytes)`);
 
-      // Refresh metadata cache so the new DB shows in the installed list
+      // Refresh metadata cache so the new DB shows in the installed list.
+      // Skipped when the rename had to close the database first — there is no
+      // worker left to ask, and the hot-reload below re-reads everything.
       try {
-        await this.db!.reloadMetadata();
+        if (!closedForRename) await this.db!.reloadMetadata();
         console.log(`[routeiq] Metadata cache refreshed after download`);
       } catch (e) {
         console.warn(`[routeiq] Metadata refresh failed: ${e}`);
@@ -1051,6 +1176,11 @@ export class ApiHandler {
           res.status(500).json({ error: `Database saved but hot-reload failed: ${e}` });
           return;
         }
+      } else if (closedForRename) {
+        // Nothing will reopen what the rename fallback had to close.
+        console.error('[routeiq] Database closed for rename but no reload hook is registered');
+        res.status(500).json({ error: `${saveFilename} was installed, but the routing database is now closed — restart the plugin to use it` });
+        return;
       }
 
       res.json({

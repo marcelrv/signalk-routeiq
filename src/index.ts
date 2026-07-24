@@ -301,7 +301,7 @@ export function pluginConstructor(app: ServerAPI) {
           maxLoadedRegions: {
             type: 'number',
             title: 'Max loaded regions (dynamic loading)',
-            description: 'Only applies with dynamic loading on. Keep at most this many regions loaded in memory, evicting the least-recently-used region once a route finishes and none is in progress. 0 = unlimited (keep every region ever loaded).',
+            description: 'Only applies with dynamic loading on. Keep at most this many regions loaded in memory, evicting the least-recently-used region once a route finishes and none is in progress. 0 = unlimited (keep every region ever loaded) — uncapped memory growth on long passages.',
             default: DEFAULT_CONFIG.maxLoadedRegions,
           },
         },

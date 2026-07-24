@@ -1313,8 +1313,9 @@ export class RoutingDatabase {
 
   /**
    * §4a M5: bounded working set. No-op unless dynamic loading is on and
-   * maxLoadedRegions > 0 (the default, 0, is unlimited — byte-for-byte
-   * today's behavior). No-op while a route is in flight (activeRouteCount >
+   * maxLoadedRegions > 0 (the constructor default, 0, is unlimited; the
+   * plugin passes DEFAULT_CONFIG.maxLoadedRegions, which is a finite cap so
+   * the heap can't grow without bound). No-op while a route is in flight (activeRouteCount >
    * 0) — never evict out from under an in-progress or about-to-run search;
    * endRoute() is the only caller, and only once activeRouteCount reaches 0.
    *

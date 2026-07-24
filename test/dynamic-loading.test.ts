@@ -675,7 +675,7 @@ describe('§4a dynamic database loading', () => {
   });
 
   describe('§4a M5: bounded working set (maxLoadedRegions LRU cap)', () => {
-    it('maxLoadedRegions=0 (default) keeps every loaded region — no eviction', async () => {
+    it('maxLoadedRegions=0 (unlimited) keeps every loaded region — no eviction', async () => {
       buildFixtures();
       const db = new RoutingDatabase(fixturesDir, true, 0);
       try {

@@ -219,10 +219,16 @@ export interface PluginConfig {
   // 0 = containment only (load only the region the vessel is inside).
   loadRadiusNm: number;
   // §4a M5: bounded working-set for dynamic loading. 0 = unlimited (keep
-  // every region a route/position has loaded — today's behavior). >0 = keep
-  // at most N regions loaded, evicting the least-recently-used region(s)
-  // beyond that once no route is in flight. Only takes effect with
-  // dynamicLoading on.
+  // every region a route/position has loaded). >0 = keep at most N regions
+  // loaded, evicting the least-recently-used region(s) beyond that once no
+  // route is in flight. Only takes effect with dynamicLoading on.
+  //
+  // Defaults to a finite cap because the graph lives in the main thread's V8
+  // heap (RoutingDatabase.edgesBySource, one object per directed edge): a
+  // regional file runs 60k–270k edges, so an unbounded working set grows into
+  // the hundreds of MB on a long passage and GC-thrashes a Pi. Six regions is
+  // a wide corridor — eviction only happens between routes, and an evicted
+  // region reloads on demand.
   maxLoadedRegions: number;
 }
 
@@ -247,5 +253,5 @@ export const DEFAULT_CONFIG: PluginConfig = {
   dynamicLoading: true,
   eagerLoadAtPosition: true,
   loadRadiusNm: 0,
-  maxLoadedRegions: 0,
+  maxLoadedRegions: 6,
 };
