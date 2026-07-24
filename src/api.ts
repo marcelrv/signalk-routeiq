@@ -129,9 +129,6 @@ export class ApiHandler {
     // GET /signalk/v1/api/router/waterways?bbox=minLon,minLat,maxLon,maxLat
     this.router.get('/waterways', this.handleWaterways.bind(this));
 
-    // GET /signalk/v1/api/router/graph/databases — list loaded DB filenames for editing
-    this.router.get('/graph/databases', this.handleGraphDatabases.bind(this));
-
     // GET /signalk/v1/api/router/graph/overlay/stats — overlay edit counts
     this.router.get('/graph/overlay/stats', this.handleOverlayStats.bind(this));
     this.router.post('/graph/overlay/repair', this.handleOverlayRepair.bind(this));
@@ -153,9 +150,6 @@ export class ApiHandler {
 
     // POST /signalk/v1/api/router/databases/download — download a database file
     this.router.post('/databases/download', this.handleDownloadDatabase.bind(this));
-
-    // GET /signalk/v1/api/router/databases/loaded — §4a per-file coverage/state
-    this.router.get('/databases/loaded', this.handleDatabasesLoaded.bind(this));
 
     // POST /signalk/v1/api/router/databases/load — §4a manual per-file load
     this.router.post('/databases/load', this.handleDatabaseLoad.bind(this));
@@ -554,25 +548,6 @@ export class ApiHandler {
   }
 
   /**
-   * Handle list loaded databases for graph editing
-   * GET /signalk/v1/api/router/graph/databases
-   */
-  private async handleGraphDatabases(req: Request, res: Response, next: NextFunction): Promise<void> {
-    if (!this.isReady()) {
-      res.status(503).json({ error: 'Database not ready' });
-      return;
-    }
-    try {
-      const list = await this.db!.getDatabaseList();
-      res.json({ databases: list });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      res.status(500).json({ error: message });
-      next(error);
-    }
-  }
-
-  /**
    * Return overlay edit counts for the editor status bar.
    * GET /signalk/v1/api/router/graph/overlay/stats
    */
@@ -870,7 +845,7 @@ export class ApiHandler {
       return;
     }
     try {
-      const info = await this.db.getDatabaseInfo();
+      const info = await this.db.getDatabaseCatalog();
       res.json({ databases: info });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -1049,28 +1024,6 @@ export class ApiHandler {
       const message = error instanceof Error ? error.message : 'Unknown error';
       console.error('[routeiq] Database download error:', error);
       res.status(500).json({ error: `Download failed: ${message}` });
-      next(error);
-    }
-  }
-
-  /**
-   * §4a per-file coverage/state — works in both modes. Non-dynamic mode
-   * always reports every locally-discovered file 'loaded' (today's
-   * unconditional load-everything behavior); dynamic mode reports each
-   * file's real not_loaded/loading/loaded state from the coverage index
-   * built by peekMetadata at startup.
-   * GET /signalk/v1/api/router/databases/loaded
-   */
-  private async handleDatabasesLoaded(req: Request, res: Response, next: NextFunction): Promise<void> {
-    if (!this.db) {
-      res.status(503).json({ error: 'Database not ready' });
-      return;
-    }
-    try {
-      res.json({ databases: this.db.getCoverageStatus() });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      res.status(500).json({ error: message });
       next(error);
     }
   }

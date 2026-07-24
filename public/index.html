@@ -2804,44 +2804,31 @@ label.switch-row {
     coverageLayer.clearLayers();
     // Draw EVERY installed database's coverage, loaded or not, colouring by
     // load state so the operator can see what's available around them, not
-    // only what happens to be in memory. /databases/loaded lists all
-    // installed DBs with {state, coverage-bbox}; /databases returns the
-    // richer metadata (precise boundaryGeometry, name, country) but only for
-    // currently-loaded DBs. Merge: the state list decides what to draw; the
-    // rich list upgrades a loaded DB's box to its real coastline shape.
-    Promise.all([
-      fetch(getApiBase() + '/signalk/v1/api/router/databases/loaded').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(databasesUrl()).then(r => r.ok ? r.json() : null).catch(() => null)
-    ]).then(function (res) {
-      const stateList = (res[0] && res[0].databases) || null;
-      const richList = (res[1] && res[1].databases) || [];
-      const richByFile = {};
-      richList.forEach(function (d) { if (d.filename) richByFile[d.filename] = d; });
-      // Fall back to the loaded-only rich list on an older server that lacks
-      // /databases/loaded (treat everything it returns as loaded).
-      const list = stateList || richList.map(function (d) {
-        return { filename: d.filename, state: 'loaded', coverage: d.boundingBox };
-      });
-      list.forEach(function (db) {
-        const loaded = db.state === 'loaded';
-        const meta = richByFile[db.filename] || {};
-        const style = loaded
-          ? { color: '#22c55e', weight: 2, opacity: 0.9, fillColor: '#22c55e', fillOpacity: 0.10 }
-          : { color: '#94a3b8', weight: 1.5, opacity: 0.75, fillColor: '#94a3b8', fillOpacity: 0.04, dashArray: '6,5' };
-        let layer = null;
-        if (loaded && meta.boundaryGeometry) {
-          layer = L.geoJSON(meta.boundaryGeometry, { style: style });
-        } else {
-          const bb = db.coverage || meta.boundingBox;
-          if (bb) layer = L.rectangle([[bb.min_lat, bb.min_lon], [bb.max_lat, bb.max_lon]], style);
-        }
-        if (!layer) return;
-        const nm = meta.name || db.filename || 'Unknown';
-        const label = escapeHtml(nm + (meta.country ? ' (' + meta.country + ')' : '') + ' — ' + (loaded ? 'loaded' : 'not loaded'));
-        layer.bindTooltip(label, { sticky: true });
-        layer.addTo(coverageLayer);
-      });
-    }).catch(() => {});
+    // only what happens to be in memory. /databases now returns one record
+    // per installed DB carrying both its state and its rich metadata
+    // (precise boundaryGeometry, name, country), so a single fetch is enough.
+    fetch(databasesUrl()).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
+      .then(function (res) {
+        const list = (res && res.databases) || [];
+        list.forEach(function (db) {
+          const loaded = db.state === 'loaded';
+          const style = loaded
+            ? { color: '#22c55e', weight: 2, opacity: 0.9, fillColor: '#22c55e', fillOpacity: 0.10 }
+            : { color: '#94a3b8', weight: 1.5, opacity: 0.75, fillColor: '#94a3b8', fillOpacity: 0.04, dashArray: '6,5' };
+          let layer = null;
+          if (loaded && db.boundaryGeometry) {
+            layer = L.geoJSON(db.boundaryGeometry, { style: style });
+          } else {
+            const bb = db.coverage || db.boundingBox;
+            if (bb) layer = L.rectangle([[bb.min_lat, bb.min_lon], [bb.max_lat, bb.max_lon]], style);
+          }
+          if (!layer) return;
+          const nm = db.name || db.filename || 'Unknown';
+          const label = escapeHtml(nm + (db.country ? ' (' + db.country + ')' : '') + ' — ' + (loaded ? 'loaded' : 'not loaded'));
+          layer.bindTooltip(label, { sticky: true });
+          layer.addTo(coverageLayer);
+        });
+      }).catch(() => {});
   }
 
   function tideStationIcon() {
@@ -5912,11 +5899,11 @@ label.switch-row {
   // installed DBs use camelCase (boundingBox / boundaryGeometry).
   function dmRegionGeo(r) {
     return {
-      // r.coverage is the not-yet-loaded shape from /databases/loaded
-      // (DatabaseCoverageEntry['bbox']) -- installed records that were
-      // never brought into memory only ever carry this field, not
-      // boundingBox (that only appears once a file's rich metadata has
-      // actually been read, i.e. once it's loaded).
+      // r.coverage is the DatabaseCoverageEntry['bbox'] shape /databases
+      // always carries for every installed record; r.boundingBox is the
+      // same bbox re-exposed under the rich-metadata field name (null when
+      // the file has no metadata table at all) -- kept as a fallback so
+      // this stays tolerant of either key being present.
       bbox: r.bounding_box || r.boundingBox || r.coverage || null,
       geom: r.boundary_geometry || r.boundaryGeometry || null,
     };
@@ -6595,42 +6582,17 @@ label.switch-row {
     dmInstalledLoading.style.display = '';
     dmInstalledList.style.display = 'none';
 
-    // Merge two endpoints, same pattern the chart's coverage overlay uses
-    // (see fetchCoverage() above): /databases/loaded lists EVERY installed
-    // database with its load state (loaded/loading/not_loaded), including
-    // ones dynamic loading hasn't brought into memory yet; /databases only
-    // has rich metadata (name/country/description/tags/stats) for databases
-    // currently loaded. Without this merge the Installed tab silently
-    // dropped any installed-but-not-yet-loaded database.
-    Promise.all([
-      fetch(getApiBase() + '/signalk/v1/api/router/databases/loaded', { signal: AbortSignal.timeout(10000) })
-        .then(function(r) { return r.ok ? r.json() : null; }).catch(function() { return null; }),
-      fetch(getInstalledUrl(), { signal: AbortSignal.timeout(10000) })
-        .then(function(r) { return r.ok ? r.json() : null; }).catch(function() { return null; })
-    ]).then(function(results) {
-      var stateList = results[0] && results[0].databases;
-      var richList = (results[1] && results[1].databases) || [];
-      var richByFile = {};
-      richList.forEach(function(d) { if (d.filename) richByFile[d.filename] = d; });
-
-      // Fall back to the rich (loaded-only) list on an older server that
-      // lacks /databases/loaded -- treat everything it returns as loaded.
-      dmInstalledRegions = stateList
-        ? stateList.map(function(s) {
-            var rich = richByFile[s.filename] || {};
-            return Object.assign({}, rich, {
-              filename: s.filename,
-              loadState: s.state,
-              coverage: s.coverage,
-              // Rich (loaded) stats are authoritative when present; the
-              // state list also carries stats now (server peeks node/edge/
-              // POI counts off the file even before it's loaded), so a
-              // not-yet-loaded database still shows real numbers instead
-              // of nothing.
-              stats: rich.stats || s.stats || null,
-            });
-          })
-        : richList.map(function(d) { return Object.assign({}, d, { loadState: 'loaded' }); });
+    // /databases returns one record per installed database, carrying both
+    // its load state (loaded/loading/not_loaded) and its rich metadata
+    // (name/country/description/tags/stats) in a single fetch -- no merge
+    // needed.
+    fetch(getInstalledUrl(), { signal: AbortSignal.timeout(10000) })
+      .then(function(r) { return r.ok ? r.json() : null; }).catch(function() { return null; })
+      .then(function(res) {
+      var list = (res && res.databases) || [];
+      dmInstalledRegions = list.map(function(d) {
+        return Object.assign({}, d, { loadState: d.state, coverage: d.coverage, stats: d.stats });
+      });
 
       dmRenderInstalled();
       // Re-render the available list with install-status info, now that it's

@@ -38,36 +38,35 @@ function haversine(lat1: number, lon1: number, lat2: number, lon2: number): numb
 }
 
 // §4a task 3 (coverageIndex-as-single-source-of-truth refactor) regression:
-// getCoverageStatus() (GET .../databases/loaded), getLoadingStatus()
-// (GET .../databases/status), getDatabaseList() (GET .../graph/databases),
-// and getDatabaseInfo() (GET .../databases) all used to be backed by four
-// separately hand-synced stores (coverageIndex, loadedDbFilenames,
-// cachedDatabaseList, metadataCache). Now they all derive from coverageIndex
+// getCoverageStatus() (GET .../databases/status's sibling per-file state
+// inspector), getLoadingStatus() (GET .../databases/status), and
+// getDatabaseCatalog() (GET .../databases) all derive from coverageIndex
 // alone, so the set of "loaded" filenames each one reports must always
 // agree — assert that after a load and after an unload. Sorted before
 // comparing: coverageIndex's Map iteration order is discovery/insertion
 // order, not load-completion order, and this assertion is about set
 // membership, not ordering.
-async function loadedFilenamesFromAllFourModels(db: RoutingDatabase): Promise<{
-  coverage: string[]; loadingStatus: string[]; databaseList: string[]; databaseInfo: string[];
+async function loadedFilenamesFromAllReadModels(db: RoutingDatabase): Promise<{
+  coverage: string[]; loadingStatus: string[]; catalog: string[];
 }> {
   const coverage = db.getCoverageStatus()
     .filter(s => s.state === 'loaded')
     .map(s => s.filename)
     .sort();
   const loadingStatus = [...db.getLoadingStatus().filenames].sort();
-  const databaseList = (await db.getDatabaseList()).map(d => d.filename).sort();
-  const databaseInfo = (await db.getDatabaseInfo()).map(d => d.filename).sort();
-  return { coverage, loadingStatus, databaseList, databaseInfo };
+  const catalog = (await db.getDatabaseCatalog())
+    .filter(d => d.state === 'loaded')
+    .map(d => d.filename)
+    .sort();
+  return { coverage, loadingStatus, catalog };
 }
 
-async function assertFourModelsConsistent(db: RoutingDatabase, expectedLoaded: string[]): Promise<void> {
+async function assertReadModelsConsistent(db: RoutingDatabase, expectedLoaded: string[]): Promise<void> {
   const expected = [...expectedLoaded].sort();
-  const { coverage, loadingStatus, databaseList, databaseInfo } = await loadedFilenamesFromAllFourModels(db);
+  const { coverage, loadingStatus, catalog } = await loadedFilenamesFromAllReadModels(db);
   assert.deepStrictEqual(coverage, expected, 'getCoverageStatus() loaded filenames mismatch');
   assert.deepStrictEqual(loadingStatus, expected, 'getLoadingStatus().filenames mismatch');
-  assert.deepStrictEqual(databaseList, expected, 'getDatabaseList() filenames mismatch');
-  assert.deepStrictEqual(databaseInfo, expected, 'getDatabaseInfo() filenames mismatch');
+  assert.deepStrictEqual(catalog, expected, 'getDatabaseCatalog() filenames mismatch');
 }
 
 // Region A: a 4-boundary-node square, triangulated along one diagonal —
@@ -296,8 +295,8 @@ describe('§4a dynamic database loading', () => {
       assert.strictEqual(baselineEdgesBySourceSize, 6);
     });
 
-    it('§4a task 3: after a load, getCoverageStatus/getLoadingStatus/getDatabaseList/getDatabaseInfo agree on the loaded set', async () => {
-      await assertFourModelsConsistent(db, ['region-a.sqlite', 'region-b.sqlite']);
+    it('§4a task 3: after a load, getCoverageStatus/getLoadingStatus/getDatabaseCatalog agree on the loaded set', async () => {
+      await assertReadModelsConsistent(db, ['region-a.sqlite', 'region-b.sqlite']);
     });
 
     it('the diagonal V0<->V2 pair is a genuine synthetic edge, not a DB row', async () => {
@@ -334,8 +333,8 @@ describe('§4a dynamic database loading', () => {
       assert.strictEqual(status.get('region-b.sqlite'), 'loaded');
     });
 
-    it('§4a task 3: after an unload, all four read models shrink together consistently', async () => {
-      await assertFourModelsConsistent(db, ['region-b.sqlite']);
+    it('§4a task 3: after an unload, all three read models shrink together consistently', async () => {
+      await assertReadModelsConsistent(db, ['region-b.sqlite']);
     });
 
     it('(d) refuses to unload the only remaining loaded database', async () => {

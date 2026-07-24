@@ -89,15 +89,16 @@ interface PoiRow {
 type NavmeshRegionWithDb = Navmesh.NavmeshRegion & { dbIndex: number };
 
 /** Coverage/state entry for one locally-discovered .sqlite file — the
- *  backing store for GET .../databases/loaded in both dynamic and
- *  non-dynamic mode (§4a task 1/5). Built by peekMetadata in dynamic mode
- *  before anything loads; derived from the bulk load's metadata in
- *  non-dynamic mode, where every file is always 'loaded'. */
+ *  backing store for getCoverageStatus() and getDatabaseCatalog() (the
+ *  latter backing GET .../databases) in both dynamic and non-dynamic mode
+ *  (§4a task 1/5). Built by peekMetadata in dynamic mode before anything
+ *  loads; derived from the bulk load's metadata in non-dynamic mode, where
+ *  every file is always 'loaded'. */
 export interface DatabaseCoverageEntry {
   filename: string;
   path: string;
   /** Parsed metadata.bounding_box JSON — kept in the same
-   *  {min_lat,min_lon,max_lat,max_lon} shape getDatabaseInfo() already
+   *  {min_lat,min_lon,max_lat,max_lon} shape getDatabaseCatalog() already
    *  exposes elsewhere in this file's public API, rather than converted to
    *  camelCase. */
   bbox: { min_lat: number; min_lon: number; max_lat: number; max_lon: number } | null;
@@ -169,11 +170,11 @@ export class RoutingDatabase {
    *  before anything is opened; derived from the bulk load's metadata in
    *  non-dynamic mode (every file reported 'loaded'). The single
    *  authoritative "installed/loaded databases" catalog — every one of
-   *  getDatabaseInfo(), getDatabaseList(), getLoadingStatus(), and
-   *  getCoverageStatus() (backing GET .../databases, .../graph/databases,
-   *  .../databases/status, and .../databases/loaded respectively) derives
-   *  its answer from this map alone, so they can never drift out of sync
-   *  with each other. */
+   *  getDatabaseCatalog(), getLoadingStatus(), and getCoverageStatus()
+   *  (backing GET .../databases, .../databases/status, and the `databases`
+   *  field of the /databases/load and /databases/unload POST responses,
+   *  respectively) derives its answer from this map alone, so they can
+   *  never drift out of sync with each other. */
   private coverageIndex: Map<string, DatabaseCoverageEntry> = new Map();
 
   /** dbIndex -> node ids that database contributed to `nodes`, so
@@ -376,39 +377,60 @@ export class RoutingDatabase {
     return this.sendMessage('getMetadata');
   }
 
-  /** Backing data for GET .../databases — one element per currently-loaded
-   *  (state === 'loaded') database, derived from coverageIndex rather than
-   *  a separate metadataCache catalog. Matches the shape/null-handling the
-   *  old metadataCache-backed implementation produced: meta fields come
-   *  from the entry's `meta` (skipped entirely if null — a loaded database
-   *  should always have peeked/bulk-load metadata, but this stays tolerant
-   *  of the same malformed-data cases rebuildCoverageIndexAfterBulkLoad and
-   *  mergeMetadataIntoCoverageIndex already tolerate elsewhere in this
-   *  file), tags/boundingBox/boundaryGeometry are JSON-parsed, and stats
-   *  comes from the entry's own `stats` field. */
-  async getDatabaseInfo(): Promise<Array<{
-    id: number; country: string; name: string; description: string | null;
-    lastUpdateDate: string; tags: string[]; boundingBox: { min_lat: number; min_lon: number; max_lat: number; max_lon: number } | null;
+  /** Backing data for GET .../databases — one record per entry in
+   *  coverageIndex, i.e. every installed database in every state (not just
+   *  currently-loaded ones), each record the union of what the old
+   *  getDatabaseInfo() (rich metadata, loaded-only) and getCoverageStatus()
+   *  (state/coverage, all installed) used to return separately. `state`,
+   *  `coverage` (= entry.bbox), `dbIndex`, and `stats` always come from the
+   *  entry itself; the descriptive fields come from entry.meta using the
+   *  same JSON-parsing/null-handling getDatabaseInfo() used to apply
+   *  (tags/boundingBox/boundaryGeometry parsed from JSON strings). Unlike
+   *  the old loaded-only getDatabaseInfo(), a null entry.meta (e.g. a
+   *  legacy database with no metadata table) no longer drops the record —
+   *  the entry-derived fields are still emitted, with the meta-derived
+   *  fields defaulted to null/empty so the database still appears in the
+   *  catalog. `boundingBox` carries the same bbox shape as `coverage`; both
+   *  keys are included so the frontend needs no field renames. */
+  async getDatabaseCatalog(): Promise<Array<{
+    filename: string; state: 'not_loaded' | 'loading' | 'loaded';
+    coverage: DatabaseCoverageEntry['bbox']; dbIndex: number | null;
+    stats: DatabaseCoverageEntry['stats'];
+    id: number | null; country: string | null; name: string | null; description: string | null;
+    lastUpdateDate: string | null; tags: string[];
+    boundingBox: { min_lat: number; min_lon: number; max_lat: number; max_lon: number } | null;
     boundaryGeometry: any | null; schemaVersion: number | null;
-    contributor: string | null; url: string | null; filename: string;
-    stats: { nodes: number; edges: number; pois: number };
+    contributor: string | null; url: string | null;
   }>> {
     const result: Array<{
-      id: number; country: string; name: string; description: string | null;
-      lastUpdateDate: string; tags: string[]; boundingBox: { min_lat: number; min_lon: number; max_lat: number; max_lon: number } | null;
+      filename: string; state: 'not_loaded' | 'loading' | 'loaded';
+      coverage: DatabaseCoverageEntry['bbox']; dbIndex: number | null;
+      stats: DatabaseCoverageEntry['stats'];
+      id: number | null; country: string | null; name: string | null; description: string | null;
+      lastUpdateDate: string | null; tags: string[];
+      boundingBox: { min_lat: number; min_lon: number; max_lat: number; max_lon: number } | null;
       boundaryGeometry: any | null; schemaVersion: number | null;
-      contributor: string | null; url: string | null; filename: string;
-      stats: { nodes: number; edges: number; pois: number };
+      contributor: string | null; url: string | null;
     }> = [];
     for (const entry of this.coverageIndex.values()) {
-      if (entry.state !== 'loaded' || !entry.meta) continue;
       const m = entry.meta;
       result.push({
-        ...m,
-        tags: m.tags ? JSON.parse(m.tags) : [],
-        boundingBox: m.boundingBox ? JSON.parse(m.boundingBox) : null,
-        boundaryGeometry: m.boundaryGeometry ? JSON.parse(m.boundaryGeometry) : null,
-        stats: entry.stats as { nodes: number; edges: number; pois: number },
+        filename: entry.filename,
+        state: entry.state,
+        coverage: entry.bbox,
+        dbIndex: entry.dbIndex,
+        stats: entry.stats,
+        id: m ? m.id : null,
+        country: m ? m.country : null,
+        name: m ? m.name : null,
+        description: m ? m.description : null,
+        lastUpdateDate: m ? m.lastUpdateDate : null,
+        tags: m && m.tags ? JSON.parse(m.tags) : [],
+        boundingBox: m && m.boundingBox ? JSON.parse(m.boundingBox) : null,
+        boundaryGeometry: m && m.boundaryGeometry ? JSON.parse(m.boundaryGeometry) : null,
+        schemaVersion: m ? m.schemaVersion : null,
+        contributor: m ? m.contributor : null,
+        url: m ? m.url : null,
       });
     }
     return result;
@@ -605,11 +627,10 @@ export class RoutingDatabase {
 
     this.graphLoaded = true;
 
-    // Populate the coverage index too so GET .../databases/loaded reports
+    // Populate the coverage index too so GET .../databases reports
     // something sensible in non-dynamic mode as well — every
     // locally-discovered file, all 'loaded' (today's unconditional
-    // load-everything behavior, just also exposed through that new
-    // endpoint).
+    // load-everything behavior, just also exposed through that catalog).
     this.rebuildCoverageIndexAfterBulkLoad(metadata);
   }
 
@@ -618,10 +639,11 @@ export class RoutingDatabase {
    *  load's own metadata round-trip (init()'s bulkFileList gives the
    *  filename/path/dbIndex triple in the exact order+index dbPaths were
    *  opened in, so this reproduces the same dbIndex assignment a
-   *  cachedDatabaseList array used to), so GET .../databases/loaded has
-   *  something to report without changing anything about the bulk load
-   *  itself. Never throws — malformed metadata JSON just leaves that file's
-   *  coverage fields null, same tolerance as the rest of this file. */
+   *  cachedDatabaseList array used to), so GET .../databases and
+   *  getCoverageStatus() have something to report without changing
+   *  anything about the bulk load itself. Never throws — malformed
+   *  metadata JSON just leaves that file's coverage fields null, same
+   *  tolerance as the rest of this file. */
   private rebuildCoverageIndexAfterBulkLoad(metadata: Array<{
     id: number; country: string; name: string; description: string | null;
     lastUpdateDate: string; tags: string | null; boundingBox: string | null;
@@ -837,8 +859,11 @@ export class RoutingDatabase {
   // dynamicLoading is false, so none of it can affect non-dynamic behavior.
   // ---------------------------------------------------------------------
 
-  /** Coverage/state for every locally-known database, in both modes — the
-   *  backing data for GET .../databases/loaded. */
+  /** Coverage/state for every locally-known database, in both modes —
+   *  folded into getDatabaseCatalog() (GET .../databases), and used
+   *  directly as the `databases` field of the /databases/load and
+   *  /databases/unload POST responses, and by tests as the per-file state
+   *  inspector. */
   getCoverageStatus(): Array<{ filename: string; state: 'not_loaded' | 'loading' | 'loaded'; coverage: DatabaseCoverageEntry['bbox']; nodes?: number; stats: DatabaseCoverageEntry['stats'] }> {
     const result: Array<{ filename: string; state: 'not_loaded' | 'loading' | 'loaded'; coverage: DatabaseCoverageEntry['bbox']; nodes?: number; stats: DatabaseCoverageEntry['stats'] }> = [];
     for (const entry of this.coverageIndex.values()) {
@@ -1769,21 +1794,6 @@ export class RoutingDatabase {
       lon: toNodeCoords?.lon || 0,
       ...(pathPoints.length > 0 ? { path_points: pathPoints } : {}),
     };
-  }
-
-  /** Backing data for GET .../graph/databases — one {index, filename, path}
-   *  triple per currently-loaded database, derived from coverageIndex
-   *  instead of a separately hand-synced cachedDatabaseList array. Entries
-   *  without a dbIndex yet (not_loaded/loading) are skipped, same as
-   *  cachedDatabaseList only ever containing databases that finished
-   *  loading. */
-  async getDatabaseList(): Promise<Array<{ index: number; filename: string; path: string }>> {
-    const result: Array<{ index: number; filename: string; path: string }> = [];
-    for (const entry of this.coverageIndex.values()) {
-      if (entry.dbIndex === null) continue;
-      result.push({ index: entry.dbIndex, filename: entry.filename, path: entry.path });
-    }
-    return result;
   }
 
   async updateNode(dbIndex: number, nodeId: number, updates: { node_depth?: number }): Promise<void> {
