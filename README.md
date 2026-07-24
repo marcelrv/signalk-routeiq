@@ -17,8 +17,9 @@ An offline-first, vessel-aware nautical route planner designed to run natively a
 
 - **Offline-First Routing**: Pre-computed routing graph enables instant route calculation without internet connectivity
 - **Vessel-Aware**: Considers draft, beam, and air draft (with configurable safety margins) to ensure safe navigation
-- **Tide-Aware (optional)**: Can factor in estimated tidal currents when the `signalk-tides` plugin is available
+- **Tide-Aware (optional)**: Can factor in estimated tidal currents — requires the [`signalk-tides`](https://github.com/signalk/signalk-tides) plugin to also be installed and running
 - **Interactive Web UI**: Leaflet-based map interface with click-and-drag route planning
+- **Freeboard-SK Integration**: Runs as a [Freeboard-SK](https://github.com/SignalK/freeboard-sk) Plotter Extension panel, so you can plan routes without leaving Freeboard-SK's own charting UI
 - **GPX Export**: Export routes for use in OpenCPN, WilhelmSK, and other navigation software
 - **POI Search**: Offline search for ports, marinas, locks, and other points of interest
 - **Chart Selection**: Nautical charts via Signal K's `resources/charts` API (raster and S-57 vector), plus built-in OpenStreetMap / OpenSeaMap
@@ -34,12 +35,17 @@ RouteIQ is made up of three pieces:
 
 Compiled routing databases are published to [signalk-router-data](https://github.com/marcelrv/signalk-router-data) and can be downloaded directly from the plugin's "Manage Routing Data" screen — you don't need to run the pipeline yourself.
 
+RouteIQ can be used two ways: as its own standalone web app (served by the plugin), or embedded directly inside [Freeboard-SK](https://github.com/SignalK/freeboard-sk) as a Plotter Extension panel, so you can plan routes on top of the chart you're already viewing there.
+
 ## Installation
 
 1. Install **RouteIQ** from the Signal K App Store (Server → Appstore, in your Signal K server's admin UI), or manually by placing this plugin in your Signal K server's `node_modules`.
 2. Restart your Signal K server and enable the plugin under Server → Plugin Config.
-3. Open the RouteIQ web app (linked from the Signal K webapps list) and use **Manage Routing Data** to download a routing database for your area.
-4. Set your vessel dimensions (or let RouteIQ auto-detect them from `design.draft` etc. if your Signal K server provides them) and start planning routes.
+3. Open the RouteIQ web app (linked from the Signal K webapps list), or open it as a panel inside Freeboard-SK if you use that.
+4. Click the ☰ menu icon in the top-right corner of the screen to open the Routing / Charts / View settings, and use **Manage Routing Data** there to download a routing database for your area.
+5. Set your vessel dimensions (or let RouteIQ auto-detect them from `design.draft` etc. if your Signal K server provides them) and start planning routes.
+
+Want tide-aware routing? Install and enable the [`signalk-tides`](https://github.com/signalk/signalk-tides) plugin first, then turn on "Consider Tides" in RouteIQ's settings (☰ menu → Routing) or per request.
 
 ## Configuration
 
