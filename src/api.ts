@@ -59,9 +59,16 @@ export class ApiHandler {
 
   private setupRoutes(): void {
     // CORS for sandbox/cross-origin dev access.
-    // Wildcard is restricted to safe (read-only) routes only.
-    // Mutation routes (vessel update, graph edits, database download) deliberately
-    // omit ACAO so browsers block unauthenticated cross-origin writes.
+    // Wildcard (Access-Control-Allow-Origin: *) is granted only to safe,
+    // read-only routes plus a small allowlist of non-destructive POSTs.
+    // NOTE: this header does NOT provide authorization. CORS only restricts
+    // which origins a browser will let its own JS read a cross-origin
+    // response from — it has no effect on curl/native/server-to-server
+    // clients, and by itself does nothing to stop a request from reaching
+    // and mutating the server. Authorization for state-mutating endpoints
+    // (graph node/edge edits, overlay repair, database load/unload/delete/
+    // download) is enforced separately by requireAuth(), which checks
+    // Signal K's own session/token authentication and admin permission.
     const CORS_SAFE_POSTS = new Set(['/route', '/route/departures', '/export/gpx', '/push']);
     this.router.use((_req, res, next) => {
       const allowCors = _req.method === 'GET'
@@ -934,6 +941,7 @@ export class ApiHandler {
    * Body: { url: string, filename: string }
    */
   private async handleDownloadDatabase(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.requireAuth(req, res)) return;
     try {
       const { url, filename } = req.body;
       if (!url || !filename) {
