@@ -37,6 +37,39 @@ function haversine(lat1: number, lon1: number, lat2: number, lon2: number): numb
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// §4a task 3 (coverageIndex-as-single-source-of-truth refactor) regression:
+// getCoverageStatus() (GET .../databases/loaded), getLoadingStatus()
+// (GET .../databases/status), getDatabaseList() (GET .../graph/databases),
+// and getDatabaseInfo() (GET .../databases) all used to be backed by four
+// separately hand-synced stores (coverageIndex, loadedDbFilenames,
+// cachedDatabaseList, metadataCache). Now they all derive from coverageIndex
+// alone, so the set of "loaded" filenames each one reports must always
+// agree — assert that after a load and after an unload. Sorted before
+// comparing: coverageIndex's Map iteration order is discovery/insertion
+// order, not load-completion order, and this assertion is about set
+// membership, not ordering.
+async function loadedFilenamesFromAllFourModels(db: RoutingDatabase): Promise<{
+  coverage: string[]; loadingStatus: string[]; databaseList: string[]; databaseInfo: string[];
+}> {
+  const coverage = db.getCoverageStatus()
+    .filter(s => s.state === 'loaded')
+    .map(s => s.filename)
+    .sort();
+  const loadingStatus = [...db.getLoadingStatus().filenames].sort();
+  const databaseList = (await db.getDatabaseList()).map(d => d.filename).sort();
+  const databaseInfo = (await db.getDatabaseInfo()).map(d => d.filename).sort();
+  return { coverage, loadingStatus, databaseList, databaseInfo };
+}
+
+async function assertFourModelsConsistent(db: RoutingDatabase, expectedLoaded: string[]): Promise<void> {
+  const expected = [...expectedLoaded].sort();
+  const { coverage, loadingStatus, databaseList, databaseInfo } = await loadedFilenamesFromAllFourModels(db);
+  assert.deepStrictEqual(coverage, expected, 'getCoverageStatus() loaded filenames mismatch');
+  assert.deepStrictEqual(loadingStatus, expected, 'getLoadingStatus().filenames mismatch');
+  assert.deepStrictEqual(databaseList, expected, 'getDatabaseList() filenames mismatch');
+  assert.deepStrictEqual(databaseInfo, expected, 'getDatabaseInfo() filenames mismatch');
+}
+
 // Region A: a 4-boundary-node square, triangulated along one diagonal —
 // enough for addAnchorShortcutEdges to synthesize genuine new in-memory
 // edges (not just upgrade an existing one): the 4 perimeter pairs already
@@ -263,6 +296,10 @@ describe('§4a dynamic database loading', () => {
       assert.strictEqual(baselineEdgesBySourceSize, 6);
     });
 
+    it('§4a task 3: after a load, getCoverageStatus/getLoadingStatus/getDatabaseList/getDatabaseInfo agree on the loaded set', async () => {
+      await assertFourModelsConsistent(db, ['region-a.sqlite', 'region-b.sqlite']);
+    });
+
     it('the diagonal V0<->V2 pair is a genuine synthetic edge, not a DB row', async () => {
       const edge = db.getEdgeSync(REGION_A_NODE_IDS[0], REGION_A_NODE_IDS[2]);
       assert.ok(edge, 'expected addFunnelShortcutEdge to have synthesized V0->V2');
@@ -295,6 +332,10 @@ describe('§4a dynamic database loading', () => {
       const status = new Map(db.getCoverageStatus().map(s => [s.filename, s.state]));
       assert.strictEqual(status.get('region-a.sqlite'), 'not_loaded');
       assert.strictEqual(status.get('region-b.sqlite'), 'loaded');
+    });
+
+    it('§4a task 3: after an unload, all four read models shrink together consistently', async () => {
+      await assertFourModelsConsistent(db, ['region-b.sqlite']);
     });
 
     it('(d) refuses to unload the only remaining loaded database', async () => {
