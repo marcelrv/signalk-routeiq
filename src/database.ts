@@ -141,6 +141,26 @@ export class RoutingDatabase {
   private pois: PoiRow[] = [];
   private navmeshRegions: NavmeshRegionWithDb[] = [];
   private spatialGrid: Map<string, number[]> = new Map();
+
+  /** Lazy cache of `this.pois` bucketed into the same 0.01° grid cells as
+   *  spatialGrid (see buildPoiGrid) — null whenever it may be stale, built
+   *  on first use afterward. Backs getPoisInBBox/getNearestPoi so a map pan
+   *  no longer linearly scans every loaded POI. Every build is from scratch
+   *  over the current `this.pois`, so a rebuilt cache is always correct —
+   *  correctness never depends on incrementally patching it. */
+  private poiGrid: Map<string, PoiRow[]> | null = null;
+
+  /** Lazy cache of edgesBySource's edges bucketed into the same 0.01° grid
+   *  cells, each edge registered under BOTH its source-endpoint cell and its
+   *  target-endpoint cell (see buildEdgeGrid) — necessary because a long
+   *  (e.g. macro/anchor-shortcut) edge's two endpoints can fall in cells far
+   *  apart, and a bbox query must find the edge from whichever endpoint (or
+   *  neither, if only the middle crosses the box — same limitation the old
+   *  full scan had, since path_points were never tested either). Null
+   *  whenever it may be stale; rebuilt from scratch on next use, same
+   *  correctness argument as poiGrid. Backs getEdgesInBBox. */
+  private edgeGrid: Map<string, Array<EdgeRow & { lat: number; lon: number }>> | null = null;
+
   private hasCrossesLand: boolean = false;
   private hasCrossesObstacle: boolean = false;
   private hasNodeDepth: boolean = false;
@@ -651,6 +671,12 @@ export class RoutingDatabase {
     // locally-discovered file, all 'loaded' (today's unconditional
     // load-everything behavior, just also exposed through that catalog).
     this.rebuildCoverageIndexAfterBulkLoad(metadata);
+
+    // Bulk load just repopulated `this.pois` and `edgesBySource` (incl. the
+    // synthetic funnel/anchor edges precomputeFunnelEdges added above) —
+    // any bbox-query cache built against the pre-load (empty) state is
+    // stale.
+    this.invalidateBBoxCaches();
   }
 
   /** Non-dynamic-mode counterpart to init()'s peekMetadata coverage-index
@@ -1164,6 +1190,11 @@ export class RoutingDatabase {
       // used one.
       this.touchRegion(filename);
 
+      // This load just added to `this.pois` and `edgesBySource` (incl. its
+      // own newly-precomputed synthetic funnel/anchor edges) — any
+      // bbox-query cache built before this load is stale.
+      this.invalidateBBoxCaches();
+
       console.log(`[routeiq] Loaded database ${filename} (dbIndex=${dbIndex}): ` +
         `${nodeIdSet.size} nodes, ${edgeCount} edges, ${pois.length} POIs, ${newRegions.length} navmesh regions`);
     } catch (err) {
@@ -1237,6 +1268,11 @@ export class RoutingDatabase {
 
     entry.state = 'not_loaded';
     entry.dbIndex = null;
+
+    // This unload just filtered `edgesBySource` and `this.pois` — any
+    // bbox-query cache built before it is stale (it would still reference
+    // the just-removed database's rows).
+    this.invalidateBBoxCaches();
 
     console.log(`[routeiq] Unloaded database ${filename} (dbIndex=${dbIndex}): removed ${nodesRemoved} nodes, ${edgesRemoved} edges`);
     return { nodesRemoved, edgesRemoved };
@@ -1677,26 +1713,54 @@ export class RoutingDatabase {
       cost_factor: number;
       path_points?: Array<[number, number]>;
     }> = [];
-    for (const [, edges] of this.edgesBySource) {
-      for (const e of edges) {
-        const slat = e.source_lat ?? 0;
-        const slon = e.source_lon ?? 0;
-        if ((slat >= minLat && slat <= maxLat && slon >= minLon && slon <= maxLon) ||
-            (e.lat >= minLat && e.lat <= maxLat && e.lon >= minLon && e.lon <= maxLon)) {
-          results.push({
-            source: e.source, target: e.target,
-            source_lat: slat, source_lon: slon,
-            target_lat: e.lat, target_lon: e.lon,
-            distance: e.distance, min_depth: e.min_depth,
-            max_air_draft: e.max_air_draft, min_width: e.min_width,
-            edge_type_id: e.edge_type_id, edge_kind_id: e.edge_kind_id ?? EDGE_KIND_CENTERLINE, traffic_mode: e.traffic_mode,
-            cost_factor: e.cost_factor,
-            ...(e.path_points && e.path_points.length > 0 ? { path_points: e.path_points } : {}),
-          });
-          if (results.length >= limit) break;
+    if (!this.edgeGrid) this.edgeGrid = this.buildEdgeGrid();
+
+    // Box query, not a radius query — no cos(lat) correction needed: iterate
+    // every grid cell whose row/col range overlaps [minLat,maxLat] x
+    // [minLon,maxLon] exactly (same Math.floor cell math buildSpatialIndex
+    // uses), then apply the same exact endpoint-in-bbox test the old full
+    // scan used. Every qualifying edge has at least one endpoint whose cell
+    // falls in this range (buildEdgeGrid registers both endpoints), so the
+    // candidate set is a superset of the true answer — identical result to
+    // the full scan once the exact test below is reapplied.
+    const cellSize = 0.01;
+    const minRow = Math.floor(minLat / cellSize);
+    const maxRow = Math.floor(maxLat / cellSize);
+    const minCol = Math.floor(minLon / cellSize);
+    const maxCol = Math.floor(maxLon / cellSize);
+    // An edge is registered under up to two cells (source + target), and
+    // both could fall in the queried row/col range — dedup by (source,
+    // target) so a qualifying edge is only ever emitted once, exactly as a
+    // full scan over edgesBySource (which stores each directed edge once)
+    // would.
+    const visited = new Set<string>();
+    outer:
+    for (let row = minRow; row <= maxRow; row++) {
+      for (let col = minCol; col <= maxCol; col++) {
+        const bucket = this.edgeGrid.get(`${row}:${col}`);
+        if (!bucket) continue;
+        for (const e of bucket) {
+          const edgeKey = `${e.source}:${e.target}`;
+          if (visited.has(edgeKey)) continue;
+          const slat = e.source_lat ?? 0;
+          const slon = e.source_lon ?? 0;
+          if ((slat >= minLat && slat <= maxLat && slon >= minLon && slon <= maxLon) ||
+              (e.lat >= minLat && e.lat <= maxLat && e.lon >= minLon && e.lon <= maxLon)) {
+            visited.add(edgeKey);
+            results.push({
+              source: e.source, target: e.target,
+              source_lat: slat, source_lon: slon,
+              target_lat: e.lat, target_lon: e.lon,
+              distance: e.distance, min_depth: e.min_depth,
+              max_air_draft: e.max_air_draft, min_width: e.min_width,
+              edge_type_id: e.edge_type_id, edge_kind_id: e.edge_kind_id ?? EDGE_KIND_CENTERLINE, traffic_mode: e.traffic_mode,
+              cost_factor: e.cost_factor,
+              ...(e.path_points && e.path_points.length > 0 ? { path_points: e.path_points } : {}),
+            });
+            if (results.length >= limit) break outer;
+          }
         }
       }
-      if (results.length >= limit) break;
     }
     return results;
   }
@@ -1707,14 +1771,31 @@ export class RoutingDatabase {
     limit: number = 2000,
   ): Promise<Array<{ id: number; name: string; typeId: number; properties: Record<string, unknown>; lat: number; lon: number }>> {
     const results: Array<{ id: number; name: string; typeId: number; properties: Record<string, unknown>; lat: number; lon: number }> = [];
-    for (const row of this.pois) {
-      if (row.lat >= minLat && row.lat <= maxLat && row.lon >= minLon && row.lon <= maxLon) {
-        results.push({
-          id: row.id, name: row.name, typeId: row.type_id,
-          properties: row.properties ? JSON.parse(row.properties) : {},
-          lat: row.lat, lon: row.lon,
-        });
-        if (results.length >= limit) break;
+    if (!this.poiGrid) this.poiGrid = this.buildPoiGrid();
+    // Box query, not a radius query — no cos(lat) correction needed: iterate
+    // every grid cell whose row/col range overlaps [minLat,maxLat] x
+    // [minLon,maxLon] exactly (same Math.floor cell math buildSpatialIndex
+    // uses), then apply the same exact box test the old full scan used.
+    const cellSize = 0.01;
+    const minRow = Math.floor(minLat / cellSize);
+    const maxRow = Math.floor(maxLat / cellSize);
+    const minCol = Math.floor(minLon / cellSize);
+    const maxCol = Math.floor(maxLon / cellSize);
+    outer:
+    for (let row = minRow; row <= maxRow; row++) {
+      for (let col = minCol; col <= maxCol; col++) {
+        const bucket = this.poiGrid.get(`${row}:${col}`);
+        if (!bucket) continue;
+        for (const poi of bucket) {
+          if (poi.lat >= minLat && poi.lat <= maxLat && poi.lon >= minLon && poi.lon <= maxLon) {
+            results.push({
+              id: poi.id, name: poi.name, typeId: poi.type_id,
+              properties: poi.properties ? JSON.parse(poi.properties) : {},
+              lat: poi.lat, lon: poi.lon,
+            });
+            if (results.length >= limit) break outer;
+          }
+        }
       }
     }
     results.sort((a, b) => a.name.localeCompare(b.name));
@@ -1722,13 +1803,33 @@ export class RoutingDatabase {
   }
 
   async getNearestPoi(lat: number, lon: number, maxDistanceMeters: number = 250): Promise<{ id: number; name: string; typeId: number; properties: Record<string, unknown>; latitude: number; longitude: number; distance: number } | null> {
+    if (!this.poiGrid) this.poiGrid = this.buildPoiGrid();
     let best: PoiRow | null = null;
     let bestDist = Infinity;
-    for (const row of this.pois) {
-      const d = this.haversineMeters(lat, lon, row.lat, row.lon);
-      if (d < bestDist && d <= maxDistanceMeters) {
-        bestDist = d;
-        best = row;
+    // Gather candidates from every cell overlapping the cos(lat)-corrected
+    // radius box — same superset technique gridCandidateIds uses for nodes —
+    // then apply the same exact haversine + `d <= maxDistanceMeters` +
+    // nearest selection the old full scan used.
+    const latRad = lat * Math.PI / 180;
+    const cosLat = Math.cos(latRad);
+    const marginLat = maxDistanceMeters / 111320;
+    const marginLon = marginLat / Math.max(1e-9, cosLat);
+    const cellSize = 0.01;
+    const minRow = Math.floor((lat - marginLat) / cellSize);
+    const maxRow = Math.floor((lat + marginLat) / cellSize);
+    const minCol = Math.floor((lon - marginLon) / cellSize);
+    const maxCol = Math.floor((lon + marginLon) / cellSize);
+    for (let row = minRow; row <= maxRow; row++) {
+      for (let col = minCol; col <= maxCol; col++) {
+        const bucket = this.poiGrid.get(`${row}:${col}`);
+        if (!bucket) continue;
+        for (const poi of bucket) {
+          const d = this.haversineMeters(lat, lon, poi.lat, poi.lon);
+          if (d < bestDist && d <= maxDistanceMeters) {
+            bestDist = d;
+            best = poi;
+          }
+        }
       }
     }
     if (!best) return null;
@@ -1781,6 +1882,89 @@ export class RoutingDatabase {
       }
     }
     return result;
+  }
+
+  /** Null both bbox-query caches (poiGrid, edgeGrid) so the next
+   *  getPoisInBBox/getNearestPoi/getEdgesInBBox call rebuilds them from
+   *  scratch over the then-current `this.pois`/`edgesBySource`. Called at
+   *  every site that mutates either of those: loadGraph (bulk),
+   *  loadDatabaseGraphInner and unloadDatabaseGraph (dynamic per-file
+   *  load/unload), addEdge, deleteEdge, deleteNode, addNode, and close().
+   *  Over-invalidation (calling this when nothing actually changed) is
+   *  cheap and safe — just an extra rebuild on the next query; a *missed*
+   *  invalidation is the only real risk (a query would silently serve stale
+   *  results), so mutation sites call this even where it may look
+   *  redundant. */
+  private invalidateBBoxCaches(): void {
+    this.poiGrid = null;
+    this.edgeGrid = null;
+  }
+
+  /** Bucket every row in `this.pois` into the same 0.01° grid cells
+   *  buildSpatialIndex uses for nodes. Always built from scratch — see
+   *  invalidateBBoxCaches — so it's trivially correct: a from-scratch
+   *  iteration over `this.pois` cannot disagree with a from-scratch full
+   *  scan over the same array. */
+  private buildPoiGrid(): Map<string, PoiRow[]> {
+    const grid = new Map<string, PoiRow[]>();
+    const cellSize = 0.01;
+    for (const row of this.pois) {
+      const col = Math.floor(row.lon / cellSize);
+      const gridRow = Math.floor(row.lat / cellSize);
+      const key = `${gridRow}:${col}`;
+      let bucket = grid.get(key);
+      if (!bucket) {
+        bucket = [];
+        grid.set(key, bucket);
+      }
+      bucket.push(row);
+    }
+    return grid;
+  }
+
+  /** Bucket every edge in edgesBySource into the same 0.01° grid cells,
+   *  under BOTH its source-endpoint cell and its target-endpoint cell (an
+   *  edge whose two endpoints land in the same cell is simply pushed twice
+   *  under the same key — harmless, getEdgesInBBox dedups via its own
+   *  `visited` set). Registering both endpoints, not just one, is required
+   *  for correctness: a long edge (macro/anchor-shortcut edges can span a
+   *  whole region) or a one-way edge must still be found by a bbox query
+   *  that only overlaps one of its two ends — exactly the semantics the old
+   *  full scan's `(source in bbox) || (target in bbox)` test already
+   *  encoded, just without an index to prune the search. Always built from
+   *  scratch — see invalidateBBoxCaches. */
+  private buildEdgeGrid(): Map<string, Array<EdgeRow & { lat: number; lon: number }>> {
+    const grid = new Map<string, Array<EdgeRow & { lat: number; lon: number }>>();
+    const cellSize = 0.01;
+    const push = (key: string, edge: EdgeRow & { lat: number; lon: number }) => {
+      let bucket = grid.get(key);
+      if (!bucket) {
+        bucket = [];
+        grid.set(key, bucket);
+      }
+      bucket.push(edge);
+    };
+    for (const edges of this.edgesBySource.values()) {
+      for (const e of edges) {
+        let slat = e.source_lat;
+        let slon = e.source_lon;
+        if (slat === undefined || slon === undefined) {
+          // Fallback for the (theoretical) case an edge row reached here
+          // without source_lat/source_lon populated — every real call site
+          // (loadGraph, loadDatabaseGraphInner, addEdge,
+          // addFunnelShortcutEdge) sets them, but resolve via the node map
+          // rather than silently mis-bucketing the edge.
+          const s = this.nodes.get(e.source);
+          slat = s?.lat ?? 0;
+          slon = s?.lon ?? 0;
+        }
+        const sourceKey = `${Math.floor(slat / cellSize)}:${Math.floor(slon / cellSize)}`;
+        const targetKey = `${Math.floor(e.lat / cellSize)}:${Math.floor(e.lon / cellSize)}`;
+        push(sourceKey, e);
+        push(targetKey, e);
+      }
+    }
+    return grid;
   }
 
   private buildSpatialIndex(): void {
@@ -2038,6 +2222,7 @@ export class RoutingDatabase {
     const existing = this.nodes.get(nodeId);
     this.nodes.delete(nodeId);
     if (existing) this.gridRemoveNode(nodeId, existing.lat, existing.lon);
+    this.invalidateBBoxCaches();
     await this.sendMessage('deleteNode', { dbIndex, nodeId });
   }
 
@@ -2047,6 +2232,7 @@ export class RoutingDatabase {
       const idx = edges.findIndex(e => e.target === target);
       if (idx >= 0) edges.splice(idx, 1);
     }
+    this.invalidateBBoxCaches();
     await this.sendMessage('deleteEdge', { dbIndex, source, target });
   }
 
@@ -2064,6 +2250,10 @@ export class RoutingDatabase {
       nodeDepth: node.node_depth ?? -1,
     });
     this.gridInsertNode(node.id, node.lat, node.lon);
+    // addNode doesn't itself touch edgesBySource/pois, but a moved node's
+    // stale coordinates could otherwise linger in edgeGrid via other edges'
+    // source/target — invalidate for safety (over-invalidation is cheap).
+    this.invalidateBBoxCaches();
   }
 
   async addEdge(dbIndex: number, edge: {
@@ -2099,6 +2289,7 @@ export class RoutingDatabase {
       this.edgesBySource.set(edge.source, []);
     }
     this.edgesBySource.get(edge.source)!.push(newEdge);
+    this.invalidateBBoxCaches();
   }
 
   async clearOverlayDeletedEdges(): Promise<{ restored: number }> {
@@ -2121,6 +2312,8 @@ export class RoutingDatabase {
     this.pois = [];
     this.navmeshRegions = [];
     this.spatialGrid.clear();
+    this.poiGrid = null;
+    this.edgeGrid = null;
     this.waterwaysGeoJson = null;
     this.waterwaysGeojsonPath = null;
     this.landGeoJson = null;

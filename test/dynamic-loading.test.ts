@@ -3,7 +3,7 @@ import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { RoutingDatabase } from '../dist/database.js';
+import { RoutingDatabase, POI_TYPE_HARBOUR, POI_TYPE_LOCK, POI_TYPE_BRIDGE } from '../dist/database.js';
 import { RoutingEngine } from '../dist/routing.js';
 import { DEFAULT_CONFIG } from '../dist/types.js';
 
@@ -94,6 +94,62 @@ const C: [number, number] = [50, 50];
 const D: [number, number] = [50.01, 50.01];
 const REGION_B_BBOX = { min_lat: 49.9, min_lon: 49.9, max_lat: 50.1, max_lon: 50.1 };
 
+// M?: getEdgesInBBox/getPoisInBBox/getNearestPoi spatial-index (edgeGrid/
+// poiGrid) differential check. Two POIs inside region A's square, one inside
+// region B's bbox — known independently of RoutingDatabase's internals (this
+// is exactly what the fixture builder below inserts into the pois tables),
+// used to brute-force an expected getPoisInBBox/getNearestPoi answer without
+// touching the private poiGrid/pois fields.
+const POI_A1 = { id: 9001, name: 'Region A Harbour', typeId: POI_TYPE_HARBOUR, lat: 10.3, lon: 10.7 };
+const POI_A2 = { id: 9002, name: 'Region A Lock', typeId: POI_TYPE_LOCK, lat: 10.85, lon: 10.15 };
+const POI_B1 = { id: 9101, name: 'Region B Bridge', typeId: POI_TYPE_BRIDGE, lat: 50.004, lon: 50.006 };
+const KNOWN_POIS = [POI_A1, POI_A2, POI_B1];
+
+function bruteForcePoisInBBox(minLat: number, minLon: number, maxLat: number, maxLon: number): typeof KNOWN_POIS {
+  return KNOWN_POIS
+    .filter(p => p.lat >= minLat && p.lat <= maxLat && p.lon >= minLon && p.lon <= maxLon)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function bruteForceNearestPoi(lat: number, lon: number, maxDist: number): number | null {
+  let bestId: number | null = null;
+  let bestDist = Infinity;
+  for (const p of KNOWN_POIS) {
+    const d = haversine(lat, lon, p.lat, p.lon);
+    if (d < bestDist && d <= maxDist) { bestDist = d; bestId = p.id; }
+  }
+  return bestId;
+}
+
+/** Grid-free reference for getEdgesInBBox: walks exactly the same node set
+ *  the old full scan effectively walked (every source node with at least one
+ *  outgoing edge) via the public getOutgoingEdges() accessor — never touches
+ *  the private edgeGrid/edgesBySource fields — and applies the identical
+ *  endpoint-in-bbox test getEdgesInBBox itself uses. `nodeIds` must include
+ *  every loaded source node or this under-counts. */
+async function bruteForceEdgesInBBox(
+  db: RoutingDatabase, nodeIds: number[],
+  minLat: number, minLon: number, maxLat: number, maxLon: number,
+): Promise<Array<{ source: number; target: number }>> {
+  const results: Array<{ source: number; target: number }> = [];
+  for (const id of nodeIds) {
+    const edges = await db.getOutgoingEdges(id);
+    for (const e of edges) {
+      const slat = (e as any).source_lat ?? 0;
+      const slon = (e as any).source_lon ?? 0;
+      if ((slat >= minLat && slat <= maxLat && slon >= minLon && slon <= maxLon) ||
+          (e.lat >= minLat && e.lat <= maxLat && e.lon >= minLon && e.lon <= maxLon)) {
+        results.push({ source: e.source, target: e.target });
+      }
+    }
+  }
+  return results;
+}
+
+function sortPairs(pairs: Array<{ source: number; target: number }>): Array<{ source: number; target: number }> {
+  return [...pairs].sort((a, b) => a.source - b.source || a.target - b.target);
+}
+
 // M4/M6 spatial-index refactor (database.ts) differential check: the exact
 // set of nodes both fixture databases contain, known independently of
 // RoutingDatabase's internals (this is just the same VERTICES/C/D the
@@ -182,6 +238,11 @@ describe('§4a dynamic database loading', () => {
       JSON.stringify(TRIANGLES),
       JSON.stringify(REGION_A_NODE_IDS),
     ]);
+    runA(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
+    for (const p of [POI_A1, POI_A2]) {
+      runA(`INSERT INTO pois (id, name, type_id, properties, lat, lon) VALUES (?, ?, ?, NULL, ?, ?)`,
+        [p.id, p.name, p.typeId, p.lat, p.lon]);
+    }
     a.close();
 
     const b = new DatabaseSync(regionBPath, { open: true });
@@ -211,6 +272,9 @@ describe('§4a dynamic database loading', () => {
       [cId, dId, dCD]);
     runB(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES (?, ?, ?, 5.0, 20.0, 10.0, 1.0, 500, 0, 0, 0)`,
       [dId, cId, dCD]);
+    runB(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
+    runB(`INSERT INTO pois (id, name, type_id, properties, lat, lon) VALUES (?, ?, ?, NULL, ?, ?)`,
+      [POI_B1.id, POI_B1.name, POI_B1.typeId, POI_B1.lat, POI_B1.lon]);
     b.close();
   }
 
@@ -249,10 +313,10 @@ describe('§4a dynamic database loading', () => {
     it('peekMetadata reports real node/edge/POI counts for not-yet-loaded databases', () => {
       const status = dynDb.getCoverageStatus();
       const byFilename = new Map(status.map(s => [s.filename, s]));
-      // Region A: 4 perimeter nodes, 8 directed edges (4 pairs x 2 directions), no pois table.
-      assert.deepStrictEqual(byFilename.get('region-a.sqlite')?.stats, { nodes: 4, edges: 8, pois: 0 });
-      // Region B: 2 nodes, 2 directed edges (C->D and D->C), no pois table.
-      assert.deepStrictEqual(byFilename.get('region-b.sqlite')?.stats, { nodes: 2, edges: 2, pois: 0 });
+      // Region A: 4 perimeter nodes, 8 directed edges (4 pairs x 2 directions), 2 POIs.
+      assert.deepStrictEqual(byFilename.get('region-a.sqlite')?.stats, { nodes: 4, edges: 8, pois: 2 });
+      // Region B: 2 nodes, 2 directed edges (C->D and D->C), 1 POI.
+      assert.deepStrictEqual(byFilename.get('region-b.sqlite')?.stats, { nodes: 2, edges: 2, pois: 1 });
     });
 
     it('a route request inside region A triggers an inline on-demand load, and matches the non-dynamic route', async () => {
@@ -397,6 +461,55 @@ describe('§4a dynamic database loading', () => {
       assert.strictEqual(db.hasNodeWithinRadius(0, 0, 1000), false);
     });
 
+    // Edge/POI spatial-index refactor (database.ts poiGrid/edgeGrid, #8)
+    // differential check: with both databases loaded, the grid-backed
+    // getEdgesInBBox/getPoisInBBox/getNearestPoi must agree exactly with a
+    // grid-free reference — bruteForceEdgesInBBox (walks getOutgoingEdges()
+    // per known node, a public accessor, never touching the private
+    // edgeGrid/edgesBySource) and bruteForcePoisInBBox/bruteForceNearestPoi
+    // (computed directly from the fixture's own known POI list, never
+    // touching the private poiGrid/pois fields).
+    it('edge/POI spatial index: grid-backed queries agree with a grid-free brute-force reference', async () => {
+      const allKnownNodeIds = KNOWN_NODES.map(n => n.id);
+
+      const bboxCases: Array<[number, number, number, number, string]> = [
+        [REGION_A_BBOX.min_lat, REGION_A_BBOX.min_lon, REGION_A_BBOX.max_lat, REGION_A_BBOX.max_lon, 'region A only'],
+        [REGION_B_BBOX.min_lat, REGION_B_BBOX.min_lon, REGION_B_BBOX.max_lat, REGION_B_BBOX.max_lon, 'region B only'],
+        // Union box spanning both regions' coordinate ranges.
+        [9.9, 9.9, 50.1, 50.1, 'union of A and B'],
+        // Overlaps neither region.
+        [20, 20, 21, 21, 'empty'],
+      ];
+
+      for (const [minLat, minLon, maxLat, maxLon, label] of bboxCases) {
+        const expectedEdges = sortPairs(await bruteForceEdgesInBBox(db, allKnownNodeIds, minLat, minLon, maxLat, maxLon));
+        const actualEdges = sortPairs((await db.getEdgesInBBox(minLat, minLon, maxLat, maxLon, 5000))
+          .map(e => ({ source: e.source, target: e.target })));
+        assert.deepStrictEqual(actualEdges, expectedEdges, `getEdgesInBBox mismatch (${label})`);
+
+        const expectedPois = bruteForcePoisInBBox(minLat, minLon, maxLat, maxLon).map(p => p.id);
+        const actualPois = (await db.getPoisInBBox(minLat, minLon, maxLat, maxLon, 2000)).map(p => p.id);
+        assert.deepStrictEqual(actualPois, expectedPois, `getPoisInBBox mismatch (${label})`);
+      }
+
+      // Sanity: region A's box is non-empty and distinct from region B's —
+      // otherwise the equality checks above would pass vacuously.
+      assert.ok((await db.getEdgesInBBox(REGION_A_BBOX.min_lat, REGION_A_BBOX.min_lon, REGION_A_BBOX.max_lat, REGION_A_BBOX.max_lon)).length > 0);
+      assert.ok((await db.getPoisInBBox(REGION_A_BBOX.min_lat, REGION_A_BBOX.min_lon, REGION_A_BBOX.max_lat, REGION_A_BBOX.max_lon)).length > 0);
+
+      const nearestCases: Array<[number, number, number, string]> = [
+        [10.31, 10.69, 5000, 'near POI A1'],
+        [10.84, 10.16, 5000, 'near POI A2'],
+        [50.003, 50.005, 5000, 'near POI B1'],
+        [0, 0, 1000, 'far from every POI'],
+      ];
+      for (const [lat, lon, maxDist, label] of nearestCases) {
+        const expected = bruteForceNearestPoi(lat, lon, maxDist);
+        const actual = await db.getNearestPoi(lat, lon, maxDist);
+        assert.strictEqual(actual?.id ?? null, expected, `getNearestPoi mismatch (${label})`);
+      }
+    });
+
     it('routes across the fixture while both databases are loaded', async () => {
       const engine = new RoutingEngine(db, DEFAULT_CONFIG);
       engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
@@ -423,6 +536,37 @@ describe('§4a dynamic database loading', () => {
       const status = new Map(db.getCoverageStatus().map(s => [s.filename, s.state]));
       assert.strictEqual(status.get('region-a.sqlite'), 'not_loaded');
       assert.strictEqual(status.get('region-b.sqlite'), 'loaded');
+    });
+
+    // Cache-invalidation proof (database.ts invalidateBBoxCaches, #8): the
+    // previous test already built poiGrid/edgeGrid while BOTH databases were
+    // loaded (via getEdgesInBBox/getPoisInBBox/getNearestPoi in the
+    // "edge/POI spatial index" test above). If unloadDatabaseGraph failed to
+    // call invalidateBBoxCaches(), these caches would still be the
+    // both-loaded snapshot and region A's now-evicted edges/POIs would
+    // wrongly still appear here.
+    it('unloading a database invalidates the poiGrid/edgeGrid caches — stale results would fail this', async () => {
+      const edgesInRegionA = await db.getEdgesInBBox(
+        REGION_A_BBOX.min_lat, REGION_A_BBOX.min_lon, REGION_A_BBOX.max_lat, REGION_A_BBOX.max_lon,
+      );
+      assert.deepStrictEqual(edgesInRegionA, [], 'region A\'s edges must be gone from getEdgesInBBox post-unload');
+
+      const poisInRegionA = await db.getPoisInBBox(
+        REGION_A_BBOX.min_lat, REGION_A_BBOX.min_lon, REGION_A_BBOX.max_lat, REGION_A_BBOX.max_lon,
+      );
+      assert.deepStrictEqual(poisInRegionA, [], 'region A\'s POIs must be gone from getPoisInBBox post-unload');
+
+      const nearestNearA1 = await db.getNearestPoi(POI_A1.lat, POI_A1.lon, 5000);
+      assert.strictEqual(nearestNearA1, null, 'POI A1 must no longer be found by getNearestPoi post-unload');
+
+      // Region B is unaffected — its edges/POI must still be reported.
+      const edgesInRegionB = await db.getEdgesInBBox(
+        REGION_B_BBOX.min_lat, REGION_B_BBOX.min_lon, REGION_B_BBOX.max_lat, REGION_B_BBOX.max_lon,
+      );
+      assert.strictEqual(edgesInRegionB.length, 2, 'region B\'s 2 edges should still be reported');
+
+      const nearestNearB1 = await db.getNearestPoi(POI_B1.lat, POI_B1.lon, 5000);
+      assert.strictEqual(nearestNearB1?.id, POI_B1.id, 'POI B1 should still be found by getNearestPoi');
     });
 
     it('§4a task 3: after an unload, all three read models shrink together consistently', async () => {
@@ -453,6 +597,18 @@ describe('§4a dynamic database loading', () => {
       // The diagonal synthetic edge exists again post-reload.
       const edge = db.getEdgeSync(REGION_A_NODE_IDS[0], REGION_A_NODE_IDS[2]);
       assert.ok(edge, 'expected the synthetic shortcut to be recreated on reload');
+
+      // Reload's own invalidateBBoxCaches() call (loadDatabaseGraphInner)
+      // means the grid-backed bbox queries see region A's edges/POIs again
+      // too, not just getEdgeSync/getStats — a stale poiGrid/edgeGrid built
+      // during the region-B-only window would still show region A empty here.
+      const poisInRegionA = await db.getPoisInBBox(
+        REGION_A_BBOX.min_lat, REGION_A_BBOX.min_lon, REGION_A_BBOX.max_lat, REGION_A_BBOX.max_lon,
+      );
+      assert.deepStrictEqual(poisInRegionA.map(p => p.id).sort(), [POI_A1.id, POI_A2.id].sort());
+
+      const nearestNearA1 = await db.getNearestPoi(POI_A1.lat, POI_A1.lon, 5000);
+      assert.strictEqual(nearestNearA1?.id, POI_A1.id);
     });
 
     it('routes correctly again after the reload', async () => {
