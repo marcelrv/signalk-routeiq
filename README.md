@@ -1,4 +1,4 @@
-![RouteIQ icon](public/icon.svg)
+<img src="public/icon.svg" alt="RouteIQ icon" width="96" />
 
 # SignalK RouteIQ Nautical Route Planner
 
