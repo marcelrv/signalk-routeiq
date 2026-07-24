@@ -384,6 +384,107 @@ immediately. The remaining five are queued here, we need to decide if we want th
   it · Shift+click for a straight-line point · right-click a leg for
   options"). The hint-bar text is too terse to teach the model.
 
+## Webapp UX — download manager improvements (port strong points from signalk-tidal-currents)
+
+**Framework decision (resolved 2026-07-24): use Leaflet, no build tooling added.**
+Checked `package.json`/`AGENTS.local.md` before deciding: `public/index.html` is
+served as-is with zero build step (the only compiled artifacts are `src/*.ts`
+→ `dist/`; the webapp has no bundler, no `webapp/` package.json, nothing under
+`scripts` touches `public/`), and this repo deliberately has no local
+node/npm (Docker-only, see `AGENTS.local.md`) — introducing React/JSX/a
+bundler purely to reuse `react-leaflet` patterns would be a disproportionate
+new dependency surface for one modal. It turned out to be moot either way:
+**Leaflet is already loaded** (`leaflet@1.9.4` + `leaflet-routing-machine`
+via `<script>`/`<link>` tags near the top of `public/index.html`, plus a
+vendored `public/vendor/leaflet.vectorgrid.min.js`) and drives the main
+chart map already. So the port is: create a second `L.map()` instance inside
+the Data Manager modal, reusing the global `L` the page already loads —
+zero new dependencies, zero new build tooling, fully consistent with the
+existing "single static HTML file" pattern. Region polygons/backdrop are
+rendered from already-local data (`world-countries.json`, catalog
+`bounding_box`/`boundary_geometry`) with no additional tile/CDN calls for
+this particular map (the main chart map already depends on OSM/OpenSeaMap
+tile CDNs elsewhere in this same file, so that dependency is pre-existing,
+not new). Click hit-testing is hand-rolled (ray-casting point-in-polygon,
+antimeridian-aware, ported from signalk-tidal-currents' `lib/geo.ts`) rather
+than relying on Leaflet's topmost-layer click semantics, so overlapping
+regions are all matched — same behavior as the React reference without
+needing `react-leaflet`'s event model.
+
+Surfaced 2026-07-23: routeiq's own "Data Manager" (region-database download UI,
+`public/index.html`, `dm*`-prefixed functions ~line 5828–6300+, modal markup
+~line 1337–1490) is list-only — Available/Installed tabs of `.dm-region-card`
+rows with a text filter (`dmFilter`) and a per-card Download button
+(`dmRenderAvailable`/`dmStartDownload`). It already draws a
+`<canvas id="dm-map-canvas">` mini-map (`dmRenderMiniMap`, ~line 5883,
+region bboxes/polygons over a bundled `world-countries.json` coastline) but
+**the canvas is purely decorative — confirmed no click/mousemove listener is
+ever attached to it.** All selection happens via the list below.
+
+The sibling `signalk-tidal-currents` plugin's download manager
+(`webapp/src/components/browser/`, React + `react-leaflet`, local-vector-only,
+no tile/CDN calls) solves the same "pick a region to download" problem with a
+genuinely interactive map, plus several other patterns worth pulling in:
+
+1. **Clickable map as the primary picker** — `SourceMap.tsx` renders every
+   catalog region as a `GeoJSON` polygon, styled by type (color) and status
+   (fill opacity/dash/stroke — not-installed = faint+dashed, installed =
+   solid), with a DOM tooltip on hover (`buildTooltip`). A click hit-tests all
+   region geometries at that point (`ClickCapture`/`useMapEvents` +
+   `pointInGeometry`) and opens `RegionInspector.tsx`, a modal listing every
+   overlapping dataset (handles overlapping global/coastal polygons) — each
+   row is a `DownloadButton.tsx` that fires the actual download. routeiq's
+   equivalent port: replace `dm-map-canvas`'s static paint with a Leaflet
+   `MapContainer` over the existing region bbox/polygon data, add the
+   click-hit-test → inspector-modal flow, keep the list view as a secondary/
+   fallback picker rather than removing it.
+2. **Per-region download progress**, not just one global bar —
+   `useDownloadProgress`/`useGlobalDownloadEvents` (SSE with polling
+   fallback) drive a live percent/byte badge on each `DownloadButton`.
+   routeiq today only has `dmShowProgress`/`dm-progress-text`, one global
+   progress element.
+3. **Disk-space guardrail before large/unknown-size downloads** —
+   `wouldExceedDiskThreshold`/`hasUnknownSizeRisk` pop a confirm modal.
+   Relevant to routeiq given US East Coast per-state files can be large.
+4. **"Update All" banner + storage gauge + smart-cleanup panel**
+   (`UpdateAllBanner.tsx`, `StorageGauge.tsx`, `SmartCleanupPanel.tsx`) —
+   surfaces available updates and lets a user reclaim space across all
+   installed regions at once, rather than checking/deleting one at a time.
+5. **Independent search/filter bar + "zoom to fit all data" control**
+   (`QuickFilters.tsx`, `SearchBox.tsx`, `FitAllControl`) — keeps the list
+   filter routeiq already has, additionally lets the map itself be
+   searched/framed.
+6. **"Near you" region surfacing** — `SourceList.tsx` fetches vessel
+   position once at startup (`api.getVesselPosition()`, a plain fetch
+   against `/signalk/v1/api/vessels/self/navigation/position`, stored in
+   the Zustand store) and, in a one-shot effect once both the catalog and
+   position are available, auto-expands only the provider groups whose
+   region geometry contains the vessel's position
+   (`pointInGeometry`, `lib/geo.ts` — ray-casting point-in-polygon with
+   antimeridian handling; a containment test, not a distance sort/nearest-N
+   list). `SourceMap.tsx` also plots the vessel as a `CircleMarker`, and
+   `FitAllControl` frames all visible regions + the vessel in one click. No
+   standalone hook — logic lives inline in those two components, both
+   reading `vesselPosition` directly from the store. **routeiq port note:**
+   WS2/PR4 above already adds a `navigation.position` subscription for
+   dynamic database loading — that same subscription is the natural
+   position source for this too, so this item should land after/alongside
+   PR4 rather than growing its own separate position plumbing. In the
+   Data Manager, the port is: auto-expand/highlight (or sort-to-top) the
+   region card(s) containing the vessel position, and drop a vessel marker
+   on the new Leaflet map from item 1.
+
+Framework decision resolved above (Leaflet, already a dependency — no new
+build tooling). **2026-07-24 slice landed item 1** (clickable Leaflet map
+replacing `dm-map-canvas` on the Available tab, styled by install status,
+ray-cast click hit-test → region-inspector modal reusing the existing
+download-card markup, list view kept as fallback) plus a lightweight cut of
+item 6 (near-you sort/badge + vessel marker, reusing the webapp's existing
+one-shot `fetchBoatData()`/`lastBoat` position rather than adding a second
+position-fetch path — no live-subscription wiring yet). Items 2–5 (per-region
+progress badges, disk-space guardrail, update-all/storage-gauge/cleanup
+panel, independent map search + fit-all control) remain queued, not started.
+
 ## Blocked — waiting on pipeline-side work
 
 - **Round 9 master-finding re-verification** — re-time `loadGraph()`

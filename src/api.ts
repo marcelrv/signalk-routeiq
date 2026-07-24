@@ -155,6 +155,9 @@ export class ApiHandler {
 
     // POST /signalk/v1/api/router/databases/unload — §4a manual per-file unload
     this.router.post('/databases/unload', this.handleDatabaseUnload.bind(this));
+
+    // POST /signalk/v1/api/router/databases/delete — remove an installed database file
+    this.router.post('/databases/delete', this.handleDeleteDatabase.bind(this));
   }
 
   /**
@@ -1130,6 +1133,72 @@ export class ApiHandler {
       // loaded / route in flight) are conflicts with current server state,
       // not a generic server error.
       res.status(409).json({ error: message });
+      next(error);
+    }
+  }
+
+  /**
+   * Delete an installed database file from disk (loaded or not) and
+   * hot-reload the routing engine so it forgets that data immediately —
+   * the same full close+reinit handleDownloadDatabase already uses for the
+   * opposite (adding a file) case, reused here rather than trying to
+   * thread a per-file unload+delete through every dynamic/non-dynamic,
+   * loaded/not-loaded permutation individually.
+   * POST /signalk/v1/api/router/databases/delete  body: { filename }
+   */
+  private async handleDeleteDatabase(req: Request, res: Response, next: NextFunction): Promise<void> {
+    if (!this.requireAuth(req, res)) return;
+    try {
+      const { filename } = req.body ?? {};
+      if (!filename || typeof filename !== 'string') {
+        res.status(400).json({ error: 'Missing required field: filename' });
+        return;
+      }
+      // Same filename shape guard as handleDownloadDatabase (path traversal prevention).
+      if (!/^[\w\-\.]+\.sqlite$/.test(filename) || filename.includes('..')) {
+        res.status(400).json({ error: 'Invalid filename: must be a plain .sqlite filename with no path components' });
+        return;
+      }
+      const dataDir = this.config.routingDataDir;
+      if (!dataDir) {
+        res.status(400).json({ error: 'routingDataDir is not configured' });
+        return;
+      }
+      const targetPath = path.resolve(dataDir, filename);
+      const resolvedDataDir = path.resolve(dataDir);
+      if (!targetPath.startsWith(resolvedDataDir + path.sep) && targetPath !== resolvedDataDir) {
+        res.status(400).json({ error: 'Invalid filename: path escapes data directory' });
+        return;
+      }
+      if (!fs.existsSync(targetPath)) {
+        res.status(404).json({ error: `Database not found: ${filename}` });
+        return;
+      }
+
+      fs.unlinkSync(targetPath);
+      console.log(`[routeiq] Database deleted: ${filename}`);
+
+      try {
+        if (this.db) await this.db.reloadMetadata();
+      } catch (e) {
+        console.warn(`[routeiq] Metadata refresh failed after delete: ${e}`);
+      }
+      if (this.onReloadRequested) {
+        try {
+          await this.onReloadRequested(dataDir);
+          console.log('[routeiq] Routing engine hot-reloaded after delete');
+        } catch (e) {
+          console.error(`[routeiq] Hot-reload failed after delete: ${e}`);
+          res.status(500).json({ error: `Database deleted but hot-reload failed: ${e}` });
+          return;
+        }
+      }
+
+      res.json({ success: true, filename });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.error('[routeiq] Database delete error:', error);
+      res.status(500).json({ error: `Delete failed: ${message}` });
       next(error);
     }
   }

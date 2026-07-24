@@ -218,6 +218,7 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
           coverage: { boundingBox: any; boundaryGeometry: any };
           meta: ReturnType<typeof readMetadataRow>;
           flags: SchemaFlags;
+          stats: ReturnType<typeof readStatsRow>;
         }> = [];
         for (const dbPath of dbPaths) {
           let db: DatabaseSync | null = null;
@@ -236,6 +237,11 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
             void nodeCols;
             const filename = filenameOf(dbPath);
             const meta = readMetadataRow(db, filename);
+            // Cheap while the handle's already open for this peek -- lets
+            // an installed-but-not-yet-loaded database report the same
+            // node/edge/POI counts a loaded one gets from getMetadata's
+            // readStatsRow, instead of leaving them blank until it loads.
+            const stats = readStatsRow(db);
             results.push({
               path: dbPath,
               filename,
@@ -245,6 +251,7 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
               },
               meta,
               flags,
+              stats,
             });
           } catch (err: any) {
             console.warn(`[db-worker] peekMetadata: skipping invalid database ${dbPath}: ${err.message ?? String(err)}`);

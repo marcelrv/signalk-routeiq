@@ -180,6 +180,15 @@ describe('§4a dynamic database loading', () => {
       assert.deepStrictEqual(byFilename.get('region-b.sqlite')?.coverage, REGION_B_BBOX);
     });
 
+    it('peekMetadata reports real node/edge/POI counts for not-yet-loaded databases', () => {
+      const status = dynDb.getCoverageStatus();
+      const byFilename = new Map(status.map(s => [s.filename, s]));
+      // Region A: 4 perimeter nodes, 8 directed edges (4 pairs x 2 directions), no pois table.
+      assert.deepStrictEqual(byFilename.get('region-a.sqlite')?.stats, { nodes: 4, edges: 8, pois: 0 });
+      // Region B: 2 nodes, 2 directed edges (C->D and D->C), no pois table.
+      assert.deepStrictEqual(byFilename.get('region-b.sqlite')?.stats, { nodes: 2, edges: 2, pois: 0 });
+    });
+
     it('a route request inside region A triggers an inline on-demand load, and matches the non-dynamic route', async () => {
       const dynEngine = new RoutingEngine(dynDb, DEFAULT_CONFIG);
       dynEngine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });

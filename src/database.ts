@@ -111,6 +111,11 @@ export interface DatabaseCoverageEntry {
     boundaryGeometry: string | null; schemaVersion: number | null;
     contributor: string | null; url: string | null; filename: string;
   } | null;
+  /** Row counts read directly off the file (peekMetadata's short-lived
+   *  handle in dynamic mode; metadataCache in non-dynamic mode) -- available
+   *  regardless of load state, unlike the in-memory graph, so a not-yet-
+   *  loaded database can still report the same stats a loaded one shows. */
+  stats: { nodes: number; edges: number; pois: number } | null;
 }
 
 export interface EdgeSnapResult {
@@ -316,6 +321,7 @@ export class RoutingDatabase {
         coverage: { boundingBox: DatabaseCoverageEntry['bbox']; boundaryGeometry: DatabaseCoverageEntry['boundary'] };
         meta: DatabaseCoverageEntry['meta'];
         flags: { hasCrossesLand: boolean; hasCrossesObstacle: boolean; hasNodeDepth: boolean; hasRegionId: boolean; hasEdgeKind: boolean };
+        stats: DatabaseCoverageEntry['stats'];
       }> = await this.sendMessage('peekMetadata', { dbPaths });
 
       this.coverageIndex.clear();
@@ -332,6 +338,7 @@ export class RoutingDatabase {
           state: 'not_loaded',
           dbIndex: null,
           meta: p.meta,
+          stats: p.stats ?? null,
         });
       }
       this.loadedDbFilenames = [];
@@ -546,6 +553,7 @@ export class RoutingDatabase {
         state: 'loaded',
         dbIndex: entry.index,
         meta,
+        stats: meta?.stats ?? null,
       });
     }
   }
@@ -739,11 +747,11 @@ export class RoutingDatabase {
 
   /** Coverage/state for every locally-known database, in both modes — the
    *  backing data for GET .../databases/loaded. */
-  getCoverageStatus(): Array<{ filename: string; state: 'not_loaded' | 'loading' | 'loaded'; coverage: DatabaseCoverageEntry['bbox']; nodes?: number }> {
-    const result: Array<{ filename: string; state: 'not_loaded' | 'loading' | 'loaded'; coverage: DatabaseCoverageEntry['bbox']; nodes?: number }> = [];
+  getCoverageStatus(): Array<{ filename: string; state: 'not_loaded' | 'loading' | 'loaded'; coverage: DatabaseCoverageEntry['bbox']; nodes?: number; stats: DatabaseCoverageEntry['stats'] }> {
+    const result: Array<{ filename: string; state: 'not_loaded' | 'loading' | 'loaded'; coverage: DatabaseCoverageEntry['bbox']; nodes?: number; stats: DatabaseCoverageEntry['stats'] }> = [];
     for (const entry of this.coverageIndex.values()) {
       const nodes = entry.dbIndex !== null ? this.nodesByDbIndex.get(entry.dbIndex)?.size : undefined;
-      result.push({ filename: entry.filename, state: entry.state, coverage: entry.bbox, nodes });
+      result.push({ filename: entry.filename, state: entry.state, coverage: entry.bbox, nodes, stats: entry.stats });
     }
     return result;
   }
