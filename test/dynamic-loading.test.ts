@@ -135,10 +135,13 @@ async function bruteForceEdgesInBBox(
   for (const id of nodeIds) {
     const edges = await db.getOutgoingEdges(id);
     for (const e of edges) {
-      const slat = (e as any).source_lat ?? 0;
-      const slon = (e as any).source_lon ?? 0;
-      if ((slat >= minLat && slat <= maxLat && slon >= minLon && slon <= maxLon) ||
-          (e.lat >= minLat && e.lat <= maxLat && e.lon >= minLon && e.lon <= maxLon)) {
+      // Edge rows carry no coordinates — resolve both endpoints through the
+      // public node accessor, exactly as getEdgesInBBox does internally.
+      const s = db.getNodeSync(e.source);
+      const t = db.getNodeSync(e.target);
+      if (!s || !t) continue;
+      if ((s.lat >= minLat && s.lat <= maxLat && s.lon >= minLon && s.lon <= maxLon) ||
+          (t.lat >= minLat && t.lat <= maxLat && t.lon >= minLon && t.lon <= maxLon)) {
         results.push({ source: e.source, target: e.target });
       }
     }

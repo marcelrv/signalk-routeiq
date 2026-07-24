@@ -1417,7 +1417,9 @@ export class RoutingEngine {
         const destBearing = bearingDeg(nodePos.lat, nodePos.lon, endLat, endLon);
         let anyTowardDeep = false;
         for (const e of edges) {
-          const edgeBearing = bearingDeg(nodePos.lat, nodePos.lon, e.lat, e.lon);
+          const tPos = this.db.getNodeSync(e.target);
+          if (!tPos) continue;
+          const edgeBearing = bearingDeg(nodePos.lat, nodePos.lon, tPos.lat, tPos.lon);
           const bearingDiff = Math.abs(edgeBearing - destBearing);
           const towardDest = Math.min(bearingDiff, 360 - bearingDiff) < 90;
           const isDeep = e.min_depth < 0 || e.min_depth >= minDepth;
@@ -1563,6 +1565,12 @@ export class RoutingEngine {
     // can't just stop on the first candidate touched.
     let bestGoalCost = Infinity;
 
+    // Edge rows carry no coordinates; every relaxation resolves its target
+    // node's position from here. Hoisted out of the loop so that's one
+    // Map.get per edge rather than a getNodeSync() call (the map is mutated
+    // in place, never replaced, so this stays valid across the awaits below).
+    const nodeMap = this.db.getNodeMap();
+
     while (!openSet.isEmpty() && iterations < maxIterations) {
       iterations++;
 
@@ -1629,8 +1637,15 @@ export class RoutingEngine {
           continue;
         }
 
+        // The target's position is resolved once per relaxation and reused
+        // by the bbox test, the tidal sample below and the heuristic. An
+        // edge whose target has no node can't be scored (nor arrived at),
+        // so it's skipped.
+        const toPos = nodeMap.get(edge.target);
+        if (!toPos) continue;
+
         // Bounding box check — skip nodes outside the box
-        if (bbox && !isInsideBBox(edge.lat, edge.lon, bbox)) {
+        if (bbox && !isInsideBBox(toPos.lat, toPos.lon, bbox)) {
           skipReasons.bbox++;
           continue;
         }
@@ -1653,12 +1668,12 @@ export class RoutingEngine {
           let sog = env.speedMs;
           if (fromNode) {
             const flow = env.flow.sample(
-              (fromNode.lat + edge.lat) / 2,
-              (fromNode.lon + edge.lon) / 2,
+              (fromNode.lat + toPos.lat) / 2,
+              (fromNode.lon + toPos.lon) / 2,
               env.departureMs + (env.offsetSec + elapsed) * 1000,
             );
             if (flow.u !== 0 || flow.v !== 0) {
-              const brg = this.toRadians(bearingDeg(fromNode.lat, fromNode.lon, edge.lat, edge.lon));
+              const brg = this.toRadians(bearingDeg(fromNode.lat, fromNode.lon, toPos.lat, toPos.lon));
               const along = flow.u * Math.sin(brg) + flow.v * Math.cos(brg);
               // Never let a foul current make an edge impossible — floor SOG
               // at 20% of STW (matches the annotation in finalizeRoute).
@@ -1687,8 +1702,8 @@ export class RoutingEngine {
           if (env) tSec.set(edge.target, (tSec.get(current.nodeId) ?? 0) + edgeSeconds);
 
           const h = this.haversineDistance(
-            edge.lat,
-            edge.lon,
+            toPos.lat,
+            toPos.lon,
             endLat,
             endLon
           ) * minMultiplier;
@@ -1840,7 +1855,7 @@ export class RoutingEngine {
   private static readonly VIOLATION_RATE_COAST = 50;
 
   private getEdgePenalty(
-    edge: EdgeRow & { lat: number; lon: number },
+    edge: EdgeRow,
     minCoastDistanceMeters: number,
     dims: VesselDimensions,
     skipReasons?: SearchSkipReasons,
@@ -1932,7 +1947,7 @@ export class RoutingEngine {
    * `effectiveDistance` defaults to the edge length; tide-aware search passes
    * the current-adjusted equivalent (distance × STW / SOG) instead.
    */
-  private calculateEdgeCost(edge: EdgeRow & { lat: number; lon: number }, effectiveDistance?: number): number {
+  private calculateEdgeCost(edge: EdgeRow, effectiveDistance?: number): number {
     let cost = (effectiveDistance ?? edge.distance) * edge.cost_factor;
 
     // One-way penalty: traffic_mode=2 means only reverse direction (target→source)

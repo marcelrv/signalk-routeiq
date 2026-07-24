@@ -314,7 +314,7 @@ describe('RoutingEngine', () => {
       assert.strictEqual(row.min_depth, 42, 'Overlay min_depth should be 42');
     });
 
-    it('addEdge sets source_lat/source_lon in memory', async () => {
+    it('addEdge exposes both endpoints coordinates through getEdgesInBBox', async () => {
       const newSrc = 1420300018503000;
       const newTgt = 1420400018504000;
       await db.addEdge(0, { source: newSrc, target: newTgt, distance: 2000, min_depth: 5, max_air_draft: 25, min_width: 12, cost_factor: 0.8, distance_to_land: 300, edge_type_id: 1, traffic_mode: 0 });

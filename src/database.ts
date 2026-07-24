@@ -51,10 +51,13 @@ export interface EdgeRow {
   edge_kind_id?: number;
   crosses_land?: number;
   crosses_obstacle?: number;
-  lat: number;
-  lon: number;
-  source_lat?: number;
-  source_lon?: number;
+  // No coordinates here by design: an edge's endpoints are always resolvable
+  // from `this.nodes` via `source`/`target`, and every edge in edgesBySource
+  // is guaranteed to have both endpoints present (the loaders skip edges
+  // whose endpoints are missing; deleteNode/unloadDatabaseGraph sweep edges
+  // whose endpoints go away). Caching lat/lon/source_lat/source_lon on the
+  // row cost ~100 bytes/edge in separate V8 heap numbers — ~25 MB per 270k
+  // edge region, several of which can be loaded at once.
   /** Intermediate [lat,lon] points of a funnel-computed navmesh path along this
    *  edge (set only when this edge_kind_id=1 edge was upgraded from a straight
    *  fallback chord to a real taut path by precomputeFunnelEdges). */
@@ -137,7 +140,7 @@ export class RoutingDatabase {
   private pending = new Map<number, { resolve: (value: any) => void; reject: (reason: any) => void }>();
   private dbDir: string;
   private nodes: Map<number, { lat: number; lon: number; regionId: number; nodeDepth: number }> = new Map();
-  private edgesBySource: Map<number, Array<EdgeRow & { lat: number; lon: number }>> = new Map();
+  private edgesBySource: Map<number, Array<EdgeRow>> = new Map();
   private pois: PoiRow[] = [];
   private navmeshRegions: NavmeshRegionWithDb[] = [];
   private spatialGrid: Map<string, number[]> = new Map();
@@ -159,7 +162,7 @@ export class RoutingDatabase {
    *  full scan had, since path_points were never tested either). Null
    *  whenever it may be stale; rebuilt from scratch on next use, same
    *  correctness argument as poiGrid. Backs getEdgesInBBox. */
-  private edgeGrid: Map<string, Array<EdgeRow & { lat: number; lon: number }>> | null = null;
+  private edgeGrid: Map<string, Array<EdgeRow>> | null = null;
 
   private hasCrossesLand: boolean = false;
   private hasCrossesObstacle: boolean = false;
@@ -633,17 +636,14 @@ export class RoutingDatabase {
       if (deletedNodeSet.has(edge.source) || deletedNodeSet.has(edge.target)) continue;
       // Skip if this specific edge was deleted
       if (deletedEdgeSet.has(`${edge.source}:${edge.target}`)) continue;
-      const s = this.nodes.get(edge.source);
-      const t = this.nodes.get(edge.target);
-      if (!s || !t) continue;
-      edge.lat = t.lat;
-      edge.lon = t.lon;
-      (edge as any).source_lat = s.lat;
-      (edge as any).source_lon = s.lon;
+      // Both endpoints must resolve — every consumer looks the edge's
+      // coordinates up from `this.nodes`, so an edge with a dangling
+      // endpoint has no usable geometry and is dropped here.
+      if (!this.nodes.has(edge.source) || !this.nodes.has(edge.target)) continue;
       if (!this.edgesBySource.has(edge.source)) {
         this.edgesBySource.set(edge.source, []);
       }
-      this.edgesBySource.get(edge.source)!.push(edge as any);
+      this.edgesBySource.get(edge.source)!.push(edge);
     }
 
     this.buildSpatialIndex();
@@ -857,9 +857,7 @@ export class RoutingDatabase {
     const result = Navmesh.funnelBetweenNodes(region, nodeA, nodeB);
     if (!result) return;
 
-    const a = this.nodes.get(nodeA);
-    const b = this.nodes.get(nodeB);
-    if (!a || !b) return;
+    if (!this.nodes.has(nodeA) || !this.nodes.has(nodeB)) return;
 
     const forwardPath = result.path.slice(1, -1);
     const reversePath = [...forwardPath].reverse();
@@ -883,14 +881,12 @@ export class RoutingDatabase {
     if (!this.edgesBySource.has(nodeA)) this.edgesBySource.set(nodeA, []);
     this.edgesBySource.get(nodeA)!.push({
       ...shared, source: nodeA, target: nodeB,
-      lat: b.lat, lon: b.lon, source_lat: a.lat, source_lon: a.lon,
       path_points: forwardPath,
     });
 
     if (!this.edgesBySource.has(nodeB)) this.edgesBySource.set(nodeB, []);
     this.edgesBySource.get(nodeB)!.push({
       ...shared, source: nodeB, target: nodeA,
-      lat: a.lat, lon: a.lon, source_lat: b.lat, source_lon: b.lon,
       path_points: reversePath,
     });
   }
@@ -1145,16 +1141,12 @@ export class RoutingDatabase {
       for (const edge of edges) {
         if (deletedNodeSet.has(edge.source) || deletedNodeSet.has(edge.target)) continue;
         if (deletedEdgeSet.has(`${edge.source}:${edge.target}`)) continue;
-        const s = this.nodes.get(edge.source);
-        const t = this.nodes.get(edge.target);
-        if (!s || !t) continue;
-        edge.lat = t.lat;
-        edge.lon = t.lon;
-        (edge as any).source_lat = s.lat;
-        (edge as any).source_lon = s.lon;
+        // Same dangling-endpoint drop as loadGraph — coordinates always come
+        // from `this.nodes`, never from the edge row.
+        if (!this.nodes.has(edge.source) || !this.nodes.has(edge.target)) continue;
         edge.dbIndex = edge.db_index;
         if (!this.edgesBySource.has(edge.source)) this.edgesBySource.set(edge.source, []);
-        this.edgesBySource.get(edge.source)!.push(edge as any);
+        this.edgesBySource.get(edge.source)!.push(edge);
         edgeCount++;
       }
 
@@ -1373,14 +1365,24 @@ export class RoutingDatabase {
     return this.nodes.get(id) || null;
   }
 
-  async getOutgoingEdges(nodeId: number): Promise<Array<EdgeRow & { lat: number; lon: number }>> {
+  /** Read-only view of the loaded node map, for hot loops that resolve one
+   *  node's coordinates per iteration (A*'s edge relaxation, which reads the
+   *  target node of every edge it considers) — a single Map.get instead of a
+   *  getNodeSync() call each time. The map is mutated in place by
+   *  load/unload, never replaced, so a hoisted reference stays live for the
+   *  caller's whole loop. Callers must treat it as read-only. */
+  getNodeMap(): ReadonlyMap<number, { lat: number; lon: number; regionId: number; nodeDepth: number }> {
+    return this.nodes;
+  }
+
+  async getOutgoingEdges(nodeId: number): Promise<Array<EdgeRow>> {
     if (this.graphLoaded) {
       return this.edgesBySource.get(nodeId) || [];
     }
     return [];
   }
 
-  async getEdge(source: number, target: number): Promise<EdgeRow & { lat: number; lon: number } | null> {
+  async getEdge(source: number, target: number): Promise<EdgeRow | null> {
     if (this.graphLoaded) {
       const edges = this.edgesBySource.get(source);
       if (edges) {
@@ -1776,15 +1778,21 @@ export class RoutingDatabase {
         for (const e of bucket) {
           const edgeKey = `${e.source}:${e.target}`;
           if (visited.has(edgeKey)) continue;
-          const slat = e.source_lat ?? 0;
-          const slon = e.source_lon ?? 0;
-          if ((slat >= minLat && slat <= maxLat && slon >= minLon && slon <= maxLon) ||
-              (e.lat >= minLat && e.lat <= maxLat && e.lon >= minLon && e.lon <= maxLon)) {
+          // Endpoint coordinates live only in the node map — this response
+          // still exposes them (the webapp draws each edge from them), so
+          // they're resolved here, at serialization time, rather than kept
+          // on every EdgeRow. Both lookups always hit for a gridded edge
+          // (buildEdgeGrid only buckets edges whose endpoints resolve).
+          const s = this.nodes.get(e.source);
+          const t = this.nodes.get(e.target);
+          if (!s || !t) continue;
+          if ((s.lat >= minLat && s.lat <= maxLat && s.lon >= minLon && s.lon <= maxLon) ||
+              (t.lat >= minLat && t.lat <= maxLat && t.lon >= minLon && t.lon <= maxLon)) {
             visited.add(edgeKey);
             results.push({
               source: e.source, target: e.target,
-              source_lat: slat, source_lon: slon,
-              target_lat: e.lat, target_lon: e.lon,
+              source_lat: s.lat, source_lon: s.lon,
+              target_lat: t.lat, target_lon: t.lon,
               distance: e.distance, min_depth: e.min_depth,
               max_air_draft: e.max_air_draft, min_width: e.min_width,
               edge_type_id: e.edge_type_id, edge_kind_id: e.edge_kind_id ?? EDGE_KIND_CENTERLINE, traffic_mode: e.traffic_mode,
@@ -1967,10 +1975,10 @@ export class RoutingDatabase {
    *  full scan's `(source in bbox) || (target in bbox)` test already
    *  encoded, just without an index to prune the search. Always built from
    *  scratch — see invalidateBBoxCaches. */
-  private buildEdgeGrid(): Map<string, Array<EdgeRow & { lat: number; lon: number }>> {
-    const grid = new Map<string, Array<EdgeRow & { lat: number; lon: number }>>();
+  private buildEdgeGrid(): Map<string, Array<EdgeRow>> {
+    const grid = new Map<string, Array<EdgeRow>>();
     const cellSize = 0.01;
-    const push = (key: string, edge: EdgeRow & { lat: number; lon: number }) => {
+    const push = (key: string, edge: EdgeRow) => {
       let bucket = grid.get(key);
       if (!bucket) {
         bucket = [];
@@ -1980,20 +1988,15 @@ export class RoutingDatabase {
     };
     for (const edges of this.edgesBySource.values()) {
       for (const e of edges) {
-        let slat = e.source_lat;
-        let slon = e.source_lon;
-        if (slat === undefined || slon === undefined) {
-          // Fallback for the (theoretical) case an edge row reached here
-          // without source_lat/source_lon populated — every real call site
-          // (loadGraph, loadDatabaseGraphInner, addEdge,
-          // addFunnelShortcutEdge) sets them, but resolve via the node map
-          // rather than silently mis-bucketing the edge.
-          const s = this.nodes.get(e.source);
-          slat = s?.lat ?? 0;
-          slon = s?.lon ?? 0;
-        }
-        const sourceKey = `${Math.floor(slat / cellSize)}:${Math.floor(slon / cellSize)}`;
-        const targetKey = `${Math.floor(e.lat / cellSize)}:${Math.floor(e.lon / cellSize)}`;
+        // Endpoint coordinates come from the node map (edges carry none).
+        // An edge whose endpoints don't both resolve has no position to
+        // bucket by, so it's left out of the grid rather than silently
+        // mis-bucketed at (0,0) — getEdgesInBBox skips such an edge anyway.
+        const s = this.nodes.get(e.source);
+        const t = this.nodes.get(e.target);
+        if (!s || !t) continue;
+        const sourceKey = `${Math.floor(s.lat / cellSize)}:${Math.floor(s.lon / cellSize)}`;
+        const targetKey = `${Math.floor(t.lat / cellSize)}:${Math.floor(t.lon / cellSize)}`;
         push(sourceKey, e);
         push(targetKey, e);
       }
@@ -2113,7 +2116,7 @@ export class RoutingDatabase {
     return false;
   }
 
-  getEdgeSync(source: number, target: number): (EdgeRow & { lat: number; lon: number }) | null {
+  getEdgeSync(source: number, target: number): EdgeRow | null {
     if (!this.graphLoaded) return null;
     const edges = this.edgesBySource.get(source);
     if (!edges) return null;
@@ -2140,7 +2143,7 @@ export class RoutingDatabase {
    * directly in buildRouteResult), so no reversal is needed when walking
    * originalPath forward.
    */
-  aggregateSegmentEdges(fromNode: number, toNode: number, originalPath: number[]): (EdgeRow & { lat: number; lon: number }) | null {
+  aggregateSegmentEdges(fromNode: number, toNode: number, originalPath: number[]): EdgeRow | null {
     if (!this.graphLoaded) return null;
 
     const startIdx = originalPath.indexOf(fromNode);
@@ -2186,7 +2189,6 @@ export class RoutingDatabase {
       }
     }
 
-    const toNodeCoords = this.nodes.get(toNode);
     return {
       source: fromNode,
       target: toNode,
@@ -2200,8 +2202,6 @@ export class RoutingDatabase {
       traffic_mode: trafficMode,
       crosses_land: crossesLand,
       crosses_obstacle: crossesObstacle,
-      lat: toNodeCoords?.lat || 0,
-      lon: toNodeCoords?.lon || 0,
       ...(pathPoints.length > 0 ? { path_points: pathPoints } : {}),
     };
   }
@@ -2303,11 +2303,9 @@ export class RoutingDatabase {
       edge.distance = Math.round(this.haversineMeters(s.lat, s.lon, t.lat, t.lon));
     }
     await this.sendMessage('insertEdge', { dbIndex, ...edge });
-    const newEdge: EdgeRow & { lat: number; lon: number } = {
+    const newEdge: EdgeRow = {
       source: edge.source,
       target: edge.target,
-      source_lat: s.lat,
-      source_lon: s.lon,
       distance: edge.distance,
       min_depth: edge.min_depth ?? -1,
       max_air_draft: edge.max_air_draft ?? -1,
@@ -2316,8 +2314,6 @@ export class RoutingDatabase {
       distance_to_land: edge.distance_to_land ?? 0,
       edge_type_id: edge.edge_type_id ?? 0,
       traffic_mode: edge.traffic_mode ?? 0,
-      lat: t.lat,
-      lon: t.lon,
     };
     if (!this.edgesBySource.has(edge.source)) {
       this.edgesBySource.set(edge.source, []);
