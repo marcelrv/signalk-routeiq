@@ -52,6 +52,26 @@ interface TimelineResponse {
   timeline?: Array<{ time: string; level: number }>;
 }
 
+/** Hard cap on cache entries per Map — a backstop behind TTL pruning so a
+ *  vessel wandering through many coordinate buckets can't grow these maps
+ *  unbounded even within the TTL window. */
+const CACHE_MAX_ENTRIES = 500;
+
+/** Delete expired entries (age >= ttlMs) from `map`, then, if it's still
+ *  over `CACHE_MAX_ENTRIES`, evict the oldest entries (smallest `at`) until
+ *  it's under the cap. Call before every cache `.set(...)`. */
+function pruneCache<T>(map: Map<string, { at: number; data: T }>, ttlMs: number): void {
+  const now = Date.now();
+  for (const [k, v] of map) {
+    if (now - v.at >= ttlMs) map.delete(k);
+  }
+  if (map.size >= CACHE_MAX_ENTRIES) {
+    const entries = [...map.entries()].sort((a, b) => a[1].at - b[1].at);
+    const toEvict = map.size - CACHE_MAX_ENTRIES + 1;
+    for (let i = 0; i < toEvict; i++) map.delete(entries[i][0]);
+  }
+}
+
 /**
  * Client for the signalk-tides REST API with response caching, so a 24 h
  * departure scan (dozens of route calculations) reuses one set of fetches.
@@ -87,6 +107,7 @@ export class TidesClient {
         latitude: s.latitude as number,
         longitude: s.longitude as number,
       }));
+    pruneCache(this.stationCache, TidesClient.CACHE_TTL_MS);
     this.stationCache.set(key, { at: Date.now(), data });
     return data;
   }
@@ -109,6 +130,7 @@ export class TidesClient {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`tides timeline failed for ${stationId} (${resp.status})`);
     const data = (await resp.json()) as TimelineResponse;
+    pruneCache(this.timelineCache, TidesClient.CACHE_TTL_MS);
     this.timelineCache.set(key, { at: Date.now(), data });
     return data;
   }
@@ -266,6 +288,7 @@ export class CurrentsClient {
     if (!resp.ok) throw new Error(`currents station search failed (${resp.status})`);
     const raw = (await resp.json()) as CurrentStationDto[];
     const data = (Array.isArray(raw) ? raw : []).filter((s) => s.vectorCapable);
+    pruneCache(this.stationCache, CurrentsClient.CACHE_TTL_MS);
     this.stationCache.set(key, { at: Date.now(), data });
     return data;
   }
@@ -285,6 +308,7 @@ export class CurrentsClient {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`currents timeline failed for ${stationId} (${resp.status})`);
     const data = (await resp.json()) as CurrentTimelineDto;
+    pruneCache(this.timelineCache, CurrentsClient.CACHE_TTL_MS);
     this.timelineCache.set(key, { at: Date.now(), data });
     return data;
   }
