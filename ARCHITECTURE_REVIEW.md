@@ -156,6 +156,25 @@ asserting no second worker is spawned (Stage 2).
 
 ## Medium-severity findings (documented backlog)
 
+> **Status (2026-07-24) — M1–M7 DONE, M8 open.** All verified with the Docker
+> build+test (64/64) and a live smoke test against the container (boot poller,
+> `/databases` catalog, and a real `POST /route` returning a 71-waypoint route
+> that exercised on-demand loading + the grid changes).
+> - **M1** — done in `b75ec12` (H3): CORS comment corrected.
+> - **M2** — `bc4d202`: `reloadMetadata` reuses the main worker's `peekMetadata`;
+>   second `Worker` removed.
+> - **M3** — `bc4d202`: duplicate `haversineDistance` deleted.
+> - **M4** — `be74ea7`: node queries routed through the grid (cos(lat) superset,
+>   identical results; POI/edge queries left full-scan — follow-up).
+> - **M5** — `0e7608e`: optional `maxLoadedRegions` LRU cap (default 0 = off).
+>   The load-timeout half was intentionally skipped (worker sqlite read is
+>   synchronous and can't be safely aborted) — still open as a sub-item.
+> - **M6** — `be74ea7`: spatial grid maintained incrementally; full rebuild kept
+>   only for the bulk `loadGraph()`.
+> - **M7** — `f01e9de`: SK app/request/engine seams typed via narrow interfaces
+>   instead of `as any`.
+> - **M8** — NOT done (overlay-merge invariant hardening); left as backlog.
+
 ### M1 — CORS is used as if it were authorization
 `src/api.ts:60-77`. The comment claims mutation routes omit
 `Access-Control-Allow-Origin` so "browsers block unauthenticated cross-origin
