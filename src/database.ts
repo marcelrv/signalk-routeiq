@@ -1258,6 +1258,39 @@ export class RoutingDatabase {
     }
     this.nodesByDbIndex.delete(dbIndex);
 
+    // The by-dbIndex edge removal above only drops edges tagged with THIS
+    // dbIndex — it deliberately keeps overlay (user-edit) edges, which are
+    // tagged dbIndex === -1, or left `undefined` entirely for edges added
+    // in-memory via addEdge (see addEdge's newEdge literal, which never sets
+    // dbIndex). If such an overlay edge happens to reference a node that
+    // just got deleted above (refcount hit 0 — e.g. a graph-editor edge the
+    // user drew from a node in another region to a node in this now-evicted
+    // one), it's left dangling in edgesBySource: its source or target no
+    // longer resolves via this.nodes.get(), which a later A* relaxation or
+    // buildRouteResult would hit as `undefined` and either crash or silently
+    // produce a broken route. Sweep those out now that node removal is done.
+    //
+    // This only ever removes an edge whose source or target is gone — every
+    // edge with both endpoints still loaded is left untouched — so it can
+    // only catch dangling overlay/stray edges, never a live one. It's an
+    // O(edges) pass, but unload is infrequent, so that's fine.
+    //
+    // Known, accepted limitation: the dropped overlay edge still exists as a
+    // row in user-edits.sqlite. Because overlay rows are merged into memory
+    // only once (see overlayMergedOnce), a later reload of this region will
+    // NOT re-add this specific in-memory overlay edge until a full
+    // close()/reload() re-merges everything from scratch. That's fine —
+    // dropping an inactive cross-region overlay edge from memory beats
+    // leaving a dangling reference, and the edit itself is preserved on
+    // disk, just not re-merged automatically. Not attempting to solve that
+    // re-merge gap here.
+    for (const [src, edges] of this.edgesBySource) {
+      if (!this.nodes.has(src)) { this.edgesBySource.delete(src); continue; }
+      const kept = edges.filter(e => this.nodes.has(e.target));
+      if (kept.length === 0) this.edgesBySource.delete(src);
+      else if (kept.length !== edges.length) this.edgesBySource.set(src, kept);
+    }
+
     this.navmeshRegions = this.navmeshRegions.filter(r => r.dbIndex !== dbIndex);
     this.pois = this.pois.filter(p => p.dbIndex !== dbIndex);
 

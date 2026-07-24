@@ -621,6 +621,57 @@ describe('§4a dynamic database loading', () => {
       });
       assert.ok(route.totalDistance! > 0);
     });
+
+    // #9 regression: unloadDatabaseGraph must not leave a dangling overlay
+    // edge behind when the node it points at gets evicted with the region
+    // being unloaded. Placed last in this describe block (both databases are
+    // loaded again here — region A was just reloaded above, region B was
+    // never unloaded) so it doesn't disturb the load/unload/reload ordering
+    // the earlier tests in this block depend on.
+    it('#9: an overlay edge dangling into an evicted region\'s node is cleaned up on unload', async () => {
+      // A region-B node (source) and a region-A node (target), both
+      // currently loaded — exactly what a graph-editor "connect node" action
+      // does (see api.ts's addEdge(0, ...) call sites), and exactly what
+      // addEdge requires (it throws if either endpoint isn't in `nodes`).
+      const bNodeId = nodeIdFor(C[0], C[1]);
+      const dNodeId = nodeIdFor(D[0], D[1]);
+      const aNodeId = REGION_A_NODE_IDS[3]; // V3 — untouched by the routing tests above (which use V0/V2)
+
+      await db.addEdge(0, { source: bNodeId, target: aNodeId, distance: 0 });
+
+      // Confirm the overlay edge is present while both regions are loaded.
+      const beforeEdge = db.getEdgeSync(bNodeId, aNodeId);
+      assert.ok(beforeEdge, 'expected the overlay edge to be present while both regions are loaded');
+      const outgoingBefore = await db.getOutgoingEdges(bNodeId);
+      assert.ok(outgoingBefore.some(e => e.target === aNodeId),
+        'expected getOutgoingEdges(bNode) to include the overlay edge');
+      // Region B's own pre-existing C->D edge must also be there, as a
+      // baseline for the "still present after unload" check below.
+      assert.ok(outgoingBefore.some(e => e.target === dNodeId),
+        'expected region B\'s own C->D edge to be present before unload');
+
+      // Evict region A: node V3 (aNodeId) gets deleted (its refcount hits
+      // zero), which would leave the overlay edge above dangling unless
+      // unloadDatabaseGraph's cleanup pass (the #9 fix) sweeps it out.
+      await db.unloadDatabaseGraph('region-a.sqlite');
+
+      assert.strictEqual(db.getEdgeSync(bNodeId, aNodeId), null,
+        'the overlay edge pointing at the now-evicted region-A node must be gone, not dangling');
+      const outgoingAfter = await db.getOutgoingEdges(bNodeId);
+      assert.ok(!outgoingAfter.some(e => e.target === aNodeId),
+        'getOutgoingEdges(bNode) must no longer contain an edge targeting the removed region-A node');
+
+      // Region B's own intact edge must have survived the cleanup pass —
+      // proof the sweep only removes edges with a missing endpoint, not
+      // every edge touching a source that also happened to have a dangling
+      // one.
+      assert.ok(outgoingAfter.some(e => e.target === dNodeId),
+        'region B\'s own C->D edge must survive the dangling-edge cleanup pass');
+
+      // Restore region A so this shared `db` instance ends the describe
+      // block loaded the same way it would have without this test.
+      await db.loadDatabaseGraph('region-a.sqlite');
+    });
   });
 
   describe('§4a M5: bounded working set (maxLoadedRegions LRU cap)', () => {
