@@ -2,172 +2,79 @@
 
 # SignalK RouteIQ Nautical Route Planner
 
+> ⚠️ **Alpha release.** RouteIQ is under active development. Routing data currently only
+> covers a small set of test regions (parts of the Netherlands and the US East Coast) —
+> it is **not yet suitable for real-world passage planning**. Use it for testing and
+> feedback only, always verify routes against official charts, and do not rely on it
+> for actual navigation.
+
 An offline-first, vessel-aware nautical route planner designed to run natively as a webapp and plugin within the Signal K ecosystem. Optimized for inland waterways and coastal navigation, it dynamically calculates safe routes based on a vessel's physical dimensions (draft, beam, air draft) and user safety preferences.
 
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
-![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)
-![TypeScript](https://img.shields.io/badge/typescript-%3E%3D5.0.0-blue.svg)
+![Node](https://img.shields.io/badge/node-%3E%3D22.5.0-brightgreen.svg)
 
 ## Features
 
 - **Offline-First Routing**: Pre-computed routing graph enables instant route calculation without internet connectivity
-- **Vessel-Aware**: Considers draft, beam, and air draft to ensure safe navigation
-- **Directed A\* Algorithm**: Multi-layered cost function with fairway preferences and traffic flow penalties
-- **Signal K Integration**: Native plugin for Signal K servers with real-time vessel data
+- **Vessel-Aware**: Considers draft, beam, and air draft (with configurable safety margins) to ensure safe navigation
+- **Tide-Aware (optional)**: Can factor in estimated tidal currents when the `signalk-tides` plugin is available
 - **Interactive Web UI**: Leaflet-based map interface with click-and-drag route planning
 - **GPX Export**: Export routes for use in OpenCPN, WilhelmSK, and other navigation software
 - **POI Search**: Offline search for ports, marinas, locks, and other points of interest
+- **Chart Selection**: Nautical charts via Signal K's `resources/charts` API (raster and S-57 vector), plus built-in OpenStreetMap / OpenSeaMap
+- **Downloadable Routing Data**: Fetch pre-compiled regional routing databases on demand from within the app — no manual data prep required
 
-## Architecture
+## How It Works
 
-The project consists of three main parts:
+RouteIQ is made up of three pieces:
 
-### Part 1: Cloud Graph Generator (Data Pipeline)
-Python pipeline that processes S-57 ENCs and generates a navigable routing graph — lives in its own repo, [signalk-router-pipeline](https://github.com/marcelrv/signalk-router-pipeline), not in this one. Compiled databases it produces are published to [signalk-router-data](https://github.com/marcelrv/signalk-router-data) and downloaded by the plugin below at runtime; see the schema/consumption contract in that repo's `specs/routing-database-format-specification.md`.
+1. **A cloud data pipeline** (separate repo, [signalk-router-pipeline](https://github.com/marcelrv/signalk-router-pipeline)) that processes nautical charts into compiled routing databases.
+2. **This Signal K plugin**, which runs on your Signal K server, loads one or more of those databases, and calculates routes.
+3. **A web app**, served by the plugin, for planning routes on a chart and exporting them.
 
-### Part 2: Signal K Backend Plugin
-Node.js plugin running on the vessel's Signal K server.
+Compiled routing databases are published to [signalk-router-data](https://github.com/marcelrv/signalk-router-data) and can be downloaded directly from the plugin's "Manage Routing Data" screen — you don't need to run the pipeline yourself.
 
-**Location**: `src/`
+## Installation
 
-**Technology**: Node.js, TypeScript, sqlite3, Express
-
-**API Endpoints**:
-- `POST /signalk/v1/api/router/route` - Calculate route
-- `GET /signalk/v1/api/router/search?q=...` - Search POIs
-- `POST /signalk/v1/api/router/export/gpx` - Export to GPX
-- `POST /signalk/v1/api/router/push` - Push route to Signal K
-- `GET /signalk/v1/api/router/stats` - Database statistics
-- `GET/PUT /signalk/v1/api/router/vessel` - Vessel dimensions
-
-### Part 3: Interactive WebApp
-User-facing application hosted by Signal K server.
-
-**Location**: `public/`
-
-**Technology**: HTML, CSS, JavaScript, Leaflet.js
-
-**Features**:
-- Interactive map with click-and-drag route planning
-- Chart selection (Charts tab): nautical charts from the Signal K `resources/charts` API — raster tile charts and S-57 vector charts (simplified S-52 rendering) — plus built-in OpenStreetMap / OpenSeaMap
-- Real-time vessel dimension display and overrides
-- POI search with map integration
-- GPX download and Signal K route activation
-
-## Getting Started
-
-### Prerequisites
-
-- Node.js >= 18.0.0
-- Signal K Server (for plugin deployment)
-
-### Installation
-
-```bash
-# Install Node.js dependencies
-npm install
-
-# Build TypeScript
-npm run build
-
-# Run tests
-npm test
-```
-
-### Generating the Routing Database
-
-Not done in this repo — see [signalk-router-pipeline](https://github.com/marcelrv/signalk-router-pipeline)
-for generating a database from source charts, or just download a
-pre-compiled one via the plugin's "Manage Routing Data" dialog (backed by
-[signalk-router-data](https://github.com/marcelrv/signalk-router-data)).
-
-### Running the Plugin
-
-```bash
-# Development mode with ts-node
-npm run dev
-
-# Production mode
-npm start
-```
-
-### Deploying to Signal K
-
-1. Install as a Signal K plugin via the App Store or manually
-2. Configure the path to your `routing_graph.sqlite` database
-3. Set default vessel dimensions (or let it auto-detect from Signal K)
+1. Install **RouteIQ** from the Signal K App Store (Server → Appstore, in your Signal K server's admin UI), or manually by placing this plugin in your Signal K server's `node_modules`.
+2. Restart your Signal K server and enable the plugin under Server → Plugin Config.
+3. Open the RouteIQ web app (linked from the Signal K webapps list) and use **Manage Routing Data** to download a routing database for your area.
+4. Set your vessel dimensions (or let RouteIQ auto-detect them from `design.draft` etc. if your Signal K server provides them) and start planning routes.
 
 ## Configuration
 
+These settings are available under Server → Plugin Config → RouteIQ:
+
 | Setting | Default | Description |
-|---------|---------|-------------|
-| `routingDatabase` | `./routing_graph.sqlite` | Path to routing database |
-| `defaultDraft` | 2.0 | Default vessel draft (meters) |
-| `defaultBeam` | 4.0 | Default vessel beam (meters) |
-| `defaultAirDraft` | 10.0 | Default vessel air draft (meters) |
-| `defaultCoastDistance` | 0.5 | Default min coast distance (NM) |
-| `fairwayMultiplier` | 0.8 | Cost multiplier for fairways |
-| `openWaterMultiplier` | 1.2 | Cost multiplier for open water |
-| `wrongWayPenalty` | 5.0 | Penalty for wrong-way travel |
-| `routingBBoxMargin` | 0.1 | A* bounding-box margin (degrees, ~11km) |
-| `routingBBoxMaxExtent` | 10.0 | Max bounding box before full-graph fallback |
-| `lineOfSightSampleInterval` | 500 | Line-of-sight sample spacing (meters) |
-| `lineOfSightSearchRadius` | 800 | Line-of-sight node search radius (meters) |
+|---|---|---|
+| Routing Data Directory | `./data/` | Directory containing the `.sqlite` routing graph files RouteIQ loads |
+| Draft Safety Margin (m) | 0.3 | Under-keel clearance added to the vessel's design draft |
+| Air Draft Safety Margin (m) | 1.5 | Mast clearance added to the vessel's design air draft |
+| Beam Safety Margin (m) | 2.0 | Width clearance added to the vessel's design beam |
+| Default Min Coast Distance (NM) | 0.5 | Default minimum distance to keep from the coastline |
+| Average Speed (kn) | 6.0 | Cruising speed used to estimate route duration / ETA |
+| Consider Tides by Default | off | Factor in estimated tidal currents when calculating routes (requires the `signalk-tides` plugin); can be overridden per request |
+| Max Tidal Current (kn) | 2.0 | Spring-tide current at full flood/ebb, used to scale the estimated tidal flow model |
+| Tides API Base URL | this server | Server hosting the `signalk-tides` plugin, if not this one |
+| Waypoint Simplification Tolerance (m) | 30 | Max deviation allowed when simplifying the computed path down to route waypoints |
+| Wrong Way Penalty | 5.0 | Cost penalty applied when routing against marked traffic flow |
+| Line-of-Sight Sample Interval (m) | 500 | Spacing between samples when checking line-of-sight for route smoothing |
+| Line-of-Sight Search Radius (m) | 0 | Radius to search for graph nodes when verifying line-of-sight |
+| Database Catalog URL | signalk-router-data catalog | Where to look for downloadable routing databases |
+| Dynamic Database Loading | on | Load each region into memory only when a route actually needs it, instead of loading everything at startup. Recommended when you have multiple regional databases installed |
+| Eager-load Region at Vessel Position | on | With dynamic loading on, pre-load the region under the vessel so it's ready to route as soon as it's positioned |
+| Proactive Load Radius (NM) | 0 | Load a region before the vessel actually enters it, once within this distance |
+| Max Loaded Regions | 6 | Cap on how many regions stay loaded in memory at once when using dynamic loading |
 
-## Routing Algorithm
+## Safety Constraints & Routing
 
-### Safety Constraints
-Edges are discarded if:
-- `min_depth <= vessel.draft`
-- `max_air_draft <= vessel.airDraft`
-- `min_width <= vessel.beam`
-- `distance_to_land < min_coast_distance`
+Routes avoid edges where:
+- Water depth is insufficient for the vessel's draft (plus safety margin)
+- Vertical clearance is insufficient for the vessel's air draft (plus safety margin)
+- Channel width is insufficient for the vessel's beam (plus safety margin)
+- Distance to land is below the configured minimum coast distance
 
-### Cost Function
-```
-Cost = Distance × FairwayMultiplier × DirectionalPenalty
-```
-
-- **Fairway Multiplier**: 0.8 for official waterways, 1.2 for open water
-- **Directional Penalty**: 1.0 for correct direction, 5.0 for wrong-way
-
-## Project Structure
-
-```
-routeiq/
-├── public/                  # Part 3: WebApp frontend
-│   ├── index.html
-│   ├── styles.css
-│   └── app.js
-├── src/                     # Part 2: SignalK plugin
-│   ├── index.ts             # Plugin entry point
-│   ├── database.ts          # SQLite database layer (spatial grid index)
-│   ├── routing.ts           # A* routing engine with bbox pruning + string-pulling
-│   ├── api.ts               # Express API handlers
-│   ├── gpx-export.ts        # GPX export utilities
-│   └── types.ts             # TypeScript definitions
-├── test/                    # Test files
-│   └── routing.test.ts
-├── package.json
-├── tsconfig.json
-└── README.md
-```
-
-## Development
-
-```bash
-# Watch mode for development
-npm run build:watch
-
-# Lint code
-npm run lint
-
-# Format code
-npm run format
-
-# Run tests
-npm test
-```
+Routing prefers marked fairways over open water and penalizes travel against marked traffic flow.
 
 ## License
 
@@ -175,7 +82,7 @@ Apache License 2.0 - see LICENSE file for details
 
 ## Contributing
 
-Contributions are welcome! Please submit pull requests or open issues for bugs and feature requests.
+This is an alpha-stage project. Bug reports and feedback are very welcome — please open an issue or pull request on GitHub.
 
 ## Acknowledgments
 

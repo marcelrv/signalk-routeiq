@@ -51,31 +51,34 @@
     "configSchema": {
       "type": "object",
       "properties": {
-        "routingDatabase": {
+        "routingDataDir": {
           "type": "string",
-          "title": "Routing Database Path",
-          "description": "Path to the routing_graph.sqlite database",
-          "default": "./data/routing_graph.sqlite"
+          "title": "Routing Data Directory",
+          "description": "Directory containing .sqlite routing graph files",
+          "default": "./data/"
         },
         "safetyMarginDraft": {
           "type": "number",
           "title": "Draft Safety Margin (m)",
-          "description": "Under-keel clearance added to design draft.",
+          "description": "Under-keel clearance added to design draft",
           "default": 0.3,
+          "minimum": 0,
           "multipleOf": 0.1
         },
         "safetyMarginAirDraft": {
           "type": "number",
           "title": "Air Draft Safety Margin (m)",
-          "description": "Mast clearance added to design air draft.",
+          "description": "Mast clearance added to design air draft",
           "default": 1.5,
+          "minimum": 0,
           "multipleOf": 0.1
         },
         "safetyMarginBeam": {
           "type": "number",
           "title": "Beam Safety Margin (m)",
-          "description": "Width clearance added to design beam.",
+          "description": "Width clearance added to design beam",
           "default": 2.0,
+          "minimum": 0,
           "multipleOf": 0.1
         },
         "defaultCoastDistance": {
@@ -84,35 +87,46 @@
           "description": "Default minimum distance from coastline in nautical miles",
           "default": 0.5
         },
-        "fairwayMultiplier": {
+        "averageSpeedKnots": {
           "type": "number",
-          "title": "Fairway Multiplier",
-          "description": "Cost multiplier for fairway edges (lower = preferred)",
-          "default": 0.8
+          "title": "Average Speed (kn)",
+          "description": "Cruising speed used to estimate route duration / ETA",
+          "default": 6,
+          "minimum": 0.5,
+          "multipleOf": 0.1
         },
-        "openWaterMultiplier": {
+        "considerTides": {
+          "type": "boolean",
+          "title": "Consider Tides by Default",
+          "description": "Use estimated tidal currents in route calculation (requires the signalk-tides plugin). Clients can override per request.",
+          "default": false
+        },
+        "maxTidalCurrentKnots": {
           "type": "number",
-          "title": "Open Water Multiplier",
-          "description": "Cost multiplier for open water edges (higher = less preferred)",
-          "default": 1.2
+          "title": "Max Tidal Current (kn)",
+          "description": "Spring-tide current at full flood/ebb used to scale the estimated tidal flow",
+          "default": 2.0,
+          "minimum": 0,
+          "multipleOf": 0.1
+        },
+        "tidesApiBase": {
+          "type": "string",
+          "title": "Tides API Base URL",
+          "description": "Server hosting the signalk-tides plugin (default: this server)",
+          "default": "http://localhost:3000"
+        },
+        "waypointTolerance": {
+          "type": "number",
+          "title": "Waypoint Simplification Tolerance (m)",
+          "description": "Max deviation from the computed path when reducing it to route waypoints (0 = keep every graph node)",
+          "default": 30,
+          "minimum": 0
         },
         "wrongWayPenalty": {
           "type": "number",
           "title": "Wrong Way Penalty",
           "description": "Penalty multiplier for traveling against traffic flow",
           "default": 5
-        },
-        "routingBBoxMargin": {
-          "type": "number",
-          "title": "Routing BBox Margin (degrees)",
-          "description": "Initial search bounding-box margin around start/end",
-          "default": 0.1
-        },
-        "routingBBoxMaxExtent": {
-          "type": "number",
-          "title": "Routing BBox Max Extent (degrees)",
-          "description": "Maximum bounding-box size before full graph fallback",
-          "default": 10
         },
         "lineOfSightSampleInterval": {
           "type": "number",
@@ -124,14 +138,37 @@
           "type": "number",
           "title": "Line-of-Sight Search Radius (m)",
           "description": "Radius to search for graph nodes when verifying line-of-sight",
-          "default": 800
+          "default": 0
         },
-        "averageSpeedKnots": {
+        "catalogUrl": {
+          "type": "string",
+          "title": "Database Catalog URL",
+          "description": "URL to the routing-index.json catalog for downloading routing databases",
+          "default": "https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/routing-index.json"
+        },
+        "dynamicLoading": {
+          "type": "boolean",
+          "title": "Dynamic Database Loading",
+          "description": "Peek installed databases at startup instead of loading all of them; load each region into memory only when a route actually needs it. Leave off for a single-region deployment — there is nothing to gain and startup behavior is unchanged.",
+          "default": true
+        },
+        "eagerLoadAtPosition": {
+          "type": "boolean",
+          "title": "Eager-load region at vessel position",
+          "description": "With dynamic loading on, load the region under the vessel at startup and as it moves (via navigation.position), so a positioned vessel boots ready-to-route instead of empty. No effect when dynamic loading is off.",
+          "default": true
+        },
+        "loadRadiusNm": {
           "type": "number",
-          "title": "Average Speed (knots)",
-          "description": "Average vessel speed used to estimate travel time",
-          "default": 6,
-          "multipleOf": 0.1
+          "title": "Proactive load radius (nm)",
+          "description": "Load a region when the vessel is within this many nautical miles of it, before it actually crosses in. 0 = only load the region the vessel is inside.",
+          "default": 0
+        },
+        "maxLoadedRegions": {
+          "type": "number",
+          "title": "Max loaded regions (dynamic loading)",
+          "description": "Only applies with dynamic loading on. Keep at most this many regions loaded in memory, evicting the least-recently-used region once a route finishes and none is in progress. 0 = unlimited (keep every region ever loaded) — uncapped memory growth on long passages.",
+          "default": 6
         }
       }
     }
