@@ -66,3 +66,7 @@ todo.local.md
 
 # Private/local-only reference implementation — never commit
 node-server/
+
+# screenshot tooling (scripts/screenshots.sh installs playwright here)
+scripts/node_modules/
+scripts/package*.json
