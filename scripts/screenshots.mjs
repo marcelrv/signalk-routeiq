@@ -54,6 +54,11 @@ const ROUTE = { start: 'Oude Tonge', dest: 'Zierikzee' };
 // zero hits — so this ends at Vlissingen, in the same tidal waters.
 const TIDE_ROUTE = { fromLat: 51.66137945, fromLon: 4.15217585, dest: 'Vlissingen' };
 
+// Plugin-panel shot: same Krammersluizen origin, routed to the Oosterschelde
+// barrier lock at Roompot — the offline POI index has no marina named exactly
+// "Roompot Marina", but this is the nearest named approach to it.
+const PLUGIN_ROUTE = { dest: 'Roompotsluis' };
+
 // ── helpers ──────────────────────────────────────────────────────────
 
 const log = (...a) => console.log('[shots]', ...a);
@@ -231,18 +236,6 @@ async function setVesselPosition(page, latitude, longitude) {
   log(`published position ${latitude}, ${longitude}`);
 }
 
-/** Centre the Freeboard chart on a POI via the panel's own map.center call. */
-async function centreOnPoi(frame, query) {
-  await frame.locator('#poi-query').fill(query);
-  await frame.locator('#poi-go').click();
-  await frame.locator('#poi-results li').first().waitFor({ timeout: 30_000 });
-  const show = frame.locator('#poi-results li').first().getByRole('button', { name: 'Show' });
-  if (await show.count()) {
-    await show.click();
-    log('centred chart on', query);
-  }
-}
-
 /** Open the RouteIQ panel inside Freeboard-SK and return its iframe handle. */
 async function openRouteIqInFreeboard(page) {
   await page.goto(FREEBOARD_APP, { waitUntil: 'domcontentloaded' });
@@ -299,7 +292,48 @@ const SHOTS = {
 
   /** 3. Freeboard-SK with the RouteIQ plotter-extension panel open. */
   'freeboard-plugin': async ({ page }) => {
-    await openRouteIqInFreeboard(page);
+    // Freeboard opens at world zoom (0°/0°) when the server has no GPS source
+    // — give it a real origin near the Oosterschelde barrier before opening
+    // the panel.
+    await page.goto(FREEBOARD_APP, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(4000);
+    await setVesselPosition(page, TIDE_ROUTE.fromLat, TIDE_ROUTE.fromLon);
+
+    const frame = await openRouteIqInFreeboard(page);
+
+    // 'zoom_in_map' is a sticky Freeboard toggle that Signal K persists per
+    // user, not a fit-to-route button, and while it is on it keeps overriding
+    // map.center — leaving the chart at world zoom. Clear it first if set.
+    const fitToggle = page.locator('button', { hasText: /^zoom_in_map$/ }).first();
+    if (await fitToggle.evaluate((el) => el.classList.contains('mat-primary')
+      || getComputedStyle(el).backgroundColor.includes('59, 130')).catch(() => false)) {
+      await fitToggle.click().catch(() => {});
+      await page.waitForTimeout(1500);
+    }
+
+    // Route from the vessel to the Roompotsluis approach — a real leg gives a
+    // more representative shot than a bare POI, and framing the whole leg
+    // (rather than "Show"'s street-level zoom 14) is the point of this shot.
+    await frame.locator('#poi-query').fill(PLUGIN_ROUTE.dest);
+    await frame.locator('#poi-go').click();
+    await frame.locator('#poi-results li').first().waitFor({ timeout: 30_000 });
+    await frame.locator('#poi-results li').first()
+      .getByRole('button', { name: 'Route' }).click();
+    await frame.locator('#summary').waitFor({ timeout: 60_000 }).catch(() => {});
+    await page.waitForTimeout(2500);
+
+    await frame.locator('#poi-query').fill(PLUGIN_ROUTE.dest);
+    await frame.locator('#poi-go').click();
+    await frame.locator('#poi-results li').first().waitFor({ timeout: 30_000 });
+    await frame.locator('#poi-results li').first()
+      .getByRole('button', { name: 'Show' }).click().catch(() => {});
+    await page.waitForTimeout(2000);
+    for (let i = 0; i < 3; i++) {
+      await page.locator('button', { hasText: /^remove$/ }).first().click().catch(() => {});
+      await page.waitForTimeout(800);
+    }
+    await page.waitForTimeout(3000);
+
     await shoot(page, 'freeboard-plugin');
   },
 
