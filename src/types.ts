@@ -181,6 +181,12 @@ export interface BBox {
 
 // Plugin configuration
 export interface PluginConfig {
+  // Empty means "not configured": index.ts then falls back to the plugin's own
+  // Signal K data directory (<config>/plugin-config-data/signalk-routeiq/routing-data).
+  // A relative path is resolved against the plugin install directory, which is
+  // what the pre-2026-07-25 './data/' default did — that put downloaded
+  // routing databases under node_modules/signalk-routeiq, where npm discards
+  // them on the next plugin update.
   routingDataDir: string;
   safetyMarginDraft: number;     // meters, added to design draft
   safetyMarginAirDraft: number;  // meters, added to design air draft
@@ -234,7 +240,7 @@ export interface PluginConfig {
 
 // Default plugin configuration
 export const DEFAULT_CONFIG: PluginConfig = {
-  routingDataDir: './data/',
+  routingDataDir: '',
   safetyMarginDraft: 0.3,
   safetyMarginAirDraft: 1.5,
   safetyMarginBeam: 2.0,

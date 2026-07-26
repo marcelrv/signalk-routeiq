@@ -7,18 +7,20 @@
   "files": [
     "dist",
     "public",
+    "plotterext",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
   "signalk": {
     "displayName": "RouteIQ",
-    "appIcon": "icon.svg"
+    "appIcon": "icon.svg",
+    "recommends": ["signalk-tidal-currents", "signalk-tides", "@signalk/freeboard-sk"]
   },
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc && tsc test/routing.test.ts test/navmesh.test.ts test/navmesh-integration.test.ts test/zeelandbrug.test.ts test/bbox-penalty-retry.test.ts test/via-disconnected-leg.test.ts test/dynamic-loading.test.ts test/vessel-validation.test.ts --outDir dist-test --moduleResolution node --module es2022 --target es2022 --declaration --declarationMap --sourceMap --esModuleInterop --strict --skipLibCheck",
+    "build": "tsc && tsc test/routing.test.ts test/navmesh.test.ts test/navmesh-integration.test.ts test/zeelandbrug.test.ts test/bbox-penalty-retry.test.ts test/via-disconnected-leg.test.ts test/dynamic-loading.test.ts test/vessel-validation.test.ts test/plugin-registration.test.ts --outDir dist-test --moduleResolution node --module es2022 --target es2022 --declaration --declarationMap --sourceMap --esModuleInterop --strict --skipLibCheck",
     "build:watch": "tsc --watch",
     "start": "node dist/index.js",
     "dev": "ts-node --esm src/index.ts",
@@ -26,7 +28,7 @@
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
-    "test": "node --test --test-force-exit dist-test/routing.test.js dist-test/navmesh.test.js dist-test/navmesh-integration.test.js dist-test/zeelandbrug.test.js dist-test/bbox-penalty-retry.test.js dist-test/via-disconnected-leg.test.js dist-test/dynamic-loading.test.js dist-test/vessel-validation.test.js",
+    "test": "node --test --test-force-exit dist-test/routing.test.js dist-test/navmesh.test.js dist-test/navmesh-integration.test.js dist-test/zeelandbrug.test.js dist-test/bbox-penalty-retry.test.js dist-test/via-disconnected-leg.test.js dist-test/dynamic-loading.test.js dist-test/vessel-validation.test.js dist-test/plugin-registration.test.js",
     "test:unit": "node --test --test-force-exit dist-test/unit/*.test.js",
     "test:integration": "node --test --test-force-exit dist-test/integration/*.test.js",
     "deploy": "bash deploy.sh",
@@ -62,8 +64,8 @@
         "routingDataDir": {
           "type": "string",
           "title": "Routing Data Directory",
-          "description": "Directory containing .sqlite routing graph files",
-          "default": "./data/"
+          "description": "Directory containing .sqlite routing graph files. Leave empty to keep them in the plugin's own data directory, which survives plugin updates.",
+          "default": ""
         },
         "safetyMarginDraft": {
           "type": "number",
@@ -106,7 +108,7 @@
         "considerTides": {
           "type": "boolean",
           "title": "Consider Tides by Default",
-          "description": "Use estimated tidal currents in route calculation (requires the signalk-tides plugin). Clients can override per request.",
+          "description": "Factor tidal currents into route calculation. Needs a tide data plugin: signalk-tidal-currents (real current stations, preferred) and/or signalk-tides (height-derived estimate). With neither installed, routes fall back to plain distance. Clients can override per request.",
           "default": false
         },
         "maxTidalCurrentKnots": {
@@ -120,7 +122,7 @@
         "tidesApiBase": {
           "type": "string",
           "title": "Tides API Base URL",
-          "description": "Server hosting the signalk-tides plugin (default: this server)",
+          "description": "Server hosting the tide/current data plugins (default: this server)",
           "default": "http://localhost:3000"
         },
         "waypointTolerance": {

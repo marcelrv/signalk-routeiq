@@ -17,7 +17,7 @@ An offline-first, vessel-aware nautical route planner designed to run natively a
 
 - **Offline-First Routing**: Pre-computed routing graph enables instant route calculation without internet connectivity
 - **Vessel-Aware**: Considers draft, beam, and air draft (with configurable safety margins) to ensure safe navigation
-- **Tide-Aware (optional)**: Can factor in estimated tidal currents — requires the [`signalk-tides`](https://github.com/signalk/signalk-tides) plugin to also be installed and running
+- **Tide-Aware (optional)**: Can factor in tidal currents — needs a tide data plugin installed and running: [`signalk-tidal-currents`](https://github.com/marcelrv/signalk-tidal-currents) for real harmonic current stations (preferred), and/or [`signalk-tides`](https://github.com/openwatersio/signalk-tides) for a height-derived estimate. Without either, routes fall back to plain distance
 - **Interactive Web UI**: Leaflet-based map interface with click-and-drag route planning
 - **Freeboard-SK Integration**: Runs as a [Freeboard-SK](https://github.com/SignalK/freeboard-sk) Plotter Extension panel, so you can plan routes without leaving Freeboard-SK's own charting UI
 - **GPX Export**: Export routes for use in OpenCPN, WilhelmSK, and other navigation software
@@ -45,7 +45,7 @@ RouteIQ can be used two ways: as its own standalone web app (served by the plugi
 4. Click the ☰ menu icon in the top-right corner of the screen to open the Routing / Charts / View settings, and use **Manage Routing Data** there to download a routing database for your area.
 5. Set your vessel dimensions (or let RouteIQ auto-detect them from `design.draft` etc. if your Signal K server provides them) and start planning routes.
 
-Want tide-aware routing? Install and enable the [`signalk-tides`](https://github.com/signalk/signalk-tides) plugin first, then turn on "Consider Tides" in RouteIQ's settings (☰ menu → Routing) or per request.
+Want tide-aware routing? Install and enable a tide data plugin first — [`signalk-tidal-currents`](https://github.com/marcelrv/signalk-tidal-currents) for real harmonic current stations, and/or [`signalk-tides`](https://github.com/openwatersio/signalk-tides) for a height-derived estimate — then turn on "Consider Tides" in RouteIQ's settings (☰ menu → Routing) or per request. When both are available RouteIQ prefers the current stations and falls back to the height estimate outside their range.
 
 ## Configuration
 
@@ -53,15 +53,15 @@ These settings are available under Server → Plugin Config → RouteIQ:
 
 | Setting | Default | Description |
 |---|---|---|
-| Routing Data Directory | `./data/` | Directory containing the `.sqlite` routing graph files RouteIQ loads |
+| Routing Data Directory | the plugin's data directory | Directory containing the `.sqlite` routing graph files RouteIQ loads. Empty means `<Signal K config>/plugin-config-data/signalk-routeiq/routing-data`, which survives plugin updates; a relative path is resolved against the plugin install directory |
 | Draft Safety Margin (m) | 0.3 | Under-keel clearance added to the vessel's design draft |
 | Air Draft Safety Margin (m) | 1.5 | Mast clearance added to the vessel's design air draft |
 | Beam Safety Margin (m) | 2.0 | Width clearance added to the vessel's design beam |
 | Default Min Coast Distance (NM) | 0.5 | Default minimum distance to keep from the coastline |
 | Average Speed (kn) | 6.0 | Cruising speed used to estimate route duration / ETA |
-| Consider Tides by Default | off | Factor in estimated tidal currents when calculating routes (requires the `signalk-tides` plugin); can be overridden per request |
+| Consider Tides by Default | off | Factor in tidal currents when calculating routes (needs `signalk-tidal-currents` and/or `signalk-tides`); can be overridden per request |
 | Max Tidal Current (kn) | 2.0 | Spring-tide current at full flood/ebb, used to scale the estimated tidal flow model |
-| Tides API Base URL | this server | Server hosting the `signalk-tides` plugin, if not this one |
+| Tides API Base URL | this server | Server hosting the tide/current data plugins, if not this one |
 | Waypoint Simplification Tolerance (m) | 30 | Max deviation allowed when simplifying the computed path down to route waypoints |
 | Wrong Way Penalty | 5.0 | Cost penalty applied when routing against marked traffic flow |
 | Line-of-Sight Sample Interval (m) | 500 | Spacing between samples when checking line-of-sight for route smoothing |

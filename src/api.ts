@@ -1099,7 +1099,7 @@ export class ApiHandler {
       }
 
       // Reject filenames that could escape the data directory (path traversal)
-      if (!/^[\w\-\.]+\.sqlite$/.test(saveFilename) || saveFilename.includes('..')) {
+      if (!/^[\w\-.]+\.sqlite$/.test(saveFilename) || saveFilename.includes('..')) {
         res.status(400).json({ error: 'Invalid filename: must be a plain .sqlite filename with no path components' });
         return;
       }
@@ -1285,7 +1285,7 @@ export class ApiHandler {
         return;
       }
       // Same filename shape guard as handleDownloadDatabase (path traversal prevention).
-      if (!/^[\w\-\.]+\.sqlite$/.test(filename) || filename.includes('..')) {
+      if (!/^[\w\-.]+\.sqlite$/.test(filename) || filename.includes('..')) {
         res.status(400).json({ error: 'Invalid filename: must be a plain .sqlite filename with no path components' });
         return;
       }

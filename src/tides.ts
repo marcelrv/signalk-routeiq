@@ -1,7 +1,7 @@
 /**
  * Tidal current estimation for tide-aware routing.
  *
- * Data source: the signalk-tides plugin (https://github.com/bkeepers/signalk-tides)
+ * Data source: the signalk-tides plugin (https://github.com/openwatersio/signalk-tides)
  * which serves offline harmonic tide-HEIGHT predictions at
  * /signalk/v2/api/tides (station search by position, 10-minute timelines).
  * It provides no current (set/drift) data, so v1 derives an ESTIMATED

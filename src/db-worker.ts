@@ -625,7 +625,7 @@ parentPort.on('message', (msg: { id: number; type: string; payload?: any }) => {
         handles.length = 0;
         filenames.length = 0;
         if (overlayHandle) {
-          try { overlayHandle.db.close(); } catch { }
+          try { overlayHandle.db.close(); } catch { /* already closed */ }
           overlayHandle = null;
         }
         parentPort!.postMessage({ id, type, result: null });
