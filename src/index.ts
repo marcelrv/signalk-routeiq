@@ -79,6 +79,12 @@ export function pluginConstructor(app: ServerAPI) {
         console.log(`[routeiq] Migrated legacy routingDatabase → routingDataDir: ${config.routingDataDir}`);
       }
 
+      // Nothing configured (fresh install) → the plugin's own Signal K data dir
+      if (typeof config.routingDataDir !== 'string' || !config.routingDataDir.trim()) {
+        config.routingDataDir = defaultDataDir();
+        console.log(`[routeiq] No routing data directory configured, using ${config.routingDataDir}`);
+      }
+
       // Resolve data directory relative to plugin directory
       if (config.routingDataDir && !path.isAbsolute(config.routingDataDir)) {
         config.routingDataDir = path.resolve(__plugindir, config.routingDataDir);
@@ -90,23 +96,19 @@ export function pluginConstructor(app: ServerAPI) {
       }
       console.log(`[routeiq] Configuration loaded: ${JSON.stringify(config)}`);
 
-      // Create ApiHandler once; Express routes are registered against it on first start.
-      // On subsequent starts (config save), only the routing engine is recreated.
-      if (!apiHandler) {
-        apiHandler = new ApiHandler(config, app);
-        console.log('[routeiq] API handler created (awaiting database init)');
-      } else {
-        // start() rebuilds the config object on every config save; the
-        // handler keeps a reference, so hand it the fresh one.
-        apiHandler.updateConfig(config);
-      }
+      // The handler is created once per server run — here on the first start,
+      // or already in registerWithRouter() when the plugin was installed but
+      // not yet enabled. start() rebuilds the config object on every config
+      // save and the handler keeps a reference, so hand it the fresh one.
+      const handler = ensureApiHandler();
+      handler.updateConfig(config);
 
       // Freeboard-SK / chartplotter integration (plotterExtensions manifest + iframe assets)
       registerPlotterExtension(app, __plugindir);
       setPlotterExtensionRunning(true);
 
       // Set hot-reload callback: when a new database is downloaded, re-init everything
-      apiHandler.onReloadRequested = async (dataDir: string) => {
+      handler.onReloadRequested = async (dataDir: string) => {
         const currentDims = routingEngine?.vesselDims;
         if (database) {
           await database.close();
@@ -188,8 +190,8 @@ export function pluginConstructor(app: ServerAPI) {
           routingDataDir: {
             type: 'string',
             title: 'Routing Data Directory',
-            description: 'Directory containing .sqlite routing graph files',
-            default: DEFAULT_CONFIG.routingDataDir,
+            description: 'Directory containing .sqlite routing graph files. Leave empty to keep them in the plugin\'s own data directory, which survives plugin updates.',
+            default: defaultDataDir(),
           },
           safetyMarginDraft: {
             type: 'number',
@@ -232,7 +234,7 @@ export function pluginConstructor(app: ServerAPI) {
           considerTides: {
             type: 'boolean',
             title: 'Consider Tides by Default',
-            description: 'Use estimated tidal currents in route calculation (requires the signalk-tides plugin). Clients can override per request.',
+            description: 'Factor tidal currents into route calculation. Needs a tide data plugin: signalk-tidal-currents (real current stations, preferred) and/or signalk-tides (height-derived estimate). With neither installed, routes fall back to plain distance. Clients can override per request.',
             default: DEFAULT_CONFIG.considerTides,
           },
           maxTidalCurrentKnots: {
@@ -246,7 +248,7 @@ export function pluginConstructor(app: ServerAPI) {
           tidesApiBase: {
             type: 'string',
             title: 'Tides API Base URL',
-            description: 'Server hosting the signalk-tides plugin (default: this server)',
+            description: 'Server hosting the tide/current data plugins (default: this server)',
             default: DEFAULT_CONFIG.tidesApiBase,
           },
           waypointTolerance: {
@@ -324,10 +326,10 @@ export function pluginConstructor(app: ServerAPI) {
         console.log(`[routeiq] Frontend served from: ${publicPath}`);
       }
 
-      // Always attach routes — apiHandler was created synchronously in start()
-      // so it's guaranteed to exist here. If the DB isn't loaded yet, routes
-      // will return 503 Service Unavailable.
-      router.use('/router', apiHandler!.getRouter());
+      // Always attach routes — ensureApiHandler() covers the case where the
+      // plugin is registered while still disabled and start() hasn't run.
+      // If the DB isn't loaded yet, routes return 503 Service Unavailable.
+      router.use('/router', ensureApiHandler().getRouter());
       console.log('[routeiq] API routes attached');
 
       console.log('[routeiq] Router registered, awaiting initialization...');
@@ -337,12 +339,53 @@ export function pluginConstructor(app: ServerAPI) {
      * Register routes under Signal K API path (/signalk/v1/api/router/)
      */
     signalKApiRoutes(router: express.IRouter) {
-      if (apiHandler) {
-      router.use('/router', apiHandler!.getRouter());
-      }
+      router.use('/router', ensureApiHandler().getRouter());
       return router;
     },
   };
+
+  /**
+   * Where routing databases go when the user hasn't named a directory: a
+   * `routing-data` subdirectory of the plugin's own Signal K data dir, i.e.
+   * `<config>/plugin-config-data/signalk-routeiq/routing-data`. That location
+   * survives plugin updates, unlike the plugin-relative `./data/` this used to
+   * default to (npm replaces node_modules/signalk-routeiq wholesale on update,
+   * taking any downloaded region databases with it).
+   *
+   * Only safe to call from start()/schema() — the server assigns
+   * getDataDirPath onto the app object after calling pluginConstructor. Older
+   * servers that don't provide it at all fall back to the legacy `./data/`
+   * path, which is deliberately left un-renamed so those installs keep
+   * finding the databases they already downloaded.
+   */
+  function defaultDataDir(): string {
+    try {
+      const dir = (app as unknown as { getDataDirPath?: () => string }).getDataDirPath?.();
+      if (dir) return path.join(dir, 'routing-data');
+    } catch (error) {
+      console.warn('[routeiq] getDataDirPath() failed, falling back to the plugin directory:', error);
+    }
+    return path.join(__plugindir, 'data');
+  }
+
+  /**
+   * Create the API handler if it doesn't exist yet.
+   *
+   * Signal K calls registerWithRouter()/signalKApiRoutes() for every installed
+   * plugin, enabled or not, and only mounts the plugin router once that call
+   * returns. On a fresh install the plugin is still disabled, so start() has
+   * not run yet and the handler has to be created from here — otherwise
+   * registerWithRouter() throws, the server never mounts the router, and the
+   * server's own POST /plugins/<id>/config route goes down with it, so the
+   * first config save answers 404.
+   */
+  function ensureApiHandler(): ApiHandler {
+    if (!apiHandler) {
+      apiHandler = new ApiHandler(config, app);
+      console.log('[routeiq] API handler created (awaiting database init)');
+    }
+    return apiHandler;
+  }
 
   /**
    * Initialize plugin components asynchronously
