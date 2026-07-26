@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.2 — 2026-07-26
 
 - Fixed: saving the plugin configuration on a fresh install failed with a 404.
   The API handler was only created in `start()`, so on an install that was not
