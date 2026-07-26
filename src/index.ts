@@ -373,19 +373,21 @@ export function pluginConstructor(app: ServerAPI) {
 
     /**
      * Register routes via Signal K's plugin router (mounted at /plugins/<pluginId>/)
+     *
+     * API only — deliberately no UI here. The server gates all of /plugins
+     * behind admin auth, so anything served from this router is invisible to
+     * read-only users. The webapp is published instead by the
+     * `signalk-webapp` keyword, which mounts public/ at /<package-name>/
+     * (i.e. /signalk-routeiq/) with no auth.
+     *
+     * This used to also serve public/ here, which produced a second copy of
+     * the UI that nobody could actually use: 401 for read-only users, and
+     * broken even for admins. The page derives its API base from its own URL,
+     * so when served from /plugins/signalk-routeiq/ it called
+     * /plugins/signalk-routeiq/signalk/v1/api/router/... — which is not where
+     * this router mounts the API (that is ./router) and returned 404.
      */
     registerWithRouter(router: express.IRouter) {
-      // Serve frontend static files
-      const publicPath = path.join(__plugindir, "public");
-      if (fs.existsSync(publicPath)) {
-        // Serve index.html at the root explicitly (SK may intercept /plugins/<id>)
-        router.get("/", (_req, res) => {
-          res.sendFile(path.join(publicPath, "index.html"));
-        });
-        router.use(express.static(publicPath));
-        console.log(`[routeiq] Frontend served from: ${publicPath}`);
-      }
-
       // Always attach routes — ensureApiHandler() covers the case where the
       // plugin is registered while still disabled and start() hasn't run.
       // If the DB isn't loaded yet, routes return 503 Service Unavailable.

@@ -31,6 +31,15 @@
 - Changed: `--experimental-sqlite` moved from CI's `NODE_OPTIONS` into the
   `test` script, so tests run identically on Windows and macOS runners.
 - Fixed: `signalK.url` pointed at the wrong GitHub owner.
+- Removed: the plugin router no longer serves the web UI under
+  `/plugins/signalk-routeiq/`. The server gates all of `/plugins` behind admin
+  auth, so that copy was invisible to read-only users — and broken for admins
+  too, because the page derives its API base from its own URL and so requested
+  `/plugins/signalk-routeiq/signalk/v1/api/router/...`, which is not where the
+  API is mounted (404). The webapp is unaffected: it is published at
+  `/signalk-routeiq/` by the `signalk-webapp` keyword and calls the public
+  `/signalk/v1/api/router/...` endpoints. The admin-only API under
+  `/plugins/signalk-routeiq/router/` is unchanged.
 - Docs: the tide settings and README no longer describe `signalk-tides` as
   required. Both tide sources are optional and independent — with neither
   installed, routes fall back to plain distance.
