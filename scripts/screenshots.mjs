@@ -305,8 +305,13 @@ const SHOTS = {
     // user, not a fit-to-route button, and while it is on it keeps overriding
     // map.center — leaving the chart at world zoom. Clear it first if set.
     const fitToggle = page.locator('button', { hasText: /^zoom_in_map$/ }).first();
-    if (await fitToggle.evaluate((el) => el.classList.contains('mat-primary')
-      || getComputedStyle(el).backgroundColor.includes('59, 130')).catch(() => false)) {
+    // count() first: evaluate() against a missing element waits out the whole
+    // default timeout before the catch below can turn it into "not set".
+    const fitToggleOn = (await fitToggle.count()) > 0
+      && await fitToggle.evaluate((el) => el.classList.contains('mat-primary')
+        || el.ownerDocument.defaultView.getComputedStyle(el).backgroundColor.includes('59, 130'))
+        .catch(() => false);
+    if (fitToggleOn) {
       await fitToggle.click().catch(() => {});
       await page.waitForTimeout(1500);
     }
@@ -319,7 +324,10 @@ const SHOTS = {
     await frame.locator('#poi-results li').first().waitFor({ timeout: 30_000 });
     await frame.locator('#poi-results li').first()
       .getByRole('button', { name: 'Route' }).click();
-    await frame.locator('#summary').waitFor({ timeout: 60_000 }).catch(() => {});
+    // Not swallowed: a route that never completes has to fail the shot (the
+    // runner logs it and captures <name>.FAILED) instead of quietly
+    // photographing an empty panel and passing.
+    await frame.locator('#summary').waitFor({ timeout: 60_000 });
     await page.waitForTimeout(2500);
 
     await frame.locator('#poi-query').fill(PLUGIN_ROUTE.dest);
@@ -376,12 +384,15 @@ const SHOTS = {
     await frame.locator('#poi-go').click();
     await frame.locator('#poi-results li').first().waitFor({ timeout: 30_000 });
     await frame.locator('#poi-results li').first().getByRole('button', { name: 'Route' }).click();
-    await frame.locator('#summary').waitFor({ timeout: 120_000 }).catch(() => {});
+    // Neither wait is swallowed: this shot exists to show a completed tidal
+    // route and its departure scan, so if either never arrives the shot is
+    // wrong and must fail rather than pass with an empty panel.
+    await frame.locator('#summary').waitFor({ timeout: 120_000 });
     await page.waitForTimeout(4000);
 
     // The departure scan is the colour-coded ETA list in the panel.
-    await frame.locator('#btn-departures').click().catch(() => {});
-    await frame.locator('#dep-list').waitFor({ timeout: 120_000 }).catch(() => {});
+    await frame.locator('#btn-departures').click();
+    await frame.locator('#dep-list').waitFor({ timeout: 120_000 });
     await page.waitForTimeout(5000);
 
     // Frame the chart via the panel's map.center ("Show" centres at zoom 14,
@@ -392,8 +403,13 @@ const SHOTS = {
     // map.center — leaving the chart at world zoom. Clear it first if set,
     // otherwise this whole block silently does nothing.
     const fitToggle = page.locator('button', { hasText: /^zoom_in_map$/ }).first();
-    if (await fitToggle.evaluate((el) => el.classList.contains('mat-primary')
-      || getComputedStyle(el).backgroundColor.includes('59, 130')).catch(() => false)) {
+    // count() first: evaluate() against a missing element waits out the whole
+    // default timeout before the catch below can turn it into "not set".
+    const fitToggleOn = (await fitToggle.count()) > 0
+      && await fitToggle.evaluate((el) => el.classList.contains('mat-primary')
+        || el.ownerDocument.defaultView.getComputedStyle(el).backgroundColor.includes('59, 130'))
+        .catch(() => false);
+    if (fitToggleOn) {
       await fitToggle.click().catch(() => {});
       await page.waitForTimeout(1500);
     }
