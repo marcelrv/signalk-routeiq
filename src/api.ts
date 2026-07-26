@@ -3,18 +3,23 @@
  * Express middleware for all router API endpoints
  */
 
-import crypto from 'crypto';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as zlib from 'node:zlib';
-import { pipeline } from 'node:stream/promises';
-import { Readable } from 'node:stream';
-import { ServerAPI } from '@signalk/server-api';
-import { NextFunction, Request, Response, Router } from 'express';
-import { RoutingDatabase } from './database.js';
-import { GpxExporter } from './gpx-export.js';
-import { RoutingEngine } from './routing.js';
-import { PluginConfig, RouteResult, RoutingRequest, VesselDimensions } from './types.js';
+import crypto from "crypto";
+import * as fs from "fs";
+import * as path from "path";
+import * as zlib from "node:zlib";
+import { pipeline } from "node:stream/promises";
+import { Readable } from "node:stream";
+import { ServerAPI } from "@signalk/server-api";
+import { NextFunction, Request, Response, Router } from "express";
+import { RoutingDatabase } from "./database.js";
+import { GpxExporter } from "./gpx-export.js";
+import { RoutingEngine } from "./routing.js";
+import {
+  PluginConfig,
+  RouteResult,
+  RoutingRequest,
+  VesselDimensions,
+} from "./types.js";
 
 /** Auth fields Signal K's tokensecurity middleware sets on the request. */
 interface SkAuthedRequest {
@@ -24,7 +29,9 @@ interface SkAuthedRequest {
 
 /** Narrow surface of the Signal K server app needed to persist a resource. */
 interface SkResourcesApp {
-  resourcesApi: { setResource(type: string, id: string, value: unknown): Promise<void> };
+  resourcesApi: {
+    setResource(type: string, id: string, value: unknown): Promise<void>;
+  };
 }
 
 /** Cap on `via` array length — each via point triggers a sequential A* search,
@@ -38,7 +45,7 @@ const MAX_VIA_POINTS = 25;
  *  comparison NaN-false (no edge is ever too shallow), and a negative draft
  *  puts the threshold below every real depth. Same shape for air draft and
  *  beam. */
-const VESSEL_DIM_MAX_M: Record<'draft' | 'beam' | 'airDraft', number> = {
+const VESSEL_DIM_MAX_M: Record<"draft" | "beam" | "airDraft", number> = {
   draft: 30,
   beam: 100,
   airDraft: 150,
@@ -53,14 +60,16 @@ export function pickVesselDimensions(
   body: Record<string, unknown> | undefined,
 ): { dims: VesselDimensions } | { error: string } {
   const dims: VesselDimensions = {};
-  for (const key of ['draft', 'beam', 'airDraft'] as const) {
+  for (const key of ["draft", "beam", "airDraft"] as const) {
     const value = body?.[key];
     if (value === undefined || value === null) continue;
-    if (typeof value !== 'number' || !Number.isFinite(value)) {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
       return { error: `Invalid ${key} — expected a number in meters` };
     }
     if (value < 0 || value > VESSEL_DIM_MAX_M[key]) {
-      return { error: `Invalid ${key} — expected 0..${VESSEL_DIM_MAX_M[key]} meters` };
+      return {
+        error: `Invalid ${key} — expected 0..${VESSEL_DIM_MAX_M[key]} meters`,
+      };
     }
     dims[key] = value;
   }
@@ -71,20 +80,27 @@ export function pickVesselDimensions(
  *  request in place (null -> undefined, so the engine falls back to the
  *  configured defaults). Returns an error string if any is unusable. See
  *  VESSEL_DIM_MAX_M for why these can't just be coerced. */
-export function validateRequestConstraints(request: RoutingRequest): string | null {
-  const picked = pickVesselDimensions(request as unknown as Record<string, unknown>);
-  if ('error' in picked) return picked.error;
+export function validateRequestConstraints(
+  request: RoutingRequest,
+): string | null {
+  const picked = pickVesselDimensions(
+    request as unknown as Record<string, unknown>,
+  );
+  if ("error" in picked) return picked.error;
   request.draft = picked.dims.draft;
   request.beam = picked.dims.beam;
   request.airDraft = picked.dims.airDraft;
 
   if (request.minCoastDistance === null) request.minCoastDistance = undefined;
   if (request.minCoastDistance !== undefined) {
-    if (typeof request.minCoastDistance !== 'number' || !Number.isFinite(request.minCoastDistance)) {
-      return 'Invalid minCoastDistance — expected a number in nautical miles';
+    if (
+      typeof request.minCoastDistance !== "number" ||
+      !Number.isFinite(request.minCoastDistance)
+    ) {
+      return "Invalid minCoastDistance — expected a number in nautical miles";
     }
     if (request.minCoastDistance < 0 || request.minCoastDistance > 100) {
-      return 'Invalid minCoastDistance — expected 0..100 nautical miles';
+      return "Invalid minCoastDistance — expected 0..100 nautical miles";
     }
   }
   return null;
@@ -118,7 +134,7 @@ export class ApiHandler {
     this.db = db;
     this.routingEngine = engine;
     this.initError = null;
-    console.log('[routeiq] API handler components updated');
+    console.log("[routeiq] API handler components updated");
   }
 
   setInitError(message: string): void {
@@ -145,161 +161,221 @@ export class ApiHandler {
     // (graph node/edge edits, overlay repair, database load/unload/delete/
     // download) is enforced separately by requireAuth(), which checks
     // Signal K's own session/token authentication and admin permission.
-    const CORS_SAFE_POSTS = new Set(['/route', '/route/departures', '/export/gpx', '/push']);
+    const CORS_SAFE_POSTS = new Set([
+      "/route",
+      "/route/departures",
+      "/export/gpx",
+      "/push",
+    ]);
     this.router.use((_req, res, next) => {
-      const allowCors = _req.method === 'GET'
-        || _req.method === 'OPTIONS'
-        || (_req.method === 'POST' && CORS_SAFE_POSTS.has(_req.path));
+      const allowCors =
+        _req.method === "GET" ||
+        _req.method === "OPTIONS" ||
+        (_req.method === "POST" && CORS_SAFE_POSTS.has(_req.path));
       if (allowCors) {
-        res.header('Access-Control-Allow-Origin', '*');
-        res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-        res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        res.header("Access-Control-Allow-Origin", "*");
+        res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        res.header(
+          "Access-Control-Allow-Headers",
+          "Content-Type, Authorization",
+        );
       }
-      if (_req.method === 'OPTIONS') { res.sendStatus(204); return; }
+      if (_req.method === "OPTIONS") {
+        res.sendStatus(204);
+        return;
+      }
       next();
     });
 
     // POST /signalk/v1/api/router/route
-    this.router.post('/route', this.handleRoute.bind(this));
+    this.router.post("/route", this.handleRoute.bind(this));
 
     // POST /signalk/v1/api/router/route/departures — scan departure times for the best tide
-    this.router.post('/route/departures', this.handleDepartureScan.bind(this));
+    this.router.post("/route/departures", this.handleDepartureScan.bind(this));
 
     // GET /signalk/v1/api/router/tides/status?latitude=&longitude= — tide data availability
-    this.router.get('/tides/status', this.handleTidesStatus.bind(this));
+    this.router.get("/tides/status", this.handleTidesStatus.bind(this));
 
     // GET /signalk/v1/api/router/search
-    this.router.get('/search', this.handleSearch.bind(this));
+    this.router.get("/search", this.handleSearch.bind(this));
 
     // POST /signalk/v1/api/router/export/gpx
-    this.router.post('/export/gpx', this.handleExportGpx.bind(this));
+    this.router.post("/export/gpx", this.handleExportGpx.bind(this));
 
     // POST /signalk/v1/api/router/push
-    this.router.post('/push', this.handlePushRoute.bind(this));
+    this.router.post("/push", this.handlePushRoute.bind(this));
 
     // GET /signalk/v1/api/router/stats
-    this.router.get('/stats', this.handleStats.bind(this));
+    this.router.get("/stats", this.handleStats.bind(this));
 
     // GET /signalk/v1/api/router/config — client-relevant plugin settings
-    this.router.get('/config', this.handleGetConfig.bind(this));
-
+    this.router.get("/config", this.handleGetConfig.bind(this));
 
     // GET /signalk/v1/api/router/vessel
-    this.router.get('/vessel', this.handleGetVessel.bind(this));
+    this.router.get("/vessel", this.handleGetVessel.bind(this));
 
     // PUT /signalk/v1/api/router/vessel (admin — writes the server-wide defaults)
-    this.router.put('/vessel', this.handleUpdateVessel.bind(this));
+    this.router.put("/vessel", this.handleUpdateVessel.bind(this));
 
     // GET /signalk/v1/api/router/graph/nodes?bbox=minLon,minLat,maxLon,maxLat
-    this.router.get('/graph/nodes', this.handleGraphNodes.bind(this));
+    this.router.get("/graph/nodes", this.handleGraphNodes.bind(this));
 
     // GET /signalk/v1/api/router/graph/edges?bbox=minLon,minLat,maxLon,maxLat
-    this.router.get('/graph/edges', this.handleGraphEdges.bind(this));
+    this.router.get("/graph/edges", this.handleGraphEdges.bind(this));
 
     // GET /signalk/v1/api/router/pois?bbox=minLon,minLat,maxLon,maxLat
-    this.router.get('/pois', this.handlePois.bind(this));
+    this.router.get("/pois", this.handlePois.bind(this));
 
     // GET /signalk/v1/api/router/poi/nearest?lat=X&lon=Y&radius=250
-    this.router.get('/poi/nearest', this.handleNearestPoi.bind(this));
+    this.router.get("/poi/nearest", this.handleNearestPoi.bind(this));
 
     // GET /signalk/v1/api/router/waterways?bbox=minLon,minLat,maxLon,maxLat
-    this.router.get('/waterways', this.handleWaterways.bind(this));
+    this.router.get("/waterways", this.handleWaterways.bind(this));
 
     // GET /signalk/v1/api/router/graph/overlay/stats — overlay edit counts
-    this.router.get('/graph/overlay/stats', this.handleOverlayStats.bind(this));
-    this.router.post('/graph/overlay/repair', this.handleOverlayRepair.bind(this));
+    this.router.get("/graph/overlay/stats", this.handleOverlayStats.bind(this));
+    this.router.post(
+      "/graph/overlay/repair",
+      this.handleOverlayRepair.bind(this),
+    );
 
     // Graph editor endpoints (all POST with manual auth check)
-    this.router.post('/graph/nodes/:id', this.handleUpsertNode.bind(this));
-    this.router.post('/graph/nodes/:id/delete', this.handleDeleteNode.bind(this));
-    this.router.post('/graph/edges/:source/:target', this.handleUpsertEdge.bind(this));
-    this.router.post('/graph/edges/:source/:target/delete', this.handleDeleteEdge.bind(this));
+    this.router.post("/graph/nodes/:id", this.handleUpsertNode.bind(this));
+    this.router.post(
+      "/graph/nodes/:id/delete",
+      this.handleDeleteNode.bind(this),
+    );
+    this.router.post(
+      "/graph/edges/:source/:target",
+      this.handleUpsertEdge.bind(this),
+    );
+    this.router.post(
+      "/graph/edges/:source/:target/delete",
+      this.handleDeleteEdge.bind(this),
+    );
 
     // GET /signalk/v1/api/router/databases — list locally installed databases
-    this.router.get('/databases', this.handleListDatabases.bind(this));
+    this.router.get("/databases", this.handleListDatabases.bind(this));
 
     // GET /signalk/v1/api/router/databases/status — loading status
-    this.router.get('/databases/status', this.handleDatabasesStatus.bind(this));
+    this.router.get("/databases/status", this.handleDatabasesStatus.bind(this));
 
     // GET /signalk/v1/api/router/databases/available — fetch remote catalog
-    this.router.get('/databases/available', this.handleAvailableDatabases.bind(this));
+    this.router.get(
+      "/databases/available",
+      this.handleAvailableDatabases.bind(this),
+    );
 
     // POST /signalk/v1/api/router/databases/download — download a database file
-    this.router.post('/databases/download', this.handleDownloadDatabase.bind(this));
+    this.router.post(
+      "/databases/download",
+      this.handleDownloadDatabase.bind(this),
+    );
 
     // POST /signalk/v1/api/router/databases/load — §4a manual per-file load
-    this.router.post('/databases/load', this.handleDatabaseLoad.bind(this));
+    this.router.post("/databases/load", this.handleDatabaseLoad.bind(this));
 
     // POST /signalk/v1/api/router/databases/unload — §4a manual per-file unload
-    this.router.post('/databases/unload', this.handleDatabaseUnload.bind(this));
+    this.router.post("/databases/unload", this.handleDatabaseUnload.bind(this));
 
     // POST /signalk/v1/api/router/databases/delete — remove an installed database file
-    this.router.post('/databases/delete', this.handleDeleteDatabase.bind(this));
+    this.router.post("/databases/delete", this.handleDeleteDatabase.bind(this));
   }
 
   /**
    * Handle route calculation request
    * POST /signalk/v1/api/router/route
    */
-  private async handleRoute(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleRoute(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.isReady()) {
-      res.status(503).json({ error: 'Routing engine not ready, still initializing' });
+      res
+        .status(503)
+        .json({ error: "Routing engine not ready, still initializing" });
       return;
     }
     try {
       const request: RoutingRequest = req.body;
 
       if (!request.start || !request.end) {
-        res.status(400).json({ error: 'Missing required fields: start and end coordinates' });
+        res.status(400).json({
+          error: "Missing required fields: start and end coordinates",
+        });
         return;
       }
 
       // Normalize leaflet {lat, lng} / {lat, lon} to {latitude, longitude}
       const norm = (p: any) => {
-        if (typeof p.latitude !== 'number') p.latitude = p.lat;
-        if (typeof p.longitude !== 'number') p.longitude = p.lng ?? p.lon;
+        if (typeof p.latitude !== "number") p.latitude = p.lat;
+        if (typeof p.longitude !== "number") p.longitude = p.lng ?? p.lon;
       };
       norm(request.start);
       norm(request.end);
 
       if (
-        typeof request.start.latitude !== 'number' ||
-        typeof request.start.longitude !== 'number' ||
-        typeof request.end.latitude !== 'number' ||
-        typeof request.end.longitude !== 'number'
+        typeof request.start.latitude !== "number" ||
+        typeof request.start.longitude !== "number" ||
+        typeof request.end.latitude !== "number" ||
+        typeof request.end.longitude !== "number"
       ) {
-        res.status(400).json({ error: 'Invalid coordinate format. Expected {latitude, longitude}' });
+        res.status(400).json({
+          error: "Invalid coordinate format. Expected {latitude, longitude}",
+        });
         return;
       }
 
       // Normalize via points and per-leg modes ('auto' is the default; only
       // 'manual' changes behavior — anything else is rejected).
       if (request.via !== undefined && !Array.isArray(request.via)) {
-        res.status(400).json({ error: 'Invalid via — expected an array of {latitude, longitude, mode?}' });
+        res.status(400).json({
+          error:
+            "Invalid via — expected an array of {latitude, longitude, mode?}",
+        });
         return;
       }
       for (const v of request.via || []) {
         norm(v);
-        if (typeof v.latitude !== 'number' || typeof v.longitude !== 'number') {
-          res.status(400).json({ error: 'Invalid via coordinate format. Expected {latitude, longitude}' });
+        if (typeof v.latitude !== "number" || typeof v.longitude !== "number") {
+          res.status(400).json({
+            error:
+              "Invalid via coordinate format. Expected {latitude, longitude}",
+          });
           return;
         }
-        if (v.mode !== undefined && v.mode !== 'auto' && v.mode !== 'manual') {
-          res.status(400).json({ error: "Invalid via mode — expected 'auto' or 'manual'" });
+        if (v.mode !== undefined && v.mode !== "auto" && v.mode !== "manual") {
+          res
+            .status(400)
+            .json({ error: "Invalid via mode — expected 'auto' or 'manual'" });
           return;
         }
       }
       if (request.via && request.via.length > MAX_VIA_POINTS) {
-        res.status(400).json({ error: `Too many via points (max ${MAX_VIA_POINTS})` });
+        res
+          .status(400)
+          .json({ error: `Too many via points (max ${MAX_VIA_POINTS})` });
         return;
       }
-      if (request.endMode !== undefined && request.endMode !== 'auto' && request.endMode !== 'manual') {
-        res.status(400).json({ error: "Invalid endMode — expected 'auto' or 'manual'" });
+      if (
+        request.endMode !== undefined &&
+        request.endMode !== "auto" &&
+        request.endMode !== "manual"
+      ) {
+        res
+          .status(400)
+          .json({ error: "Invalid endMode — expected 'auto' or 'manual'" });
         return;
       }
 
-      if (request.departureTime !== undefined && !Number.isFinite(Date.parse(request.departureTime))) {
-        res.status(400).json({ error: 'Invalid departureTime — expected an ISO 8601 date string' });
+      if (
+        request.departureTime !== undefined &&
+        !Number.isFinite(Date.parse(request.departureTime))
+      ) {
+        res.status(400).json({
+          error: "Invalid departureTime — expected an ISO 8601 date string",
+        });
         return;
       }
 
@@ -309,15 +385,16 @@ export class ApiHandler {
         return;
       }
 
-      const route: RouteResult = await this.routingEngine!.calculateRoute(request);
+      const route: RouteResult =
+        await this.routingEngine!.calculateRoute(request);
 
       res.json(route);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       // Use 422 (Unprocessable Entity) so clients can distinguish a routing
       // failure (constraint/graph issue) from a server error (500).
       // Do not call next(error) — the response is already sent.
-      res.status(422).json({ error: message, code: 'ROUTE_NOT_FOUND' });
+      res.status(422).json({ error: message, code: "ROUTE_NOT_FOUND" });
     }
   }
 
@@ -327,26 +404,41 @@ export class ApiHandler {
    * POST /signalk/v1/api/router/route/departures
    * Body: RoutingRequest + { scanHours?: number, stepMinutes?: number }
    */
-  private async handleDepartureScan(req: Request, res: Response): Promise<void> {
+  private async handleDepartureScan(
+    req: Request,
+    res: Response,
+  ): Promise<void> {
     if (!this.isReady()) {
-      res.status(503).json({ error: 'Routing engine not ready, still initializing' });
+      res
+        .status(503)
+        .json({ error: "Routing engine not ready, still initializing" });
       return;
     }
     try {
-      const { scanHours, stepMinutes, ...request } = req.body as RoutingRequest & {
-        scanHours?: number;
-        stepMinutes?: number;
-      };
+      const { scanHours, stepMinutes, ...request } =
+        req.body as RoutingRequest & {
+          scanHours?: number;
+          stepMinutes?: number;
+        };
       if (!request.start || !request.end) {
-        res.status(400).json({ error: 'Missing required fields: start and end coordinates' });
+        res.status(400).json({
+          error: "Missing required fields: start and end coordinates",
+        });
         return;
       }
       if (request.via && request.via.length > MAX_VIA_POINTS) {
-        res.status(400).json({ error: `Too many via points (max ${MAX_VIA_POINTS})` });
+        res
+          .status(400)
+          .json({ error: `Too many via points (max ${MAX_VIA_POINTS})` });
         return;
       }
-      if (request.departureTime !== undefined && !Number.isFinite(Date.parse(request.departureTime))) {
-        res.status(400).json({ error: 'Invalid departureTime — expected an ISO 8601 date string' });
+      if (
+        request.departureTime !== undefined &&
+        !Number.isFinite(Date.parse(request.departureTime))
+      ) {
+        res.status(400).json({
+          error: "Invalid departureTime — expected an ISO 8601 date string",
+        });
         return;
       }
       const constraintError = validateRequestConstraints(request);
@@ -358,14 +450,21 @@ export class ApiHandler {
       const step = Math.min(240, Math.max(10, Number(stepMinutes) || 60));
 
       if (!this.routingEngine!.tidesClient) {
-        res.status(422).json({ error: 'Tide data is not available', code: 'TIDES_UNAVAILABLE' });
+        res.status(422).json({
+          error: "Tide data is not available",
+          code: "TIDES_UNAVAILABLE",
+        });
         return;
       }
-      const departures = await this.routingEngine!.scanDepartures(request, hours, step);
+      const departures = await this.routingEngine!.scanDepartures(
+        request,
+        hours,
+        step,
+      );
       res.json({ scanHours: hours, stepMinutes: step, departures });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      res.status(422).json({ error: message, code: 'SCAN_FAILED' });
+      const message = error instanceof Error ? error.message : "Unknown error";
+      res.status(422).json({ error: message, code: "SCAN_FAILED" });
     }
   }
 
@@ -378,26 +477,33 @@ export class ApiHandler {
     const client = this.routingEngine?.tidesClient;
     const currents = this.routingEngine?.currentsClient;
     if (!client && !currents) {
-      res.json({ available: false, reason: 'engine not ready' });
+      res.json({ available: false, reason: "engine not ready" });
       return;
     }
     const lat = parseFloat(req.query.latitude as string);
     const lon = parseFloat(req.query.longitude as string);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-      res.status(400).json({ error: 'latitude and longitude query parameters are required' });
+      res.status(400).json({
+        error: "latitude and longitude query parameters are required",
+      });
       return;
     }
-    const probe = client ? await client.probe(lat, lon) : { available: false, stations: [] };
+    const probe = client
+      ? await client.probe(lat, lon)
+      : { available: false, stations: [] };
     // Real current stations (signalk-tidal-currents plugin) near this position?
     const currentStations = currents ? await currents.probe(lat, lon) : false;
     res.json({
       available: probe.available || currentStations,
       estimated: true, // station predictions still derive from community harmonic data
       currentStations,
-      source: currentStations ? 'stations' : 'height-estimate',
+      source: currentStations ? "stations" : "height-estimate",
       considerTidesDefault: this.config.considerTides,
       stations: probe.stations.slice(0, 5).map((s) => ({
-        id: s.id, name: s.name, latitude: s.latitude, longitude: s.longitude,
+        id: s.id,
+        name: s.name,
+        latitude: s.latitude,
+        longitude: s.longitude,
       })),
     });
   }
@@ -406,9 +512,13 @@ export class ApiHandler {
    * Handle POI search request
    * GET /signalk/v1/api/router/search?q=...
    */
-  private async handleSearch(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleSearch(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.isReady()) {
-      res.status(503).json({ error: 'Database not ready, still initializing' });
+      res.status(503).json({ error: "Database not ready, still initializing" });
       return;
     }
     try {
@@ -425,7 +535,7 @@ export class ApiHandler {
       const results = await this.db!.searchPois(query, limit);
       res.json({ query, count: results.length, results });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -435,27 +545,36 @@ export class ApiHandler {
    * Handle GPX export request
    * POST /signalk/v1/api/router/export/gpx
    */
-  private async handleExportGpx(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleExportGpx(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.isReady()) {
-      res.status(503).json({ error: 'Routing engine not ready, still initializing' });
+      res
+        .status(503)
+        .json({ error: "Routing engine not ready, still initializing" });
       return;
     }
     try {
       const route: RouteResult = req.body.route;
-      const name: string = req.body.name || 'RouteIQ';
+      const name: string = req.body.name || "RouteIQ";
 
       if (!route) {
-        res.status(400).json({ error: 'Missing route data in request body' });
+        res.status(400).json({ error: "Missing route data in request body" });
         return;
       }
 
       const gpx = GpxExporter.toGpx(route, name);
 
-      res.setHeader('Content-Type', 'application/gpx+xml');
-      res.setHeader('Content-Disposition', `attachment; filename="${name.replace(/[^a-z0-9]/gi, '_')}.gpx"`);
+      res.setHeader("Content-Type", "application/gpx+xml");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${name.replace(/[^a-z0-9]/gi, "_")}.gpx"`,
+      );
       res.send(gpx);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -465,17 +584,23 @@ export class ApiHandler {
    * Handle route push to Signal K resources
    * POST /signalk/v1/api/router/push
    */
-  private async handlePushRoute(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handlePushRoute(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.isReady()) {
-      res.status(503).json({ error: 'Routing engine not ready, still initializing' });
+      res
+        .status(503)
+        .json({ error: "Routing engine not ready, still initializing" });
       return;
     }
     try {
       const route: RouteResult = req.body.route;
-      const name: string = req.body.name || 'RouteIQ Route';
+      const name: string = req.body.name || "RouteIQ Route";
 
       if (!route) {
-        res.status(400).json({ error: 'Missing route data in request body' });
+        res.status(400).json({ error: "Missing route data in request body" });
         return;
       }
 
@@ -484,18 +609,23 @@ export class ApiHandler {
       const skRoute = GpxExporter.toSignalKRoute(route, name, uuid);
 
       // Persist via the Resource API (goes through resources-provider plugin)
-      await (this.app as unknown as SkResourcesApp).resourcesApi.setResource('routes', uuid, skRoute);
+      await (this.app as unknown as SkResourcesApp).resourcesApi.setResource(
+        "routes",
+        uuid,
+        skRoute,
+      );
 
       res.json({
         success: true,
-        message: 'Route pushed to Signal K resources',
+        message: "Route pushed to Signal K resources",
         routeId: uuid,
         path: `resources.routes.${uuid}`,
       });
     } catch (error) {
       const err = error as any;
-      const message = err instanceof Error ? err.message : `NonError: ${JSON.stringify(err)}`;
-      console.error('[routeiq] Push route error:', error);
+      const message =
+        err instanceof Error ? err.message : `NonError: ${JSON.stringify(err)}`;
+      console.error("[routeiq] Push route error:", error);
       res.status(500).json({ error: `Failed to push route: ${message}` });
       next(error);
     }
@@ -505,16 +635,20 @@ export class ApiHandler {
    * Handle database stats request
    * GET /signalk/v1/api/router/stats
    */
-  private async handleStats(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleStats(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.isReady()) {
-      res.status(503).json({ error: 'Database not ready, still initializing' });
+      res.status(503).json({ error: "Database not ready, still initializing" });
       return;
     }
     try {
       const stats = await this.db!.getStats();
       res.json(stats);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -538,20 +672,35 @@ export class ApiHandler {
    * Handle get vessel dimensions request
    * GET /signalk/v1/api/router/vessel
    */
-  private async handleGetVessel(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleGetVessel(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.isReady()) {
-      res.status(503).json({ error: 'Routing engine not ready, still initializing' });
+      res
+        .status(503)
+        .json({ error: "Routing engine not ready, still initializing" });
       return;
     }
     try {
       const vessel = this.routingEngine!.vesselDims;
       const cfg = this.routingEngine!.config;
-      const effectiveDraft = Math.round(((vessel.draft || 2.0) + (cfg.safetyMarginDraft || 0.3)) * 10) / 10;
-      const effectiveBeam = Math.round(((vessel.beam || 4.0) + (cfg.safetyMarginBeam || 2.0)) * 10) / 10;
-      const effectiveAirDraft = Math.round(((vessel.airDraft || 0) + (cfg.safetyMarginAirDraft || 1.5)) * 10) / 10;
+      const effectiveDraft =
+        Math.round(
+          ((vessel.draft || 2.0) + (cfg.safetyMarginDraft || 0.3)) * 10,
+        ) / 10;
+      const effectiveBeam =
+        Math.round(
+          ((vessel.beam || 4.0) + (cfg.safetyMarginBeam || 2.0)) * 10,
+        ) / 10;
+      const effectiveAirDraft =
+        Math.round(
+          ((vessel.airDraft || 0) + (cfg.safetyMarginAirDraft || 1.5)) * 10,
+        ) / 10;
       res.json({ ...vessel, effectiveDraft, effectiveBeam, effectiveAirDraft });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -565,22 +714,28 @@ export class ApiHandler {
    * explicit overrides is planned against, and they survive until the plugin
    * restarts (the Signal K design.* paths are only read once, at startup).
    */
-  private async handleUpdateVessel(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleUpdateVessel(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.isReady()) {
-      res.status(503).json({ error: 'Routing engine not ready, still initializing' });
+      res
+        .status(503)
+        .json({ error: "Routing engine not ready, still initializing" });
       return;
     }
     if (!this.requireAuth(req, res)) return;
     try {
       const picked = pickVesselDimensions(req.body);
-      if ('error' in picked) {
+      if ("error" in picked) {
         res.status(400).json({ error: picked.error });
         return;
       }
       this.routingEngine!.setVesselDimensions(picked.dims);
       res.json({ success: true, vessel: this.routingEngine!.vesselDims });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -590,29 +745,43 @@ export class ApiHandler {
    * Handle graph nodes query
    * GET /signalk/v1/api/router/graph/nodes?bbox=minLon,minLat,maxLon,maxLat&limit=5000
    */
-  private async handleGraphNodes(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleGraphNodes(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.isReady()) {
-      res.status(503).json({ error: 'Database not ready' });
+      res.status(503).json({ error: "Database not ready" });
       return;
     }
     try {
       const bbox = req.query.bbox as string;
       const limit = parseInt(req.query.limit as string) || 5000;
       if (!bbox) {
-        res.status(400).json({ error: 'Missing bbox parameter (minLon,minLat,maxLon,maxLat)' });
+        res.status(400).json({
+          error: "Missing bbox parameter (minLon,minLat,maxLon,maxLat)",
+        });
         return;
       }
-      const parts = bbox.split(',').map(Number);
+      const parts = bbox.split(",").map(Number);
       if (parts.length !== 4 || parts.some(isNaN)) {
-        res.status(400).json({ error: 'Invalid bbox format, expected minLon,minLat,maxLon,maxLat' });
+        res.status(400).json({
+          error: "Invalid bbox format, expected minLon,minLat,maxLon,maxLat",
+        });
         return;
       }
       const [minLon, minLat, maxLon, maxLat] = parts;
-      const nodes = await this.db!.getNodesInBBox(minLat, minLon, maxLat, maxLon, limit);
+      const nodes = await this.db!.getNodesInBBox(
+        minLat,
+        minLon,
+        maxLat,
+        maxLon,
+        limit,
+      );
       res.json({ count: nodes.length, nodes });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[routeiq] graph/nodes error:', error);
+      const message = error instanceof Error ? error.message : "Unknown error";
+      console.error("[routeiq] graph/nodes error:", error);
       res.status(500).json({ error: message });
       next(error);
     }
@@ -622,29 +791,43 @@ export class ApiHandler {
    * Handle graph edges query
    * GET /signalk/v1/api/router/graph/edges?bbox=minLon,minLat,maxLon,maxLat&limit=5000
    */
-  private async handleGraphEdges(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleGraphEdges(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.isReady()) {
-      res.status(503).json({ error: 'Database not ready' });
+      res.status(503).json({ error: "Database not ready" });
       return;
     }
     try {
       const bbox = req.query.bbox as string;
       const limit = parseInt(req.query.limit as string) || 5000;
       if (!bbox) {
-        res.status(400).json({ error: 'Missing bbox parameter (minLon,minLat,maxLon,maxLat)' });
+        res.status(400).json({
+          error: "Missing bbox parameter (minLon,minLat,maxLon,maxLat)",
+        });
         return;
       }
-      const parts = bbox.split(',').map(Number);
+      const parts = bbox.split(",").map(Number);
       if (parts.length !== 4 || parts.some(isNaN)) {
-        res.status(400).json({ error: 'Invalid bbox format, expected minLon,minLat,maxLon,maxLat' });
+        res.status(400).json({
+          error: "Invalid bbox format, expected minLon,minLat,maxLon,maxLat",
+        });
         return;
       }
       const [minLon, minLat, maxLon, maxLat] = parts;
-      const edges = await this.db!.getEdgesInBBox(minLat, minLon, maxLat, maxLon, limit);
+      const edges = await this.db!.getEdgesInBBox(
+        minLat,
+        minLon,
+        maxLat,
+        maxLon,
+        limit,
+      );
       res.json({ count: edges.length, edges });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[routeiq] graph/edges error:', error);
+      const message = error instanceof Error ? error.message : "Unknown error";
+      console.error("[routeiq] graph/edges error:", error);
       res.status(500).json({ error: message });
       next(error);
     }
@@ -654,20 +837,34 @@ export class ApiHandler {
    * Return overlay edit counts for the editor status bar.
    * GET /signalk/v1/api/router/graph/overlay/stats
    */
-  private async handleOverlayStats(req: Request, res: Response, next: NextFunction): Promise<void> {
-    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+  private async handleOverlayStats(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    if (!this.isReady()) {
+      res.status(503).json({ error: "Database not ready" });
+      return;
+    }
     try {
       const stats = await this.db!.getOverlayStats();
       res.json(stats);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
   }
 
-  private async handleOverlayRepair(req: Request, res: Response, next: NextFunction): Promise<void> {
-    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+  private async handleOverlayRepair(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    if (!this.isReady()) {
+      res.status(503).json({ error: "Database not ready" });
+      return;
+    }
     if (!this.requireAuth(req, res)) return;
     try {
       const result = await this.db!.clearOverlayDeletedEdges();
@@ -675,7 +872,7 @@ export class ApiHandler {
       await this.db!.loadGraph();
       res.json({ success: true, ...result });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -697,11 +894,14 @@ export class ApiHandler {
   private requireAuth(req: Request, res: Response): boolean {
     const skReq = req as unknown as SkAuthedRequest;
     if (skReq.skIsAuthenticated !== true) {
-      res.status(401).json({ error: 'Authentication required. Please log into the Signal K admin UI.' });
+      res.status(401).json({
+        error:
+          "Authentication required. Please log into the Signal K admin UI.",
+      });
       return false;
     }
-    if (skReq.skPrincipal && skReq.skPrincipal.permissions !== 'admin') {
-      res.status(403).json({ error: 'Admin permission required.' });
+    if (skReq.skPrincipal && skReq.skPrincipal.permissions !== "admin") {
+      res.status(403).json({ error: "Admin permission required." });
       return false;
     }
     return true;
@@ -711,13 +911,23 @@ export class ApiHandler {
    * Handle upsert node (create or update)
    * POST /signalk/v1/api/router/graph/nodes/:id
    */
-  private async handleUpsertNode(req: Request, res: Response, next: NextFunction): Promise<void> {
-    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+  private async handleUpsertNode(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    if (!this.isReady()) {
+      res.status(503).json({ error: "Database not ready" });
+      return;
+    }
     if (!this.requireAuth(req, res)) return;
     try {
       const nodeId = parseInt(req.params.id, 10);
       const { dbIndex, lat, lon, node_depth } = req.body;
-      if (dbIndex === undefined) { res.status(400).json({ error: 'Missing dbIndex' }); return; }
+      if (dbIndex === undefined) {
+        res.status(400).json({ error: "Missing dbIndex" });
+        return;
+      }
       if (lat !== undefined && lon !== undefined) {
         await this.db!.addNode(dbIndex, { id: nodeId, lat, lon, node_depth });
         const connect = await this.autoConnectNode(nodeId, lat, lon);
@@ -727,7 +937,7 @@ export class ApiHandler {
         res.json({ success: true });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -750,7 +960,12 @@ export class ApiHandler {
     const MAX_CONNECT_DIST = 1000; // m — beyond this, connecting blind is guesswork
     const TARGET_CONNECTIONS = 2;
     // Over-fetch candidates so a rejected line can fall through to the next node
-    const candidates = await this.db!.findKNearestMainGraphNodes(lat, lon, 6, MAX_CONNECT_DIST);
+    const candidates = await this.db!.findKNearestMainGraphNodes(
+      lat,
+      lon,
+      6,
+      MAX_CONNECT_DIST,
+    );
 
     let autoConnected = 0;
     let skipped = 0;
@@ -764,12 +979,23 @@ export class ApiHandler {
         continue;
       }
       const distance = Math.max(1, Math.round(n.distance));
-      const attrs = { distance, cost_factor: 1.2, min_depth: -1, max_air_draft: -1, min_width: -1, distance_to_land: 0, edge_type_id: 0, traffic_mode: 0 };
+      const attrs = {
+        distance,
+        cost_factor: 1.2,
+        min_depth: -1,
+        max_air_draft: -1,
+        min_width: -1,
+        distance_to_land: 0,
+        edge_type_id: 0,
+        traffic_mode: 0,
+      };
       try {
         await this.db!.addEdge(0, { source: nodeId, target: n.id, ...attrs });
         await this.db!.addEdge(0, { source: n.id, target: nodeId, ...attrs });
         autoConnected++;
-      } catch { /* edge already exists or other non-fatal error */ }
+      } catch {
+        /* edge already exists or other non-fatal error */
+      }
     }
     return { autoConnected, autoConnectSkipped: skipped };
   }
@@ -778,17 +1004,27 @@ export class ApiHandler {
    * Handle delete node
    * POST /signalk/v1/api/router/graph/nodes/:id/delete  body: { dbIndex }
    */
-  private async handleDeleteNode(req: Request, res: Response, next: NextFunction): Promise<void> {
-    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+  private async handleDeleteNode(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    if (!this.isReady()) {
+      res.status(503).json({ error: "Database not ready" });
+      return;
+    }
     if (!this.requireAuth(req, res)) return;
     try {
       const nodeId = parseInt(req.params.id, 10);
       const { dbIndex } = req.body;
-      if (dbIndex === undefined) { res.status(400).json({ error: 'Missing dbIndex' }); return; }
+      if (dbIndex === undefined) {
+        res.status(400).json({ error: "Missing dbIndex" });
+        return;
+      }
       await this.db!.deleteNode(dbIndex, nodeId);
       res.json({ success: true });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -798,34 +1034,92 @@ export class ApiHandler {
    * Handle upsert edge (create or update)
    * POST /signalk/v1/api/router/graph/edges/:source/:target
    */
-  private async handleUpsertEdge(req: Request, res: Response, next: NextFunction): Promise<void> {
-    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+  private async handleUpsertEdge(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    if (!this.isReady()) {
+      res.status(503).json({ error: "Database not ready" });
+      return;
+    }
     if (!this.requireAuth(req, res)) return;
     try {
       const source = parseInt(req.params.source, 10);
       const target = parseInt(req.params.target, 10);
-      const { dbIndex, distance, min_depth, max_air_draft, min_width, traffic_mode, cost_factor, distance_to_land, edge_type_id } = req.body;
-      if (dbIndex === undefined) { res.status(400).json({ error: 'Missing dbIndex' }); return; }
+      const {
+        dbIndex,
+        distance,
+        min_depth,
+        max_air_draft,
+        min_width,
+        traffic_mode,
+        cost_factor,
+        distance_to_land,
+        edge_type_id,
+      } = req.body;
+      if (dbIndex === undefined) {
+        res.status(400).json({ error: "Missing dbIndex" });
+        return;
+      }
       const isBidirectional = traffic_mode === 0 || traffic_mode === undefined;
       // Try update first; if edge doesn't exist in memory, create it
       try {
-        await this.db!.updateEdge(dbIndex, source, target, { distance, min_depth, max_air_draft, min_width, traffic_mode, cost_factor });
+        await this.db!.updateEdge(dbIndex, source, target, {
+          distance,
+          min_depth,
+          max_air_draft,
+          min_width,
+          traffic_mode,
+          cost_factor,
+        });
       } catch {
-        await this.db!.addEdge(dbIndex, { source, target, distance, min_depth, max_air_draft, min_width, traffic_mode, cost_factor, distance_to_land, edge_type_id });
+        await this.db!.addEdge(dbIndex, {
+          source,
+          target,
+          distance,
+          min_depth,
+          max_air_draft,
+          min_width,
+          traffic_mode,
+          cost_factor,
+          distance_to_land,
+          edge_type_id,
+        });
       }
       // For bidirectional edges also store the reverse so A* can traverse both ways
       if (isBidirectional) {
         try {
-          await this.db!.updateEdge(dbIndex, target, source, { distance, min_depth, max_air_draft, min_width, traffic_mode, cost_factor });
+          await this.db!.updateEdge(dbIndex, target, source, {
+            distance,
+            min_depth,
+            max_air_draft,
+            min_width,
+            traffic_mode,
+            cost_factor,
+          });
         } catch {
           try {
-            await this.db!.addEdge(dbIndex, { source: target, target: source, distance, min_depth, max_air_draft, min_width, traffic_mode, cost_factor, distance_to_land, edge_type_id });
-          } catch { /* nodes may not exist for reverse — ignore */ }
+            await this.db!.addEdge(dbIndex, {
+              source: target,
+              target: source,
+              distance,
+              min_depth,
+              max_air_draft,
+              min_width,
+              traffic_mode,
+              cost_factor,
+              distance_to_land,
+              edge_type_id,
+            });
+          } catch {
+            /* nodes may not exist for reverse — ignore */
+          }
         }
       }
       res.json({ success: true });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -835,18 +1129,28 @@ export class ApiHandler {
    * Handle delete edge
    * POST /signalk/v1/api/router/graph/edges/:source/:target/delete  body: { dbIndex }
    */
-  private async handleDeleteEdge(req: Request, res: Response, next: NextFunction): Promise<void> {
-    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+  private async handleDeleteEdge(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    if (!this.isReady()) {
+      res.status(503).json({ error: "Database not ready" });
+      return;
+    }
     if (!this.requireAuth(req, res)) return;
     try {
       const source = parseInt(req.params.source, 10);
       const target = parseInt(req.params.target, 10);
       const { dbIndex } = req.body;
-      if (dbIndex === undefined) { res.status(400).json({ error: 'Missing dbIndex' }); return; }
+      if (dbIndex === undefined) {
+        res.status(400).json({ error: "Missing dbIndex" });
+        return;
+      }
       await this.db!.deleteEdge(dbIndex, source, target);
       res.json({ success: true });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -856,28 +1160,42 @@ export class ApiHandler {
    * Handle POIs query
    * GET /signalk/v1/api/router/pois?bbox=minLon,minLat,maxLon,maxLat&limit=2000
    */
-  private async handlePois(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handlePois(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.isReady()) {
-      res.status(503).json({ error: 'Database not ready' });
+      res.status(503).json({ error: "Database not ready" });
       return;
     }
     try {
       const bbox = req.query.bbox as string;
       const limit = parseInt(req.query.limit as string) || 2000;
       if (!bbox) {
-        res.status(400).json({ error: 'Missing bbox parameter (minLon,minLat,maxLon,maxLat)' });
+        res.status(400).json({
+          error: "Missing bbox parameter (minLon,minLat,maxLon,maxLat)",
+        });
         return;
       }
-      const parts = bbox.split(',').map(Number);
+      const parts = bbox.split(",").map(Number);
       if (parts.length !== 4 || parts.some(isNaN)) {
-        res.status(400).json({ error: 'Invalid bbox format, expected minLon,minLat,maxLon,maxLat' });
+        res.status(400).json({
+          error: "Invalid bbox format, expected minLon,minLat,maxLon,maxLat",
+        });
         return;
       }
       const [minLon, minLat, maxLon, maxLat] = parts;
-      const pois = await this.db!.getPoisInBBox(minLat, minLon, maxLat, maxLon, limit);
+      const pois = await this.db!.getPoisInBBox(
+        minLat,
+        minLon,
+        maxLat,
+        maxLon,
+        limit,
+      );
       res.json({ count: pois.length, pois });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -887,9 +1205,13 @@ export class ApiHandler {
    * Handle nearest POI query
    * GET /signalk/v1/api/router/poi/nearest?lat=X&lon=Y&radius=250
    */
-  private async handleNearestPoi(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleNearestPoi(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.db) {
-      res.status(503).json({ error: 'Database not ready' });
+      res.status(503).json({ error: "Database not ready" });
       return;
     }
     try {
@@ -897,13 +1219,15 @@ export class ApiHandler {
       const lon = parseFloat(req.query.lon as string);
       const radius = parseFloat(req.query.radius as string) || 250;
       if (isNaN(lat) || isNaN(lon)) {
-        res.status(400).json({ error: 'Missing or invalid lat/lon parameters' });
+        res
+          .status(400)
+          .json({ error: "Missing or invalid lat/lon parameters" });
         return;
       }
       const poi = await this.db!.getNearestPoi(lat, lon, radius);
       res.json({ poi });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -913,28 +1237,41 @@ export class ApiHandler {
    * Handle waterway line query
    * GET /signalk/v1/api/router/waterways?bbox=minLon,minLat,maxLon,maxLat
    */
-  private async handleWaterways(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleWaterways(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.db) {
-      res.status(503).json({ error: 'Database not ready' });
+      res.status(503).json({ error: "Database not ready" });
       return;
     }
     try {
       const bbox = req.query.bbox as string;
       if (!bbox) {
-        res.status(400).json({ error: 'Missing bbox parameter (minLon,minLat,maxLon,maxLat)' });
+        res.status(400).json({
+          error: "Missing bbox parameter (minLon,minLat,maxLon,maxLat)",
+        });
         return;
       }
-      const parts = bbox.split(',').map(Number);
+      const parts = bbox.split(",").map(Number);
       if (parts.length !== 4 || parts.some(isNaN)) {
-        res.status(400).json({ error: 'Invalid bbox format, expected minLon,minLat,maxLon,maxLat' });
+        res.status(400).json({
+          error: "Invalid bbox format, expected minLon,minLat,maxLon,maxLat",
+        });
         return;
       }
       const [minLon, minLat, maxLon, maxLat] = parts;
-      const features = await this.db!.getWaterways(minLat, minLon, maxLat, maxLon);
-      res.json({ type: 'FeatureCollection', features });
+      const features = await this.db!.getWaterways(
+        minLat,
+        minLon,
+        maxLat,
+        maxLon,
+      );
+      res.json({ type: "FeatureCollection", features });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[routeiq] waterways error:', error);
+      const message = error instanceof Error ? error.message : "Unknown error";
+      console.error("[routeiq] waterways error:", error);
       res.status(500).json({ error: message });
       next(error);
     }
@@ -944,16 +1281,20 @@ export class ApiHandler {
    * Handle list locally installed databases
    * GET /signalk/v1/api/router/databases
    */
-  private async handleListDatabases(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleListDatabases(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.db) {
-      res.status(503).json({ error: 'Database not ready' });
+      res.status(503).json({ error: "Database not ready" });
       return;
     }
     try {
       const info = await this.db.getDatabaseCatalog();
       res.json({ databases: info });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -963,17 +1304,26 @@ export class ApiHandler {
    * Handle databases loading status
    * GET /signalk/v1/api/router/databases/status
    */
-  private async handleDatabasesStatus(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleDatabasesStatus(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.db) {
       // Return 200 (not 503) so the frontend can read the error field
-      res.json({ loaded: false, filenames: [], available: 0, initError: this.initError });
+      res.json({
+        loaded: false,
+        filenames: [],
+        available: 0,
+        initError: this.initError,
+      });
       return;
     }
     try {
       const status = this.db.getLoadingStatus();
       res.json({ ...status, initError: this.initError });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -989,7 +1339,7 @@ export class ApiHandler {
   private catalogBaseUrl(): string | null {
     if (!this.config.catalogUrl) return null;
     try {
-      return new URL('.', this.config.catalogUrl).href;
+      return new URL(".", this.config.catalogUrl).href;
     } catch {
       return null;
     }
@@ -999,19 +1349,27 @@ export class ApiHandler {
    * Handle fetch available databases from remote catalog
    * GET /signalk/v1/api/router/databases/available
    */
-  private async handleAvailableDatabases(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleAvailableDatabases(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     try {
       const catalogUrl = this.config.catalogUrl;
       if (!catalogUrl) {
-        res.status(400).json({ error: 'No catalog URL configured' });
+        res.status(400).json({ error: "No catalog URL configured" });
         return;
       }
-      const response = await fetch(catalogUrl, { signal: AbortSignal.timeout(15000) });
+      const response = await fetch(catalogUrl, {
+        signal: AbortSignal.timeout(15000),
+      });
       if (!response.ok) {
-        res.status(502).json({ error: `Catalog server returned ${response.status}` });
+        res
+          .status(502)
+          .json({ error: `Catalog server returned ${response.status}` });
         return;
       }
-      const catalog = await response.json() as any;
+      const catalog = (await response.json()) as any;
       // Derive the base URL from the catalog URL for constructing download links
       const baseUrl = this.catalogBaseUrl();
       if (baseUrl && catalog.regions && Array.isArray(catalog.regions)) {
@@ -1023,7 +1381,7 @@ export class ApiHandler {
       }
       res.json(catalog);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(502).json({ error: `Failed to fetch catalog: ${message}` });
       next(error);
     }
@@ -1035,18 +1393,24 @@ export class ApiHandler {
    * POST /signalk/v1/api/router/databases/download
    * Body: { url: string, filename: string }
    */
-  private async handleDownloadDatabase(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleDownloadDatabase(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.requireAuth(req, res)) return;
     try {
       const { url, filename } = req.body;
       if (!url || !filename) {
-        res.status(400).json({ error: 'Missing required fields: url, filename' });
+        res
+          .status(400)
+          .json({ error: "Missing required fields: url, filename" });
         return;
       }
 
       const dataDir = this.config.routingDataDir;
       if (!dataDir) {
-        res.status(400).json({ error: 'routingDataDir is not configured' });
+        res.status(400).json({ error: "routingDataDir is not configured" });
         return;
       }
 
@@ -1056,12 +1420,16 @@ export class ApiHandler {
       // raw.githubusercontent.com, whose origin every GitHub user's repo
       // shares, so any of them would have passed.
       if (!this.config.catalogUrl) {
-        res.status(400).json({ error: 'No catalog URL configured; cannot validate download origin' });
+        res.status(400).json({
+          error: "No catalog URL configured; cannot validate download origin",
+        });
         return;
       }
       const trustedBase = this.catalogBaseUrl();
       if (!trustedBase) {
-        res.status(400).json({ error: 'Configured catalog URL is not a valid URL' });
+        res
+          .status(400)
+          .json({ error: "Configured catalog URL is not a valid URL" });
         return;
       }
       try {
@@ -1071,21 +1439,31 @@ export class ApiHandler {
         // (…/main/../../other/evil.sqlite) is rejected.
         const normalized = new URL(url).href;
         if (!normalized.startsWith(trustedBase)) {
-          res.status(400).json({ error: `Download URL must be under the configured catalog path (${trustedBase})` });
+          res.status(400).json({
+            error: `Download URL must be under the configured catalog path (${trustedBase})`,
+          });
           return;
         }
       } catch {
-        res.status(400).json({ error: 'Invalid download URL' });
+        res.status(400).json({ error: "Invalid download URL" });
         return;
       }
 
       // Ensure data directory exists
-      try { await fs.promises.mkdir(dataDir, { recursive: true }); } catch { /* ignore */ }
+      try {
+        await fs.promises.mkdir(dataDir, { recursive: true });
+      } catch {
+        /* ignore */
+      }
 
       console.log(`[routeiq] Downloading database: ${url}`);
-      const response = await fetch(url, { signal: AbortSignal.timeout(120000) });
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(120000),
+      });
       if (!response.ok) {
-        res.status(502).json({ error: `Download failed: server returned ${response.status}` });
+        res.status(502).json({
+          error: `Download failed: server returned ${response.status}`,
+        });
         return;
       }
 
@@ -1093,20 +1471,31 @@ export class ApiHandler {
       // and validate it BEFORE touching the filesystem or the response body
       // — never open a write stream to an unvalidated path.
       let saveFilename = filename;
-      const isGzip = filename.endsWith('.sqlite.gz');
+      const isGzip = filename.endsWith(".sqlite.gz");
       if (isGzip) {
         saveFilename = filename.slice(0, -3); // strip .gz
       }
 
       // Reject filenames that could escape the data directory (path traversal)
-      if (!/^[\w\-.]+\.sqlite$/.test(saveFilename) || saveFilename.includes('..')) {
-        res.status(400).json({ error: 'Invalid filename: must be a plain .sqlite filename with no path components' });
+      if (
+        !/^[\w\-.]+\.sqlite$/.test(saveFilename) ||
+        saveFilename.includes("..")
+      ) {
+        res.status(400).json({
+          error:
+            "Invalid filename: must be a plain .sqlite filename with no path components",
+        });
         return;
       }
       const destPath = path.resolve(dataDir, saveFilename);
       const resolvedDataDir = path.resolve(dataDir);
-      if (!destPath.startsWith(resolvedDataDir + path.sep) && destPath !== resolvedDataDir) {
-        res.status(400).json({ error: 'Invalid filename: path escapes data directory' });
+      if (
+        !destPath.startsWith(resolvedDataDir + path.sep) &&
+        destPath !== resolvedDataDir
+      ) {
+        res
+          .status(400)
+          .json({ error: "Invalid filename: path escapes data directory" });
         return;
       }
 
@@ -1119,16 +1508,20 @@ export class ApiHandler {
       // Multi-region dynamic loading keeps every installed database around;
       // renaming to destPath below overwrites a same-named file in place, so
       // re-downloading a region updates it without touching other regions.
-      const tmpPath = destPath + '.tmp';
+      const tmpPath = destPath + ".tmp";
       if (!response.body) {
-        res.status(502).json({ error: 'Download failed: empty response body' });
+        res.status(502).json({ error: "Download failed: empty response body" });
         return;
       }
       let closedForRename = false;
       try {
         const src = Readable.fromWeb(response.body as any);
         if (isGzip) {
-          await pipeline(src, zlib.createGunzip(), fs.createWriteStream(tmpPath));
+          await pipeline(
+            src,
+            zlib.createGunzip(),
+            fs.createWriteStream(tmpPath),
+          );
           console.log(`[routeiq] Decompressed ${filename} -> ${saveFilename}`);
         } else {
           await pipeline(src, fs.createWriteStream(tmpPath));
@@ -1142,19 +1535,28 @@ export class ApiHandler {
           // it out), but Windows refuses with EPERM/EBUSY. Drop the handles
           // and retry — the hot-reload rebuilds the database either way.
           const code = e?.code;
-          if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') throw e;
-          console.warn(`[routeiq] Rename blocked (${code}); closing database handles and retrying`);
+          if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")
+            throw e;
+          console.warn(
+            `[routeiq] Rename blocked (${code}); closing database handles and retrying`,
+          );
           await this.db!.close();
           closedForRename = true;
           await fs.promises.rename(tmpPath, destPath);
         }
       } catch (e) {
-        try { await fs.promises.unlink(tmpPath); } catch { /* ignore missing tmp file */ }
+        try {
+          await fs.promises.unlink(tmpPath);
+        } catch {
+          /* ignore missing tmp file */
+        }
         throw e;
       }
 
       const sizeBytes = (await fs.promises.stat(destPath)).size;
-      console.log(`[routeiq] Database saved: ${saveFilename} (${sizeBytes} bytes)`);
+      console.log(
+        `[routeiq] Database saved: ${saveFilename} (${sizeBytes} bytes)`,
+      );
 
       // Refresh metadata cache so the new DB shows in the installed list.
       // Skipped when the rename had to close the database first — there is no
@@ -1173,13 +1575,19 @@ export class ApiHandler {
           console.log(`[routeiq] Routing engine hot-reloaded`);
         } catch (e) {
           console.error(`[routeiq] Hot-reload failed: ${e}`);
-          res.status(500).json({ error: `Database saved but hot-reload failed: ${e}` });
+          res
+            .status(500)
+            .json({ error: `Database saved but hot-reload failed: ${e}` });
           return;
         }
       } else if (closedForRename) {
         // Nothing will reopen what the rename fallback had to close.
-        console.error('[routeiq] Database closed for rename but no reload hook is registered');
-        res.status(500).json({ error: `${saveFilename} was installed, but the routing database is now closed — restart the plugin to use it` });
+        console.error(
+          "[routeiq] Database closed for rename but no reload hook is registered",
+        );
+        res.status(500).json({
+          error: `${saveFilename} was installed, but the routing database is now closed — restart the plugin to use it`,
+        });
         return;
       }
 
@@ -1190,8 +1598,8 @@ export class ApiHandler {
         message: `Downloaded and installed ${saveFilename} (${(sizeBytes / 1048576).toFixed(1)} MB)`,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[routeiq] Database download error:', error);
+      const message = error instanceof Error ? error.message : "Unknown error";
+      console.error("[routeiq] Database download error:", error);
       res.status(500).json({ error: `Download failed: ${message}` });
       next(error);
     }
@@ -1204,17 +1612,27 @@ export class ApiHandler {
    * doesn't have.
    * POST /signalk/v1/api/router/databases/load  body: { filename }
    */
-  private async handleDatabaseLoad(req: Request, res: Response, next: NextFunction): Promise<void> {
-    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+  private async handleDatabaseLoad(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    if (!this.isReady()) {
+      res.status(503).json({ error: "Database not ready" });
+      return;
+    }
     if (!this.requireAuth(req, res)) return;
     if (!this.db!.isDynamicLoadingEnabled()) {
-      res.status(400).json({ error: 'Dynamic loading is not enabled (config.dynamicLoading is false) — every database is already loaded' });
+      res.status(400).json({
+        error:
+          "Dynamic loading is not enabled (config.dynamicLoading is false) — every database is already loaded",
+      });
       return;
     }
     try {
       const { filename } = req.body ?? {};
-      if (!filename || typeof filename !== 'string') {
-        res.status(400).json({ error: 'Missing required field: filename' });
+      if (!filename || typeof filename !== "string") {
+        res.status(400).json({ error: "Missing required field: filename" });
         return;
       }
       if (!this.db!.hasKnownDatabase(filename)) {
@@ -1222,9 +1640,13 @@ export class ApiHandler {
         return;
       }
       await this.db!.loadDatabaseGraph(filename);
-      res.json({ success: true, filename, databases: this.db!.getCoverageStatus() });
+      res.json({
+        success: true,
+        filename,
+        databases: this.db!.getCoverageStatus(),
+      });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });
       next(error);
     }
@@ -1238,17 +1660,27 @@ export class ApiHandler {
    * this handler just maps its rejection to 409.
    * POST /signalk/v1/api/router/databases/unload  body: { filename }
    */
-  private async handleDatabaseUnload(req: Request, res: Response, next: NextFunction): Promise<void> {
-    if (!this.isReady()) { res.status(503).json({ error: 'Database not ready' }); return; }
+  private async handleDatabaseUnload(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    if (!this.isReady()) {
+      res.status(503).json({ error: "Database not ready" });
+      return;
+    }
     if (!this.requireAuth(req, res)) return;
     if (!this.db!.isDynamicLoadingEnabled()) {
-      res.status(400).json({ error: 'Dynamic loading is not enabled (config.dynamicLoading is false) — databases cannot be unloaded' });
+      res.status(400).json({
+        error:
+          "Dynamic loading is not enabled (config.dynamicLoading is false) — databases cannot be unloaded",
+      });
       return;
     }
     try {
       const { filename } = req.body ?? {};
-      if (!filename || typeof filename !== 'string') {
-        res.status(400).json({ error: 'Missing required field: filename' });
+      if (!filename || typeof filename !== "string") {
+        res.status(400).json({ error: "Missing required field: filename" });
         return;
       }
       if (!this.db!.hasKnownDatabase(filename)) {
@@ -1256,9 +1688,14 @@ export class ApiHandler {
         return;
       }
       const result = await this.db!.unloadDatabaseGraph(filename);
-      res.json({ success: true, filename, ...result, databases: this.db!.getCoverageStatus() });
+      res.json({
+        success: true,
+        filename,
+        ...result,
+        databases: this.db!.getCoverageStatus(),
+      });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
+      const message = error instanceof Error ? error.message : "Unknown error";
       // unloadDatabaseGraph's own guards (not loaded / would leave zero
       // loaded / route in flight) are conflicts with current server state,
       // not a generic server error.
@@ -1276,34 +1713,46 @@ export class ApiHandler {
    * loaded/not-loaded permutation individually.
    * POST /signalk/v1/api/router/databases/delete  body: { filename }
    */
-  private async handleDeleteDatabase(req: Request, res: Response, next: NextFunction): Promise<void> {
+  private async handleDeleteDatabase(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
     if (!this.requireAuth(req, res)) return;
     try {
       const { filename } = req.body ?? {};
-      if (!filename || typeof filename !== 'string') {
-        res.status(400).json({ error: 'Missing required field: filename' });
+      if (!filename || typeof filename !== "string") {
+        res.status(400).json({ error: "Missing required field: filename" });
         return;
       }
       // Same filename shape guard as handleDownloadDatabase (path traversal prevention).
-      if (!/^[\w\-.]+\.sqlite$/.test(filename) || filename.includes('..')) {
-        res.status(400).json({ error: 'Invalid filename: must be a plain .sqlite filename with no path components' });
+      if (!/^[\w\-.]+\.sqlite$/.test(filename) || filename.includes("..")) {
+        res.status(400).json({
+          error:
+            "Invalid filename: must be a plain .sqlite filename with no path components",
+        });
         return;
       }
       const dataDir = this.config.routingDataDir;
       if (!dataDir) {
-        res.status(400).json({ error: 'routingDataDir is not configured' });
+        res.status(400).json({ error: "routingDataDir is not configured" });
         return;
       }
       const targetPath = path.resolve(dataDir, filename);
       const resolvedDataDir = path.resolve(dataDir);
-      if (!targetPath.startsWith(resolvedDataDir + path.sep) && targetPath !== resolvedDataDir) {
-        res.status(400).json({ error: 'Invalid filename: path escapes data directory' });
+      if (
+        !targetPath.startsWith(resolvedDataDir + path.sep) &&
+        targetPath !== resolvedDataDir
+      ) {
+        res
+          .status(400)
+          .json({ error: "Invalid filename: path escapes data directory" });
         return;
       }
       try {
         await fs.promises.unlink(targetPath);
       } catch (e: any) {
-        if (e && e.code === 'ENOENT') {
+        if (e && e.code === "ENOENT") {
           res.status(404).json({ error: `Database not found: ${filename}` });
           return;
         }
@@ -1319,18 +1768,20 @@ export class ApiHandler {
       if (this.onReloadRequested) {
         try {
           await this.onReloadRequested(dataDir);
-          console.log('[routeiq] Routing engine hot-reloaded after delete');
+          console.log("[routeiq] Routing engine hot-reloaded after delete");
         } catch (e) {
           console.error(`[routeiq] Hot-reload failed after delete: ${e}`);
-          res.status(500).json({ error: `Database deleted but hot-reload failed: ${e}` });
+          res
+            .status(500)
+            .json({ error: `Database deleted but hot-reload failed: ${e}` });
           return;
         }
       }
 
       res.json({ success: true, filename });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[routeiq] Database delete error:', error);
+      const message = error instanceof Error ? error.message : "Unknown error";
+      console.error("[routeiq] Database delete error:", error);
       res.status(500).json({ error: `Delete failed: ${message}` });
       next(error);
     }

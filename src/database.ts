@@ -1,9 +1,9 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { Worker } from 'node:worker_threads';
-import { BBox, PoiResult } from './types.js';
-import * as Navmesh from './navmesh.js';
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
+import { BBox, PoiResult } from "./types.js";
+import * as Navmesh from "./navmesh.js";
 
 // Node type constants (encoded in the node ID via coordinate hashing)
 export const NODE_TYPE_COASTAL = 0;
@@ -104,16 +104,29 @@ export interface DatabaseCoverageEntry {
    *  {min_lat,min_lon,max_lat,max_lon} shape getDatabaseCatalog() already
    *  exposes elsewhere in this file's public API, rather than converted to
    *  camelCase. */
-  bbox: { min_lat: number; min_lon: number; max_lat: number; max_lon: number } | null;
+  bbox: {
+    min_lat: number;
+    min_lon: number;
+    max_lat: number;
+    max_lon: number;
+  } | null;
   boundary: GeoJSON.Polygon | GeoJSON.MultiPolygon | null;
-  state: 'not_loaded' | 'loading' | 'loaded';
+  state: "not_loaded" | "loading" | "loaded";
   /** Worker-side handle index once loaded; null while not_loaded. */
   dbIndex: number | null;
   meta: {
-    id: number; country: string; name: string; description: string | null;
-    lastUpdateDate: string; tags: string | null; boundingBox: string | null;
-    boundaryGeometry: string | null; schemaVersion: number | null;
-    contributor: string | null; url: string | null; filename: string;
+    id: number;
+    country: string;
+    name: string;
+    description: string | null;
+    lastUpdateDate: string;
+    tags: string | null;
+    boundingBox: string | null;
+    boundaryGeometry: string | null;
+    schemaVersion: number | null;
+    contributor: string | null;
+    url: string | null;
+    filename: string;
   } | null;
   /** Row counts read directly off the file (peekMetadata's short-lived
    *  handle in dynamic mode; getMetadata()'s bulk-load round-trip in
@@ -137,9 +150,15 @@ export interface EdgeSnapResult {
 export class RoutingDatabase {
   private worker: Worker | null = null;
   private messageIdCounter = 0;
-  private pending = new Map<number, { resolve: (value: any) => void; reject: (reason: any) => void }>();
+  private pending = new Map<
+    number,
+    { resolve: (value: any) => void; reject: (reason: any) => void }
+  >();
   private dbDir: string;
-  private nodes: Map<number, { lat: number; lon: number; regionId: number; nodeDepth: number }> = new Map();
+  private nodes: Map<
+    number,
+    { lat: number; lon: number; regionId: number; nodeDepth: number }
+  > = new Map();
   private edgesBySource: Map<number, Array<EdgeRow>> = new Map();
   private pois: PoiRow[] = [];
   private navmeshRegions: NavmeshRegionWithDb[] = [];
@@ -251,7 +270,11 @@ export class RoutingDatabase {
   /** Source of the monotonic values in regionLastUsedAt. */
   private lruCounter: number = 0;
 
-  constructor(dbDir: string, dynamicLoading: boolean = false, maxLoadedRegions: number = 0) {
+  constructor(
+    dbDir: string,
+    dynamicLoading: boolean = false,
+    maxLoadedRegions: number = 0,
+  ) {
     this.dbDir = dbDir;
     this.dynamicLoading = dynamicLoading;
     this.maxLoadedRegions = maxLoadedRegions;
@@ -299,7 +322,7 @@ export class RoutingDatabase {
   private loadedFilenames(): string[] {
     const result: string[] = [];
     for (const entry of this.coverageIndex.values()) {
-      if (entry.state === 'loaded') result.push(entry.filename);
+      if (entry.state === "loaded") result.push(entry.filename);
     }
     return result;
   }
@@ -315,65 +338,85 @@ export class RoutingDatabase {
   async init(): Promise<void> {
     let files: string[];
     try {
-      files = readdirSync(this.dbDir).filter(f => f.endsWith('.sqlite') && f !== 'user-edits.sqlite');
+      files = readdirSync(this.dbDir).filter(
+        (f) => f.endsWith(".sqlite") && f !== "user-edits.sqlite",
+      );
     } catch (err: any) {
-      throw new Error(`Cannot read routing data directory "${this.dbDir}": ${err.message}`);
+      throw new Error(
+        `Cannot read routing data directory "${this.dbDir}": ${err.message}`,
+      );
     }
     if (files.length === 0) {
-      throw new Error(`No .sqlite files found in routing data directory: ${this.dbDir}`);
+      throw new Error(
+        `No .sqlite files found in routing data directory: ${this.dbDir}`,
+      );
     }
 
-    const workerPath = join(dirname(fileURLToPath(import.meta.url)), 'db-worker.js');
+    const workerPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "db-worker.js",
+    );
     this.worker = new Worker(workerPath);
 
-    this.worker.on('message', (msg: { id: number; type: string; result?: any; error?: string; chunk?: boolean; chunkIndex?: number; totalChunks?: number }) => {
-      const pending = this.pending.get(msg.id);
-      if (!pending) return;
+    this.worker.on(
+      "message",
+      (msg: {
+        id: number;
+        type: string;
+        result?: any;
+        error?: string;
+        chunk?: boolean;
+        chunkIndex?: number;
+        totalChunks?: number;
+      }) => {
+        const pending = this.pending.get(msg.id);
+        if (!pending) return;
 
-      if (msg.error) {
+        if (msg.error) {
+          this.pending.delete(msg.id);
+          pending.reject(new Error(msg.error));
+          return;
+        }
+
+        // Edge-loading chunked response
+        if (msg.chunk === true && msg.totalChunks !== undefined) {
+          // Initialize accumulator on first chunk
+          if (!(pending as any)._chunks) {
+            (pending as any)._chunks = [];
+          }
+          (pending as any)._chunks.push(msg.result);
+          // Resolve when all chunks arrive
+          if ((pending as any)._chunks.length === msg.totalChunks) {
+            this.pending.delete(msg.id);
+            pending.resolve((pending as any)._chunks.flat());
+          }
+          return;
+        }
+        // Final marker (chunk=false) — normally already resolved by the last
+        // chunk above. Exception: zero rows means the worker's chunk loop never
+        // ran and this marker is the *only* message sent — resolve here with an
+        // empty array, or this promise (and loadGraph() with it) hangs forever.
+        if (msg.chunk === false) {
+          if (!(pending as any)._chunks) {
+            this.pending.delete(msg.id);
+            pending.resolve([]);
+          }
+          return;
+        }
+
         this.pending.delete(msg.id);
-        pending.reject(new Error(msg.error));
-        return;
-      }
+        pending.resolve(msg.result);
+      },
+    );
 
-      // Edge-loading chunked response
-      if (msg.chunk === true && msg.totalChunks !== undefined) {
-        // Initialize accumulator on first chunk
-        if (!(pending as any)._chunks) {
-          (pending as any)._chunks = [];
-        }
-        (pending as any)._chunks.push(msg.result);
-        // Resolve when all chunks arrive
-        if ((pending as any)._chunks.length === msg.totalChunks) {
-          this.pending.delete(msg.id);
-          pending.resolve((pending as any)._chunks.flat());
-        }
-        return;
-      }
-      // Final marker (chunk=false) — normally already resolved by the last
-      // chunk above. Exception: zero rows means the worker's chunk loop never
-      // ran and this marker is the *only* message sent — resolve here with an
-      // empty array, or this promise (and loadGraph() with it) hangs forever.
-      if (msg.chunk === false) {
-        if (!(pending as any)._chunks) {
-          this.pending.delete(msg.id);
-          pending.resolve([]);
-        }
-        return;
-      }
-
-      this.pending.delete(msg.id);
-      pending.resolve(msg.result);
-    });
-
-    this.worker.on('error', (err) => {
+    this.worker.on("error", (err) => {
       for (const [, p] of this.pending) {
         p.reject(err);
       }
       this.pending.clear();
     });
 
-    const dbPaths = files.map(f => join(this.dbDir, f));
+    const dbPaths = files.map((f) => join(this.dbDir, f));
 
     if (!this.dynamicLoading) {
       // Legacy path (dynamicLoading explicitly set to false): open every
@@ -381,14 +424,14 @@ export class RoutingDatabase {
       // default (flipped 2026-07-20, see types.ts) — kept for deployments
       // that genuinely have one region file and want today's simpler
       // eager-load behavior instead of the on-demand path.
-      const schema = await this.sendMessage('init', { dbPaths });
+      const schema = await this.sendMessage("init", { dbPaths });
       this.hasCrossesLand = schema.hasCrossesLand;
       this.hasCrossesObstacle = schema.hasCrossesObstacle;
       this.hasNodeDepth = schema.hasNodeDepth;
       this.hasRegionId = schema.hasRegionId;
       const filenames: string[] = schema.filenames || [];
       this.bulkFileList = dbPaths.map((p, i) => ({
-        filename: filenames[i] || p.split('/').pop() || '',
+        filename: filenames[i] || p.split("/").pop() || "",
         path: p,
       }));
     } else {
@@ -397,17 +440,28 @@ export class RoutingDatabase {
       // graph data loads later, on demand — see loadDatabaseGraph() and
       // ensureRegionsLoaded().
       const peeked: Array<{
-        path: string; filename: string;
-        coverage: { boundingBox: DatabaseCoverageEntry['bbox']; boundaryGeometry: DatabaseCoverageEntry['boundary'] };
-        meta: DatabaseCoverageEntry['meta'];
-        flags: { hasCrossesLand: boolean; hasCrossesObstacle: boolean; hasNodeDepth: boolean; hasRegionId: boolean; hasEdgeKind: boolean };
-        stats: DatabaseCoverageEntry['stats'];
-      }> = await this.sendMessage('peekMetadata', { dbPaths });
+        path: string;
+        filename: string;
+        coverage: {
+          boundingBox: DatabaseCoverageEntry["bbox"];
+          boundaryGeometry: DatabaseCoverageEntry["boundary"];
+        };
+        meta: DatabaseCoverageEntry["meta"];
+        flags: {
+          hasCrossesLand: boolean;
+          hasCrossesObstacle: boolean;
+          hasNodeDepth: boolean;
+          hasRegionId: boolean;
+          hasEdgeKind: boolean;
+        };
+        stats: DatabaseCoverageEntry["stats"];
+      }> = await this.sendMessage("peekMetadata", { dbPaths });
 
       this.coverageIndex.clear();
       for (const p of peeked) {
         this.hasCrossesLand = this.hasCrossesLand || p.flags.hasCrossesLand;
-        this.hasCrossesObstacle = this.hasCrossesObstacle || p.flags.hasCrossesObstacle;
+        this.hasCrossesObstacle =
+          this.hasCrossesObstacle || p.flags.hasCrossesObstacle;
         this.hasNodeDepth = this.hasNodeDepth || p.flags.hasNodeDepth;
         this.hasRegionId = this.hasRegionId || p.flags.hasRegionId;
         this.coverageIndex.set(p.filename, {
@@ -415,33 +469,45 @@ export class RoutingDatabase {
           path: p.path,
           bbox: p.coverage.boundingBox ?? null,
           boundary: p.coverage.boundaryGeometry ?? null,
-          state: 'not_loaded',
+          state: "not_loaded",
           dbIndex: null,
           meta: p.meta,
           stats: p.stats ?? null,
         });
       }
-      console.log(`[routeiq] Dynamic loading enabled: peeked ${peeked.length} database(s) in ${this.dbDir}, none loaded yet`);
+      console.log(
+        `[routeiq] Dynamic loading enabled: peeked ${peeked.length} database(s) in ${this.dbDir}, none loaded yet`,
+      );
     }
 
     // Open overlay (user-edits.sqlite) — created if not exists
-    const overlayPath = join(this.dbDir, 'user-edits.sqlite');
-    await this.sendMessage('openOverlay', { overlayPath });
+    const overlayPath = join(this.dbDir, "user-edits.sqlite");
+    await this.sendMessage("openOverlay", { overlayPath });
     console.log(`[routeiq] User-edits overlay ready: ${overlayPath}`);
   }
 
   private regionIdCol(): string {
-    return this.hasRegionId ? 'region_id' : '0 AS region_id';
+    return this.hasRegionId ? "region_id" : "0 AS region_id";
   }
 
-  async getMetadata(): Promise<Array<{
-    id: number; country: string; name: string; description: string | null;
-    lastUpdateDate: string; tags: string | null; boundingBox: string | null;
-    boundaryGeometry: string | null; schemaVersion: number | null;
-    contributor: string | null; url: string | null; filename: string;
-    stats: { nodes: number; edges: number; pois: number };
-  }>> {
-    return this.sendMessage('getMetadata');
+  async getMetadata(): Promise<
+    Array<{
+      id: number;
+      country: string;
+      name: string;
+      description: string | null;
+      lastUpdateDate: string;
+      tags: string | null;
+      boundingBox: string | null;
+      boundaryGeometry: string | null;
+      schemaVersion: number | null;
+      contributor: string | null;
+      url: string | null;
+      filename: string;
+      stats: { nodes: number; edges: number; pois: number };
+    }>
+  > {
+    return this.sendMessage("getMetadata");
   }
 
   /** Backing data for GET .../databases — one record per entry in
@@ -459,25 +525,53 @@ export class RoutingDatabase {
    *  fields defaulted to null/empty so the database still appears in the
    *  catalog. `boundingBox` carries the same bbox shape as `coverage`; both
    *  keys are included so the frontend needs no field renames. */
-  async getDatabaseCatalog(): Promise<Array<{
-    filename: string; state: 'not_loaded' | 'loading' | 'loaded';
-    coverage: DatabaseCoverageEntry['bbox']; dbIndex: number | null;
-    stats: DatabaseCoverageEntry['stats'];
-    id: number | null; country: string | null; name: string | null; description: string | null;
-    lastUpdateDate: string | null; tags: string[];
-    boundingBox: { min_lat: number; min_lon: number; max_lat: number; max_lon: number } | null;
-    boundaryGeometry: any | null; schemaVersion: number | null;
-    contributor: string | null; url: string | null;
-  }>> {
+  async getDatabaseCatalog(): Promise<
+    Array<{
+      filename: string;
+      state: "not_loaded" | "loading" | "loaded";
+      coverage: DatabaseCoverageEntry["bbox"];
+      dbIndex: number | null;
+      stats: DatabaseCoverageEntry["stats"];
+      id: number | null;
+      country: string | null;
+      name: string | null;
+      description: string | null;
+      lastUpdateDate: string | null;
+      tags: string[];
+      boundingBox: {
+        min_lat: number;
+        min_lon: number;
+        max_lat: number;
+        max_lon: number;
+      } | null;
+      boundaryGeometry: any | null;
+      schemaVersion: number | null;
+      contributor: string | null;
+      url: string | null;
+    }>
+  > {
     const result: Array<{
-      filename: string; state: 'not_loaded' | 'loading' | 'loaded';
-      coverage: DatabaseCoverageEntry['bbox']; dbIndex: number | null;
-      stats: DatabaseCoverageEntry['stats'];
-      id: number | null; country: string | null; name: string | null; description: string | null;
-      lastUpdateDate: string | null; tags: string[];
-      boundingBox: { min_lat: number; min_lon: number; max_lat: number; max_lon: number } | null;
-      boundaryGeometry: any | null; schemaVersion: number | null;
-      contributor: string | null; url: string | null;
+      filename: string;
+      state: "not_loaded" | "loading" | "loaded";
+      coverage: DatabaseCoverageEntry["bbox"];
+      dbIndex: number | null;
+      stats: DatabaseCoverageEntry["stats"];
+      id: number | null;
+      country: string | null;
+      name: string | null;
+      description: string | null;
+      lastUpdateDate: string | null;
+      tags: string[];
+      boundingBox: {
+        min_lat: number;
+        min_lon: number;
+        max_lat: number;
+        max_lon: number;
+      } | null;
+      boundaryGeometry: any | null;
+      schemaVersion: number | null;
+      contributor: string | null;
+      url: string | null;
     }> = [];
     for (const entry of this.coverageIndex.values()) {
       const m = entry.meta;
@@ -494,7 +588,8 @@ export class RoutingDatabase {
         lastUpdateDate: m ? m.lastUpdateDate : null,
         tags: m && m.tags ? JSON.parse(m.tags) : [],
         boundingBox: m && m.boundingBox ? JSON.parse(m.boundingBox) : null,
-        boundaryGeometry: m && m.boundaryGeometry ? JSON.parse(m.boundaryGeometry) : null,
+        boundaryGeometry:
+          m && m.boundaryGeometry ? JSON.parse(m.boundaryGeometry) : null,
         schemaVersion: m ? m.schemaVersion : null,
         contributor: m ? m.contributor : null,
         url: m ? m.url : null,
@@ -507,7 +602,11 @@ export class RoutingDatabase {
    *  databases known to the plugin (peeked in dynamic mode, all loaded in
    *  non-dynamic mode) — lets the UI distinguish "nothing installed" from
    *  "installed but none loaded yet under dynamic loading". */
-  getLoadingStatus(): { loaded: boolean; filenames: string[]; available: number } {
+  getLoadingStatus(): {
+    loaded: boolean;
+    filenames: string[];
+    available: number;
+  } {
     return {
       loaded: this.graphLoaded,
       filenames: this.loadedFilenames(),
@@ -528,7 +627,9 @@ export class RoutingDatabase {
   async reloadMetadata(): Promise<void> {
     let files: string[];
     try {
-      files = readdirSync(this.dbDir).filter(f => f.endsWith('.sqlite') && f !== 'user-edits.sqlite');
+      files = readdirSync(this.dbDir).filter(
+        (f) => f.endsWith(".sqlite") && f !== "user-edits.sqlite",
+      );
     } catch {
       return;
     }
@@ -537,7 +638,7 @@ export class RoutingDatabase {
       return;
     }
 
-    const dbPaths = files.map(f => join(this.dbDir, f));
+    const dbPaths = files.map((f) => join(this.dbDir, f));
 
     try {
       // Reuse the existing main worker's peekMetadata support instead of
@@ -547,15 +648,21 @@ export class RoutingDatabase {
       // never disturb any database this worker already has loaded (unlike
       // `init`, which would reset `handles` and drop them).
       const peeked: Array<{
-        path: string; filename: string;
-        coverage: { boundingBox: DatabaseCoverageEntry['bbox']; boundaryGeometry: DatabaseCoverageEntry['boundary'] };
-        meta: DatabaseCoverageEntry['meta'];
-        stats: DatabaseCoverageEntry['stats'];
-      }> = await this.sendMessage('peekMetadata', { dbPaths });
+        path: string;
+        filename: string;
+        coverage: {
+          boundingBox: DatabaseCoverageEntry["bbox"];
+          boundaryGeometry: DatabaseCoverageEntry["boundary"];
+        };
+        meta: DatabaseCoverageEntry["meta"];
+        stats: DatabaseCoverageEntry["stats"];
+      }> = await this.sendMessage("peekMetadata", { dbPaths });
 
       this.mergeMetadataIntoCoverageIndex(peeked);
     } catch (err) {
-      console.warn(`[routeiq] reloadMetadata: peekMetadata failed, coverage index left unchanged: ${err instanceof Error ? err.message : err}`);
+      console.warn(
+        `[routeiq] reloadMetadata: peekMetadata failed, coverage index left unchanged: ${err instanceof Error ? err.message : err}`,
+      );
     }
   }
 
@@ -570,10 +677,14 @@ export class RoutingDatabase {
    *  vanished, since this method never touches in-memory graph data. */
   private mergeMetadataIntoCoverageIndex(
     peeked: Array<{
-      path: string; filename: string;
-      coverage: { boundingBox: DatabaseCoverageEntry['bbox']; boundaryGeometry: DatabaseCoverageEntry['boundary'] };
-      meta: DatabaseCoverageEntry['meta'];
-      stats: DatabaseCoverageEntry['stats'];
+      path: string;
+      filename: string;
+      coverage: {
+        boundingBox: DatabaseCoverageEntry["bbox"];
+        boundaryGeometry: DatabaseCoverageEntry["boundary"];
+      };
+      meta: DatabaseCoverageEntry["meta"];
+      stats: DatabaseCoverageEntry["stats"];
     }>,
   ): void {
     const seen = new Set<string>();
@@ -585,21 +696,21 @@ export class RoutingDatabase {
         path: p.path,
         bbox: p.coverage.boundingBox ?? null,
         boundary: p.coverage.boundaryGeometry ?? null,
-        state: existing?.state ?? 'not_loaded',
+        state: existing?.state ?? "not_loaded",
         dbIndex: existing?.dbIndex ?? null,
         meta: p.meta,
         stats: p.stats ?? null,
       });
     }
     for (const [filename, entry] of this.coverageIndex) {
-      if (!seen.has(filename) && entry.state === 'not_loaded') {
+      if (!seen.has(filename) && entry.state === "not_loaded") {
         this.coverageIndex.delete(filename);
       }
     }
   }
 
   private crossesLandCol(): string {
-    return this.hasCrossesLand ? ', e.crosses_land' : '';
+    return this.hasCrossesLand ? ", e.crosses_land" : "";
   }
 
   async loadGraph(): Promise<void> {
@@ -614,32 +725,49 @@ export class RoutingDatabase {
       return;
     }
 
-    const allNodes: Array<{ id: number; lat: number; lon: number; node_depth: number; region_id?: number }> = await this.sendMessage('loadNodes');
+    const allNodes: Array<{
+      id: number;
+      lat: number;
+      lon: number;
+      node_depth: number;
+      region_id?: number;
+    }> = await this.sendMessage("loadNodes");
     for (const n of allNodes) {
-      this.nodes.set(n.id, { lat: n.lat, lon: n.lon, regionId: n.region_id ?? 0, nodeDepth: n.node_depth });
+      this.nodes.set(n.id, {
+        lat: n.lat,
+        lon: n.lon,
+        regionId: n.region_id ?? 0,
+        nodeDepth: n.node_depth,
+      });
     }
 
     // Apply overlay deletions — remove nodes/edges the user deleted
-    const deletedNodeIds: number[] = await this.sendMessage('getDeletedNodeIds');
-    const deletedEdges: Array<{ source: number; target: number }> = await this.sendMessage('getDeletedEdgePairs');
+    const deletedNodeIds: number[] =
+      await this.sendMessage("getDeletedNodeIds");
+    const deletedEdges: Array<{ source: number; target: number }> =
+      await this.sendMessage("getDeletedEdgePairs");
 
     for (const nid of deletedNodeIds) {
       this.nodes.delete(nid);
     }
 
     const deletedNodeSet = new Set(deletedNodeIds);
-    const deletedEdgeSet = new Set(deletedEdges.map(d => `${d.source}:${d.target}`));
+    const deletedEdgeSet = new Set(
+      deletedEdges.map((d) => `${d.source}:${d.target}`),
+    );
 
-    const allEdges: Array<EdgeRow> = await this.sendMessage('loadEdges');
+    const allEdges: Array<EdgeRow> = await this.sendMessage("loadEdges");
     for (const edge of allEdges) {
       // Skip if source or target was deleted
-      if (deletedNodeSet.has(edge.source) || deletedNodeSet.has(edge.target)) continue;
+      if (deletedNodeSet.has(edge.source) || deletedNodeSet.has(edge.target))
+        continue;
       // Skip if this specific edge was deleted
       if (deletedEdgeSet.has(`${edge.source}:${edge.target}`)) continue;
       // Both endpoints must resolve — every consumer looks the edge's
       // coordinates up from `this.nodes`, so an edge with a dangling
       // endpoint has no usable geometry and is dropped here.
-      if (!this.nodes.has(edge.source) || !this.nodes.has(edge.target)) continue;
+      if (!this.nodes.has(edge.source) || !this.nodes.has(edge.target))
+        continue;
       if (!this.edgesBySource.has(edge.source)) {
         this.edgesBySource.set(edge.source, []);
       }
@@ -648,17 +776,29 @@ export class RoutingDatabase {
 
     this.buildSpatialIndex();
 
-    const allPois: Array<{ id: number; name: string; type_id: number; properties: string | null; lat: number; lon: number }> = await this.sendMessage('loadPois');
+    const allPois: Array<{
+      id: number;
+      name: string;
+      type_id: number;
+      properties: string | null;
+      lat: number;
+      lon: number;
+    }> = await this.sendMessage("loadPois");
     this.pois.push(...allPois);
 
     const metadata = await this.getMetadata();
 
     const rawRegions: Array<{
-      region_id: number; boundary_geometry: string; vertices: string;
-      triangles: string; triangle_adjacency: string | null;
-      boundary_node_ids: string; depth_ceiling_m: number; db_index?: number;
-    }> = await this.sendMessage('loadNavmeshRegions');
-    this.navmeshRegions = rawRegions.map(r => ({
+      region_id: number;
+      boundary_geometry: string;
+      vertices: string;
+      triangles: string;
+      triangle_adjacency: string | null;
+      boundary_node_ids: string;
+      depth_ceiling_m: number;
+      db_index?: number;
+    }> = await this.sendMessage("loadNavmeshRegions");
+    this.navmeshRegions = rawRegions.map((r) => ({
       ...Navmesh.buildNavmeshRegion(r, (id) => this.nodes.get(id)),
       dbIndex: r.db_index ?? -1,
     }));
@@ -689,27 +829,41 @@ export class RoutingDatabase {
    *  anything about the bulk load itself. Never throws — malformed
    *  metadata JSON just leaves that file's coverage fields null, same
    *  tolerance as the rest of this file. */
-  private rebuildCoverageIndexAfterBulkLoad(metadata: Array<{
-    id: number; country: string; name: string; description: string | null;
-    lastUpdateDate: string; tags: string | null; boundingBox: string | null;
-    boundaryGeometry: string | null; schemaVersion: number | null;
-    contributor: string | null; url: string | null; filename: string;
-    stats: { nodes: number; edges: number; pois: number };
-  }>): void {
+  private rebuildCoverageIndexAfterBulkLoad(
+    metadata: Array<{
+      id: number;
+      country: string;
+      name: string;
+      description: string | null;
+      lastUpdateDate: string;
+      tags: string | null;
+      boundingBox: string | null;
+      boundaryGeometry: string | null;
+      schemaVersion: number | null;
+      contributor: string | null;
+      url: string | null;
+      filename: string;
+      stats: { nodes: number; edges: number; pois: number };
+    }>,
+  ): void {
     this.coverageIndex.clear();
     this.bulkFileList.forEach((file, index) => {
-      const meta = metadata.find(m => m.filename === file.filename) ?? null;
-      let bbox: DatabaseCoverageEntry['bbox'] = null;
-      let boundary: DatabaseCoverageEntry['boundary'] = null;
+      const meta = metadata.find((m) => m.filename === file.filename) ?? null;
+      let bbox: DatabaseCoverageEntry["bbox"] = null;
+      let boundary: DatabaseCoverageEntry["boundary"] = null;
       try {
         if (meta?.boundingBox) bbox = JSON.parse(meta.boundingBox);
-        if (meta?.boundaryGeometry) boundary = JSON.parse(meta.boundaryGeometry);
-      } catch { /* malformed metadata JSON — leave coverage null, non-fatal */ }
+        if (meta?.boundaryGeometry)
+          boundary = JSON.parse(meta.boundaryGeometry);
+      } catch {
+        /* malformed metadata JSON — leave coverage null, non-fatal */
+      }
       this.coverageIndex.set(file.filename, {
         filename: file.filename,
         path: file.path,
-        bbox, boundary,
-        state: 'loaded',
+        bbox,
+        boundary,
+        state: "loaded",
         dbIndex: index,
         meta,
         stats: meta?.stats ?? null,
@@ -731,7 +885,9 @@ export class RoutingDatabase {
    * database's own regions, so an incremental load never recomputes work
    * already done for regions loaded earlier (§4a task 2).
    */
-  private precomputeFunnelEdges(regions: NavmeshRegionWithDb[] = this.navmeshRegions): void {
+  private precomputeFunnelEdges(
+    regions: NavmeshRegionWithDb[] = this.navmeshRegions,
+  ): void {
     let emptyCount = 0;
     regions.forEach((region, index) => {
       if (region.boundaryNodeIds.length === 0) {
@@ -739,17 +895,21 @@ export class RoutingDatabase {
         // region_id is not a unique key in real generated databases (all rows
         // observed with region_id=1 in zeeland.sqlite) — log the load-order
         // index too so individual occurrences are distinguishable.
-        console.warn(`[routeiq] Navmesh region_id=${region.regionId} (load index ${index}) has no ` +
-          'boundary_node_ids — funnel-edge upgrade and anchor shortcuts are silently skipped for it, ' +
-          'leaving only straight-line edge_kind_id=1 fallback edges (see NEXT_PHASES.md, Round 9 master finding).');
+        console.warn(
+          `[routeiq] Navmesh region_id=${region.regionId} (load index ${index}) has no ` +
+            "boundary_node_ids — funnel-edge upgrade and anchor shortcuts are silently skipped for it, " +
+            "leaving only straight-line edge_kind_id=1 fallback edges (see NEXT_PHASES.md, Round 9 master finding).",
+        );
         return;
       }
       this.upgradeRingBoundaryEdges(region);
       this.addAnchorShortcutEdges(region);
     });
     if (emptyCount > 0) {
-      console.warn(`[routeiq] ${emptyCount}/${regions.length} navmesh regions have empty ` +
-        'boundary_node_ids — funnel-upgrade coverage is degraded for this database.');
+      console.warn(
+        `[routeiq] ${emptyCount}/${regions.length} navmesh regions have empty ` +
+          "boundary_node_ids — funnel-upgrade coverage is degraded for this database.",
+      );
     }
   }
 
@@ -772,7 +932,8 @@ export class RoutingDatabase {
         // Always compute in a canonical (lo -> hi) direction so the cache
         // is correct regardless of which direction's edge row is visited
         // first — orientation is then just "did I ask for lo or hi first".
-        const [lo, hi] = nodeId < edge.target ? [nodeId, edge.target] : [edge.target, nodeId];
+        const [lo, hi] =
+          nodeId < edge.target ? [nodeId, edge.target] : [edge.target, nodeId];
         const pairKey = `${lo}:${hi}`;
         let result = computed.get(pairKey);
         if (!result) {
@@ -821,7 +982,10 @@ export class RoutingDatabase {
     // computation itself is 40 cheap haversine calls per node, negligible
     // next to the corridor search it feeds.
     const anchorSet = new Set(anchors);
-    const anchorCoords: Array<{ id: number; pos: { lat: number; lon: number } }> = [];
+    const anchorCoords: Array<{
+      id: number;
+      pos: { lat: number; lon: number };
+    }> = [];
     for (const id of anchors) {
       const pos = this.nodes.get(id);
       if (pos) anchorCoords.push({ id, pos });
@@ -832,7 +996,15 @@ export class RoutingDatabase {
       const nodePos = this.nodes.get(nodeId);
       if (!nodePos) return;
       const nearest = anchorCoords
-        .map(a => ({ id: a.id, d: this.haversineMeters(nodePos.lat, nodePos.lon, a.pos.lat, a.pos.lon) }))
+        .map((a) => ({
+          id: a.id,
+          d: this.haversineMeters(
+            nodePos.lat,
+            nodePos.lon,
+            a.pos.lat,
+            a.pos.lon,
+          ),
+        }))
         .sort((a, b) => a.d - b.d)
         .slice(0, 2);
       for (const { id } of nearest) {
@@ -847,11 +1019,18 @@ export class RoutingDatabase {
    *  load-time-only edges, never persisted). No-op if a ring-adjacency
    *  edge_kind_id=1 edge already connects the pair directly — that one is
    *  handled (and upgraded) by `upgradeRingBoundaryEdges` instead. */
-  private addFunnelShortcutEdge(region: NavmeshRegionWithDb, nodeA: number, nodeB: number): void {
+  private addFunnelShortcutEdge(
+    region: NavmeshRegionWithDb,
+    nodeA: number,
+    nodeB: number,
+  ): void {
     if (nodeA === nodeB) return;
-    const alreadyDirectEdge = this.edgesBySource.get(nodeA)?.some(
-      e => e.target === nodeB && e.edge_kind_id === EDGE_KIND_NAVMESH_BOUNDARY,
-    );
+    const alreadyDirectEdge = this.edgesBySource
+      .get(nodeA)
+      ?.some(
+        (e) =>
+          e.target === nodeB && e.edge_kind_id === EDGE_KIND_NAVMESH_BOUNDARY,
+      );
     if (alreadyDirectEdge) return;
 
     const result = Navmesh.funnelBetweenNodes(region, nodeA, nodeB);
@@ -880,13 +1059,17 @@ export class RoutingDatabase {
 
     if (!this.edgesBySource.has(nodeA)) this.edgesBySource.set(nodeA, []);
     this.edgesBySource.get(nodeA)!.push({
-      ...shared, source: nodeA, target: nodeB,
+      ...shared,
+      source: nodeA,
+      target: nodeB,
       path_points: forwardPath,
     });
 
     if (!this.edgesBySource.has(nodeB)) this.edgesBySource.set(nodeB, []);
     this.edgesBySource.get(nodeB)!.push({
-      ...shared, source: nodeB, target: nodeA,
+      ...shared,
+      source: nodeB,
+      target: nodeA,
       path_points: reversePath,
     });
   }
@@ -905,11 +1088,32 @@ export class RoutingDatabase {
    *  directly as the `databases` field of the /databases/load and
    *  /databases/unload POST responses, and by tests as the per-file state
    *  inspector. */
-  getCoverageStatus(): Array<{ filename: string; state: 'not_loaded' | 'loading' | 'loaded'; coverage: DatabaseCoverageEntry['bbox']; nodes?: number; stats: DatabaseCoverageEntry['stats'] }> {
-    const result: Array<{ filename: string; state: 'not_loaded' | 'loading' | 'loaded'; coverage: DatabaseCoverageEntry['bbox']; nodes?: number; stats: DatabaseCoverageEntry['stats'] }> = [];
+  getCoverageStatus(): Array<{
+    filename: string;
+    state: "not_loaded" | "loading" | "loaded";
+    coverage: DatabaseCoverageEntry["bbox"];
+    nodes?: number;
+    stats: DatabaseCoverageEntry["stats"];
+  }> {
+    const result: Array<{
+      filename: string;
+      state: "not_loaded" | "loading" | "loaded";
+      coverage: DatabaseCoverageEntry["bbox"];
+      nodes?: number;
+      stats: DatabaseCoverageEntry["stats"];
+    }> = [];
     for (const entry of this.coverageIndex.values()) {
-      const nodes = entry.dbIndex !== null ? this.nodesByDbIndex.get(entry.dbIndex)?.size : undefined;
-      result.push({ filename: entry.filename, state: entry.state, coverage: entry.bbox, nodes, stats: entry.stats });
+      const nodes =
+        entry.dbIndex !== null
+          ? this.nodesByDbIndex.get(entry.dbIndex)?.size
+          : undefined;
+      result.push({
+        filename: entry.filename,
+        state: entry.state,
+        coverage: entry.bbox,
+        nodes,
+        stats: entry.stats,
+      });
     }
     return result;
   }
@@ -933,27 +1137,37 @@ export class RoutingDatabase {
    * attempt/segment once the search's bounding box is known (PHASE_4_DESIGN.md
    * §4a.1 task 4).
    */
-  async ensureRegionsLoaded(points: Array<{ latitude: number; longitude: number }>): Promise<void> {
+  async ensureRegionsLoaded(
+    points: Array<{ latitude: number; longitude: number }>,
+  ): Promise<void> {
     if (!this.dynamicLoading) return;
     const toLoad = new Set<string>();
     for (const p of points) {
       for (const entry of this.coverageIndex.values()) {
         if (!entry.bbox) continue;
-        if (p.latitude >= entry.bbox.min_lat && p.latitude <= entry.bbox.max_lat &&
-            p.longitude >= entry.bbox.min_lon && p.longitude <= entry.bbox.max_lon) {
+        if (
+          p.latitude >= entry.bbox.min_lat &&
+          p.latitude <= entry.bbox.max_lat &&
+          p.longitude >= entry.bbox.min_lon &&
+          p.longitude <= entry.bbox.max_lon
+        ) {
           // §4a M5: touch every region this request falls inside, whether or
           // not it's already loaded — an actively-relevant region must never
           // look like the LRU candidate to enforceRegionCap().
           this.touchRegion(entry.filename);
-          if (entry.state !== 'loaded') toLoad.add(entry.filename);
+          if (entry.state !== "loaded") toLoad.add(entry.filename);
         }
       }
     }
     for (const filename of toLoad) {
       const t0 = Date.now();
-      console.log(`[routeiq] Route request falls inside not-yet-loaded database ${filename} — loading inline before search`);
+      console.log(
+        `[routeiq] Route request falls inside not-yet-loaded database ${filename} — loading inline before search`,
+      );
       await this.loadDatabaseGraph(filename);
-      console.log(`[routeiq] Inline on-demand load of ${filename} completed in ${Date.now() - t0}ms`);
+      console.log(
+        `[routeiq] Inline on-demand load of ${filename} completed in ${Date.now() - t0}ms`,
+      );
     }
   }
 
@@ -975,20 +1189,26 @@ export class RoutingDatabase {
     for (const entry of this.coverageIndex.values()) {
       if (!entry.bbox) continue;
       const intersects =
-        entry.bbox.min_lat <= bbox.maxLat && entry.bbox.max_lat >= bbox.minLat &&
-        entry.bbox.min_lon <= bbox.maxLon && entry.bbox.max_lon >= bbox.minLon;
+        entry.bbox.min_lat <= bbox.maxLat &&
+        entry.bbox.max_lat >= bbox.minLat &&
+        entry.bbox.min_lon <= bbox.maxLon &&
+        entry.bbox.max_lon >= bbox.minLon;
       if (intersects) {
         // §4a M5: see ensureRegionsLoaded — touch relevant regions whether
         // newly loaded or already loaded.
         this.touchRegion(entry.filename);
-        if (entry.state !== 'loaded') toLoad.add(entry.filename);
+        if (entry.state !== "loaded") toLoad.add(entry.filename);
       }
     }
     for (const filename of toLoad) {
       const t0 = Date.now();
-      console.log(`[routeiq] Route search bounding box overlaps not-yet-loaded database ${filename} — loading inline before search`);
+      console.log(
+        `[routeiq] Route search bounding box overlaps not-yet-loaded database ${filename} — loading inline before search`,
+      );
       await this.loadDatabaseGraph(filename);
-      console.log(`[routeiq] Inline on-demand load of ${filename} completed in ${Date.now() - t0}ms`);
+      console.log(
+        `[routeiq] Inline on-demand load of ${filename} completed in ${Date.now() - t0}ms`,
+      );
     }
   }
 
@@ -999,32 +1219,46 @@ export class RoutingDatabase {
    *  throttled position update — so a positioned vessel boots with its local
    *  region loaded and routable instead of an empty graph. No-op in
    *  non-dynamic mode (everything is already loaded). */
-  async eagerLoadForPosition(lat: number, lon: number, radiusNm: number = 0): Promise<void> {
+  async eagerLoadForPosition(
+    lat: number,
+    lon: number,
+    radiusNm: number = 0,
+  ): Promise<void> {
     if (!this.dynamicLoading) return;
     // ~1 nm of latitude ≈ 1/60°; scale longitude by cos(lat) so the band is
     // roughly circular. Cheap prefilter — the containment test below is what
     // actually decides membership.
     const dLat = radiusNm / 60;
-    const dLon = radiusNm / 60 / Math.max(0.1, Math.cos(lat * Math.PI / 180));
+    const dLon = radiusNm / 60 / Math.max(0.1, Math.cos((lat * Math.PI) / 180));
     const toLoad = new Set<string>();
     for (const entry of this.coverageIndex.values()) {
       if (!entry.bbox) continue;
-      if (lat >= entry.bbox.min_lat - dLat && lat <= entry.bbox.max_lat + dLat &&
-          lon >= entry.bbox.min_lon - dLon && lon <= entry.bbox.max_lon + dLon) {
+      if (
+        lat >= entry.bbox.min_lat - dLat &&
+        lat <= entry.bbox.max_lat + dLat &&
+        lon >= entry.bbox.min_lon - dLon &&
+        lon <= entry.bbox.max_lon + dLon
+      ) {
         // §4a M5: touch every region within the band, whether or not it's
         // already loaded — see ensureRegionsLoaded.
         this.touchRegion(entry.filename);
-        if (entry.state === 'not_loaded') toLoad.add(entry.filename);
+        if (entry.state === "not_loaded") toLoad.add(entry.filename);
       }
     }
     for (const filename of toLoad) {
       const t0 = Date.now();
-      console.log(`[routeiq] Vessel position (${lat.toFixed(4)},${lon.toFixed(4)}) is inside not-yet-loaded database ${filename} — eager-loading`);
+      console.log(
+        `[routeiq] Vessel position (${lat.toFixed(4)},${lon.toFixed(4)}) is inside not-yet-loaded database ${filename} — eager-loading`,
+      );
       try {
         await this.loadDatabaseGraph(filename);
-        console.log(`[routeiq] Eager position load of ${filename} completed in ${Date.now() - t0}ms`);
+        console.log(
+          `[routeiq] Eager position load of ${filename} completed in ${Date.now() - t0}ms`,
+        );
       } catch (e) {
-        console.warn(`[routeiq] Eager position load of ${filename} failed: ${e instanceof Error ? e.message : e}`);
+        console.warn(
+          `[routeiq] Eager position load of ${filename} failed: ${e instanceof Error ? e.message : e}`,
+        );
       }
     }
   }
@@ -1038,12 +1272,16 @@ export class RoutingDatabase {
     if (!this.dynamicLoading) return;
     if (this.coverageIndex.size !== 1) return;
     const [only] = this.coverageIndex.values();
-    if (!only || only.state === 'loaded') return;
-    console.log(`[routeiq] Single installed database ${only.filename} — eager-loading at startup`);
+    if (!only || only.state === "loaded") return;
+    console.log(
+      `[routeiq] Single installed database ${only.filename} — eager-loading at startup`,
+    );
     try {
       await this.loadDatabaseGraph(only.filename);
     } catch (e) {
-      console.warn(`[routeiq] Single-database eager load failed: ${e instanceof Error ? e.message : e}`);
+      console.warn(
+        `[routeiq] Single-database eager load failed: ${e instanceof Error ? e.message : e}`,
+      );
     }
   }
 
@@ -1059,10 +1297,13 @@ export class RoutingDatabase {
   async loadDatabaseGraph(filename: string): Promise<void> {
     const entry = this.coverageIndex.get(filename);
     if (!entry) throw new Error(`Unknown database: ${filename}`);
-    if (entry.state === 'loaded') return;
+    if (entry.state === "loaded") return;
 
     const inflight = this.loadingPromises.get(filename);
-    if (inflight) { await inflight; return; }
+    if (inflight) {
+      await inflight;
+      return;
+    }
 
     const promise = this.loadDatabaseGraphInner(filename, entry);
     this.loadingPromises.set(filename, promise);
@@ -1073,16 +1314,27 @@ export class RoutingDatabase {
     }
   }
 
-  private async loadDatabaseGraphInner(filename: string, entry: DatabaseCoverageEntry): Promise<void> {
-    entry.state = 'loading';
+  private async loadDatabaseGraphInner(
+    filename: string,
+    entry: DatabaseCoverageEntry,
+  ): Promise<void> {
+    entry.state = "loading";
     try {
       const opened: {
-        dbIndex: number; filename: string;
-        flags: { hasCrossesLand: boolean; hasCrossesObstacle: boolean; hasNodeDepth: boolean; hasRegionId: boolean; hasEdgeKind: boolean };
-      } = await this.sendMessage('openDb', { dbPath: entry.path });
+        dbIndex: number;
+        filename: string;
+        flags: {
+          hasCrossesLand: boolean;
+          hasCrossesObstacle: boolean;
+          hasNodeDepth: boolean;
+          hasRegionId: boolean;
+          hasEdgeKind: boolean;
+        };
+      } = await this.sendMessage("openDb", { dbPath: entry.path });
       const dbIndex = opened.dbIndex;
       this.hasCrossesLand = this.hasCrossesLand || opened.flags.hasCrossesLand;
-      this.hasCrossesObstacle = this.hasCrossesObstacle || opened.flags.hasCrossesObstacle;
+      this.hasCrossesObstacle =
+        this.hasCrossesObstacle || opened.flags.hasCrossesObstacle;
       this.hasNodeDepth = this.hasNodeDepth || opened.flags.hasNodeDepth;
       this.hasRegionId = this.hasRegionId || opened.flags.hasRegionId;
 
@@ -1092,8 +1344,17 @@ export class RoutingDatabase {
       // load would duplicate them in edgesBySource.
       const includeOverlay = !this.overlayMergedOnce;
 
-      const nodes: Array<{ id: number; lat: number; lon: number; node_depth: number; region_id?: number; db_index: number }> =
-        await this.sendMessage('loadNodes', { dbIndexes: [dbIndex], includeOverlay });
+      const nodes: Array<{
+        id: number;
+        lat: number;
+        lon: number;
+        node_depth: number;
+        region_id?: number;
+        db_index: number;
+      }> = await this.sendMessage("loadNodes", {
+        dbIndexes: [dbIndex],
+        includeOverlay,
+      });
 
       const nodeIdSet = this.nodesByDbIndex.get(dbIndex) ?? new Set<number>();
       for (const n of nodes) {
@@ -1103,7 +1364,12 @@ export class RoutingDatabase {
         // another database) must NOT be re-inserted, or the id would appear
         // twice in its grid cell and corrupt every grid-backed query (M6).
         const isNewNode = !this.nodes.has(n.id);
-        this.nodes.set(n.id, { lat: n.lat, lon: n.lon, regionId: n.region_id ?? 0, nodeDepth: n.node_depth });
+        this.nodes.set(n.id, {
+          lat: n.lat,
+          lon: n.lon,
+          regionId: n.region_id ?? 0,
+          nodeDepth: n.node_depth,
+        });
         if (isNewNode) this.gridInsertNode(n.id, n.lat, n.lon);
         if (n.db_index === dbIndex) {
           // Real per-file node (not an overlay row) — track provenance and
@@ -1121,8 +1387,10 @@ export class RoutingDatabase {
 
       // Overlay deletions apply regardless of includeOverlay (they're a
       // filter, not a merge, and cheap enough to just refetch every load).
-      const deletedNodeIds: number[] = await this.sendMessage('getDeletedNodeIds');
-      const deletedEdges: Array<{ source: number; target: number }> = await this.sendMessage('getDeletedEdgePairs');
+      const deletedNodeIds: number[] =
+        await this.sendMessage("getDeletedNodeIds");
+      const deletedEdges: Array<{ source: number; target: number }> =
+        await this.sendMessage("getDeletedEdgePairs");
       for (const nid of deletedNodeIds) {
         // Capture coords before deleting — needed to find the grid cell the
         // node was inserted into (a node's id encodes its coordinate, so the
@@ -1130,22 +1398,32 @@ export class RoutingDatabase {
         const removedCoords = this.nodes.get(nid);
         if (this.nodes.delete(nid)) {
           nodeIdSet.delete(nid);
-          if (removedCoords) this.gridRemoveNode(nid, removedCoords.lat, removedCoords.lon);
+          if (removedCoords)
+            this.gridRemoveNode(nid, removedCoords.lat, removedCoords.lon);
         }
       }
       const deletedNodeSet = new Set(deletedNodeIds);
-      const deletedEdgeSet = new Set(deletedEdges.map(d => `${d.source}:${d.target}`));
+      const deletedEdgeSet = new Set(
+        deletedEdges.map((d) => `${d.source}:${d.target}`),
+      );
 
-      const edges: Array<EdgeRow & { db_index: number }> = await this.sendMessage('loadEdges', { dbIndexes: [dbIndex], includeOverlay });
+      const edges: Array<EdgeRow & { db_index: number }> =
+        await this.sendMessage("loadEdges", {
+          dbIndexes: [dbIndex],
+          includeOverlay,
+        });
       let edgeCount = 0;
       for (const edge of edges) {
-        if (deletedNodeSet.has(edge.source) || deletedNodeSet.has(edge.target)) continue;
+        if (deletedNodeSet.has(edge.source) || deletedNodeSet.has(edge.target))
+          continue;
         if (deletedEdgeSet.has(`${edge.source}:${edge.target}`)) continue;
         // Same dangling-endpoint drop as loadGraph — coordinates always come
         // from `this.nodes`, never from the edge row.
-        if (!this.nodes.has(edge.source) || !this.nodes.has(edge.target)) continue;
+        if (!this.nodes.has(edge.source) || !this.nodes.has(edge.target))
+          continue;
         edge.dbIndex = edge.db_index;
-        if (!this.edgesBySource.has(edge.source)) this.edgesBySource.set(edge.source, []);
+        if (!this.edgesBySource.has(edge.source))
+          this.edgesBySource.set(edge.source, []);
         this.edgesBySource.get(edge.source)!.push(edge);
         edgeCount++;
       }
@@ -1155,16 +1433,30 @@ export class RoutingDatabase {
       // here (M6). buildSpatialIndex() is still used by the bulk loadGraph()
       // path below, where one full build after the whole load is simplest.
 
-      const pois: Array<{ id: number; name: string; type_id: number; properties: string | null; lat: number; lon: number; db_index: number }> =
-        await this.sendMessage('loadPois', { dbIndexes: [dbIndex] });
+      const pois: Array<{
+        id: number;
+        name: string;
+        type_id: number;
+        properties: string | null;
+        lat: number;
+        lon: number;
+        db_index: number;
+      }> = await this.sendMessage("loadPois", { dbIndexes: [dbIndex] });
       for (const p of pois) this.pois.push({ ...p, dbIndex: p.db_index });
 
       const rawRegions: Array<{
-        region_id: number; boundary_geometry: string; vertices: string;
-        triangles: string; triangle_adjacency: string | null;
-        boundary_node_ids: string; depth_ceiling_m: number; db_index: number;
-      }> = await this.sendMessage('loadNavmeshRegions', { dbIndexes: [dbIndex] });
-      const newRegions: NavmeshRegionWithDb[] = rawRegions.map(r => ({
+        region_id: number;
+        boundary_geometry: string;
+        vertices: string;
+        triangles: string;
+        triangle_adjacency: string | null;
+        boundary_node_ids: string;
+        depth_ceiling_m: number;
+        db_index: number;
+      }> = await this.sendMessage("loadNavmeshRegions", {
+        dbIndexes: [dbIndex],
+      });
+      const newRegions: NavmeshRegionWithDb[] = rawRegions.map((r) => ({
         ...Navmesh.buildNavmeshRegion(r, (id) => this.nodes.get(id)),
         dbIndex,
       }));
@@ -1177,7 +1469,7 @@ export class RoutingDatabase {
       if (includeOverlay) this.overlayMergedOnce = true;
 
       entry.dbIndex = dbIndex;
-      entry.state = 'loaded';
+      entry.state = "loaded";
       // §4a M5: a freshly-loaded region is by definition the most recently
       // used one.
       this.touchRegion(filename);
@@ -1187,12 +1479,14 @@ export class RoutingDatabase {
       // bbox-query cache built before this load is stale.
       this.invalidateBBoxCaches();
 
-      console.log(`[routeiq] Loaded database ${filename} (dbIndex=${dbIndex}): ` +
-        `${nodeIdSet.size} nodes, ${edgeCount} edges, ${pois.length} POIs, ${newRegions.length} navmesh regions`);
+      console.log(
+        `[routeiq] Loaded database ${filename} (dbIndex=${dbIndex}): ` +
+          `${nodeIdSet.size} nodes, ${edgeCount} edges, ${pois.length} POIs, ${newRegions.length} navmesh regions`,
+      );
     } catch (err) {
       // Leave the coverage entry loadable again on failure rather than
       // stuck 'loading' forever.
-      entry.state = 'not_loaded';
+      entry.state = "not_loaded";
       throw err;
     }
   }
@@ -1208,28 +1502,37 @@ export class RoutingDatabase {
    * beginRoute/endRoute) — evicting graph data out from under an
    * in-progress search is worse than a temporarily-stale eviction request.
    */
-  async unloadDatabaseGraph(filename: string): Promise<{ nodesRemoved: number; edgesRemoved: number }> {
+  async unloadDatabaseGraph(
+    filename: string,
+  ): Promise<{ nodesRemoved: number; edgesRemoved: number }> {
     const entry = this.coverageIndex.get(filename);
     if (!entry) throw new Error(`Unknown database: ${filename}`);
-    if (entry.state !== 'loaded' || entry.dbIndex === null) {
+    if (entry.state !== "loaded" || entry.dbIndex === null) {
       throw new Error(`Database ${filename} is not currently loaded`);
     }
-    const loadedCount = Array.from(this.coverageIndex.values()).filter(e => e.state === 'loaded').length;
+    const loadedCount = Array.from(this.coverageIndex.values()).filter(
+      (e) => e.state === "loaded",
+    ).length;
     if (loadedCount <= 1) {
-      throw new Error('Cannot unload the only loaded database — routing would have no coverage left');
+      throw new Error(
+        "Cannot unload the only loaded database — routing would have no coverage left",
+      );
     }
     if (this.activeRouteCount > 0) {
-      throw new Error('Cannot unload a database while a route calculation is in progress');
+      throw new Error(
+        "Cannot unload a database while a route calculation is in progress",
+      );
     }
 
     const dbIndex = entry.dbIndex;
 
     let edgesRemoved = 0;
     for (const [src, edges] of this.edgesBySource) {
-      const filtered = edges.filter(e => e.dbIndex !== dbIndex);
+      const filtered = edges.filter((e) => e.dbIndex !== dbIndex);
       edgesRemoved += edges.length - filtered.length;
       if (filtered.length === 0) this.edgesBySource.delete(src);
-      else if (filtered.length !== edges.length) this.edgesBySource.set(src, filtered);
+      else if (filtered.length !== edges.length)
+        this.edgesBySource.set(src, filtered);
     }
 
     const nodeIds = this.nodesByDbIndex.get(dbIndex) ?? new Set<number>();
@@ -1242,7 +1545,8 @@ export class RoutingDatabase {
         // loadDatabaseGraphInner's overlay-deletion handling above.
         const removedCoords = this.nodes.get(nodeId);
         this.nodes.delete(nodeId);
-        if (removedCoords) this.gridRemoveNode(nodeId, removedCoords.lat, removedCoords.lon);
+        if (removedCoords)
+          this.gridRemoveNode(nodeId, removedCoords.lat, removedCoords.lon);
         nodesRemoved++;
       } else {
         this.nodeDbCount.set(nodeId, remaining);
@@ -1277,21 +1581,26 @@ export class RoutingDatabase {
     // disk, just not re-merged automatically. Not attempting to solve that
     // re-merge gap here.
     for (const [src, edges] of this.edgesBySource) {
-      if (!this.nodes.has(src)) { this.edgesBySource.delete(src); continue; }
-      const kept = edges.filter(e => this.nodes.has(e.target));
+      if (!this.nodes.has(src)) {
+        this.edgesBySource.delete(src);
+        continue;
+      }
+      const kept = edges.filter((e) => this.nodes.has(e.target));
       if (kept.length === 0) this.edgesBySource.delete(src);
       else if (kept.length !== edges.length) this.edgesBySource.set(src, kept);
     }
 
-    this.navmeshRegions = this.navmeshRegions.filter(r => r.dbIndex !== dbIndex);
-    this.pois = this.pois.filter(p => p.dbIndex !== dbIndex);
+    this.navmeshRegions = this.navmeshRegions.filter(
+      (r) => r.dbIndex !== dbIndex,
+    );
+    this.pois = this.pois.filter((p) => p.dbIndex !== dbIndex);
 
-    await this.sendMessage('closeDb', { dbIndex });
+    await this.sendMessage("closeDb", { dbIndex });
 
     // spatialGrid is maintained incrementally above (gridRemoveNode for
     // exactly the nodes actually removed) — no full rebuild needed (M6).
 
-    entry.state = 'not_loaded';
+    entry.state = "not_loaded";
     entry.dbIndex = null;
 
     // This unload just filtered `edgesBySource` and `this.pois` — any
@@ -1299,7 +1608,9 @@ export class RoutingDatabase {
     // the just-removed database's rows).
     this.invalidateBBoxCaches();
 
-    console.log(`[routeiq] Unloaded database ${filename} (dbIndex=${dbIndex}): removed ${nodesRemoved} nodes, ${edgesRemoved} edges`);
+    console.log(
+      `[routeiq] Unloaded database ${filename} (dbIndex=${dbIndex}): removed ${nodesRemoved} nodes, ${edgesRemoved} edges`,
+    );
     return { nodesRemoved, edgesRemoved };
   }
 
@@ -1323,7 +1634,9 @@ export class RoutingDatabase {
     if (this.activeRouteCount > 0) return;
 
     for (;;) {
-      const loaded = Array.from(this.coverageIndex.values()).filter(e => e.state === 'loaded');
+      const loaded = Array.from(this.coverageIndex.values()).filter(
+        (e) => e.state === "loaded",
+      );
       if (loaded.length <= this.maxLoadedRegions || loaded.length <= 1) return;
       if (this.activeRouteCount > 0) return;
 
@@ -1345,22 +1658,31 @@ export class RoutingDatabase {
         // Last-loaded-database guard or a route that started concurrently —
         // either way, stop enforcing rather than loop or throw out of a
         // fire-and-forget background pass.
-        console.warn(`[routeiq] enforceRegionCap: stopping (${e instanceof Error ? e.message : e})`);
+        console.warn(
+          `[routeiq] enforceRegionCap: stopping (${e instanceof Error ? e.message : e})`,
+        );
         return;
       }
     }
   }
 
-  async getNodeById(id: number): Promise<{ lat: number; lon: number; regionId: number; nodeDepth: number } | null> {
+  async getNodeById(id: number): Promise<{
+    lat: number;
+    lon: number;
+    regionId: number;
+    nodeDepth: number;
+  } | null> {
     if (this.graphLoaded) {
       return this.nodes.get(id) || null;
     }
     return null;
   }
 
-  getNodeSync(id: number): { lat: number; lon: number; regionId: number; nodeDepth: number } | null {
+  getNodeSync(
+    id: number,
+  ): { lat: number; lon: number; regionId: number; nodeDepth: number } | null {
     if (!this.graphLoaded) {
-      throw new Error('Graph must be loaded for synchronous node lookup');
+      throw new Error("Graph must be loaded for synchronous node lookup");
     }
     return this.nodes.get(id) || null;
   }
@@ -1371,7 +1693,10 @@ export class RoutingDatabase {
    *  getNodeSync() call each time. The map is mutated in place by
    *  load/unload, never replaced, so a hoisted reference stays live for the
    *  caller's whole loop. Callers must treat it as read-only. */
-  getNodeMap(): ReadonlyMap<number, { lat: number; lon: number; regionId: number; nodeDepth: number }> {
+  getNodeMap(): ReadonlyMap<
+    number,
+    { lat: number; lon: number; regionId: number; nodeDepth: number }
+  > {
     return this.nodes;
   }
 
@@ -1386,13 +1711,15 @@ export class RoutingDatabase {
     if (this.graphLoaded) {
       const edges = this.edgesBySource.get(source);
       if (edges) {
-        return edges.find(e => e.target === target) || null;
+        return edges.find((e) => e.target === target) || null;
       }
     }
     return null;
   }
 
-  async getEdgesBySources(nodeIds: number[]): Promise<Map<number, Array<EdgeRow>>> {
+  async getEdgesBySources(
+    nodeIds: number[],
+  ): Promise<Map<number, Array<EdgeRow>>> {
     const result = new Map<number, Array<EdgeRow>>();
     if (!this.graphLoaded) return result;
     for (const id of nodeIds) {
@@ -1404,53 +1731,100 @@ export class RoutingDatabase {
     return result;
   }
 
-  async findNearestNode(latitude: number, longitude: number, maxDistanceMeters: number = 50000): Promise<number | null> {
+  async findNearestNode(
+    latitude: number,
+    longitude: number,
+    maxDistanceMeters: number = 50000,
+  ): Promise<number | null> {
     if (!this.graphLoaded) return null;
     let bestId: number | null = null;
     let bestDist = maxDistanceMeters;
-    const latRad = latitude * Math.PI / 180;
+    const latRad = (latitude * Math.PI) / 180;
     const cosLat = Math.cos(latRad);
     const marginDeg = maxDistanceMeters / 111320;
     // cos(lat)-corrected longitude margin (see gridCandidateIds) — the same
     // superset the old full-scan prefilter below re-applies exactly.
     const marginLonDeg = marginDeg / cosLat;
-    for (const id of this.gridCandidateIds(latitude, longitude, marginDeg, marginLonDeg)) {
+    for (const id of this.gridCandidateIds(
+      latitude,
+      longitude,
+      marginDeg,
+      marginLonDeg,
+    )) {
       const c = this.nodes.get(id);
       if (!c) continue;
       if (Math.abs(c.lat - latitude) > marginDeg) continue;
       if (Math.abs(c.lon - longitude) > marginLonDeg) continue;
-      const dLat = (c.lat - latitude) * Math.PI / 180;
-      const dLon = (c.lon - longitude) * Math.PI / 180;
-      const a = Math.sin(dLat / 2) ** 2 + cosLat * Math.cos(c.lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+      const dLat = ((c.lat - latitude) * Math.PI) / 180;
+      const dLon = ((c.lon - longitude) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        cosLat * Math.cos((c.lat * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
       const d = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      if (d < bestDist) { bestDist = d; bestId = id; }
+      if (d < bestDist) {
+        bestDist = d;
+        bestId = id;
+      }
     }
     return bestId;
   }
 
-  async findKNearestMainGraphNodes(latitude: number, longitude: number, k: number, maxDistMeters: number = 5000): Promise<Array<{ id: number; lat: number; lon: number; distance: number }>> {
+  async findKNearestMainGraphNodes(
+    latitude: number,
+    longitude: number,
+    k: number,
+    maxDistMeters: number = 5000,
+  ): Promise<
+    Array<{ id: number; lat: number; lon: number; distance: number }>
+  > {
     if (!this.graphLoaded) return [];
-    const latRad = latitude * Math.PI / 180;
+    const latRad = (latitude * Math.PI) / 180;
     const cosLat = Math.cos(latRad);
     const marginDeg = maxDistMeters / 111320;
     const marginLonDeg = marginDeg / cosLat;
-    const candidates: Array<{ id: number; lat: number; lon: number; distance: number }> = [];
-    for (const id of this.gridCandidateIds(latitude, longitude, marginDeg, marginLonDeg)) {
+    const candidates: Array<{
+      id: number;
+      lat: number;
+      lon: number;
+      distance: number;
+    }> = [];
+    for (const id of this.gridCandidateIds(
+      latitude,
+      longitude,
+      marginDeg,
+      marginLonDeg,
+    )) {
       const c = this.nodes.get(id);
       if (!c) continue;
       if (c.regionId === 0) continue;
       if (Math.abs(c.lat - latitude) > marginDeg) continue;
       if (Math.abs(c.lon - longitude) > marginLonDeg) continue;
       const d = this.haversineMeters(latitude, longitude, c.lat, c.lon);
-      if (d <= maxDistMeters) candidates.push({ id, lat: c.lat, lon: c.lon, distance: d });
+      if (d <= maxDistMeters)
+        candidates.push({ id, lat: c.lat, lon: c.lon, distance: d });
     }
     candidates.sort((a, b) => a.distance - b.distance);
     return candidates.slice(0, k);
   }
 
-  async findNearestNodeInSet(latitude: number, longitude: number, candidates: Set<number>, maxDistanceMeters: number = 5000): Promise<{ id: number; lat: number; lon: number; distance: number } | null> {
+  async findNearestNodeInSet(
+    latitude: number,
+    longitude: number,
+    candidates: Set<number>,
+    maxDistanceMeters: number = 5000,
+  ): Promise<{
+    id: number;
+    lat: number;
+    lon: number;
+    distance: number;
+  } | null> {
     if (candidates.size === 0 || !this.graphLoaded) return null;
-    let best: { id: number; lat: number; lon: number; distance: number } | null = null;
+    let best: {
+      id: number;
+      lat: number;
+      lon: number;
+      distance: number;
+    } | null = null;
     for (const id of candidates) {
       const c = this.nodes.get(id);
       if (!c) continue;
@@ -1462,23 +1836,42 @@ export class RoutingDatabase {
     return best;
   }
 
-  async getNodesInRadius(latitude: number, longitude: number, radiusMeters: number): Promise<Array<{ id: number; lat: number; lon: number; distance: number }>> {
-    const results: Array<{ id: number; lat: number; lon: number; distance: number }> = [];
+  async getNodesInRadius(
+    latitude: number,
+    longitude: number,
+    radiusMeters: number,
+  ): Promise<
+    Array<{ id: number; lat: number; lon: number; distance: number }>
+  > {
+    const results: Array<{
+      id: number;
+      lat: number;
+      lon: number;
+      distance: number;
+    }> = [];
     if (!this.graphLoaded) return results;
-    const latRad = latitude * Math.PI / 180;
+    const latRad = (latitude * Math.PI) / 180;
     const cosLat = Math.cos(latRad);
     const marginDeg = radiusMeters / 111320;
     const marginLonDeg = marginDeg / cosLat;
-    for (const id of this.gridCandidateIds(latitude, longitude, marginDeg, marginLonDeg)) {
+    for (const id of this.gridCandidateIds(
+      latitude,
+      longitude,
+      marginDeg,
+      marginLonDeg,
+    )) {
       const c = this.nodes.get(id);
       if (!c) continue;
       if (Math.abs(c.lat - latitude) > marginDeg) continue;
       if (Math.abs(c.lon - longitude) > marginLonDeg) continue;
-      const dLat = (c.lat - latitude) * Math.PI / 180;
-      const dLon = (c.lon - longitude) * Math.PI / 180;
-      const a = Math.sin(dLat / 2) ** 2 + cosLat * Math.cos(c.lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+      const dLat = ((c.lat - latitude) * Math.PI) / 180;
+      const dLon = ((c.lon - longitude) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        cosLat * Math.cos((c.lat * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
       const d = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      if (d <= radiusMeters) results.push({ id, lat: c.lat, lon: c.lon, distance: d });
+      if (d <= radiusMeters)
+        results.push({ id, lat: c.lat, lon: c.lon, distance: d });
     }
     results.sort((a, b) => a.distance - b.distance);
     return results;
@@ -1521,16 +1914,42 @@ export class RoutingDatabase {
             if (!s || !t) continue;
 
             const { fraction, point, distance } = this.projectOnEdge(
-              s.lon, s.lat, t.lon, t.lat, longitude, latitude,
+              s.lon,
+              s.lat,
+              t.lon,
+              t.lat,
+              longitude,
+              latitude,
             );
 
             if (distance < bestDist) {
               bestDist = distance;
-              const distToSource = this.haversineMeters(latitude, longitude, s.lat, s.lon);
-              const distToTarget = this.haversineMeters(latitude, longitude, t.lat, t.lon);
-              const nearNode = distToSource <= distToTarget ? edge.source : edge.target;
-              const farNode = nearNode === edge.source ? edge.target : edge.source;
-              best = { source: edge.source, target: edge.target, fraction, point, distance, nearNode, farNode, edge };
+              const distToSource = this.haversineMeters(
+                latitude,
+                longitude,
+                s.lat,
+                s.lon,
+              );
+              const distToTarget = this.haversineMeters(
+                latitude,
+                longitude,
+                t.lat,
+                t.lon,
+              );
+              const nearNode =
+                distToSource <= distToTarget ? edge.source : edge.target;
+              const farNode =
+                nearNode === edge.source ? edge.target : edge.source;
+              best = {
+                source: edge.source,
+                target: edge.target,
+                fraction,
+                point,
+                distance,
+                nearNode,
+                farNode,
+                edge,
+              };
             }
           }
         }
@@ -1541,14 +1960,21 @@ export class RoutingDatabase {
   }
 
   public projectOnEdge(
-    ax: number, ay: number,
-    bx: number, by: number,
-    px: number, py: number,
-  ): { fraction: number; point: { lat: number; lon: number }; distance: number } {
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number,
+    px: number,
+    py: number,
+  ): {
+    fraction: number;
+    point: { lat: number; lon: number };
+    distance: number;
+  } {
     // Scale longitude differences by cos(midLat) so that 1° lon and 1° lat
     // have equal weight in the projection. Without this correction the result
     // is distorted above ~40° latitude (1° lon < 1° lat in real distance).
-    const midLat = ((ay + by) / 2) * Math.PI / 180;
+    const midLat = (((ay + by) / 2) * Math.PI) / 180;
     const cosLat = Math.cos(midLat);
 
     const dx = (bx - ax) * cosLat;
@@ -1569,12 +1995,16 @@ export class RoutingDatabase {
     const projLat = ay + t * (by - ay);
     const dist = this.haversineMeters(py, px, projLat, projLon);
 
-    return { fraction: t, point: { lat: projLat, lon: projLon }, distance: dist };
+    return {
+      fraction: t,
+      point: { lat: projLat, lon: projLon },
+      distance: dist,
+    };
   }
 
   getReachableNodes(startNode: number): Set<number> {
     if (!this.graphLoaded) {
-      throw new Error('Graph must be loaded before checking reachability');
+      throw new Error("Graph must be loaded before checking reachability");
     }
     const visited = new Set<number>();
     const queue: number[] = [startNode];
@@ -1600,9 +2030,15 @@ export class RoutingDatabase {
   /** The navmesh region (if any) whose boundary_geometry contains this point. */
   findNavmeshRegionAt(lat: number, lon: number): Navmesh.NavmeshRegion | null {
     for (const region of this.navmeshRegions) {
-      if (lat < region.bbox.minLat || lat > region.bbox.maxLat ||
-          lon < region.bbox.minLon || lon > region.bbox.maxLon) continue;
-      if (Navmesh.pointInPolygon(lat, lon, region.boundaryGeometry)) return region;
+      if (
+        lat < region.bbox.minLat ||
+        lat > region.bbox.maxLat ||
+        lon < region.bbox.minLon ||
+        lon > region.bbox.maxLon
+      )
+        continue;
+      if (Navmesh.pointInPolygon(lat, lon, region.boundaryGeometry))
+        return region;
     }
     return null;
   }
@@ -1612,15 +2048,30 @@ export class RoutingDatabase {
     return this.navmeshRegions;
   }
 
-  funnelPathBetweenNodes(region: Navmesh.NavmeshRegion, nodeA: number, nodeB: number): Navmesh.FunnelResult | null {
+  funnelPathBetweenNodes(
+    region: Navmesh.NavmeshRegion,
+    nodeA: number,
+    nodeB: number,
+  ): Navmesh.FunnelResult | null {
     return Navmesh.funnelBetweenNodes(region, nodeA, nodeB);
   }
 
-  funnelPathFromPoint(region: Navmesh.NavmeshRegion, lat: number, lon: number, targetNodeId: number): Navmesh.FunnelResult | null {
+  funnelPathFromPoint(
+    region: Navmesh.NavmeshRegion,
+    lat: number,
+    lon: number,
+    targetNodeId: number,
+  ): Navmesh.FunnelResult | null {
     return Navmesh.funnelFromPoint(region, lat, lon, targetNodeId);
   }
 
-  funnelPathBetweenPoints(region: Navmesh.NavmeshRegion, latA: number, lonA: number, latB: number, lonB: number): Navmesh.FunnelResult | null {
+  funnelPathBetweenPoints(
+    region: Navmesh.NavmeshRegion,
+    latA: number,
+    lonA: number,
+    latB: number,
+    lonB: number,
+  ): Navmesh.FunnelResult | null {
     return Navmesh.funnelBetweenPoints(region, latA, lonA, latB, lonB);
   }
 
@@ -1632,22 +2083,33 @@ export class RoutingDatabase {
    * result + this precomputed hop — instead of a live `funnelPathFromPoint`
    * call per node (NEXT_PHASES.md's boundary-shortcut-sparsification fix).
    */
-  getPrecomputedNavmeshShortcut(source: number, target: number): { distance: number; path_points?: Array<[number, number]> } | null {
-    const edge = this.edgesBySource.get(source)?.find(
-      e => e.target === target && e.edge_kind_id === EDGE_KIND_NAVMESH_BOUNDARY,
-    );
-    return edge ? { distance: edge.distance, path_points: edge.path_points } : null;
+  getPrecomputedNavmeshShortcut(
+    source: number,
+    target: number,
+  ): { distance: number; path_points?: Array<[number, number]> } | null {
+    const edge = this.edgesBySource
+      .get(source)
+      ?.find(
+        (e) =>
+          e.target === target && e.edge_kind_id === EDGE_KIND_NAVMESH_BOUNDARY,
+      );
+    return edge
+      ? { distance: edge.distance, path_points: edge.path_points }
+      : null;
   }
 
-  async searchPois(query: string, maxResults: number = 20): Promise<PoiResult[]> {
+  async searchPois(
+    query: string,
+    maxResults: number = 20,
+  ): Promise<PoiResult[]> {
     const pattern = query.toLowerCase();
     // Sort before slicing so results are alphabetically consistent regardless
     // of the order rows were inserted into the database.
     return this.pois
-      .filter(row => row.name.toLowerCase().includes(pattern))
+      .filter((row) => row.name.toLowerCase().includes(pattern))
       .sort((a, b) => a.name.localeCompare(b.name))
       .slice(0, maxResults)
-      .map(row => ({
+      .map((row) => ({
         id: row.id,
         name: row.name,
         typeId: row.type_id,
@@ -1657,8 +2119,13 @@ export class RoutingDatabase {
       }));
   }
 
-  async getOverlayStats(): Promise<{ nodes: number; edges: number; deletedNodes: number; deletedEdges: number }> {
-    return this.sendMessage('getOverlayStats');
+  async getOverlayStats(): Promise<{
+    nodes: number;
+    edges: number;
+    deletedNodes: number;
+    deletedEdges: number;
+  }> {
+    return this.sendMessage("getOverlayStats");
   }
 
   async getStats(): Promise<{ nodes: number; edges: number; pois: number }> {
@@ -1683,11 +2150,27 @@ export class RoutingDatabase {
   }
 
   async getNodesInBBox(
-    minLat: number, minLon: number,
-    maxLat: number, maxLon: number,
+    minLat: number,
+    minLon: number,
+    maxLat: number,
+    maxLon: number,
     limit: number = 5000,
-  ): Promise<Array<{ id: number; lat: number; lon: number; min_depth: number; region_id: number }>> {
-    const results: Array<{ id: number; lat: number; lon: number; min_depth: number; region_id: number }> = [];
+  ): Promise<
+    Array<{
+      id: number;
+      lat: number;
+      lon: number;
+      min_depth: number;
+      region_id: number;
+    }>
+  > {
+    const results: Array<{
+      id: number;
+      lat: number;
+      lon: number;
+      min_depth: number;
+      region_id: number;
+    }> = [];
     // Box query, not a radius query — no cos(lat) correction needed: iterate
     // every grid cell whose row/col range overlaps [minLat,maxLat] x
     // [minLon,maxLon] exactly (same Math.floor cell math buildSpatialIndex
@@ -1697,17 +2180,23 @@ export class RoutingDatabase {
     const maxRow = Math.floor(maxLat / cellSize);
     const minCol = Math.floor(minLon / cellSize);
     const maxCol = Math.floor(maxLon / cellSize);
-    outer:
-    for (let row = minRow; row <= maxRow; row++) {
+    outer: for (let row = minRow; row <= maxRow; row++) {
       for (let col = minCol; col <= maxCol; col++) {
         const ids = this.spatialGrid.get(`${row}:${col}`);
         if (!ids) continue;
         for (const id of ids) {
           const c = this.nodes.get(id);
           if (!c) continue;
-          if (c.lat >= minLat && c.lat <= maxLat && c.lon >= minLon && c.lon <= maxLon) {
+          if (
+            c.lat >= minLat &&
+            c.lat <= maxLat &&
+            c.lon >= minLon &&
+            c.lon <= maxLon
+          ) {
             results.push({
-              id, lat: c.lat, lon: c.lon,
+              id,
+              lat: c.lat,
+              lon: c.lon,
               min_depth: c.nodeDepth,
               region_id: c.regionId,
             });
@@ -1721,31 +2210,51 @@ export class RoutingDatabase {
   }
 
   async getEdgesInBBox(
-    minLat: number, minLon: number,
-    maxLat: number, maxLon: number,
+    minLat: number,
+    minLon: number,
+    maxLat: number,
+    maxLon: number,
     limit: number = 5000,
-  ): Promise<Array<{
-    source: number; target: number;
-    source_lat: number; source_lon: number;
-    target_lat: number; target_lon: number;
-    distance: number; min_depth: number; max_air_draft: number; min_width: number;
-    edge_type_id: number; edge_kind_id: number; traffic_mode: number;
-    cost_factor: number;
-    /** Interior [lat,lon] points (source→target order, same as the internal
-     *  EdgeRow.path_points and the pts array buildRouteResult walks — NOT
-     *  GeoJSON [lon,lat] order) for edges whose real geometry is a curved
-     *  funnel path rather than the source-target straight chord. Omitted
-     *  entirely (not an empty array) when the edge has no such geometry, to
-     *  keep the common-case payload the same size as before this field
-     *  existed. Round 23b (see NEXT_PHASES.md §5.3). */
-    path_points?: Array<[number, number]>;
-  }>> {
+  ): Promise<
+    Array<{
+      source: number;
+      target: number;
+      source_lat: number;
+      source_lon: number;
+      target_lat: number;
+      target_lon: number;
+      distance: number;
+      min_depth: number;
+      max_air_draft: number;
+      min_width: number;
+      edge_type_id: number;
+      edge_kind_id: number;
+      traffic_mode: number;
+      cost_factor: number;
+      /** Interior [lat,lon] points (source→target order, same as the internal
+       *  EdgeRow.path_points and the pts array buildRouteResult walks — NOT
+       *  GeoJSON [lon,lat] order) for edges whose real geometry is a curved
+       *  funnel path rather than the source-target straight chord. Omitted
+       *  entirely (not an empty array) when the edge has no such geometry, to
+       *  keep the common-case payload the same size as before this field
+       *  existed. Round 23b (see NEXT_PHASES.md §5.3). */
+      path_points?: Array<[number, number]>;
+    }>
+  > {
     const results: Array<{
-      source: number; target: number;
-      source_lat: number; source_lon: number;
-      target_lat: number; target_lon: number;
-      distance: number; min_depth: number; max_air_draft: number; min_width: number;
-      edge_type_id: number; edge_kind_id: number; traffic_mode: number;
+      source: number;
+      target: number;
+      source_lat: number;
+      source_lon: number;
+      target_lat: number;
+      target_lon: number;
+      distance: number;
+      min_depth: number;
+      max_air_draft: number;
+      min_width: number;
+      edge_type_id: number;
+      edge_kind_id: number;
+      traffic_mode: number;
       cost_factor: number;
       path_points?: Array<[number, number]>;
     }> = [];
@@ -1770,8 +2279,7 @@ export class RoutingDatabase {
     // full scan over edgesBySource (which stores each directed edge once)
     // would.
     const visited = new Set<string>();
-    outer:
-    for (let row = minRow; row <= maxRow; row++) {
+    outer: for (let row = minRow; row <= maxRow; row++) {
       for (let col = minCol; col <= maxCol; col++) {
         const bucket = this.edgeGrid.get(`${row}:${col}`);
         if (!bucket) continue;
@@ -1786,18 +2294,35 @@ export class RoutingDatabase {
           const s = this.nodes.get(e.source);
           const t = this.nodes.get(e.target);
           if (!s || !t) continue;
-          if ((s.lat >= minLat && s.lat <= maxLat && s.lon >= minLon && s.lon <= maxLon) ||
-              (t.lat >= minLat && t.lat <= maxLat && t.lon >= minLon && t.lon <= maxLon)) {
+          if (
+            (s.lat >= minLat &&
+              s.lat <= maxLat &&
+              s.lon >= minLon &&
+              s.lon <= maxLon) ||
+            (t.lat >= minLat &&
+              t.lat <= maxLat &&
+              t.lon >= minLon &&
+              t.lon <= maxLon)
+          ) {
             visited.add(edgeKey);
             results.push({
-              source: e.source, target: e.target,
-              source_lat: s.lat, source_lon: s.lon,
-              target_lat: t.lat, target_lon: t.lon,
-              distance: e.distance, min_depth: e.min_depth,
-              max_air_draft: e.max_air_draft, min_width: e.min_width,
-              edge_type_id: e.edge_type_id, edge_kind_id: e.edge_kind_id ?? EDGE_KIND_CENTERLINE, traffic_mode: e.traffic_mode,
+              source: e.source,
+              target: e.target,
+              source_lat: s.lat,
+              source_lon: s.lon,
+              target_lat: t.lat,
+              target_lon: t.lon,
+              distance: e.distance,
+              min_depth: e.min_depth,
+              max_air_draft: e.max_air_draft,
+              min_width: e.min_width,
+              edge_type_id: e.edge_type_id,
+              edge_kind_id: e.edge_kind_id ?? EDGE_KIND_CENTERLINE,
+              traffic_mode: e.traffic_mode,
               cost_factor: e.cost_factor,
-              ...(e.path_points && e.path_points.length > 0 ? { path_points: e.path_points } : {}),
+              ...(e.path_points && e.path_points.length > 0
+                ? { path_points: e.path_points }
+                : {}),
             });
             if (results.length >= limit) break outer;
           }
@@ -1808,11 +2333,29 @@ export class RoutingDatabase {
   }
 
   async getPoisInBBox(
-    minLat: number, minLon: number,
-    maxLat: number, maxLon: number,
+    minLat: number,
+    minLon: number,
+    maxLat: number,
+    maxLon: number,
     limit: number = 2000,
-  ): Promise<Array<{ id: number; name: string; typeId: number; properties: Record<string, unknown>; lat: number; lon: number }>> {
-    const results: Array<{ id: number; name: string; typeId: number; properties: Record<string, unknown>; lat: number; lon: number }> = [];
+  ): Promise<
+    Array<{
+      id: number;
+      name: string;
+      typeId: number;
+      properties: Record<string, unknown>;
+      lat: number;
+      lon: number;
+    }>
+  > {
+    const results: Array<{
+      id: number;
+      name: string;
+      typeId: number;
+      properties: Record<string, unknown>;
+      lat: number;
+      lon: number;
+    }> = [];
     if (!this.poiGrid) this.poiGrid = this.buildPoiGrid();
     // Box query, not a radius query — no cos(lat) correction needed: iterate
     // every grid cell whose row/col range overlaps [minLat,maxLat] x
@@ -1823,17 +2366,24 @@ export class RoutingDatabase {
     const maxRow = Math.floor(maxLat / cellSize);
     const minCol = Math.floor(minLon / cellSize);
     const maxCol = Math.floor(maxLon / cellSize);
-    outer:
-    for (let row = minRow; row <= maxRow; row++) {
+    outer: for (let row = minRow; row <= maxRow; row++) {
       for (let col = minCol; col <= maxCol; col++) {
         const bucket = this.poiGrid.get(`${row}:${col}`);
         if (!bucket) continue;
         for (const poi of bucket) {
-          if (poi.lat >= minLat && poi.lat <= maxLat && poi.lon >= minLon && poi.lon <= maxLon) {
+          if (
+            poi.lat >= minLat &&
+            poi.lat <= maxLat &&
+            poi.lon >= minLon &&
+            poi.lon <= maxLon
+          ) {
             results.push({
-              id: poi.id, name: poi.name, typeId: poi.type_id,
+              id: poi.id,
+              name: poi.name,
+              typeId: poi.type_id,
               properties: poi.properties ? JSON.parse(poi.properties) : {},
-              lat: poi.lat, lon: poi.lon,
+              lat: poi.lat,
+              lon: poi.lon,
             });
             if (results.length >= limit) break outer;
           }
@@ -1844,7 +2394,19 @@ export class RoutingDatabase {
     return results;
   }
 
-  async getNearestPoi(lat: number, lon: number, maxDistanceMeters: number = 250): Promise<{ id: number; name: string; typeId: number; properties: Record<string, unknown>; latitude: number; longitude: number; distance: number } | null> {
+  async getNearestPoi(
+    lat: number,
+    lon: number,
+    maxDistanceMeters: number = 250,
+  ): Promise<{
+    id: number;
+    name: string;
+    typeId: number;
+    properties: Record<string, unknown>;
+    latitude: number;
+    longitude: number;
+    distance: number;
+  } | null> {
     if (!this.poiGrid) this.poiGrid = this.buildPoiGrid();
     let best: PoiRow | null = null;
     let bestDist = Infinity;
@@ -1852,7 +2414,7 @@ export class RoutingDatabase {
     // radius box — same superset technique gridCandidateIds uses for nodes —
     // then apply the same exact haversine + `d <= maxDistanceMeters` +
     // nearest selection the old full scan used.
-    const latRad = lat * Math.PI / 180;
+    const latRad = (lat * Math.PI) / 180;
     const cosLat = Math.cos(latRad);
     const marginLat = maxDistanceMeters / 111320;
     const marginLon = marginLat / Math.max(1e-9, cosLat);
@@ -1876,18 +2438,30 @@ export class RoutingDatabase {
     }
     if (!best) return null;
     return {
-      id: best.id, name: best.name, typeId: best.type_id,
+      id: best.id,
+      name: best.name,
+      typeId: best.type_id,
       properties: best.properties ? JSON.parse(best.properties) : {},
-      latitude: best.lat, longitude: best.lon,
+      latitude: best.lat,
+      longitude: best.lon,
       distance: Math.round(bestDist),
     };
   }
 
-  private haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  private haversineMeters(
+    lat1: number,
+    lon1: number,
+    lat2: number,
+    lon2: number,
+  ): number {
     const R = 6371000;
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLon = ((lon2 - lon1) * Math.PI) / 180;
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos((lat1 * Math.PI) / 180) *
+        Math.cos((lat2 * Math.PI) / 180) *
+        Math.sin(dLon / 2) ** 2;
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
@@ -1895,22 +2469,27 @@ export class RoutingDatabase {
   private waterwaysGeojsonPath: string | null = null;
 
   async getWaterways(
-    minLat: number, minLon: number,
-    maxLat: number, maxLon: number,
+    minLat: number,
+    minLon: number,
+    maxLat: number,
+    maxLon: number,
   ): Promise<any[]> {
     if (!this.waterwaysGeojsonPath) {
-      this.waterwaysGeojsonPath = join(this.dbDir, 'inland_waterways_lines.geojson');
+      this.waterwaysGeojsonPath = join(
+        this.dbDir,
+        "inland_waterways_lines.geojson",
+      );
     }
 
     if (!this.waterwaysGeoJson) {
       if (!existsSync(this.waterwaysGeojsonPath)) {
-        this.waterwaysGeoJson = { type: 'FeatureCollection', features: [] };
+        this.waterwaysGeoJson = { type: "FeatureCollection", features: [] };
       } else {
-        const raw = readFileSync(this.waterwaysGeojsonPath, 'utf-8');
+        const raw = readFileSync(this.waterwaysGeojsonPath, "utf-8");
         try {
           this.waterwaysGeoJson = JSON.parse(raw);
         } catch {
-          this.waterwaysGeoJson = { type: 'FeatureCollection', features: [] };
+          this.waterwaysGeoJson = { type: "FeatureCollection", features: [] };
         }
       }
     }
@@ -2077,7 +2656,12 @@ export class RoutingDatabase {
    *  refactor notes) since 1° of longitude covers less ground than 1° of
    *  latitude away from the equator — using a plain marginLatDeg for both
    *  axes would under-cover longitude and silently drop real candidates. */
-  private gridCandidateIds(latitude: number, longitude: number, marginLatDeg: number, marginLonDeg: number): number[] {
+  private gridCandidateIds(
+    latitude: number,
+    longitude: number,
+    marginLatDeg: number,
+    marginLonDeg: number,
+  ): number[] {
     const cellSize = 0.01;
     const minRow = Math.floor((latitude - marginLatDeg) / cellSize);
     const maxRow = Math.floor((latitude + marginLatDeg) / cellSize);
@@ -2120,7 +2704,7 @@ export class RoutingDatabase {
     if (!this.graphLoaded) return null;
     const edges = this.edgesBySource.get(source);
     if (!edges) return null;
-    return edges.find(e => e.target === target) || null;
+    return edges.find((e) => e.target === target) || null;
   }
 
   /**
@@ -2143,7 +2727,11 @@ export class RoutingDatabase {
    * directly in buildRouteResult), so no reversal is needed when walking
    * originalPath forward.
    */
-  aggregateSegmentEdges(fromNode: number, toNode: number, originalPath: number[]): EdgeRow | null {
+  aggregateSegmentEdges(
+    fromNode: number,
+    toNode: number,
+    originalPath: number[],
+  ): EdgeRow | null {
     if (!this.graphLoaded) return null;
 
     const startIdx = originalPath.indexOf(fromNode);
@@ -2165,19 +2753,28 @@ export class RoutingDatabase {
       const edge = this.getEdgeSync(originalPath[i], originalPath[i + 1]);
       if (edge) {
         totalDist += edge.distance;
-        if (typeof edge.min_depth === 'number' && edge.min_depth >= 0) minDepth = Math.min(minDepth, edge.min_depth);
-        if (typeof edge.max_air_draft === 'number' && edge.max_air_draft >= 0) maxAirDraft = Math.min(maxAirDraft, edge.max_air_draft);
-        if (typeof edge.min_width === 'number' && edge.min_width >= 0) minWidth = Math.min(minWidth, edge.min_width);
+        if (typeof edge.min_depth === "number" && edge.min_depth >= 0)
+          minDepth = Math.min(minDepth, edge.min_depth);
+        if (typeof edge.max_air_draft === "number" && edge.max_air_draft >= 0)
+          maxAirDraft = Math.min(maxAirDraft, edge.max_air_draft);
+        if (typeof edge.min_width === "number" && edge.min_width >= 0)
+          minWidth = Math.min(minWidth, edge.min_width);
         weightedCostFactor += edge.cost_factor * edge.distance;
         // Preserve the most restrictive traffic direction across sub-edges.
         // REV (2) beats FWD (1) beats TWO_WAY (0) — never collapse to two-way.
-        if (edge.traffic_mode === TRAFFIC_ONE_WAY_REV) trafficMode = TRAFFIC_ONE_WAY_REV;
-        else if (edge.traffic_mode === TRAFFIC_ONE_WAY_FWD && trafficMode !== TRAFFIC_ONE_WAY_REV) trafficMode = TRAFFIC_ONE_WAY_FWD;
+        if (edge.traffic_mode === TRAFFIC_ONE_WAY_REV)
+          trafficMode = TRAFFIC_ONE_WAY_REV;
+        else if (
+          edge.traffic_mode === TRAFFIC_ONE_WAY_FWD &&
+          trafficMode !== TRAFFIC_ONE_WAY_REV
+        )
+          trafficMode = TRAFFIC_ONE_WAY_FWD;
         edgeTypeId = edge.edge_type_id;
         if (edge.crosses_land === 1) crossesLand = 1;
         if (edge.crosses_obstacle === 1) crossesObstacle = 1;
 
-        if (edge.path_points && edge.path_points.length > 0) pathPoints.push(...edge.path_points);
+        if (edge.path_points && edge.path_points.length > 0)
+          pathPoints.push(...edge.path_points);
         // The intermediate original-path node itself is a real vertex of the
         // aggregated polyline (not just curve interior) — include it, except
         // after the final edge, whose target *is* toNode (added separately
@@ -2206,49 +2803,79 @@ export class RoutingDatabase {
     };
   }
 
-  async updateNode(dbIndex: number, nodeId: number, updates: { node_depth?: number }): Promise<void> {
+  async updateNode(
+    dbIndex: number,
+    nodeId: number,
+    updates: { node_depth?: number },
+  ): Promise<void> {
     const cur = this.nodes.get(nodeId);
     if (!cur) throw new Error(`Node ${nodeId} not found`);
     const node_depth = updates.node_depth ?? cur.nodeDepth;
-    await this.sendMessage('updateNode', { dbIndex, nodeId, lat: cur.lat, lon: cur.lon, node_depth });
+    await this.sendMessage("updateNode", {
+      dbIndex,
+      nodeId,
+      lat: cur.lat,
+      lon: cur.lon,
+      node_depth,
+    });
     cur.nodeDepth = node_depth;
   }
 
-  async updateEdge(dbIndex: number, source: number, target: number, updates: {
-    distance?: number; min_depth?: number; max_air_draft?: number;
-    min_width?: number; traffic_mode?: number; cost_factor?: number;
-  }): Promise<void> {
+  async updateEdge(
+    dbIndex: number,
+    source: number,
+    target: number,
+    updates: {
+      distance?: number;
+      min_depth?: number;
+      max_air_draft?: number;
+      min_width?: number;
+      traffic_mode?: number;
+      cost_factor?: number;
+    },
+  ): Promise<void> {
     const edges = this.edgesBySource.get(source);
     if (!edges) throw new Error(`No edges from source ${source}`);
-    const edge = edges.find(e => e.target === target);
+    const edge = edges.find((e) => e.target === target);
     if (!edge) throw new Error(`Edge ${source}->${target} not found`);
-    if (updates.distance !== undefined && (updates.distance < 0 || !updates.distance)) {
+    if (
+      updates.distance !== undefined &&
+      (updates.distance < 0 || !updates.distance)
+    ) {
       const s = this.nodes.get(source);
       const t = this.nodes.get(target);
       if (s && t) {
-        updates.distance = Math.round(this.haversineMeters(s.lat, s.lon, t.lat, t.lon));
+        updates.distance = Math.round(
+          this.haversineMeters(s.lat, s.lon, t.lat, t.lon),
+        );
       }
     }
     // Send full edge context so the overlay can store a complete row
-    await this.sendMessage('updateEdge', {
-      dbIndex, source, target,
+    await this.sendMessage("updateEdge", {
+      dbIndex,
+      source,
+      target,
       distance_to_land: edge.distance_to_land ?? 0,
       edge_type_id: edge.edge_type_id ?? 0,
       ...updates,
     });
     if (updates.distance !== undefined) edge.distance = updates.distance;
     if (updates.min_depth !== undefined) edge.min_depth = updates.min_depth;
-    if (updates.max_air_draft !== undefined) edge.max_air_draft = updates.max_air_draft;
+    if (updates.max_air_draft !== undefined)
+      edge.max_air_draft = updates.max_air_draft;
     if (updates.min_width !== undefined) edge.min_width = updates.min_width;
-    if (updates.traffic_mode !== undefined) edge.traffic_mode = updates.traffic_mode;
-    if (updates.cost_factor !== undefined) edge.cost_factor = updates.cost_factor;
+    if (updates.traffic_mode !== undefined)
+      edge.traffic_mode = updates.traffic_mode;
+    if (updates.cost_factor !== undefined)
+      edge.cost_factor = updates.cost_factor;
   }
 
   async deleteNode(dbIndex: number, nodeId: number): Promise<void> {
     this.edgesBySource.delete(nodeId);
     for (const [src, edges] of this.edgesBySource) {
-      const filtered = edges.filter(e => e.target !== nodeId);
-      if (filtered.length !== edges.length) this.edgesBySource.set(src, filtered);
+      const filtered = edges.filter((e) => e.target !== nodeId);
+      if (filtered.length !== edges.length)
+        this.edgesBySource.set(src, filtered);
     }
     // Capture coords before deleting so the grid entry (which was otherwise
     // left stale here — a latent bug, since queries now rely on the grid
@@ -2257,21 +2884,28 @@ export class RoutingDatabase {
     this.nodes.delete(nodeId);
     if (existing) this.gridRemoveNode(nodeId, existing.lat, existing.lon);
     this.invalidateBBoxCaches();
-    await this.sendMessage('deleteNode', { dbIndex, nodeId });
+    await this.sendMessage("deleteNode", { dbIndex, nodeId });
   }
 
-  async deleteEdge(dbIndex: number, source: number, target: number): Promise<void> {
+  async deleteEdge(
+    dbIndex: number,
+    source: number,
+    target: number,
+  ): Promise<void> {
     const edges = this.edgesBySource.get(source);
     if (edges) {
-      const idx = edges.findIndex(e => e.target === target);
+      const idx = edges.findIndex((e) => e.target === target);
       if (idx >= 0) edges.splice(idx, 1);
     }
     this.invalidateBBoxCaches();
-    await this.sendMessage('deleteEdge', { dbIndex, source, target });
+    await this.sendMessage("deleteEdge", { dbIndex, source, target });
   }
 
-  async addNode(dbIndex: number, node: { id: number; lat: number; lon: number; node_depth?: number }): Promise<void> {
-    await this.sendMessage('insertNode', { dbIndex, ...node });
+  async addNode(
+    dbIndex: number,
+    node: { id: number; lat: number; lon: number; node_depth?: number },
+  ): Promise<void> {
+    await this.sendMessage("insertNode", { dbIndex, ...node });
     // This is an upsert (see handleUpsertNode) — an existing node id can be
     // re-added at a different (lat, lon), which would move it to a
     // different grid cell. Remove the stale grid entry at its old cell
@@ -2280,7 +2914,9 @@ export class RoutingDatabase {
     const existing = this.nodes.get(node.id);
     if (existing) this.gridRemoveNode(node.id, existing.lat, existing.lon);
     this.nodes.set(node.id, {
-      lat: node.lat, lon: node.lon, regionId: 0,
+      lat: node.lat,
+      lon: node.lon,
+      regionId: 0,
       nodeDepth: node.node_depth ?? -1,
     });
     this.gridInsertNode(node.id, node.lat, node.lon);
@@ -2290,19 +2926,30 @@ export class RoutingDatabase {
     this.invalidateBBoxCaches();
   }
 
-  async addEdge(dbIndex: number, edge: {
-    source: number; target: number; distance: number;
-    min_depth?: number; max_air_draft?: number; min_width?: number;
-    cost_factor?: number; distance_to_land?: number;
-    edge_type_id?: number; traffic_mode?: number;
-  }): Promise<void> {
+  async addEdge(
+    dbIndex: number,
+    edge: {
+      source: number;
+      target: number;
+      distance: number;
+      min_depth?: number;
+      max_air_draft?: number;
+      min_width?: number;
+      cost_factor?: number;
+      distance_to_land?: number;
+      edge_type_id?: number;
+      traffic_mode?: number;
+    },
+  ): Promise<void> {
     const s = this.nodes.get(edge.source);
     const t = this.nodes.get(edge.target);
-    if (!s || !t) throw new Error('Source or target node not found');
+    if (!s || !t) throw new Error("Source or target node not found");
     if (!edge.distance || edge.distance <= 0) {
-      edge.distance = Math.round(this.haversineMeters(s.lat, s.lon, t.lat, t.lon));
+      edge.distance = Math.round(
+        this.haversineMeters(s.lat, s.lon, t.lat, t.lon),
+      );
     }
-    await this.sendMessage('insertEdge', { dbIndex, ...edge });
+    await this.sendMessage("insertEdge", { dbIndex, ...edge });
     const newEdge: EdgeRow = {
       source: edge.source,
       target: edge.target,
@@ -2323,17 +2970,19 @@ export class RoutingDatabase {
   }
 
   async clearOverlayDeletedEdges(): Promise<{ restored: number }> {
-    return this.sendMessage('clearOverlayDeletedEdges');
+    return this.sendMessage("clearOverlayDeletedEdges");
   }
 
   async close(): Promise<void> {
     if (this.worker) {
       try {
         await Promise.race([
-          this.sendMessage('close'),
-          new Promise(resolve => setTimeout(resolve, 5000)),
+          this.sendMessage("close"),
+          new Promise((resolve) => setTimeout(resolve, 5000)),
         ]);
-      } catch { /* worker may already be dead */ }
+      } catch {
+        /* worker may already be dead */
+      }
       this.worker.terminate();
       this.worker = null;
     }
@@ -2375,18 +3024,26 @@ export class RoutingDatabase {
   private landGeojsonPath: string | null = null;
   private landBBoxIndex: Float64Array | null = null;
 
-  isLineCrossingLand(lat1: number, lon1: number, lat2: number, lon2: number, numSamples: number): boolean {
+  isLineCrossingLand(
+    lat1: number,
+    lon1: number,
+    lat2: number,
+    lon2: number,
+    numSamples: number,
+  ): boolean {
     if (!this.landGeojsonPath) {
-      this.landGeojsonPath = join(this.dbDir, 'land_polygons.geojson');
+      this.landGeojsonPath = join(this.dbDir, "land_polygons.geojson");
     }
     if (!this.landGeoJson) {
       if (!existsSync(this.landGeojsonPath)) {
-        this.landGeoJson = { type: 'FeatureCollection', features: [] };
+        this.landGeoJson = { type: "FeatureCollection", features: [] };
       } else {
         try {
-          this.landGeoJson = JSON.parse(readFileSync(this.landGeojsonPath, 'utf-8'));
+          this.landGeoJson = JSON.parse(
+            readFileSync(this.landGeojsonPath, "utf-8"),
+          );
         } catch {
-          this.landGeoJson = { type: 'FeatureCollection', features: [] };
+          this.landGeoJson = { type: "FeatureCollection", features: [] };
         }
       }
     }
@@ -2404,26 +3061,37 @@ export class RoutingDatabase {
       const t = i / numSamples;
       const lat = lat1 + (lat2 - lat1) * t;
       const lon = lon1 + (lon2 - lon1) * t;
-      if (this.isPointInAnyPolygon(lat, lon, features, this.landBBoxIndex)) return true;
+      if (this.isPointInAnyPolygon(lat, lon, features, this.landBBoxIndex))
+        return true;
     }
     return false;
   }
 
-  private isPointInAnyPolygon(lat: number, lon: number, features: any[], bboxIndex: Float64Array | null): boolean {
+  private isPointInAnyPolygon(
+    lat: number,
+    lon: number,
+    features: any[],
+    bboxIndex: Float64Array | null,
+  ): boolean {
     const idx = bboxIndex;
     const STRIDE = 5;
     if (idx) {
       const n = idx.length / STRIDE;
       for (let i = 0; i < n; i++) {
         const base = i * STRIDE;
-        if (lon < idx[base] || lon > idx[base + 2] ||
-            lat < idx[base + 1] || lat > idx[base + 3]) continue;
+        if (
+          lon < idx[base] ||
+          lon > idx[base + 2] ||
+          lat < idx[base + 1] ||
+          lat > idx[base + 3]
+        )
+          continue;
         const fi = idx[base + 4];
         const geom = features[fi]?.geometry;
         if (!geom) continue;
-        if (geom.type === 'Polygon') {
+        if (geom.type === "Polygon") {
           if (this.raycastPolygon(lon, lat, geom.coordinates)) return true;
-        } else if (geom.type === 'MultiPolygon') {
+        } else if (geom.type === "MultiPolygon") {
           for (const poly of geom.coordinates) {
             if (this.raycastPolygon(lon, lat, poly)) return true;
           }
@@ -2434,9 +3102,9 @@ export class RoutingDatabase {
     for (const f of features) {
       const geom = f.geometry;
       if (!geom) continue;
-      if (geom.type === 'Polygon') {
+      if (geom.type === "Polygon") {
         if (this.raycastPolygon(lon, lat, geom.coordinates)) return true;
-      } else if (geom.type === 'MultiPolygon') {
+      } else if (geom.type === "MultiPolygon") {
         for (const poly of geom.coordinates) {
           if (this.raycastPolygon(lon, lat, poly)) return true;
         }
@@ -2457,9 +3125,11 @@ export class RoutingDatabase {
     let inside = false;
     const n = ring.length;
     for (let i = 0, j = n - 1; i < n; j = i++) {
-      const xi = ring[i][0], yi = ring[i][1];
-      const xj = ring[j][0], yj = ring[j][1];
-      if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
+      const xi = ring[i][0],
+        yi = ring[i][1];
+      const xj = ring[j][0],
+        yj = ring[j][1];
+      if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
         inside = !inside;
       }
     }
@@ -2475,9 +3145,15 @@ function buildBBoxIndex(features: any[]): Float64Array {
     const geom = features[fi]?.geometry;
     if (!geom) continue;
     const type = geom.type;
-    if (type !== 'Polygon' && type !== 'MultiPolygon') continue;
-    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
-    const polys: number[][][] = type === 'MultiPolygon' ? geom.coordinates.map((p: number[][][]) => p[0]) : [geom.coordinates[0]];
+    if (type !== "Polygon" && type !== "MultiPolygon") continue;
+    let minLon = Infinity,
+      minLat = Infinity,
+      maxLon = -Infinity,
+      maxLat = -Infinity;
+    const polys: number[][][] =
+      type === "MultiPolygon"
+        ? geom.coordinates.map((p: number[][][]) => p[0])
+        : [geom.coordinates[0]];
     for (const ring of polys) {
       for (const pt of ring) {
         if (pt[0] < minLon) minLon = pt[0];
@@ -2487,8 +3163,10 @@ function buildBBoxIndex(features: any[]): Float64Array {
       }
     }
     const base = count * STRIDE;
-    buf[base] = minLon; buf[base + 1] = minLat;
-    buf[base + 2] = maxLon; buf[base + 3] = maxLat;
+    buf[base] = minLon;
+    buf[base + 1] = minLat;
+    buf[base + 2] = maxLon;
+    buf[base + 3] = maxLat;
     buf[base + 4] = fi;
     count++;
   }
@@ -2497,28 +3175,34 @@ function buildBBoxIndex(features: any[]): Float64Array {
 
 function featureIntersectsBBox(
   feature: any,
-  minLat: number, minLon: number,
-  maxLat: number, maxLon: number,
+  minLat: number,
+  minLon: number,
+  maxLat: number,
+  maxLon: number,
 ): boolean {
   const coords = feature.geometry?.coordinates;
   if (!coords) return false;
 
-  let fMinLat = Infinity, fMaxLat = -Infinity;
-  let fMinLon = Infinity, fMaxLon = -Infinity;
+  let fMinLat = Infinity,
+    fMaxLat = -Infinity;
+  let fMinLon = Infinity,
+    fMaxLon = -Infinity;
 
   const type = feature.geometry.type;
-  if (type === 'LineString') {
+  if (type === "LineString") {
     for (const pt of coords) {
-      const lon = pt[0], lat = pt[1];
+      const lon = pt[0],
+        lat = pt[1];
       if (lat < fMinLat) fMinLat = lat;
       if (lat > fMaxLat) fMaxLat = lat;
       if (lon < fMinLon) fMinLon = lon;
       if (lon > fMaxLon) fMaxLon = lon;
     }
-  } else if (type === 'MultiLineString') {
+  } else if (type === "MultiLineString") {
     for (const line of coords) {
       for (const pt of line) {
-        const lon = pt[0], lat = pt[1];
+        const lon = pt[0],
+          lat = pt[1];
         if (lat < fMinLat) fMinLat = lat;
         if (lat > fMaxLat) fMaxLat = lat;
         if (lon < fMinLon) fMinLon = lon;
@@ -2526,10 +3210,11 @@ function featureIntersectsBBox(
       }
     }
   } else {
-    const rings = type === 'MultiPolygon' ? coords.flat() : coords;
+    const rings = type === "MultiPolygon" ? coords.flat() : coords;
     for (const ring of rings) {
       for (const pt of ring) {
-        const lon = pt[0], lat = pt[1];
+        const lon = pt[0],
+          lat = pt[1];
         if (lat < fMinLat) fMinLat = lat;
         if (lat > fMaxLat) fMaxLat = lat;
         if (lon < fMinLon) fMinLon = lon;
@@ -2538,6 +3223,10 @@ function featureIntersectsBBox(
     }
   }
 
-  return fMinLon <= maxLon && fMaxLon >= minLon &&
-         fMinLat <= maxLat && fMaxLat >= minLat;
+  return (
+    fMinLon <= maxLon &&
+    fMaxLon >= minLon &&
+    fMinLat <= maxLat &&
+    fMaxLat >= minLat
+  );
 }

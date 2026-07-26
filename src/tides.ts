@@ -35,7 +35,7 @@ export interface FlowField {
   readonly estimated: boolean;
   /** Where the vectors come from: 'stations' (harmonic current stations via
    *  signalk-tidal-currents) or 'height-estimate' (derived from tide heights). */
-  readonly source: 'stations' | 'height-estimate';
+  readonly source: "stations" | "height-estimate";
 }
 
 export const KNOTS_TO_MS = 0.514444;
@@ -60,7 +60,10 @@ const CACHE_MAX_ENTRIES = 500;
 /** Delete expired entries (age >= ttlMs) from `map`, then, if it's still
  *  over `CACHE_MAX_ENTRIES`, evict the oldest entries (smallest `at`) until
  *  it's under the cap. Call before every cache `.set(...)`. */
-function pruneCache<T>(map: Map<string, { at: number; data: T }>, ttlMs: number): void {
+function pruneCache<T>(
+  map: Map<string, { at: number; data: T }>,
+  ttlMs: number,
+): void {
   const now = Date.now();
   for (const [k, v] of map) {
     if (now - v.at >= ttlMs) map.delete(k);
@@ -78,12 +81,18 @@ function pruneCache<T>(map: Map<string, { at: number; data: T }>, ttlMs: number)
  */
 export class TidesClient {
   private baseUrl: string;
-  private stationCache = new Map<string, { at: number; data: TideStationInfo[] }>();
-  private timelineCache = new Map<string, { at: number; data: TimelineResponse }>();
+  private stationCache = new Map<
+    string,
+    { at: number; data: TideStationInfo[] }
+  >();
+  private timelineCache = new Map<
+    string,
+    { at: number; data: TimelineResponse }
+  >();
   private static CACHE_TTL_MS = 6 * 3600_000;
 
   constructor(baseUrl: string) {
-    this.baseUrl = baseUrl.replace(/\/$/, '');
+    this.baseUrl = baseUrl.replace(/\/$/, "");
   }
 
   private api(path: string): string {
@@ -96,11 +105,17 @@ export class TidesClient {
     const hit = this.stationCache.get(key);
     if (hit && Date.now() - hit.at < TidesClient.CACHE_TTL_MS) return hit.data;
 
-    const resp = await fetch(this.api(`/stations?latitude=${lat}&longitude=${lon}`));
-    if (!resp.ok) throw new Error(`tides station search failed (${resp.status})`);
+    const resp = await fetch(
+      this.api(`/stations?latitude=${lat}&longitude=${lon}`),
+    );
+    if (!resp.ok)
+      throw new Error(`tides station search failed (${resp.status})`);
     const raw = (await resp.json()) as Array<Record<string, unknown>>;
     const data = (Array.isArray(raw) ? raw : [])
-      .filter((s) => typeof s.latitude === 'number' && typeof s.longitude === 'number')
+      .filter(
+        (s) =>
+          typeof s.latitude === "number" && typeof s.longitude === "number",
+      )
       .map((s) => ({
         id: String(s.id),
         name: String(s.name ?? s.id),
@@ -113,7 +128,11 @@ export class TidesClient {
   }
 
   /** Height timeline (fixed 10-minute interval) for [startMs, endMs]. */
-  async fetchTimeline(stationId: string, startMs: number, endMs: number): Promise<TimelineResponse> {
+  async fetchTimeline(
+    stationId: string,
+    startMs: number,
+    endMs: number,
+  ): Promise<TimelineResponse> {
     // Round the window outward to whole hours so scan steps share cache entries.
     const HOUR = 3600_000;
     const s = Math.floor(startMs / HOUR) * HOUR;
@@ -124,11 +143,14 @@ export class TidesClient {
 
     const url = this.api(
       `/stations/${stationId}/timeline` +
-      `?start=${encodeURIComponent(new Date(s).toISOString())}` +
-      `&end=${encodeURIComponent(new Date(e).toISOString())}`,
+        `?start=${encodeURIComponent(new Date(s).toISOString())}` +
+        `&end=${encodeURIComponent(new Date(e).toISOString())}`,
     );
     const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`tides timeline failed for ${stationId} (${resp.status})`);
+    if (!resp.ok)
+      throw new Error(
+        `tides timeline failed for ${stationId} (${resp.status})`,
+      );
     const data = (await resp.json()) as TimelineResponse;
     pruneCache(this.timelineCache, TidesClient.CACHE_TTL_MS);
     this.timelineCache.set(key, { at: Date.now(), data });
@@ -136,7 +158,10 @@ export class TidesClient {
   }
 
   /** Availability probe: plugin reachable and knows stations near (lat, lon). */
-  async probe(lat: number, lon: number): Promise<{ available: boolean; stations: TideStationInfo[] }> {
+  async probe(
+    lat: number,
+    lon: number,
+  ): Promise<{ available: boolean; stations: TideStationInfo[] }> {
     try {
       const stations = await this.findStations(lat, lon);
       return { available: stations.length > 0, stations };
@@ -162,7 +187,7 @@ class HeightGradientFlowField implements FlowField {
   readonly maxSpeedMs: number;
   readonly stations: TideStationInfo[];
   readonly estimated = true;
-  readonly source = 'height-estimate' as const;
+  readonly source = "height-estimate" as const;
 
   private timelines: StationTimeline[];
   private sampleCache = new Map<string, FlowVector>();
@@ -199,39 +224,68 @@ class HeightGradientFlowField implements FlowField {
     const mPerDegLon = EARTH_M_PER_DEG_LAT * Math.cos((lat * Math.PI) / 180);
 
     // Nearest stations to this sample point (they are few — linear scan).
-    const withDist = this.timelines.map((tl) => {
-      const dx = (tl.station.longitude - lon) * mPerDegLon;
-      const dy = (tl.station.latitude - lat) * EARTH_M_PER_DEG_LAT;
-      return { tl, dx, dy, d2: dx * dx + dy * dy };
-    }).sort((a, b) => a.d2 - b.d2);
+    const withDist = this.timelines
+      .map((tl) => {
+        const dx = (tl.station.longitude - lon) * mPerDegLon;
+        const dy = (tl.station.latitude - lat) * EARTH_M_PER_DEG_LAT;
+        return { tl, dx, dy, d2: dx * dx + dy * dy };
+      })
+      .sort((a, b) => a.d2 - b.d2);
 
     const MAX_STATION_DIST_M = 60_000;
-    const near = withDist.filter((w) => w.d2 < MAX_STATION_DIST_M * MAX_STATION_DIST_M).slice(0, 6);
+    const near = withDist
+      .filter((w) => w.d2 < MAX_STATION_DIST_M * MAX_STATION_DIST_M)
+      .slice(0, 6);
     const result: FlowVector = { u: 0, v: 0 };
 
     if (near.length >= 3) {
       // Least-squares plane h = a + b·x + c·y through station heights (x, y
       // in meters relative to the sample point). (b, c) = surface gradient.
-      let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sh = 0, shx = 0, shy = 0;
+      let sx = 0,
+        sy = 0,
+        sxx = 0,
+        syy = 0,
+        sxy = 0,
+        sh = 0,
+        shx = 0,
+        shy = 0;
       for (const w of near) {
         const h = this.levelAt(w.tl, timeMs);
-        sx += w.dx; sy += w.dy; sxx += w.dx * w.dx; syy += w.dy * w.dy;
-        sxy += w.dx * w.dy; sh += h; shx += h * w.dx; shy += h * w.dy;
+        sx += w.dx;
+        sy += w.dy;
+        sxx += w.dx * w.dx;
+        syy += w.dy * w.dy;
+        sxy += w.dx * w.dy;
+        sh += h;
+        shx += h * w.dx;
+        shy += h * w.dy;
       }
       const n = near.length;
       // Solve the 3x3 normal equations via Cramer's rule.
       const det =
-        n * (sxx * syy - sxy * sxy) - sx * (sx * syy - sxy * sy) + sy * (sx * sxy - sxx * sy);
+        n * (sxx * syy - sxy * sxy) -
+        sx * (sx * syy - sxy * sy) +
+        sy * (sx * sxy - sxx * sy);
       if (Math.abs(det) > 1e-9) {
         const b =
-          (n * (shx * syy - sxy * shy) - sh * (sx * syy - sxy * sy) + sy * (sx * shy - shx * sy)) / det;
+          (n * (shx * syy - sxy * shy) -
+            sh * (sx * syy - sxy * sy) +
+            sy * (sx * shy - shx * sy)) /
+          det;
         const c =
-          (n * (sxx * shy - shx * sxy) - sx * (sx * shy - shx * sy) + sh * (sx * sxy - sxx * sy)) / det;
+          (n * (sxx * shy - shx * sxy) -
+            sx * (sx * shy - shx * sy) +
+            sh * (sx * sxy - sxx * sy)) /
+          det;
         const gradLen = Math.hypot(b, c);
         // Typical tidal surface slope is ~1e-5; below a tenth of that the
         // direction is numerically meaningless.
         if (gradLen > 1e-7) {
-          const phase = Math.min(1, Math.abs(this.dhDtAt(near[0].tl, timeMs)) / (near[0].tl.maxAbsDhDt || 1e-9));
+          const phase = Math.min(
+            1,
+            Math.abs(this.dhDtAt(near[0].tl, timeMs)) /
+              (near[0].tl.maxAbsDhDt || 1e-9),
+          );
           const speed = this.maxSpeedMs * phase;
           result.u = (-b / gradLen) * speed;
           result.v = (-c / gradLen) * speed;
@@ -239,7 +293,8 @@ class HeightGradientFlowField implements FlowField {
       }
     }
 
-    if (this.sampleCache.size > HeightGradientFlowField.CACHE_MAX) this.sampleCache.clear();
+    if (this.sampleCache.size > HeightGradientFlowField.CACHE_MAX)
+      this.sampleCache.clear();
     this.sampleCache.set(key, result);
     return result;
   }
@@ -267,12 +322,18 @@ interface CurrentTimelineDto {
  */
 export class CurrentsClient {
   private baseUrl: string;
-  private stationCache = new Map<string, { at: number; data: CurrentStationDto[] }>();
-  private timelineCache = new Map<string, { at: number; data: CurrentTimelineDto }>();
+  private stationCache = new Map<
+    string,
+    { at: number; data: CurrentStationDto[] }
+  >();
+  private timelineCache = new Map<
+    string,
+    { at: number; data: CurrentTimelineDto }
+  >();
   private static CACHE_TTL_MS = 6 * 3600_000;
 
   constructor(baseUrl: string) {
-    this.baseUrl = baseUrl.replace(/\/$/, '');
+    this.baseUrl = baseUrl.replace(/\/$/, "");
   }
 
   private api(path: string): string {
@@ -283,9 +344,13 @@ export class CurrentsClient {
   async findStations(lat: number, lon: number): Promise<CurrentStationDto[]> {
     const key = `${lat.toFixed(1)},${lon.toFixed(1)}`;
     const hit = this.stationCache.get(key);
-    if (hit && Date.now() - hit.at < CurrentsClient.CACHE_TTL_MS) return hit.data;
-    const resp = await fetch(this.api(`/stations?latitude=${lat}&longitude=${lon}&limit=10`));
-    if (!resp.ok) throw new Error(`currents station search failed (${resp.status})`);
+    if (hit && Date.now() - hit.at < CurrentsClient.CACHE_TTL_MS)
+      return hit.data;
+    const resp = await fetch(
+      this.api(`/stations?latitude=${lat}&longitude=${lon}&limit=10`),
+    );
+    if (!resp.ok)
+      throw new Error(`currents station search failed (${resp.status})`);
     const raw = (await resp.json()) as CurrentStationDto[];
     const data = (Array.isArray(raw) ? raw : []).filter((s) => s.vectorCapable);
     pruneCache(this.stationCache, CurrentsClient.CACHE_TTL_MS);
@@ -293,20 +358,28 @@ export class CurrentsClient {
     return data;
   }
 
-  async fetchTimeline(stationId: string, startMs: number, endMs: number): Promise<CurrentTimelineDto> {
+  async fetchTimeline(
+    stationId: string,
+    startMs: number,
+    endMs: number,
+  ): Promise<CurrentTimelineDto> {
     const HOUR = 3600_000;
     const s = Math.floor(startMs / HOUR) * HOUR;
     const e = Math.ceil(endMs / HOUR) * HOUR;
     const key = `${stationId}|${s}|${e}`;
     const hit = this.timelineCache.get(key);
-    if (hit && Date.now() - hit.at < CurrentsClient.CACHE_TTL_MS) return hit.data;
+    if (hit && Date.now() - hit.at < CurrentsClient.CACHE_TTL_MS)
+      return hit.data;
     const url = this.api(
       `/stations/${stationId}/timeline` +
-      `?start=${encodeURIComponent(new Date(s).toISOString())}` +
-      `&end=${encodeURIComponent(new Date(e).toISOString())}&step=10`,
+        `?start=${encodeURIComponent(new Date(s).toISOString())}` +
+        `&end=${encodeURIComponent(new Date(e).toISOString())}&step=10`,
     );
     const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`currents timeline failed for ${stationId} (${resp.status})`);
+    if (!resp.ok)
+      throw new Error(
+        `currents timeline failed for ${stationId} (${resp.status})`,
+      );
     const data = (await resp.json()) as CurrentTimelineDto;
     pruneCache(this.timelineCache, CurrentsClient.CACHE_TTL_MS);
     this.timelineCache.set(key, { at: Date.now(), data });
@@ -342,7 +415,7 @@ class StationFlowField implements FlowField {
   readonly maxSpeedMs: number;
   readonly stations: TideStationInfo[];
   readonly estimated: boolean;
-  readonly source = 'stations' as const;
+  readonly source = "stations" as const;
 
   constructor(
     private series: StationSeries[],
@@ -377,7 +450,9 @@ class StationFlowField implements FlowField {
       }
     }
     if (!best) {
-      return this.fallback ? this.fallback.sample(lat, lon, timeMs) : { u: 0, v: 0 };
+      return this.fallback
+        ? this.fallback.sample(lat, lon, timeMs)
+        : { u: 0, v: 0 };
     }
     const pos = (timeMs - best.startMs) / best.stepMs;
     const i = Math.max(0, Math.min(best.u.length - 2, Math.floor(pos)));
@@ -423,13 +498,24 @@ export async function prepareStationFlowField(
     const padMs = 3600_000;
     const results = await Promise.allSettled(
       [...byId.values()].map(async (st): Promise<StationSeries> => {
-        const data = await client.fetchTimeline(st.id, startMs - padMs, endMs + padMs);
-        const tl = (data.timeline ?? []).filter((e) => e.u !== null && e.v !== null);
-        if (tl.length < 3) throw new Error('empty timeline');
+        const data = await client.fetchTimeline(
+          st.id,
+          startMs - padMs,
+          endMs + padMs,
+        );
+        const tl = (data.timeline ?? []).filter(
+          (e) => e.u !== null && e.v !== null,
+        );
+        if (tl.length < 3) throw new Error("empty timeline");
         const t0 = Date.parse(tl[0].time);
         const stepMs = Date.parse(tl[1].time) - t0;
         return {
-          info: { id: st.id, name: st.name, latitude: st.latitude, longitude: st.longitude },
+          info: {
+            id: st.id,
+            name: st.name,
+            latitude: st.latitude,
+            longitude: st.longitude,
+          },
           startMs: t0,
           stepMs,
           u: tl.map((e) => e.u as number),
@@ -438,7 +524,10 @@ export async function prepareStationFlowField(
       }),
     );
     const series = results
-      .filter((r): r is PromiseFulfilledResult<StationSeries> => r.status === 'fulfilled')
+      .filter(
+        (r): r is PromiseFulfilledResult<StationSeries> =>
+          r.status === "fulfilled",
+      )
       .map((r) => r.value);
     if (series.length === 0) return null;
     return new StationFlowField(series, fallback);
@@ -476,21 +565,34 @@ export async function prepareTidalFlowField(
     const padMs = 3600_000;
     const results = await Promise.allSettled(
       [...byId.values()].map(async (station) => {
-        const data = await client.fetchTimeline(station.id, startMs - padMs, endMs + padMs);
+        const data = await client.fetchTimeline(
+          station.id,
+          startMs - padMs,
+          endMs + padMs,
+        );
         const tl = data.timeline;
-        if (!tl || tl.length < 3) throw new Error('empty timeline');
+        if (!tl || tl.length < 3) throw new Error("empty timeline");
         const t0 = Date.parse(tl[0].time);
         const stepMs = Date.parse(tl[1].time) - t0;
         const levels = tl.map((e) => e.level);
         let maxAbsDhDt = 0;
         for (let i = 1; i < levels.length; i++) {
-          maxAbsDhDt = Math.max(maxAbsDhDt, Math.abs(levels[i] - levels[i - 1]) / (stepMs / 1000));
+          maxAbsDhDt = Math.max(
+            maxAbsDhDt,
+            Math.abs(levels[i] - levels[i - 1]) / (stepMs / 1000),
+          );
         }
-        return { station, startMs: t0, stepMs, levels, maxAbsDhDt } as StationTimeline;
+        return {
+          station,
+          startMs: t0,
+          stepMs,
+          levels,
+          maxAbsDhDt,
+        } as StationTimeline;
       }),
     );
     for (const r of results) {
-      if (r.status === 'fulfilled') timelines.push(r.value);
+      if (r.status === "fulfilled") timelines.push(r.value);
     }
     if (timelines.length === 0) return null;
 

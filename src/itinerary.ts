@@ -15,7 +15,7 @@
  *   bridge/lock crossings) computed from the exact graph edges.
  */
 
-import { ItineraryPoint, RouteCrossing, RouteWaypoint } from './types.js';
+import { ItineraryPoint, RouteCrossing, RouteWaypoint } from "./types.js";
 
 /** Subset of the per-edge segment attributes the itinerary needs. */
 export interface PathSegment {
@@ -23,7 +23,7 @@ export interface PathSegment {
   minDepth?: number;
   maxAirDraft?: number;
   minWidth?: number;
-  seconds?: number;   // tide-corrected traversal time
+  seconds?: number; // tide-corrected traversal time
   currentKn?: number; // estimated along-track current, + = fair
 }
 
@@ -32,12 +32,18 @@ type LonLat = [number, number];
 const EARTH_M_PER_DEG_LAT = 111320;
 
 /** Great-circle initial bearing in degrees true [0, 360). */
-export function bearingDeg(lat1: number, lon1: number, lat2: number, lon2: number): number {
+export function bearingDeg(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+): number {
   const φ1 = (lat1 * Math.PI) / 180;
   const φ2 = (lat2 * Math.PI) / 180;
   const Δλ = ((lon2 - lon1) * Math.PI) / 180;
   const y = Math.sin(Δλ) * Math.cos(φ2);
-  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  const x =
+    Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
   const θ = (Math.atan2(y, x) * 180) / Math.PI;
   return (θ + 360) % 360;
 }
@@ -50,13 +56,20 @@ function signedTurn(b1: number, b2: number): number {
   return d;
 }
 
-function haversineM(lat1: number, lon1: number, lat2: number, lon2: number): number {
+function haversineM(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+): number {
   const R = 6371000;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
   const a =
     Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
@@ -65,7 +78,10 @@ function haversineM(lat1: number, lon1: number, lat2: number, lon2: number): num
  * Returns the kept indices (sorted, always including first and last).
  * The simplified line deviates at most `toleranceM` from the original.
  */
-export function simplifyIndices(coords: LonLat[], toleranceM: number): number[] {
+export function simplifyIndices(
+  coords: LonLat[],
+  toleranceM: number,
+): number[] {
   if (coords.length <= 2 || toleranceM <= 0) {
     return coords.map((_, i) => i);
   }
@@ -73,7 +89,10 @@ export function simplifyIndices(coords: LonLat[], toleranceM: number): number[] 
   // Local equirectangular projection (meters); fine at route scale.
   const latMid = (coords[0][1] + coords[coords.length - 1][1]) / 2;
   const mPerDegLon = EARTH_M_PER_DEG_LAT * Math.cos((latMid * Math.PI) / 180);
-  const pts = coords.map(([lon, lat]) => [lon * mPerDegLon, lat * EARTH_M_PER_DEG_LAT]);
+  const pts = coords.map(([lon, lat]) => [
+    lon * mPerDegLon,
+    lat * EARTH_M_PER_DEG_LAT,
+  ]);
 
   const keep = new Array<boolean>(coords.length).fill(false);
   keep[0] = keep[coords.length - 1] = true;
@@ -97,7 +116,10 @@ export function simplifyIndices(coords: LonLat[], toleranceM: number): number[] 
         dist = Math.hypot(px - ax, py - ay);
       } else {
         // Perpendicular distance to the (clamped) chord a→b
-        const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
+        const t = Math.max(
+          0,
+          Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2),
+        );
         dist = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
       }
       if (dist > maxDist) {
@@ -122,14 +144,22 @@ export function simplifyIndices(coords: LonLat[], toleranceM: number): number[] 
  * when the segments align with the coordinates (segment i spans coord i→i+1),
  * falling back to haversine where they do not.
  */
-export function cumulativeDistances(coords: LonLat[], segments: PathSegment[]): number[] {
+export function cumulativeDistances(
+  coords: LonLat[],
+  segments: PathSegment[],
+): number[] {
   const cum = new Array<number>(coords.length).fill(0);
   for (let i = 1; i < coords.length; i++) {
     const seg = segments[i - 1];
     const d =
-      seg && typeof seg.distance === 'number' && seg.distance > 0
+      seg && typeof seg.distance === "number" && seg.distance > 0
         ? seg.distance
-        : haversineM(coords[i - 1][1], coords[i - 1][0], coords[i][1], coords[i][0]);
+        : haversineM(
+            coords[i - 1][1],
+            coords[i - 1][0],
+            coords[i][1],
+            coords[i][0],
+          );
     cum[i] = cum[i - 1] + d;
   }
   return cum;
@@ -172,7 +202,10 @@ export function buildItinerary(
 ): ItineraryResult {
   if (coords.length < 2) {
     return {
-      waypoints: coords.map(([lon, lat]) => ({ latitude: lat, longitude: lon })),
+      waypoints: coords.map(([lon, lat]) => ({
+        latitude: lat,
+        longitude: lon,
+      })),
       itinerary: [],
     };
   }
@@ -183,10 +216,16 @@ export function buildItinerary(
 
   // Annotate crossings with chainage along the route.
   for (const c of crossings) {
-    const idx = closestCoordIndex(coords, c.position.latitude, c.position.longitude);
+    const idx = closestCoordIndex(
+      coords,
+      c.position.latitude,
+      c.position.longitude,
+    );
     c.distanceFromStart = Math.round(cum[idx]);
   }
-  crossings.sort((a, b) => (a.distanceFromStart ?? 0) - (b.distanceFromStart ?? 0));
+  crossings.sort(
+    (a, b) => (a.distanceFromStart ?? 0) - (b.distanceFromStart ?? 0),
+  );
 
   // --- major course changes, evaluated on the simplified polyline so grid
   // micro-jogs cannot register as turns ---
@@ -197,7 +236,10 @@ export function buildItinerary(
     const [pLon, pLat] = coords[kept[k - 1]];
     const [cLon, cLat] = coords[kept[k]];
     const [nLon, nLat] = coords[kept[k + 1]];
-    const change = signedTurn(bearingDeg(pLat, pLon, cLat, cLon), bearingDeg(cLat, cLon, nLat, nLon));
+    const change = signedTurn(
+      bearingDeg(pLat, pLon, cLat, cLon),
+      bearingDeg(cLat, cLon, nLat, nLon),
+    );
     if (Math.abs(change) > turnThreshold) {
       turns.push({ idx: kept[k], change: Math.abs(change) });
     }
@@ -210,25 +252,30 @@ export function buildItinerary(
   }
 
   // Assemble itinerary indices: start, turns, via points, end.
-  const entries = new Map<number, ItineraryPoint['kind']>();
-  entries.set(0, 'start');
-  for (const t of turns) entries.set(t.idx, 'turn');
+  const entries = new Map<number, ItineraryPoint["kind"]>();
+  entries.set(0, "start");
+  for (const t of turns) entries.set(t.idx, "turn");
   const viaIdxByCoord = new Map<number, number>();
   for (let v = 0; v < via.length; v++) {
     const idx = closestCoordIndex(coords, via[v].latitude, via[v].longitude);
     if (idx > 0 && idx < coords.length - 1) {
-      entries.set(idx, 'via'); // via wins over a coinciding turn
+      entries.set(idx, "via"); // via wins over a coinciding turn
       viaIdxByCoord.set(idx, v);
     }
   }
-  entries.set(coords.length - 1, 'end');
+  entries.set(coords.length - 1, "end");
 
   const indices = [...entries.keys()].sort((a, b) => a - b);
 
   const itinerary: ItineraryPoint[] = indices.map((idx, i) => {
     const [lon, lat] = coords[idx];
     const point: ItineraryPoint = {
-      kind: idx === 0 ? 'start' : idx === coords.length - 1 ? 'end' : entries.get(idx)!,
+      kind:
+        idx === 0
+          ? "start"
+          : idx === coords.length - 1
+            ? "end"
+            : entries.get(idx)!,
       latitude: lat,
       longitude: lon,
       distanceFromStart: Math.round(cum[idx]),
@@ -242,7 +289,10 @@ export function buildItinerary(
       if (i > 0) {
         const [pLon, pLat] = coords[indices[i - 1]];
         point.turn = Math.round(
-          signedTurn(bearingDeg(pLat, pLon, lat, lon), bearingDeg(lat, lon, nLat, nLon)),
+          signedTurn(
+            bearingDeg(pLat, pLon, lat, lon),
+            bearingDeg(lat, lon, nLat, nLon),
+          ),
         );
       }
 
@@ -259,11 +309,17 @@ export function buildItinerary(
         const seg = segments[s];
         if (!seg) continue;
         legDistance += seg.distance ?? 0;
-        if (typeof seg.minDepth === 'number' && seg.minDepth >= 0) minDepth = Math.min(minDepth, seg.minDepth);
-        if (typeof seg.minWidth === 'number' && seg.minWidth >= 0) minWidth = Math.min(minWidth, seg.minWidth);
-        if (typeof seg.maxAirDraft === 'number' && seg.maxAirDraft >= 0) maxAirDraft = Math.min(maxAirDraft, seg.maxAirDraft);
-        if (typeof seg.seconds === 'number') { legSeconds += seg.seconds; hasSeconds = true; }
-        if (typeof seg.currentKn === 'number') {
+        if (typeof seg.minDepth === "number" && seg.minDepth >= 0)
+          minDepth = Math.min(minDepth, seg.minDepth);
+        if (typeof seg.minWidth === "number" && seg.minWidth >= 0)
+          minWidth = Math.min(minWidth, seg.minWidth);
+        if (typeof seg.maxAirDraft === "number" && seg.maxAirDraft >= 0)
+          maxAirDraft = Math.min(maxAirDraft, seg.maxAirDraft);
+        if (typeof seg.seconds === "number") {
+          legSeconds += seg.seconds;
+          hasSeconds = true;
+        }
+        if (typeof seg.currentKn === "number") {
           currentWeighted += seg.currentKn * (seg.distance ?? 0);
           currentDist += seg.distance ?? 0;
         }
@@ -281,7 +337,12 @@ export function buildItinerary(
         ...(minWidth < Infinity ? { minWidth } : {}),
         ...(maxAirDraft < Infinity ? { maxAirDraft } : {}),
         ...(hasSeconds ? { seconds: Math.round(legSeconds) } : {}),
-        ...(currentDist > 0 ? { currentKn: Math.round((currentWeighted / currentDist) * 100) / 100 } : {}),
+        ...(currentDist > 0
+          ? {
+              currentKn:
+                Math.round((currentWeighted / currentDist) * 100) / 100,
+            }
+          : {}),
         ...(legCrossings.length > 0 ? { crossings: legCrossings } : {}),
       };
     }
@@ -289,7 +350,10 @@ export function buildItinerary(
   });
 
   return {
-    waypoints: kept.map((idx) => ({ latitude: coords[idx][1], longitude: coords[idx][0] })),
+    waypoints: kept.map((idx) => ({
+      latitude: coords[idx][1],
+      longitude: coords[idx][0],
+    })),
     itinerary,
   };
 }

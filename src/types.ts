@@ -12,7 +12,7 @@ export interface VesselDimensions {
 // How a leg (the segment ARRIVING at a waypoint) is routed:
 // 'auto'   — A* graph search (default)
 // 'manual' — straight rhumb line drawn by the user, bypassing the graph
-export type LegMode = 'auto' | 'manual';
+export type LegMode = "auto" | "manual";
 
 // Routing parameters from user request
 export interface RoutingRequest {
@@ -61,10 +61,10 @@ export interface SearchNode {
 
 // Crossing annotation (bridge or lock encountered on the route)
 export interface RouteCrossing {
-  type: 'bridge' | 'lock';
+  type: "bridge" | "lock";
   name: string;
   subtype?: string; // 'opening' or 'fixed' for bridges
-  height?: number;  // vertical clearance (m) for fixed bridges
+  height?: number; // vertical clearance (m) for fixed bridges
   position: { latitude: number; longitude: number };
   distanceFromStart?: number; // meters along the route (chainage)
 }
@@ -80,27 +80,36 @@ export interface RouteWaypoint {
 // An entry of the human-readable route itinerary: start/end, via points and
 // major course changes, with aggregates for the leg to the next entry.
 export interface ItineraryPoint {
-  kind: 'start' | 'turn' | 'via' | 'end';
+  kind: "start" | "turn" | "via" | "end";
   latitude: number;
   longitude: number;
   distanceFromStart: number; // meters along the route
-  courseToNext?: number;     // degrees true, chord course to the next itinerary point
-  turn?: number;             // signed course change at this point (deg, + = starboard)
-  viaIndex?: number;         // 0-based index of the matching request via point
+  courseToNext?: number; // degrees true, chord course to the next itinerary point
+  turn?: number; // signed course change at this point (deg, + = starboard)
+  viaIndex?: number; // 0-based index of the matching request via point
   leg?: {
-    distance: number;        // meters, sum of graph edges to the next itinerary point
-    minDepth?: number;       // m, only when known (>= 0 in the graph)
-    minWidth?: number;       // m
-    maxAirDraft?: number;    // m
-    seconds?: number;        // tide-corrected sailing time for this leg
-    currentKn?: number;      // distance-weighted mean along-track current (+ = fair)
+    distance: number; // meters, sum of graph edges to the next itinerary point
+    minDepth?: number; // m, only when known (>= 0 in the graph)
+    minWidth?: number; // m
+    maxAirDraft?: number; // m
+    seconds?: number; // tide-corrected sailing time for this leg
+    currentKn?: number; // distance-weighted mean along-track current (+ = fair)
     crossings?: RouteCrossing[]; // bridges/locks on this leg, in route order
   };
 }
 
 // Route result
 export interface RouteWarning {
-  type: 'start_unreachable' | 'end_unreachable' | 'both_unreachable' | 'via_constrained' | 'via_skipped' | 'bbox_expanded' | 'start_connecting' | 'end_connecting' | 'manual_segment';
+  type:
+    | "start_unreachable"
+    | "end_unreachable"
+    | "both_unreachable"
+    | "via_constrained"
+    | "via_skipped"
+    | "bbox_expanded"
+    | "start_connecting"
+    | "end_connecting"
+    | "manual_segment";
   message: string;
   from?: { latitude: number; longitude: number };
   to?: { latitude: number; longitude: number };
@@ -108,27 +117,27 @@ export interface RouteWarning {
 }
 
 export interface RouteResult {
-  type: 'FeatureCollection';
+  type: "FeatureCollection";
   warnings?: RouteWarning[];
   totalDistance?: number;
   totalCost?: number;
-  totalSeconds?: number;       // sailing time at averageSpeedKnots, tide-corrected when tide info present
+  totalSeconds?: number; // sailing time at averageSpeedKnots, tide-corrected when tide info present
   totalSecondsNoTide?: number; // same route without current — UIs show the delta
-  departureTime?: string;      // ISO, echoed/defaulted from the request when tides active
-  arrivalTime?: string;        // ISO, departure + totalSeconds
+  departureTime?: string; // ISO, echoed/defaulted from the request when tides active
+  arrivalTime?: string; // ISO, departure + totalSeconds
   tide?: {
     enabled: boolean;
-    estimated: boolean;        // true = model/community-data predictions, not measurements
-    source?: 'stations' | 'height-estimate'; // real current stations vs height-derived estimate
-    stations: string[];        // station names used for the flow field
+    estimated: boolean; // true = model/community-data predictions, not measurements
+    source?: "stations" | "height-estimate"; // real current stations vs height-derived estimate
+    stations: string[]; // station names used for the flow field
   };
   crossings?: RouteCrossing[];
   waypoints?: RouteWaypoint[];
   itinerary?: ItineraryPoint[];
   features: Array<{
-    type: 'Feature';
+    type: "Feature";
     geometry: {
-      type: 'LineString';
+      type: "LineString";
       coordinates: Array<[number, number]>; // [lon, lat]
     };
     properties: {
@@ -140,7 +149,7 @@ export interface RouteResult {
       costFactor?: number;
       trafficMode?: number;
       edgeTypeId?: number;
-      mode?: 'manual'; // present on user-drawn straight-line segments
+      mode?: "manual"; // present on user-drawn straight-line segments
       segments?: Array<{
         from: number; // node id
         to: number; // node id
@@ -151,10 +160,10 @@ export interface RouteResult {
         costFactor: number;
         trafficMode: number;
         edgeTypeId?: number;
-        mode?: 'manual';    // user-drawn straight-line segment (bypasses the graph)
-        seconds?: number;   // traversal time, tide-corrected when tides active
+        mode?: "manual"; // user-drawn straight-line segment (bypasses the graph)
+        seconds?: number; // traversal time, tide-corrected when tides active
         currentKn?: number; // estimated along-track current, + = fair (with tide)
-        sogKn?: number;     // speed over ground used for this segment
+        sogKn?: number; // speed over ground used for this segment
       }>;
     };
   }>;
@@ -188,21 +197,21 @@ export interface PluginConfig {
   // routing databases under node_modules/signalk-routeiq, where npm discards
   // them on the next plugin update.
   routingDataDir: string;
-  safetyMarginDraft: number;     // meters, added to design draft
-  safetyMarginAirDraft: number;  // meters, added to design air draft
-  safetyMarginBeam: number;      // meters, added to design beam
+  safetyMarginDraft: number; // meters, added to design draft
+  safetyMarginAirDraft: number; // meters, added to design air draft
+  safetyMarginBeam: number; // meters, added to design beam
   defaultCoastDistance: number;
   wrongWayPenalty: number;
-  routingBBoxMargin: number;        // degrees, default 1.0 (~111km) — internal search tuning, not in the settings schema
-  routingBBoxMaxExtent: number;     // degrees, default 10.0 — internal, not in the settings schema
+  routingBBoxMargin: number; // degrees, default 1.0 (~111km) — internal search tuning, not in the settings schema
+  routingBBoxMaxExtent: number; // degrees, default 10.0 — internal, not in the settings schema
   lineOfSightSampleInterval: number; // meters, default 500
   lineOfSightSearchRadius: number; // meters, default 800
-  averageSpeedKnots: number;        // knots, default 6.0
-  waypointTolerance: number;        // meters, max deviation when simplifying to waypoints (default 30)
-  catalogUrl: string;               // URL to the routing-index.json catalog for downloadable databases
-  considerTides: boolean;           // default for the per-request "use tides" toggle
-  maxTidalCurrentKnots: number;     // spring-current calibration for the estimated flow model
-  tidesApiBase: string;             // base URL of the server hosting signalk-tides
+  averageSpeedKnots: number; // knots, default 6.0
+  waypointTolerance: number; // meters, max deviation when simplifying to waypoints (default 30)
+  catalogUrl: string; // URL to the routing-index.json catalog for downloadable databases
+  considerTides: boolean; // default for the per-request "use tides" toggle
+  maxTidalCurrentKnots: number; // spring-current calibration for the estimated flow model
+  tidesApiBase: string; // base URL of the server hosting signalk-tides
   // §4a: when true (default since 2026-07-20), startup only peeks each
   // file's metadata/coverage (cheap), and individual databases load into
   // memory on demand — the first time a route request needs them, or via
@@ -240,7 +249,7 @@ export interface PluginConfig {
 
 // Default plugin configuration
 export const DEFAULT_CONFIG: PluginConfig = {
-  routingDataDir: '',
+  routingDataDir: "",
   safetyMarginDraft: 0.3,
   safetyMarginAirDraft: 1.5,
   safetyMarginBeam: 2.0,
@@ -252,10 +261,11 @@ export const DEFAULT_CONFIG: PluginConfig = {
   lineOfSightSearchRadius: 0,
   averageSpeedKnots: 6.0,
   waypointTolerance: 30,
-  catalogUrl: 'https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/routing-index.json',
+  catalogUrl:
+    "https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/routing-index.json",
   considerTides: false,
   maxTidalCurrentKnots: 2.0,
-  tidesApiBase: 'http://localhost:3000',
+  tidesApiBase: "http://localhost:3000",
   dynamicLoading: true,
   eagerLoadAtPosition: true,
   loadRadiusNm: 0,

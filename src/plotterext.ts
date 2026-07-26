@@ -11,13 +11,13 @@
  * Spec: https://github.com/SignalK/freeboard-sk/blob/master/docs/api/plotter-extensions-api.md
  */
 
-import { ServerAPI } from '@signalk/server-api';
-import * as express from 'express';
-import * as fs from 'fs';
-import { createRequire } from 'node:module';
-import * as path from 'path';
+import { ServerAPI } from "@signalk/server-api";
+import * as express from "express";
+import * as fs from "fs";
+import { createRequire } from "node:module";
+import * as path from "path";
 
-const PLUGIN_ID = 'signalk-routeiq';
+const PLUGIN_ID = "signalk-routeiq";
 
 /** Base URL for extension iframe assets. Top-level (not /plugins/*) so that
  * read-only users can load them — /plugins is admin-gated by the server. */
@@ -40,43 +40,45 @@ export function setPlotterExtensionRunning(state: boolean): void {
 
 function readPluginVersion(plugindir: string): string {
   try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(plugindir, 'package.json'), 'utf8'));
-    return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(plugindir, "package.json"), "utf8"),
+    );
+    return typeof pkg.version === "string" ? pkg.version : "0.0.0";
   } catch {
-    return '0.0.0';
+    return "0.0.0";
   }
 }
 
 function buildManifest(version: string) {
   return {
-    name: 'RouteIQ',
+    name: "RouteIQ",
     description:
-      'Offline vessel-aware auto-routing: reshape the route you are editing around land, shallows and bridges.',
+      "Offline vessel-aware auto-routing: reshape the route you are editing around land, shallows and bridges.",
     version,
-    apiVersion: '1',
+    apiVersion: "1",
     // The panel drives the host's live route edit buffer; without these the
     // extension is pointless, so they are hard requirements.
-    requires: ['panels.iframe', 'buttons', 'routes'],
+    requires: ["panels.iframe", "buttons", "routes"],
     // Used when present, degraded gracefully when not.
-    optional: ['map', 'units'],
+    optional: ["map", "units"],
     buttons: [
       {
-        id: 'open-routeiq',
-        title: 'RouteIQ',
-        slot: 'mapToolbar',
-        icon: 'alt_route',
-        action: { type: 'togglePanel', panel: 'routeiq-panel' },
+        id: "open-routeiq",
+        title: "RouteIQ",
+        slot: "mapToolbar",
+        icon: "alt_route",
+        action: { type: "togglePanel", panel: "routeiq-panel" },
       },
     ],
     panels: [
       {
-        id: 'routeiq-panel',
-        title: 'RouteIQ',
-        type: 'iframe',
+        id: "routeiq-panel",
+        title: "RouteIQ",
+        type: "iframe",
         url: `${ASSET_BASE}/panel.html`,
         // keepAlive: route selection, last result and the revert buffer
         // survive closing/reopening the drawer.
-        lifecycle: 'keepAlive',
+        lifecycle: "keepAlive",
       },
     ],
   };
@@ -88,14 +90,18 @@ function buildManifest(version: string) {
  * registration is re-done every time (the server unregisters it on every
  * stop), while the Express asset mounts are only ever mounted once.
  */
-export function registerPlotterExtension(app: ServerAPI, plugindir: string): void {
+export function registerPlotterExtension(
+  app: ServerAPI,
+  plugindir: string,
+): void {
   const version = readPluginVersion(plugindir);
 
   try {
     app.registerResourceProvider({
-      type: 'plotterExtensions',
+      type: "plotterExtensions",
       methods: {
-        listResources: async () => (running ? { [PLUGIN_ID]: buildManifest(version) } : {}),
+        listResources: async () =>
+          running ? { [PLUGIN_ID]: buildManifest(version) } : {},
         getResource: async (id: string) => {
           if (!running || id !== PLUGIN_ID) {
             throw new Error(`No such plotterExtensions resource: ${id}`);
@@ -104,28 +110,38 @@ export function registerPlotterExtension(app: ServerAPI, plugindir: string): voi
         },
         // The manifest is code, not user data.
         setResource: async () => {
-          throw new Error(`${PLUGIN_ID} is a read-only plotterExtensions provider`);
+          throw new Error(
+            `${PLUGIN_ID} is a read-only plotterExtensions provider`,
+          );
         },
         deleteResource: async () => {
-          throw new Error(`${PLUGIN_ID} is a read-only plotterExtensions provider`);
+          throw new Error(
+            `${PLUGIN_ID} is a read-only plotterExtensions provider`,
+          );
         },
       },
     });
-    console.log('[routeiq] plotterExtensions manifest registered');
+    console.log("[routeiq] plotterExtensions manifest registered");
   } catch (error) {
-    console.warn(`[routeiq] Failed to register plotterExtensions provider: ${error}`);
+    console.warn(
+      `[routeiq] Failed to register plotterExtensions provider: ${error}`,
+    );
   }
 
   if (!assetsMounted) {
     const appExpress = app as unknown as express.IRouter;
 
     // Extension iframe pages (panel.html, panel.js, …)
-    const extAssetDir = path.join(plugindir, 'plotterext');
+    const extAssetDir = path.join(plugindir, "plotterext");
     if (fs.existsSync(extAssetDir)) {
       appExpress.use(ASSET_BASE, express.static(extAssetDir));
-      console.log(`[routeiq] Plotter extension assets served from: ${extAssetDir}`);
+      console.log(
+        `[routeiq] Plotter extension assets served from: ${extAssetDir}`,
+      );
     } else {
-      console.warn(`[routeiq] Plotter extension asset dir missing: ${extAssetDir}`);
+      console.warn(
+        `[routeiq] Plotter extension asset dir missing: ${extAssetDir}`,
+      );
     }
 
     // The signalk-plotterext-bus client library (ESM build), imported by the
@@ -133,10 +149,14 @@ export function registerPlotterExtension(app: ServerAPI, plugindir: string): voi
     // of the dependency does not break the path.
     try {
       const require = createRequire(import.meta.url);
-      const busDist = path.dirname(require.resolve('signalk-plotterext-bus/extension'));
+      const busDist = path.dirname(
+        require.resolve("signalk-plotterext-bus/extension"),
+      );
       appExpress.use(`${ASSET_BASE}/bus`, express.static(busDist));
     } catch (error) {
-      console.warn(`[routeiq] signalk-plotterext-bus not found, extension UI disabled: ${error}`);
+      console.warn(
+        `[routeiq] signalk-plotterext-bus not found, extension UI disabled: ${error}`,
+      );
     }
 
     assetsMounted = true;
