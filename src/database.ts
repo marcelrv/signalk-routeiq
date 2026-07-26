@@ -152,7 +152,13 @@ export class RoutingDatabase {
   private messageIdCounter = 0;
   private pending = new Map<
     number,
-    { resolve: (value: any) => void; reject: (reason: any) => void }
+    {
+      resolve: (value: any) => void;
+      reject: (reason: any) => void;
+      // Accumulated rows of a chunked reply; absent until the first chunk lands,
+      // which is what distinguishes a zero-row final marker from a finished one.
+      chunks?: unknown[][];
+    }
   >();
   private dbDir: string;
   private nodes: Map<
@@ -381,14 +387,14 @@ export class RoutingDatabase {
         // Edge-loading chunked response
         if (msg.chunk === true && msg.totalChunks !== undefined) {
           // Initialize accumulator on first chunk
-          if (!(pending as any)._chunks) {
-            (pending as any)._chunks = [];
+          if (!pending.chunks) {
+            pending.chunks = [];
           }
-          (pending as any)._chunks.push(msg.result);
+          pending.chunks.push(msg.result);
           // Resolve when all chunks arrive
-          if ((pending as any)._chunks.length === msg.totalChunks) {
+          if (pending.chunks.length === msg.totalChunks) {
             this.pending.delete(msg.id);
-            pending.resolve((pending as any)._chunks.flat());
+            pending.resolve(pending.chunks.flat());
           }
           return;
         }
@@ -397,7 +403,7 @@ export class RoutingDatabase {
         // ran and this marker is the *only* message sent — resolve here with an
         // empty array, or this promise (and loadGraph() with it) hangs forever.
         if (msg.chunk === false) {
-          if (!(pending as any)._chunks) {
+          if (!pending.chunks) {
             this.pending.delete(msg.id);
             pending.resolve([]);
           }
