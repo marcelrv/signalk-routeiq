@@ -17,6 +17,9 @@
   `viewBox`, so it had no intrinsic size; it now sets `width`/`height` as well.
 - Added: `signalk.recommends` lists `signalk-tidal-currents`, `signalk-tides`
   and `@signalk/freeboard-sk` so the App Store links the optional companions.
+- Added: four App Store screenshots under `img/`, declared in
+  `signalk.screenshots` and shipped via `files`. Regenerate them with
+  `./scripts/screenshots.sh`.
 - Docs: the tide settings and README no longer describe `signalk-tides` as
   required. Both tide sources are optional and independent — with neither
   installed, routes fall back to plain distance.

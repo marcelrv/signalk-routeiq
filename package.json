@@ -8,6 +8,7 @@
     "dist",
     "public",
     "plotterext",
+    "img",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
@@ -15,6 +16,12 @@
   "signalk": {
     "displayName": "RouteIQ",
     "appIcon": "icon.svg",
+    "screenshots": [
+      "./img/webapp-route.png",
+      "./img/freeboard-plugin.png",
+      "./img/freeboard-tides.png",
+      "./img/download-manager.png"
+    ],
     "recommends": ["signalk-tidal-currents", "signalk-tides", "@signalk/freeboard-sk"]
   },
   "type": "module",
