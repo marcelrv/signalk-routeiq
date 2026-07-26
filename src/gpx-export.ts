@@ -1,19 +1,20 @@
-import crypto from 'crypto';
-import { RouteResult } from './types.js';
+import crypto from "crypto";
+import { RouteResult } from "./types.js";
 
 export class GpxExporter {
   /**
    * Convert a RouteResult GeoJSON to GPX XML string
    * Handles both single-feature (segments array) and multi-feature (per-segment) formats.
    */
-  static toGpx(route: RouteResult, name: string = 'RouteIQ'): string {
+  static toGpx(route: RouteResult, name: string = "RouteIQ"): string {
     const { coords, segments } = this.extractCoordsAndSegments(route);
     const totalDistance = route.totalDistance ?? 0;
     const totalCost = route.totalCost ?? 0;
     // Simplified navigable waypoints (computed server-side with bounded
     // deviation): these make the <rte>; the full computed geometry is kept
     // as a <trk> so the receiving plotter still has the reference line.
-    const waypoints = route.waypoints && route.waypoints.length >= 2 ? route.waypoints : null;
+    const waypoints =
+      route.waypoints && route.waypoints.length >= 2 ? route.waypoints : null;
 
     let gpx = `<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="signalk-routeiq" xmlns:ar="http://signalk.org/routeiq">
@@ -79,7 +80,11 @@ export class GpxExporter {
   /**
    * Convert route to Signal K v2 Route specification
    */
-  static toSignalKRoute(route: RouteResult, name: string = 'RouteIQ Route', routeId?: string): any {
+  static toSignalKRoute(
+    route: RouteResult,
+    name: string = "RouteIQ Route",
+    routeId?: string,
+  ): any {
     const { coords, segments } = this.extractCoordsAndSegments(route);
     const totalDistance = route.totalDistance ?? 0;
     const totalCost = route.totalCost ?? 0;
@@ -89,9 +94,10 @@ export class GpxExporter {
     // waypoints (same geometry the Freeboard-SK extension saves) so the
     // waypoint list stays meaningful. Full-resolution segments are internal
     // metadata and only round-trip on legacy results without waypoints.
-    const waypoints = route.waypoints && route.waypoints.length >= 2 ? route.waypoints : null;
+    const waypoints =
+      route.waypoints && route.waypoints.length >= 2 ? route.waypoints : null;
     const coordinates = waypoints
-      ? waypoints.map(w => [w.longitude, w.latitude] as [number, number])
+      ? waypoints.map((w) => [w.longitude, w.latitude] as [number, number])
       : (coords as [number, number][]);
 
     return {
@@ -99,25 +105,27 @@ export class GpxExporter {
       description: `Route calculated by SignalK RouteIQ Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m`,
       distance: totalDistance,
       feature: {
-        type: 'Feature',
+        type: "Feature",
         geometry: {
-          type: 'LineString',
+          type: "LineString",
           coordinates,
         },
         properties: {
           totalCost,
-          ...(waypoints ? {} : {
-            segments: segments.map(s => ({
-              from: s.from ?? -1,
-              to: s.to ?? -1,
-              distance: s.distance,
-              minDepth: s.minDepth,
-              maxAirDraft: s.maxAirDraft,
-              costFactor: s.costFactor,
-              trafficMode: s.trafficMode,
-              edgeTypeId: s.edgeTypeId,
-            })),
-          }),
+          ...(waypoints
+            ? {}
+            : {
+                segments: segments.map((s) => ({
+                  from: s.from ?? -1,
+                  to: s.to ?? -1,
+                  distance: s.distance,
+                  minDepth: s.minDepth,
+                  maxAirDraft: s.maxAirDraft,
+                  costFactor: s.costFactor,
+                  trafficMode: s.trafficMode,
+                  edgeTypeId: s.edgeTypeId,
+                })),
+              }),
         },
       },
       timestamp: new Date().toISOString(),
@@ -132,9 +140,14 @@ export class GpxExporter {
   private static extractCoordsAndSegments(route: RouteResult): {
     coords: Array<[number, number]>;
     segments: Array<{
-      from?: number; to?: number; distance: number;
-      minDepth: number; maxAirDraft: number; costFactor: number;
-      trafficMode?: number; edgeTypeId?: number;
+      from?: number;
+      to?: number;
+      distance: number;
+      minDepth: number;
+      maxAirDraft: number;
+      costFactor: number;
+      trafficMode?: number;
+      edgeTypeId?: number;
     }>;
   } {
     const coords: Array<[number, number]> = [];
@@ -178,10 +191,10 @@ export class GpxExporter {
 
   private static escapeXml(text: string): string {
     return text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&apos;');
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&apos;");
   }
 }

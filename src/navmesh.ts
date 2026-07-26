@@ -43,18 +43,31 @@ interface RawNavmeshRegionRow {
   depth_ceiling_m: number;
 }
 
-function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+function haversineMeters(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+): number {
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
   return EARTH_RADIUS_M * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function polylineLength(path: Array<[number, number]>): number {
   let d = 0;
   for (let i = 1; i < path.length; i++) {
-    d += haversineMeters(path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]);
+    d += haversineMeters(
+      path[i - 1][0],
+      path[i - 1][1],
+      path[i][0],
+      path[i][1],
+    );
   }
   return d;
 }
@@ -72,16 +85,25 @@ function coordKey(lat: number, lon: number): string {
 function raycastRing(lon: number, lat: number, ring: number[][]): boolean {
   let inside = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const xi = ring[i][0], yi = ring[i][1];
-    const xj = ring[j][0], yj = ring[j][1];
-    if ((yi > lat) !== (yj > lat) && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) {
+    const xi = ring[i][0],
+      yi = ring[i][1];
+    const xj = ring[j][0],
+      yj = ring[j][1];
+    if (
+      yi > lat !== yj > lat &&
+      lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi
+    ) {
       inside = !inside;
     }
   }
   return inside;
 }
 
-function raycastPolygon(lon: number, lat: number, rings: number[][][]): boolean {
+function raycastPolygon(
+  lon: number,
+  lat: number,
+  rings: number[][][],
+): boolean {
   if (!raycastRing(lon, lat, rings[0])) return false;
   for (let h = 1; h < rings.length; h++) {
     if (raycastRing(lon, lat, rings[h])) return false; // inside a hole
@@ -89,9 +111,17 @@ function raycastPolygon(lon: number, lat: number, rings: number[][][]): boolean 
   return true;
 }
 
-export function pointInPolygon(lat: number, lon: number, geometry: GeoJSON.Polygon | GeoJSON.MultiPolygon): boolean {
-  if (geometry.type === 'Polygon') {
-    return raycastPolygon(lon, lat, geometry.coordinates as unknown as number[][][]);
+export function pointInPolygon(
+  lat: number,
+  lon: number,
+  geometry: GeoJSON.Polygon | GeoJSON.MultiPolygon,
+): boolean {
+  if (geometry.type === "Polygon") {
+    return raycastPolygon(
+      lon,
+      lat,
+      geometry.coordinates as unknown as number[][][],
+    );
   }
   for (const poly of geometry.coordinates as unknown as number[][][][]) {
     if (raycastPolygon(lon, lat, poly)) return true;
@@ -114,9 +144,12 @@ function normalizeWinding(
   triangles: Array<[number, number, number]>,
 ): Array<[number, number, number]> {
   return triangles.map(([a, b, c]) => {
-    const va = vertices[a], vb = vertices[b], vc = vertices[c];
+    const va = vertices[a],
+      vb = vertices[b],
+      vc = vertices[c];
     // x = lon, y = lat
-    const area2 = (vb[1] - va[1]) * (vc[0] - va[0]) - (vc[1] - va[1]) * (vb[0] - va[0]);
+    const area2 =
+      (vb[1] - va[1]) * (vc[0] - va[0]) - (vc[1] - va[1]) * (vb[0] - va[0]);
     return area2 >= 0 ? [a, b, c] : [a, c, b];
   }) as Array<[number, number, number]>;
 }
@@ -124,18 +157,31 @@ function normalizeWinding(
 function buildAdjacency(
   triangles: Array<[number, number, number]>,
 ): Map<number, Array<{ neighbor: number; a: number; b: number }>> {
-  const edgeMap = new Map<string, Array<{ tri: number; a: number; b: number }>>();
+  const edgeMap = new Map<
+    string,
+    Array<{ tri: number; a: number; b: number }>
+  >();
   triangles.forEach((tri, triIdx) => {
-    const edges: Array<[number, number]> = [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]];
+    const edges: Array<[number, number]> = [
+      [tri[0], tri[1]],
+      [tri[1], tri[2]],
+      [tri[2], tri[0]],
+    ];
     for (const [a, b] of edges) {
       const key = a < b ? `${a}:${b}` : `${b}:${a}`;
       let occ = edgeMap.get(key);
-      if (!occ) { occ = []; edgeMap.set(key, occ); }
+      if (!occ) {
+        occ = [];
+        edgeMap.set(key, occ);
+      }
       occ.push({ tri: triIdx, a, b });
     }
   });
 
-  const adjacency = new Map<number, Array<{ neighbor: number; a: number; b: number }>>();
+  const adjacency = new Map<
+    number,
+    Array<{ neighbor: number; a: number; b: number }>
+  >();
   for (const occurrences of edgeMap.values()) {
     if (occurrences.length !== 2) continue; // boundary edge (1) or non-manifold (skip)
     const [x, y] = occurrences;
@@ -151,9 +197,13 @@ export function buildNavmeshRegion(
   row: RawNavmeshRegionRow,
   getNodeCoord: (id: number) => { lat: number; lon: number } | undefined,
 ): NavmeshRegion {
-  const boundaryGeometry = JSON.parse(row.boundary_geometry) as GeoJSON.Polygon | GeoJSON.MultiPolygon;
+  const boundaryGeometry = JSON.parse(row.boundary_geometry) as
+    | GeoJSON.Polygon
+    | GeoJSON.MultiPolygon;
   const vertices = JSON.parse(row.vertices) as Array<[number, number]>;
-  const rawTriangles = JSON.parse(row.triangles) as Array<[number, number, number]>;
+  const rawTriangles = JSON.parse(row.triangles) as Array<
+    [number, number, number]
+  >;
   const boundaryNodeIds = JSON.parse(row.boundary_node_ids) as number[];
 
   const triangles = normalizeWinding(vertices, rawTriangles);
@@ -164,9 +214,14 @@ export function buildNavmeshRegion(
   const adjacency = buildAdjacency(triangles);
 
   const vertexToTriangles = new Map<number, number[]>();
-  const triangleCentroids: Array<[number, number]> = new Array(triangles.length);
+  const triangleCentroids: Array<[number, number]> = new Array(
+    triangles.length,
+  );
   const triangleBBoxes = new Float64Array(triangles.length * 4);
-  let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+  let minLat = Infinity,
+    maxLat = -Infinity,
+    minLon = Infinity,
+    maxLon = -Infinity;
 
   triangles.forEach((tri, triIdx) => {
     const [a, b, c] = tri;
@@ -174,8 +229,13 @@ export function buildNavmeshRegion(
       if (!vertexToTriangles.has(v)) vertexToTriangles.set(v, []);
       vertexToTriangles.get(v)!.push(triIdx);
     }
-    const va = vertices[a], vb = vertices[b], vc = vertices[c];
-    triangleCentroids[triIdx] = [(va[0] + vb[0] + vc[0]) / 3, (va[1] + vb[1] + vc[1]) / 3];
+    const va = vertices[a],
+      vb = vertices[b],
+      vc = vertices[c];
+    triangleCentroids[triIdx] = [
+      (va[0] + vb[0] + vc[0]) / 3,
+      (va[1] + vb[1] + vc[1]) / 3,
+    ];
 
     const tMinLat = Math.min(va[0], vb[0], vc[0]);
     const tMaxLat = Math.max(va[0], vb[0], vc[0]);
@@ -196,7 +256,9 @@ export function buildNavmeshRegion(
   }
 
   const vertexIndexByCoord = new Map<string, number>();
-  vertices.forEach(([lat, lon], idx) => vertexIndexByCoord.set(coordKey(lat, lon), idx));
+  vertices.forEach(([lat, lon], idx) =>
+    vertexIndexByCoord.set(coordKey(lat, lon), idx),
+  );
 
   const boundaryNodeToVertex = new Map<number, number>();
   const vertexToBoundaryNode = new Map<number, number>();
@@ -239,12 +301,18 @@ export function buildNavmeshRegion(
  * well-spread points; every other boundary node reaches the interior cheaply
  * via its nearest anchor instead.
  */
-export function selectAnchors(region: NavmeshRegion, maxAnchors = DEFAULT_MAX_ANCHORS): number[] {
-  const candidates = region.boundaryNodeIds.filter(id => region.boundaryNodeToVertex.has(id));
+export function selectAnchors(
+  region: NavmeshRegion,
+  maxAnchors = DEFAULT_MAX_ANCHORS,
+): number[] {
+  const candidates = region.boundaryNodeIds.filter((id) =>
+    region.boundaryNodeToVertex.has(id),
+  );
   if (candidates.length === 0) return [];
   if (candidates.length <= maxAnchors) return candidates;
 
-  const coord = (id: number): [number, number] => region.vertices[region.boundaryNodeToVertex.get(id)!];
+  const coord = (id: number): [number, number] =>
+    region.vertices[region.boundaryNodeToVertex.get(id)!];
 
   const chosen: number[] = [candidates[0]];
   const chosenSet = new Set(chosen);
@@ -261,7 +329,10 @@ export function selectAnchors(region: NavmeshRegion, maxAnchors = DEFAULT_MAX_AN
     for (const id of candidates) {
       if (chosenSet.has(id)) continue;
       const d = minDist.get(id)!;
-      if (d > bestD) { bestD = d; best = id; }
+      if (d > bestD) {
+        bestD = d;
+        best = id;
+      }
     }
     if (best === -1) break;
     chosen.push(best);
@@ -282,13 +353,26 @@ export function selectAnchors(region: NavmeshRegion, maxAnchors = DEFAULT_MAX_AN
 // Point location
 // ---------------------------------------------------------------------------
 
-function sign(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+function sign(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
   return (px - bx) * (ay - by) - (ax - bx) * (py - by);
 }
 
 function pointInTriangle(
-  px: number, py: number,
-  ax: number, ay: number, bx: number, by: number, cx: number, cy: number,
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  cx: number,
+  cy: number,
 ): boolean {
   const d1 = sign(px, py, ax, ay, bx, by);
   const d2 = sign(px, py, bx, by, cx, cy);
@@ -298,17 +382,33 @@ function pointInTriangle(
   return !(hasNeg && hasPos); // boundary-inclusive
 }
 
-export function locateTriangle(region: NavmeshRegion, lat: number, lon: number): number | null {
-  if (lat < region.bbox.minLat || lat > region.bbox.maxLat ||
-      lon < region.bbox.minLon || lon > region.bbox.maxLon) return null;
+export function locateTriangle(
+  region: NavmeshRegion,
+  lat: number,
+  lon: number,
+): number | null {
+  if (
+    lat < region.bbox.minLat ||
+    lat > region.bbox.maxLat ||
+    lon < region.bbox.minLon ||
+    lon > region.bbox.maxLon
+  )
+    return null;
 
   const n = region.triangles.length;
   for (let t = 0; t < n; t++) {
     const base = t * 4;
-    if (lon < region.triangleBBoxes[base] || lon > region.triangleBBoxes[base + 2] ||
-        lat < region.triangleBBoxes[base + 1] || lat > region.triangleBBoxes[base + 3]) continue;
+    if (
+      lon < region.triangleBBoxes[base] ||
+      lon > region.triangleBBoxes[base + 2] ||
+      lat < region.triangleBBoxes[base + 1] ||
+      lat > region.triangleBBoxes[base + 3]
+    )
+      continue;
     const [ia, ib, ic] = region.triangles[t];
-    const a = region.vertices[ia], b = region.vertices[ib], c = region.vertices[ic];
+    const a = region.vertices[ia],
+      b = region.vertices[ib],
+      c = region.vertices[ic];
     if (pointInTriangle(lon, lat, a[1], a[0], b[1], b[0], c[1], c[0])) return t;
   }
   return null;
@@ -342,18 +442,32 @@ class MinHeap<T> {
       this.data[0] = bottom;
       let i = 0;
       for (;;) {
-        const l = 2 * i + 1, r = 2 * i + 2;
+        const l = 2 * i + 1,
+          r = 2 * i + 2;
         let smallest = i;
-        if (l < this.data.length && this.score(this.data[l]) < this.score(this.data[smallest])) smallest = l;
-        if (r < this.data.length && this.score(this.data[r]) < this.score(this.data[smallest])) smallest = r;
+        if (
+          l < this.data.length &&
+          this.score(this.data[l]) < this.score(this.data[smallest])
+        )
+          smallest = l;
+        if (
+          r < this.data.length &&
+          this.score(this.data[r]) < this.score(this.data[smallest])
+        )
+          smallest = r;
         if (smallest === i) break;
-        [this.data[i], this.data[smallest]] = [this.data[smallest], this.data[i]];
+        [this.data[i], this.data[smallest]] = [
+          this.data[smallest],
+          this.data[i],
+        ];
         i = smallest;
       }
     }
     return top;
   }
-  isEmpty(): boolean { return this.data.length === 0; }
+  isEmpty(): boolean {
+    return this.data.length === 0;
+  }
 }
 
 /**
@@ -371,12 +485,16 @@ class MinHeap<T> {
  * identical to the old Dijkstra's — this is a pure speedup, not an
  * approximation. (See NEXT_PHASES.md, "Phase 2 Hardening, Round 4".)
  */
-export function corridorSearch(region: NavmeshRegion, startCandidates: number[], endCandidates: number[]): number[] | null {
+export function corridorSearch(
+  region: NavmeshRegion,
+  startCandidates: number[],
+  endCandidates: number[],
+): number[] | null {
   if (startCandidates.length === 0 || endCandidates.length === 0) return null;
   const endSet = new Set(endCandidates);
   for (const s of startCandidates) if (endSet.has(s)) return [s];
 
-  const endCentroids = endCandidates.map(t => region.triangleCentroids[t]);
+  const endCentroids = endCandidates.map((t) => region.triangleCentroids[t]);
   const heuristic = (tri: number): number => {
     const [lat, lon] = region.triangleCentroids[tri];
     let best = Infinity;
@@ -390,7 +508,7 @@ export function corridorSearch(region: NavmeshRegion, startCandidates: number[],
   const gScore = new Map<number, number>();
   const prev = new Map<number, number>();
   const visited = new Set<number>();
-  const heap = new MinHeap<{ tri: number; g: number; f: number }>(x => x.f);
+  const heap = new MinHeap<{ tri: number; g: number; f: number }>((x) => x.f);
 
   for (const s of startCandidates) {
     if (!gScore.has(s) || gScore.get(s)! > 0) gScore.set(s, 0);
@@ -435,7 +553,10 @@ export function corridorSearch(region: NavmeshRegion, startCandidates: number[],
 // tests are metrically well-behaved, then unprojects the result back to lat/lon.
 // ---------------------------------------------------------------------------
 
-interface Pt { x: number; y: number }
+interface Pt {
+  x: number;
+  y: number;
+}
 
 function triarea2(a: Pt, b: Pt, c: Pt): number {
   return (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
@@ -446,7 +567,9 @@ function funnelAlgorithm(portals: Array<{ left: Pt; right: Pt }>): Pt[] {
   let apex = portals[0].left;
   let portalLeft = portals[0].left;
   let portalRight = portals[0].right;
-  let apexIdx = 0, leftIdx = 0, rightIdx = 0;
+  let apexIdx = 0,
+    leftIdx = 0,
+    rightIdx = 0;
 
   let i = 1;
   while (i < portals.length) {
@@ -498,7 +621,11 @@ function funnelAlgorithm(portals: Array<{ left: Pt; right: Pt }>): Pt[] {
   return pts;
 }
 
-function getPortalEdge(region: NavmeshRegion, fromTri: number, toTri: number): { a: number; b: number } | null {
+function getPortalEdge(
+  region: NavmeshRegion,
+  fromTri: number,
+  toTri: number,
+): { a: number; b: number } | null {
   const entries = region.adjacency.get(fromTri);
   if (!entries) return null;
   for (const e of entries) if (e.neighbor === toTri) return { a: e.a, b: e.b };
@@ -514,19 +641,21 @@ export function funnel(
   if (corridor.length <= 1) return [start, end];
 
   const originLat = (region.bbox.minLat + region.bbox.maxLat) / 2;
-  const cosLat = Math.cos(originLat * Math.PI / 180);
+  const cosLat = Math.cos((originLat * Math.PI) / 180);
   const proj = (lat: number, lon: number): Pt => ({
-    x: lon * Math.PI / 180 * EARTH_RADIUS_M * cosLat,
-    y: lat * Math.PI / 180 * EARTH_RADIUS_M,
+    x: ((lon * Math.PI) / 180) * EARTH_RADIUS_M * cosLat,
+    y: ((lat * Math.PI) / 180) * EARTH_RADIUS_M,
   });
   const unproj = (p: Pt): [number, number] => [
-    (p.y / EARTH_RADIUS_M) * 180 / Math.PI,
-    (p.x / (EARTH_RADIUS_M * cosLat)) * 180 / Math.PI,
+    ((p.y / EARTH_RADIUS_M) * 180) / Math.PI,
+    ((p.x / (EARTH_RADIUS_M * cosLat)) * 180) / Math.PI,
   ];
 
   const startP = proj(start[0], start[1]);
   const endP = proj(end[0], end[1]);
-  const portals: Array<{ left: Pt; right: Pt }> = [{ left: startP, right: startP }];
+  const portals: Array<{ left: Pt; right: Pt }> = [
+    { left: startP, right: startP },
+  ];
 
   for (let i = 1; i < corridor.length; i++) {
     const edge = getPortalEdge(region, corridor[i - 1], corridor[i]);
@@ -537,7 +666,10 @@ export function funnel(
     }
     const vLeft = region.vertices[edge.a];
     const vRight = region.vertices[edge.b];
-    portals.push({ left: proj(vLeft[0], vLeft[1]), right: proj(vRight[0], vRight[1]) });
+    portals.push({
+      left: proj(vLeft[0], vLeft[1]),
+      right: proj(vRight[0], vRight[1]),
+    });
   }
   portals.push({ left: endP, right: endP });
 
@@ -553,7 +685,11 @@ export interface FunnelResult {
   path: Array<[number, number]>;
 }
 
-export function funnelBetweenNodes(region: NavmeshRegion, nodeA: number, nodeB: number): FunnelResult | null {
+export function funnelBetweenNodes(
+  region: NavmeshRegion,
+  nodeA: number,
+  nodeB: number,
+): FunnelResult | null {
   const va = region.boundaryNodeToVertex.get(nodeA);
   const vb = region.boundaryNodeToVertex.get(nodeB);
   if (va === undefined || vb === undefined) return null;
@@ -570,7 +706,12 @@ export function funnelBetweenNodes(region: NavmeshRegion, nodeA: number, nodeB: 
   return { distance: polylineLength(path), path };
 }
 
-export function funnelFromPoint(region: NavmeshRegion, lat: number, lon: number, targetNodeId: number): FunnelResult | null {
+export function funnelFromPoint(
+  region: NavmeshRegion,
+  lat: number,
+  lon: number,
+  targetNodeId: number,
+): FunnelResult | null {
   const vTarget = region.boundaryNodeToVertex.get(targetNodeId);
   if (vTarget === undefined) return null;
 
@@ -587,15 +728,20 @@ export function funnelFromPoint(region: NavmeshRegion, lat: number, lon: number,
 
 export function funnelBetweenPoints(
   region: NavmeshRegion,
-  latA: number, lonA: number,
-  latB: number, lonB: number,
+  latA: number,
+  lonA: number,
+  latB: number,
+  lonB: number,
 ): FunnelResult | null {
   const triA = locateTriangle(region, latA, lonA);
   const triB = locateTriangle(region, latB, lonB);
   if (triA === null || triB === null) return null;
 
   if (triA === triB) {
-    const path: Array<[number, number]> = [[latA, lonA], [latB, lonB]];
+    const path: Array<[number, number]> = [
+      [latA, lonA],
+      [latB, lonB],
+    ];
     return { distance: polylineLength(path), path };
   }
 

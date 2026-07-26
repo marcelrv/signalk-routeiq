@@ -18,13 +18,15 @@ jobs:
   # --experimental-sqlite is rejected outright as a bad option. package.json
   # already declares engines >= 22.5.0.
   #
-  # format-check-command is deliberately unset — it is blocking when set, and
-  # prettier currently reports style issues in 11 files. Run `npm run format`
-  # and then wire it up.
+  # Note if format:check ever fails right after running `npm run format`:
+  # prettier is not always idempotent in a single pass — nested calls like
+  # res.status().json() can reflow on a second pass. Re-run `npm run format`
+  # until `npm run format:check` is clean.
   test:
     uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@master
     with:
       enable-armv7: false
+      format-check-command: 'npm run format:check'
 
   # Not part of the reusable workflow — it takes test/build/format commands
   # but has no lint input, and a job that `uses:` a reusable workflow cannot
