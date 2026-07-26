@@ -1206,10 +1206,7 @@ export class RoutingEngine {
       if (!this.config.lineOfSightSearchRadius) return;
       const seg = segments[segIdx];
       if (!seg) return;
-      const overland =
-        (this.db as any).isLineCrossingLand &&
-        (this.db as any).isLineCrossingLand(fromLat, fromLon, toLat, toLon, 5);
-      if (overland) {
+      if (this.db.isLineCrossingLand(fromLat, fromLon, toLat, toLon, 5)) {
         seg.minDepth = 0;
       }
     };
@@ -1427,10 +1424,14 @@ export class RoutingEngine {
         }
       }
 
-      const edgeSnap = await this.db.findNearestEdge(
-        userPoint.latitude,
-        userPoint.longitude,
-      );
+      // Only the append path below uses this, and it's a grid scan over a 20 km
+      // default radius — skip it once truncation has already handled the point.
+      const edgeSnap = didTruncate
+        ? null
+        : await this.db.findNearestEdge(
+            userPoint.latitude,
+            userPoint.longitude,
+          );
       if (
         !didTruncate &&
         edgeSnap &&
@@ -1829,22 +1830,6 @@ export class RoutingEngine {
     }
 
     const minDepth = (dims.draft || 2.0) + this.config.safetyMarginDraft;
-
-    const bearingDeg = (
-      fromLat: number,
-      fromLon: number,
-      toLat: number,
-      toLon: number,
-    ): number => {
-      const dLon = ((toLon - fromLon) * Math.PI) / 180;
-      const lat1 = (fromLat * Math.PI) / 180;
-      const lat2 = (toLat * Math.PI) / 180;
-      const y = Math.sin(dLon) * Math.cos(lat2);
-      const x =
-        Math.cos(lat1) * Math.sin(lat2) -
-        Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
-      return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
-    };
 
     const improveNode = async (
       node: number,
@@ -2477,10 +2462,7 @@ export class RoutingEngine {
     // 50m spacing gives fine resolution; 60 samples caps at ~3 km per check.
     const numSamples = Math.min(60, Math.max(3, Math.ceil(dist / 50)));
 
-    if (
-      (this.db as any).isLineCrossingLand &&
-      (this.db as any).isLineCrossingLand(lat1, lon1, lat2, lon2, numSamples)
-    ) {
+    if (this.db.isLineCrossingLand(lat1, lon1, lat2, lon2, numSamples)) {
       return false;
     }
 

@@ -59,6 +59,11 @@ export function pluginConstructor(app: ServerAPI) {
   // Last position we ran an eager-load for; used to throttle so a moving
   // vessel doesn't re-evaluate coverage on every position delta.
   let lastEagerLoadPos: { lat: number; lon: number } | null = null;
+  // Lifecycle serialization — see runLifecycle(). Every transition that tears
+  // down or rebuilds the shared database/engine runs through it, one at a time,
+  // tagged with a generation so a superseded transition can drop its work.
+  let lifecycleGeneration = 0;
+  let lifecycleChain: Promise<void> = Promise.resolve();
 
   const pluginId = "signalk-routeiq";
   const __filename = new URL(import.meta.url).pathname;
@@ -89,9 +94,12 @@ export function pluginConstructor(app: ServerAPI) {
       } = (options ?? {}) as Record<string, unknown>;
       config = { ...DEFAULT_CONFIG, ...userOptions };
 
-      // Migrate legacy routingDatabase config to routingDataDir
-      if (!config.routingDataDir && (options as any).routingDatabase) {
-        config.routingDataDir = path.dirname((options as any).routingDatabase);
+      // Migrate legacy routingDatabase config to routingDataDir. Read through
+      // the normalized options above: the raw argument may be absent on a fresh
+      // start, and a non-string value would throw in path.dirname().
+      const legacyRoutingDatabase = userOptions.routingDatabase;
+      if (!config.routingDataDir && typeof legacyRoutingDatabase === "string") {
+        config.routingDataDir = path.dirname(legacyRoutingDatabase);
         console.log(
           `[routeiq] Migrated legacy routingDatabase → routingDataDir: ${config.routingDataDir}`,
         );
@@ -137,53 +145,19 @@ export function pluginConstructor(app: ServerAPI) {
       registerPlotterExtension(app, __plugindir);
       setPlotterExtensionRunning(true);
 
-      // Set hot-reload callback: when a new database is downloaded, re-init everything
-      handler.onReloadRequested = async (dataDir: string) => {
-        const currentDims = routingEngine?.vesselDims;
-        if (database) {
-          await database.close();
-          database = null;
-        }
-        routingEngine = null;
-
-        try {
-          database = new RoutingDatabase(
-            dataDir,
-            config.dynamicLoading,
-            config.maxLoadedRegions,
-          );
-          await database.init();
-          await database.loadGraph();
-          const stats = await database.getStats();
-          console.log(
-            `[routeiq] Database hot-reloaded: ${stats.nodes} nodes, ${stats.edges} edges, ${stats.pois} POIs`,
-          );
-
-          routingEngine = new RoutingEngine(database, config, currentDims);
-          routingEngine.setTidesClient(
-            new TidesClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase),
-          );
-          routingEngine.setCurrentsClient(
-            new CurrentsClient(
-              config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase,
-            ),
-          );
-          if (apiHandler) {
-            apiHandler.setComponents(database, routingEngine);
-          }
-          console.log(
-            "[routeiq] Routing engine hot-reloaded after database download",
-          );
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : "Unknown error";
-          console.error(`[routeiq] Hot-reload failed: ${message}`);
-          if (apiHandler) apiHandler.setInitError(message);
-        }
-      };
+      // Set hot-reload callback: when a new database is downloaded, re-init
+      // everything. Queued behind any in-flight transition, so a download that
+      // lands while startup is still loading the graph waits for it rather
+      // than racing it for the shared components.
+      handler.onReloadRequested = (dataDir: string) =>
+        runLifecycle("Hot reload", (generation) =>
+          reloadPluginAsync(dataDir, generation),
+        );
 
       // Re-initialize database/routing engine with (possibly updated) config
-      initPluginAsync(app);
+      void runLifecycle("Initialization", (generation) =>
+        initPluginAsync(app, generation),
+      );
     },
 
     /**
@@ -198,31 +172,10 @@ export function pluginConstructor(app: ServerAPI) {
       // stop offering it (presence == enabled per the extensions spec)
       setPlotterExtensionRunning(false);
 
-      // Unsubscribe from vessel dimensions
-      if (subscriptionCancelled) {
-        subscriptionCancelled();
-        subscriptionCancelled = null;
-      }
-      // Unsubscribe from navigation.position
-      if (positionSubscriptionCancelled) {
-        positionSubscriptionCancelled();
-        positionSubscriptionCancelled = null;
-      }
-      lastEagerLoadPos = null;
-
-      // Close database connection
-      if (database) {
-        await database.close();
-        database = null;
-      }
-
-      // Detach engine/db from apiHandler, but keep apiHandler alive
-      // so Express routes stay registered across stop/start cycles
-      if (apiHandler) {
-        (apiHandler as any).db = null;
-        (apiHandler as any).routingEngine = null;
-      }
-      routingEngine = null;
+      // Awaiting the transition means this resolves only once teardown is
+      // really done, as the server-api docs ask, instead of leaving the rest of
+      // the teardown to run after Signal K has already called start() again.
+      await runLifecycle("Teardown", () => teardownComponents());
 
       console.log("[routeiq] Plugin stopped");
     },
@@ -455,58 +408,246 @@ export function pluginConstructor(app: ServerAPI) {
   }
 
   /**
-   * Initialize plugin components asynchronously
+   * Run a lifecycle transition (initialization, teardown or hot reload) in
+   * isolation from every other one.
+   *
+   * Signal K calls stop() then start() on every config save and does not
+   * reliably await stop(), and the API fires hot reloads from Express handlers,
+   * so these transitions do overlap. They all mutate the same module-level
+   * database/engine/subscription state across awaits, which without
+   * serialization interleaves: a teardown resuming after `await db.close()`
+   * nulls out components a concurrent initialization has just published,
+   * leaving routing dead until the server restarts, and each transition leaks
+   * the other's worker thread.
+   *
+   * `fn` is queued behind whatever is already running, so only one transition
+   * ever writes the shared state. The generation is bumped synchronously on
+   * entry — before `fn` starts — so a transition already in flight can see it
+   * has been superseded and discard its work instead of publishing components
+   * that the queued transition would only have to undo.
    */
-  async function initPluginAsync(app: ServerAPI) {
+  function runLifecycle(
+    label: string,
+    fn: (generation: number) => Promise<void>,
+  ): Promise<void> {
+    const generation = ++lifecycleGeneration;
+    const run = lifecycleChain.then(() => fn(generation));
+    // Keep the chain usable after a failed transition and never leave an
+    // unhandled rejection on it; callers that care still get `run` itself.
+    lifecycleChain = run.then(
+      () => undefined,
+      (error) => {
+        console.error(`[routeiq] ${label} failed:`, error);
+      },
+    );
+    return run;
+  }
+
+  /** Install a vessel-dimensions unsubscribe, cancelling any previous one. */
+  function setDimensionsSubscription(cancel: (() => void) | null) {
+    if (subscriptionCancelled) subscriptionCancelled();
+    subscriptionCancelled = cancel;
+  }
+
+  /** Install a navigation.position unsubscribe, cancelling any previous one. */
+  function setPositionSubscription(cancel: (() => void) | null) {
+    if (positionSubscriptionCancelled) positionSubscriptionCancelled();
+    positionSubscriptionCancelled = cancel;
+  }
+
+  /**
+   * Close a database this transition built but never published. Nothing else
+   * holds a reference, so it would otherwise keep its worker thread alive.
+   */
+  async function discardDatabase(db: RoutingDatabase, reason: string) {
+    console.log(`[routeiq] Closing database from ${reason}`);
+    try {
+      await db.close();
+    } catch (error) {
+      console.warn("[routeiq] Failed to close discarded database:", error);
+    }
+  }
+
+  /**
+   * Drop all components and subscriptions. Only ever called inside
+   * runLifecycle(), so no initialization can be midway through publishing.
+   */
+  async function teardownComponents() {
+    setDimensionsSubscription(null);
+    setPositionSubscription(null);
+    lastEagerLoadPos = null;
+
+    // Unpublish before closing so no request can pick up a closing database
+    const db = database;
+    database = null;
+    routingEngine = null;
+    if (db) await db.close();
+
+    // Detach engine/db from apiHandler, but keep apiHandler alive
+    // so Express routes stay registered across stop/start cycles
+    if (apiHandler) {
+      (apiHandler as any).db = null;
+      (apiHandler as any).routingEngine = null;
+    }
+  }
+
+  /**
+   * Initialize plugin components asynchronously.
+   *
+   * The database and engine are built into locals and published only while this
+   * initialization is still the current one, so a superseded init closes what it
+   * built rather than handing a stale database to the API handler.
+   */
+  async function initPluginAsync(app: ServerAPI, generation: number) {
+    const isCurrent = () => generation === lifecycleGeneration;
+    let db: RoutingDatabase | null = null;
     try {
       if (!config.routingDataDir) {
         throw new Error("routingDataDir is not configured");
       }
-      database = new RoutingDatabase(
+      db = new RoutingDatabase(
         config.routingDataDir,
         config.dynamicLoading,
         config.maxLoadedRegions,
       );
-      await database.init();
-      await database.loadGraph();
-      const stats = await database.getStats();
+      await db.init();
+      await db.loadGraph();
+      if (!isCurrent()) {
+        await discardDatabase(db, "superseded initialization");
+        return;
+      }
+      const stats = await db.getStats();
       console.log(
         `[routeiq] Database loaded: ${stats.nodes} nodes, ${stats.edges} edges, ${stats.pois} POIs`,
       );
 
-      routingEngine = new RoutingEngine(database, config);
-      routingEngine.setTidesClient(
+      const engine = new RoutingEngine(db, config);
+      engine.setTidesClient(
         new TidesClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase),
       );
-      routingEngine.setCurrentsClient(
+      engine.setCurrentsClient(
         new CurrentsClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase),
       );
-      apiHandler!.setComponents(database, routingEngine);
+      if (!isCurrent()) {
+        await discardDatabase(db, "superseded initialization");
+        return;
+      }
+
+      // Publish. Past this point the components are shared state and a queued
+      // teardown owns closing them, so bailing out must not close them here.
+      database = db;
+      routingEngine = engine;
+      apiHandler!.setComponents(db, engine);
       console.log("[routeiq] API handler ready");
 
       // Fetch initial vessel dimensions synchronously (subscription may not fire for static values)
       await fetchInitialVesselDimensions(app);
 
       // Subscribe to future vessel dimension changes
-      await subscribeToVesselDimensions(app);
+      const cancelDimensions = await subscribeToVesselDimensions(app);
+      if (!isCurrent()) {
+        cancelDimensions?.();
+        return;
+      }
+      setDimensionsSubscription(cancelDimensions);
 
       // §4a: with dynamic loading on, boot the region under the vessel (and,
       // for a single-region install, the sole database) rather than an empty
       // graph, then keep it current via a navigation.position subscription.
       if (config.dynamicLoading) {
-        await database.eagerLoadIfSingle();
+        await db.eagerLoadIfSingle();
         if (config.eagerLoadAtPosition) {
           await fetchInitialPosition(app);
-          await subscribeToPosition(app);
+          const cancelPosition = await subscribeToPosition(app);
+          if (!isCurrent()) {
+            cancelPosition?.();
+            return;
+          }
+          setPositionSubscription(cancelPosition);
         }
       }
       console.log("[routeiq] Plugin started successfully");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       console.error(`[routeiq] Failed to initialize: ${message}`);
+      if (db && database !== db) {
+        await discardDatabase(db, "failed initialization");
+      }
       // Surface the error through the API so the frontend can show it rather
       // than polling forever on a 503. The app (map, data manager) stays usable.
-      apiHandler!.setInitError(message);
+      // A superseded init must not overwrite the live one's state.
+      if (isCurrent()) apiHandler!.setInitError(message);
+    }
+  }
+
+  /**
+   * Rebuild the database and engine against `dataDir` after a database download
+   * or delete.
+   *
+   * Subscriptions are deliberately left in place: their callbacks read the
+   * shared components, so re-pointing those is enough.
+   */
+  async function reloadPluginAsync(dataDir: string, generation: number) {
+    const isCurrent = () => generation === lifecycleGeneration;
+    if (!isCurrent()) {
+      // A teardown or a fresh initialization is already queued behind us, and
+      // `dataDir` is always config.routingDataDir, so that transition
+      // establishes the correct state for this directory anyway.
+      console.log("[routeiq] Skipping superseded hot reload");
+      return;
+    }
+
+    const currentDims = routingEngine?.vesselDims;
+    const previous = database;
+    database = null;
+    routingEngine = null;
+    if (previous) await previous.close();
+
+    let db: RoutingDatabase | null = null;
+    try {
+      db = new RoutingDatabase(
+        dataDir,
+        config.dynamicLoading,
+        config.maxLoadedRegions,
+      );
+      await db.init();
+      await db.loadGraph();
+      if (!isCurrent()) {
+        await discardDatabase(db, "superseded hot reload");
+        return;
+      }
+      const stats = await db.getStats();
+      console.log(
+        `[routeiq] Database hot-reloaded: ${stats.nodes} nodes, ${stats.edges} edges, ${stats.pois} POIs`,
+      );
+
+      const engine = new RoutingEngine(db, config, currentDims);
+      engine.setTidesClient(
+        new TidesClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase),
+      );
+      engine.setCurrentsClient(
+        new CurrentsClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase),
+      );
+      if (!isCurrent()) {
+        await discardDatabase(db, "superseded hot reload");
+        return;
+      }
+
+      database = db;
+      routingEngine = engine;
+      if (apiHandler) {
+        apiHandler.setComponents(db, engine);
+      }
+      console.log(
+        "[routeiq] Routing engine hot-reloaded after database download",
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      console.error(`[routeiq] Hot-reload failed: ${message}`);
+      if (db && database !== db) {
+        await discardDatabase(db, "failed hot reload");
+      }
+      if (apiHandler && isCurrent()) apiHandler.setInitError(message);
     }
   }
 
@@ -571,9 +712,14 @@ export function pluginConstructor(app: ServerAPI) {
   }
 
   /**
-   * Subscribe to vessel dimensions from Signal K delta tree
+   * Subscribe to vessel dimensions from Signal K delta tree.
+   *
+   * Returns the unsubscribe callback rather than installing it, so the caller
+   * can drop it if its initialization has meanwhile been superseded.
    */
-  async function subscribeToVesselDimensions(app: ServerAPI) {
+  async function subscribeToVesselDimensions(
+    app: ServerAPI,
+  ): Promise<(() => void) | null> {
     try {
       const app_ = app as unknown as SkAppSurface;
       if (typeof app_.subscriptionmanager?.subscribe === "function") {
@@ -595,7 +741,7 @@ export function pluginConstructor(app: ServerAPI) {
             handleVesselUpdate(update);
           },
         );
-        subscriptionCancelled = () => {
+        return () => {
           unsubscribeFns.forEach((fn) => fn());
         };
       } else if (typeof app_.subscribe === "function") {
@@ -608,7 +754,7 @@ export function pluginConstructor(app: ServerAPI) {
             { path: "design.airHeight" },
           ],
         };
-        subscriptionCancelled = app_.subscribe(subscription, (update: any) => {
+        return app_.subscribe(subscription, (update: any) => {
           handleVesselUpdate(update);
         });
       }
@@ -618,6 +764,7 @@ export function pluginConstructor(app: ServerAPI) {
         error,
       );
     }
+    return null;
   }
 
   /**
@@ -648,7 +795,9 @@ export function pluginConstructor(app: ServerAPI) {
    * Subscribe to navigation.position and eager-load the covering region as the
    * vessel moves (throttled via maybeEagerLoad).
    */
-  async function subscribeToPosition(app: ServerAPI) {
+  async function subscribeToPosition(
+    app: ServerAPI,
+  ): Promise<(() => void) | null> {
     try {
       const app_ = app as unknown as SkAppSurface;
       if (typeof app_.subscriptionmanager?.subscribe === "function") {
@@ -667,7 +816,7 @@ export function pluginConstructor(app: ServerAPI) {
             handlePositionUpdate(update);
           },
         );
-        positionSubscriptionCancelled = () => {
+        return () => {
           unsubscribeFns.forEach((fn) => fn());
         };
       } else if (typeof app_.subscribe === "function") {
@@ -675,12 +824,9 @@ export function pluginConstructor(app: ServerAPI) {
           context: "vessels.self",
           subscribe: [{ path: "navigation.position" }],
         };
-        positionSubscriptionCancelled = app_.subscribe(
-          subscription,
-          (update: any) => {
-            handlePositionUpdate(update);
-          },
-        );
+        return app_.subscribe(subscription, (update: any) => {
+          handlePositionUpdate(update);
+        });
       }
     } catch (error) {
       console.warn(
@@ -688,6 +834,7 @@ export function pluginConstructor(app: ServerAPI) {
         error,
       );
     }
+    return null;
   }
 
   /** Extract {lat, lon} from a Signal K position value (handles {value:{latitude,longitude}} and plain shapes). */

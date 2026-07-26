@@ -34,6 +34,17 @@ interface SkResourcesApp {
   };
 }
 
+/** A coordinate as it arrives from a client: leaflet `{lat, lng}`, `{lat, lon}`
+ *  or the canonical `{latitude, longitude}`. Every field is optional because
+ *  this is unvalidated request body — the handlers narrow it before use. */
+interface LooseCoordinate {
+  latitude?: number;
+  longitude?: number;
+  lat?: number;
+  lng?: number;
+  lon?: number;
+}
+
 /** Cap on `via` array length — each via point triggers a sequential A* search,
  *  and /route is unauthenticated, so an unbounded array is a CPU DoS vector. */
 const MAX_VIA_POINTS = 25;
@@ -289,7 +300,7 @@ export class ApiHandler {
   private async handleRoute(
     req: Request,
     res: Response,
-    next: NextFunction,
+    _next: NextFunction,
   ): Promise<void> {
     if (!this.isReady()) {
       res
@@ -308,7 +319,7 @@ export class ApiHandler {
       }
 
       // Normalize leaflet {lat, lng} / {lat, lon} to {latitude, longitude}
-      const norm = (p: any) => {
+      const norm = (p: LooseCoordinate) => {
         if (typeof p.latitude !== "number") p.latitude = p.lat;
         if (typeof p.longitude !== "number") p.longitude = p.lng ?? p.lon;
       };
@@ -1540,8 +1551,13 @@ export class ApiHandler {
           console.warn(
             `[routeiq] Rename blocked (${code}); closing database handles and retrying`,
           );
-          await this.db!.close();
-          closedForRename = true;
+          // No database when a previous init failed — exactly the case where
+          // the user re-downloads to repair it, so there are no handles to drop
+          // and closing must not throw over the retry.
+          if (this.db) {
+            await this.db.close();
+            closedForRename = true;
+          }
           await fs.promises.rename(tmpPath, destPath);
         }
       } catch (e) {

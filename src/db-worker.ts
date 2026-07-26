@@ -479,17 +479,20 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
           const insertRev = db.prepare(
             "INSERT OR IGNORE INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode) VALUES (?,?,?,?,?,?,?,?,?,?)",
           );
+          // Prepared once: node:sqlite compiles a fresh statement per
+          // prepare() call, so leaving these in the loop recompiles both on
+          // every edge.
+          const selectReverse = db.prepare(
+            "SELECT 1 FROM edges WHERE source=? AND target=?",
+          );
+          const selectDeleted = db.prepare(
+            "SELECT 1 FROM deleted_edges WHERE source=? AND target=?",
+          );
           let backfilled = 0;
           for (const e of fwdEdges) {
-            const rev = db
-              .prepare("SELECT 1 FROM edges WHERE source=? AND target=?")
-              .get(e.target, e.source);
+            const rev = selectReverse.get(e.target, e.source);
             if (rev) continue;
-            const wasDeleted = db
-              .prepare(
-                "SELECT 1 FROM deleted_edges WHERE source=? AND target=?",
-              )
-              .get(e.target, e.source);
+            const wasDeleted = selectDeleted.get(e.target, e.source);
             if (wasDeleted) continue;
             insertRev.run(
               e.target,
