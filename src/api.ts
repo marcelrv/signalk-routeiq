@@ -148,6 +148,19 @@ export class ApiHandler {
     console.log("[routeiq] API handler components updated");
   }
 
+  /**
+   * Release the database and engine, leaving the router mounted.
+   *
+   * Must be called *before* closing a database that is being swapped out: these
+   * references are what isReady() consults, so leaving them in place over a
+   * close lets concurrent requests through to a closed database instead of
+   * answering a clean 503 for the duration of the swap.
+   */
+  clearComponents(): void {
+    this.db = null;
+    this.routingEngine = null;
+  }
+
   setInitError(message: string): void {
     this.initError = message;
   }
@@ -1555,7 +1568,11 @@ export class ApiHandler {
           // the user re-downloads to repair it, so there are no handles to drop
           // and closing must not throw over the retry.
           if (this.db) {
-            await this.db.close();
+            const closing = this.db;
+            // Unpublish first: requests must not reach a closed database while
+            // the rename and the hot-reload below run.
+            this.clearComponents();
+            await closing.close();
             closedForRename = true;
           }
           await fs.promises.rename(tmpPath, destPath);

@@ -443,29 +443,61 @@ export function pluginConstructor(app: ServerAPI) {
     return run;
   }
 
+  /**
+   * Run an unsubscribe callback. These come from the Signal K subscription
+   * manager, so a throw here must not abort the teardown that called it and
+   * leave the database open.
+   */
+  function cancelSubscription(cancel: (() => void) | null, what: string) {
+    if (!cancel) return;
+    try {
+      cancel();
+    } catch (error) {
+      console.warn(`[routeiq] Failed to unsubscribe from ${what}:`, error);
+    }
+  }
+
   /** Install a vessel-dimensions unsubscribe, cancelling any previous one. */
   function setDimensionsSubscription(cancel: (() => void) | null) {
-    if (subscriptionCancelled) subscriptionCancelled();
+    cancelSubscription(subscriptionCancelled, "vessel dimensions");
     subscriptionCancelled = cancel;
   }
 
   /** Install a navigation.position unsubscribe, cancelling any previous one. */
   function setPositionSubscription(cancel: (() => void) | null) {
-    if (positionSubscriptionCancelled) positionSubscriptionCancelled();
+    cancelSubscription(positionSubscriptionCancelled, "navigation.position");
     positionSubscriptionCancelled = cancel;
   }
 
   /**
-   * Close a database this transition built but never published. Nothing else
-   * holds a reference, so it would otherwise keep its worker thread alive.
+   * Close a database that is being dropped, whether it was ever published or
+   * not. Failures are logged rather than thrown: every caller is on a teardown
+   * or swap path where propagating would leave the plugin unready with no
+   * database at all, and nothing else holds a reference to close later.
    */
   async function discardDatabase(db: RoutingDatabase, reason: string) {
-    console.log(`[routeiq] Closing database from ${reason}`);
+    console.log(`[routeiq] Closing database (${reason})`);
     try {
       await db.close();
     } catch (error) {
-      console.warn("[routeiq] Failed to close discarded database:", error);
+      console.warn("[routeiq] Failed to close database:", error);
     }
+  }
+
+  /**
+   * Release and close whatever is currently published, if anything.
+   *
+   * The API handler is unpublished *before* the close, so requests answer a
+   * clean 503 for the duration instead of reaching a closed database. The
+   * handler itself stays alive so its Express routes remain registered across
+   * stop/start cycles.
+   */
+  async function unpublishComponents(reason: string) {
+    const previous = database;
+    database = null;
+    routingEngine = null;
+    apiHandler?.clearComponents();
+    if (previous) await discardDatabase(previous, reason);
   }
 
   /**
@@ -476,19 +508,7 @@ export function pluginConstructor(app: ServerAPI) {
     setDimensionsSubscription(null);
     setPositionSubscription(null);
     lastEagerLoadPos = null;
-
-    // Unpublish before closing so no request can pick up a closing database
-    const db = database;
-    database = null;
-    routingEngine = null;
-    if (db) await db.close();
-
-    // Detach engine/db from apiHandler, but keep apiHandler alive
-    // so Express routes stay registered across stop/start cycles
-    if (apiHandler) {
-      (apiHandler as any).db = null;
-      (apiHandler as any).routingEngine = null;
-    }
+    await unpublishComponents("plugin teardown");
   }
 
   /**
@@ -528,6 +548,12 @@ export function pluginConstructor(app: ServerAPI) {
       engine.setCurrentsClient(
         new CurrentsClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase),
       );
+
+      // Release anything a previous initialization published. Signal K normally
+      // calls stop() first, but two start()s without one would otherwise drop a
+      // live database — and its worker thread — out of teardown's reach.
+      await unpublishComponents("replaced by a new initialization");
+
       if (!isCurrent()) {
         await discardDatabase(db, "superseded initialization");
         return;
@@ -546,7 +572,7 @@ export function pluginConstructor(app: ServerAPI) {
       // Subscribe to future vessel dimension changes
       const cancelDimensions = await subscribeToVesselDimensions(app);
       if (!isCurrent()) {
-        cancelDimensions?.();
+        cancelSubscription(cancelDimensions, "vessel dimensions");
         return;
       }
       setDimensionsSubscription(cancelDimensions);
@@ -560,7 +586,7 @@ export function pluginConstructor(app: ServerAPI) {
           await fetchInitialPosition(app);
           const cancelPosition = await subscribeToPosition(app);
           if (!isCurrent()) {
-            cancelPosition?.();
+            cancelSubscription(cancelPosition, "navigation.position");
             return;
           }
           setPositionSubscription(cancelPosition);
@@ -598,10 +624,11 @@ export function pluginConstructor(app: ServerAPI) {
     }
 
     const currentDims = routingEngine?.vesselDims;
-    const previous = database;
-    database = null;
-    routingEngine = null;
-    if (previous) await previous.close();
+    // Unpublishes the API handler too, so requests answer 503 for the duration
+    // of the swap rather than reaching the database being closed. A failing
+    // close is logged, not thrown: propagating here would leave the plugin with
+    // no database and no attempt to load the new one.
+    await unpublishComponents("replaced by hot reload");
 
     let db: RoutingDatabase | null = null;
     try {

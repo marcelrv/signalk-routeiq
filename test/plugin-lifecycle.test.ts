@@ -100,11 +100,36 @@ describe('plugin lifecycle serialization', () => {
     });
   }
 
-  /** Live db-worker threads; a superseded transition that leaks one shows here. */
+  /**
+   * Live db-worker threads. Each RoutingDatabase spawns one worker, which the
+   * event loop reports as a 'MessagePort' handle — that is the label
+   * getActiveResourcesInfo() gives it, not 'Worker'. Always compared against a
+   * baseline taken in the same test, since the runner holds handles of its own.
+   */
   function workerCount(): number {
     return process
       .getActiveResourcesInfo()
-      .filter((r) => r === 'Worker' || r === 'Thread').length;
+      .filter((r) => r === 'MessagePort').length;
+  }
+
+  /**
+   * worker.terminate() is asynchronous, so a count sampled straight after
+   * close() can still include a worker on its way out. Wait for it to hold
+   * steady, the same way readiness is sampled.
+   */
+  async function settledWorkerCount(deadlineMs = 20000) {
+    const stable = 5;
+    const deadline = Date.now() + deadlineMs;
+    let last = -1;
+    let repeats = 0;
+    while (Date.now() < deadline) {
+      const count = workerCount();
+      repeats = count === last ? repeats + 1 : 0;
+      last = count;
+      if (repeats >= stable) return count;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return last;
   }
 
   /**
@@ -156,7 +181,7 @@ describe('plugin lifecycle serialization', () => {
     const plugin = pluginConstructor(fakeApp());
     const router = captureApiRouter(plugin);
     const options = { routingDataDir: dataDir };
-    const before = workerCount();
+    const before = await settledWorkerCount();
 
     // Three initializations racing: only the last may end up owning a worker.
     plugin.start(options);
@@ -164,17 +189,42 @@ describe('plugin lifecycle serialization', () => {
     plugin.start(options);
     assert.strictEqual(await settledStatus(router), 200);
 
-    assert.ok(
-      workerCount() <= before + 1,
-      `expected at most one live db-worker, saw ${workerCount() - before} extra`,
+    assert.strictEqual(
+      await settledWorkerCount(),
+      before + 1,
+      'the two superseded initializations must each close the database they built',
     );
 
     // stop() must resolve only once teardown is complete, so no worker outlives it
     await plugin.stop();
     assert.strictEqual(
-      workerCount(),
+      await settledWorkerCount(),
       before,
       'stop() must close every database it opened',
     );
+  });
+
+  it('closes the published database when a start replaces it without a stop', async () => {
+    const plugin = pluginConstructor(fakeApp());
+    const router = captureApiRouter(plugin);
+    const options = { routingDataDir: dataDir };
+    const before = await settledWorkerCount();
+
+    // Let the first initialization publish fully, so the second one replaces a
+    // live database rather than superseding an in-flight one.
+    plugin.start(options);
+    assert.strictEqual(await settledStatus(router), 200);
+    assert.strictEqual(await settledWorkerCount(), before + 1);
+
+    plugin.start(options);
+    assert.strictEqual(await settledStatus(router), 200);
+    assert.strictEqual(
+      await settledWorkerCount(),
+      before + 1,
+      'replacing a published database must close it, not leave its worker running beyond the reach of teardown',
+    );
+
+    await plugin.stop();
+    assert.strictEqual(await settledWorkerCount(), before);
   });
 });
