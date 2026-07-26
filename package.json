@@ -3,6 +3,15 @@
   "version": "0.1.0-alpha.1",
   "description": "SignalK Nautical Route Planner - Offline tide and vessel-aware routing",
   "license": "Apache-2.0",
+  "author": "Marcel Verpaalen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marcelrv/signalk-routeiq.git"
+  },
+  "bugs": {
+    "url": "https://github.com/marcelrv/signalk-routeiq/issues"
+  },
+  "homepage": "https://github.com/marcelrv/signalk-routeiq#readme",
   "keywords": ["signalk-node-server-plugin", "signalk-webapp"],
   "files": [
     "dist",
@@ -17,10 +26,10 @@
     "displayName": "RouteIQ",
     "appIcon": "icon.svg",
     "screenshots": [
-      "./img/webapp-route.png",
-      "./img/freeboard-plugin.png",
-      "./img/freeboard-tides.png",
-      "./img/download-manager.png"
+      "./img/webapp-route.jpg",
+      "./img/freeboard-plugin.jpg",
+      "./img/freeboard-tides.jpg",
+      "./img/download-manager.jpg"
     ],
     "recommends": ["signalk-tidal-currents", "signalk-tides", "@signalk/freeboard-sk"]
   },
@@ -35,7 +44,7 @@
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
-    "test": "node --test --test-force-exit dist-test/routing.test.js dist-test/navmesh.test.js dist-test/navmesh-integration.test.js dist-test/zeelandbrug.test.js dist-test/bbox-penalty-retry.test.js dist-test/via-disconnected-leg.test.js dist-test/dynamic-loading.test.js dist-test/vessel-validation.test.js dist-test/plugin-registration.test.js",
+    "test": "node --test --experimental-sqlite --test-force-exit dist-test/routing.test.js dist-test/navmesh.test.js dist-test/navmesh-integration.test.js dist-test/zeelandbrug.test.js dist-test/bbox-penalty-retry.test.js dist-test/via-disconnected-leg.test.js dist-test/dynamic-loading.test.js dist-test/vessel-validation.test.js dist-test/plugin-registration.test.js",
     "test:unit": "node --test --test-force-exit dist-test/unit/*.test.js",
     "test:integration": "node --test --test-force-exit dist-test/integration/*.test.js",
     "deploy": "bash deploy.sh",
@@ -63,7 +72,7 @@
     "pluginConstructor": "pluginConstructor",
     "name": "signalk-routeiq",
     "description": "Offline nautical route planner with tide and vessel-aware A* pathfinding",
-    "url": "https://github.com/signalk/signalk-routeiq",
+    "url": "https://github.com/marcelrv/signalk-routeiq",
     "scope": "route",
     "configSchema": {
       "type": "object",

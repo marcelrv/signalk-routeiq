@@ -20,6 +20,17 @@
 - Added: four App Store screenshots under `img/`, declared in
   `signalk.screenshots` and shipped via `files`. Regenerate them with
   `./scripts/screenshots.sh`.
+- Added: `repository`, `bugs`, `homepage` and `author` to `package.json`. The
+  App Store derives its GitHub and Issues links from these, and the registry
+  clones the repository to run the test suite — without them a plugin scores
+  zero for tests however many it actually has.
+- Changed: CI now calls the shared `SignalK/signalk-server` plugin-CI reusable
+  workflow (with a separate lint job), which is what the App Store registry
+  credits. armv7 is disabled there: it runs Node 20, which has no `node:sqlite`
+  and rejects `--experimental-sqlite` outright.
+- Changed: `--experimental-sqlite` moved from CI's `NODE_OPTIONS` into the
+  `test` script, so tests run identically on Windows and macOS runners.
+- Fixed: `signalK.url` pointed at the wrong GitHub owner.
 - Docs: the tide settings and README no longer describe `signalk-tides` as
   required. Both tide sources are optional and independent — with neither
   installed, routes fall back to plain distance.

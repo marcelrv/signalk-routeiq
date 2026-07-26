@@ -30,10 +30,13 @@ const SK_USERNAME = process.env.SK_USERNAME || '';
 const SK_PASSWORD = process.env.SK_PASSWORD || '';
 const OUT_DIR = process.env.OUT_DIR || 'img';
 const [VW, VH] = (process.env.VIEWPORT || '1600x1000').split('x').map(Number);
-// Captured at 2× the viewport, then downsampled to this width. Supersampling
-// keeps small chart labels and the itinerary text crisp, and 1920 matches what
-// the other Signal K plugins ship for App Store screenshots.
-const OUT_WIDTH = Number(process.env.OUT_WIDTH || 1920);
+// App Store screenshots must be JPEG, at most 1280x800, at most 500 KB. The
+// 1600x1000 viewport shares 1280x800's 1.6 aspect, so width alone fixes both
+// dimensions. Captured at 2x and supersampled down, which keeps chart labels
+// and itinerary text legible at this size.
+const OUT_WIDTH = Number(process.env.OUT_WIDTH || 1280);
+const OUT_QUALITY = Number(process.env.OUT_QUALITY || 82);
+const MAX_BYTES = 500 * 1024;
 
 const ROUTEIQ_APP = `${SK_URL}/signalk-routeiq/`;
 const FREEBOARD_APP = `${SK_URL}/@signalk/freeboard-sk/`;
@@ -153,15 +156,26 @@ async function planZeelandRoute(page, attempt = 0) {
 
 async function shoot(page, name) {
   await fs.mkdir(OUT_DIR, { recursive: true });
-  const file = path.join(OUT_DIR, `${name}.png`);
+  const file = path.join(OUT_DIR, `${name}.jpg`);
   const raw = await page.screenshot();
-  const out = await sharp(raw)
-    .resize({ width: OUT_WIDTH, withoutEnlargement: true })
-    .png({ compressionLevel: 9, palette: true })
-    .toBuffer();
+
+  // Step the quality down if the first encode overshoots the 500 KB cap, so a
+  // busy chart can't quietly ship an oversized asset.
+  let out;
+  let quality = OUT_QUALITY;
+  for (;;) {
+    out = await sharp(raw)
+      .resize({ width: OUT_WIDTH, withoutEnlargement: true })
+      .jpeg({ quality, mozjpeg: true })
+      .toBuffer();
+    if (out.length <= MAX_BYTES || quality <= 55) break;
+    quality -= 7;
+  }
+
   await fs.writeFile(file, out);
   const { width, height } = await sharp(out).metadata();
-  log(`wrote ${file} (${width}x${height}, ${Math.round(out.length / 1024)} KB)`);
+  const kb = Math.round(out.length / 1024);
+  log(`wrote ${file} (${width}x${height}, q${quality}, ${kb} KB)${kb > 500 ? ' OVER 500 KB' : ''}`);
 }
 
 /** POST to the RouteIQ API with the logged-in context. */

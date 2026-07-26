@@ -25,6 +25,15 @@ An offline-first, vessel-aware nautical route planner designed to run natively a
 - **Chart Selection**: Nautical charts via Signal K's `resources/charts` API (raster and S-57 vector), plus built-in OpenStreetMap / OpenSeaMap
 - **Downloadable Routing Data**: Fetch pre-compiled regional routing databases on demand from within the app — no manual data prep required
 
+## Screenshots
+
+<!-- Absolute raw URLs, not relative paths, so these also render on npmjs.com. -->
+
+| | |
+|---|---|
+| ![Route planning in the RouteIQ web app](https://raw.githubusercontent.com/marcelrv/signalk-routeiq/main/img/webapp-route.jpg)<br>Planning a route through the Zeeland delta | ![RouteIQ panel inside Freeboard-SK](https://raw.githubusercontent.com/marcelrv/signalk-routeiq/main/img/freeboard-plugin.jpg)<br>Running as a Freeboard-SK plotter extension |
+| ![Tide-aware planning with a departure scan](https://raw.githubusercontent.com/marcelrv/signalk-routeiq/main/img/freeboard-tides.jpg)<br>Tide-aware routing with a 24 h departure scan | ![Routing Data Manager](https://raw.githubusercontent.com/marcelrv/signalk-routeiq/main/img/download-manager.jpg)<br>Downloading and managing regional routing data |
+
 ## How It Works
 
 RouteIQ is made up of three pieces:

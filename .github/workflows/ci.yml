@@ -7,7 +7,33 @@ on:
     branches: [main]
 
 jobs:
+  # The shared Signal K reusable workflow is what the App Store registry
+  # credits — a hand-rolled equivalent scores the -10 "no plugin-CI workflow"
+  # penalty. The penalty only clears once a run referencing this workflow
+  # exists on the exact commit SHA published to npm, so commit this before
+  # bumping the version.
+  #
+  # armv7 (Cerbo GX) is off because that leg runs Node 20, which cannot run
+  # this plugin at all: node:sqlite does not exist there and
+  # --experimental-sqlite is rejected outright as a bad option. package.json
+  # already declares engines >= 22.5.0.
+  #
+  # format-check-command is deliberately unset — it is blocking when set, and
+  # prettier currently reports style issues in 11 files. Run `npm run format`
+  # and then wire it up.
   test:
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@master
+    with:
+      enable-armv7: false
+
+  # Not part of the reusable workflow — it takes test/build/format commands
+  # but has no lint input, and a job that `uses:` a reusable workflow cannot
+  # also declare steps. So lint runs as a sibling job.
+  #
+  # Errors fail the build, warnings do not. There is a backlog of
+  # no-explicit-any / no-unused-vars warnings; add --max-warnings once that
+  # is cleared, to stop it growing again.
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,8 +45,4 @@ jobs:
 
       - run: npm ci
 
-      - run: npm run build
-
-      - run: npm test
-        env:
-          NODE_OPTIONS: --experimental-sqlite
+      - run: npm run lint
