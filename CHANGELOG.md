@@ -6,6 +6,30 @@
   The API handler was only created in `start()`, so on an install that was not
   yet enabled `registerWithRouter()` threw and Signal K never mounted the plugin
   router — taking its own `POST /plugins/signalk-routeiq/config` route with it.
+- Fixed: saving the plugin configuration could leave routing unavailable until
+  the Signal K server was restarted, with every route request answering
+  "Routing engine not ready, still initializing". Signal K stops and restarts the
+  plugin on each save, and the two halves could overlap — the shutdown
+  discarding the routing database the restart had just finished loading.
+- Fixed: downloading or deleting a routing database while the plugin was still
+  starting up, or while another download was completing, could leave routing
+  unavailable the same way, and left the abandoned database's worker thread
+  running — one per occurrence — for as long as the server stayed up.
+- Fixed: route requests arriving while a routing database was being swapped in
+  (after a download or delete) could reach that database as it was closing,
+  instead of getting a plain "not ready" answer for the moment the swap takes.
+- Fixed: on Windows, re-downloading a routing database after a failed startup
+  reported an internal error instead of retrying the file replacement. The retry
+  path assumed a database was already open, which is exactly what is not true
+  when the download is meant to repair a broken one.
+- Changed: stopping or disabling the plugin now finishes closing its routing
+  database before Signal K moves on, so a stop immediately followed by a start
+  can no longer trip over itself, and a database left over from an earlier start
+  is always closed rather than abandoned.
+- Changed: routes to a destination that sits away from the routing network skip
+  a redundant nearest-waterway search, and opening a user-edits overlay now
+  prepares its queries once instead of once per edge. Both are faster, with
+  identical results.
 - Fixed: the Freeboard-SK plotter extension assets (`plotterext/`) were missing
   from the published package, so the RouteIQ panel failed to load in Freeboard-SK
   on an npm install.
