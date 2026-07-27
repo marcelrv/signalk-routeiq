@@ -3980,7 +3980,14 @@ label.switch-row {
   function doConnect() {
     setConnected(false);
 
-    const connectUrl = getApiBase() + '/signalk/v1/api/router/stats';
+    // Probe /databases/status, NOT /stats. /stats answers 503 until a routing
+    // graph is loaded, so on a fresh install with no database installed it can
+    // never succeed: the retry loop below spun forever on "Waiting for
+    // server...", checkDbStatus() was never reached, and the user was never
+    // offered the Data Manager they needed in order to download anything.
+    // /databases/status is deliberately built to always answer 200 with an
+    // initError field (see handleDatabasesStatus) for exactly this purpose.
+    const connectUrl = getApiBase() + '/signalk/v1/api/router/databases/status';
     var retryEl = document.getElementById('loading-retry');
     var subtitleEl = document.getElementById('loading-subtitle');
     var dotsEl = document.getElementById('loading-dots');
@@ -4043,35 +4050,37 @@ label.switch-row {
       stop();
     }
 
-    function showError(msg, isNoDatabases) {
+    function showError(msg) {
       if (spinnerEl) spinnerEl.style.display = 'none';
       if (dotsEl) { dotsEl.className = ''; dotsEl.textContent = ''; }
-      if (titleEl) titleEl.textContent = isNoDatabases ? 'No Routing Data' : 'Routing Data Error';
-      if (titleEl) titleEl.style.color = isNoDatabases ? '#f59e0b' : '#ef4444';
-      if (subtitleEl) subtitleEl.textContent = isNoDatabases
-        ? 'No routing databases are installed. Use the Data Manager to download one.'
-        : 'The routing database failed to load. The map is still available.';
+      if (titleEl) { titleEl.textContent = 'Routing Data Error'; titleEl.style.color = '#ef4444'; }
+      if (subtitleEl) subtitleEl.textContent = 'The routing database failed to load. The map is still available.';
       if (dbsEl) dbsEl.textContent = '';
       if (retryEl) retryEl.classList.remove('visible');
-      if (errorDetailEl && msg && !isNoDatabases) {
+      if (errorDetailEl && msg) {
         errorDetailEl.textContent = msg;
         errorDetailEl.style.display = '';
       }
       if (dismissBtn) {
-        dismissBtn.textContent = isNoDatabases ? 'Continue (open Data Manager later)' : 'Continue without routing';
+        dismissBtn.textContent = 'Continue without routing';
         dismissBtn.style.display = '';
-        dismissBtn.onclick = function() {
-          dismissOverlay();
-          if (isNoDatabases) {
-            // Auto-open data manager so user can immediately download
-            setTimeout(function() {
-              var btn = document.getElementById('manage-data-btn');
-              if (btn) btn.click();
-            }, 600);
-          }
-        };
+        dismissBtn.onclick = dismissOverlay;
       }
       stopped = true; // stop polling
+    }
+
+    /**
+     * Nothing installed yet — the only useful next action is downloading a
+     * region, so go straight there rather than parking the user on an overlay
+     * with a button they have to find first. This is the first-run path.
+     */
+    function jumpToDownloadManager() {
+      stopped = true; // stop polling before the elements are released
+      dismissOverlay();
+      showToast('No routing data installed yet — choose a region to download', 'info');
+      // dmOpen is a hoisted declaration further down this same scope, and this
+      // only runs once a fetch has resolved, so it is defined by now.
+      dmOpen('available');
     }
 
     function poll() {
@@ -4090,9 +4099,18 @@ label.switch-row {
           }
           // Init failed with a known error
           if (status.initError) {
-            var isNoDatabases = status.filenames && status.filenames.length === 0
-              && (status.initError.toLowerCase().includes('no .sqlite') || status.initError.toLowerCase().includes('no routing'));
-            showError(status.initError, isNoDatabases);
+            // "No .sqlite files found in routing data directory: ..." (and the
+            // unreadable-directory variant) mean nothing is installed yet, which
+            // is the normal first-run state rather than a failure.
+            var err = status.initError.toLowerCase();
+            var noDatabases = status.filenames && status.filenames.length === 0
+              && (err.includes('no .sqlite') || err.includes('no routing')
+                  || err.includes('cannot read routing data directory'));
+            if (noDatabases) {
+              jumpToDownloadManager();
+              return;
+            }
+            showError(status.initError);
             return;
           }
           var loadedCount = (status.filenames && status.filenames.length) || 0;
@@ -4116,8 +4134,8 @@ label.switch-row {
               setTimeout(function() { var ov = document.getElementById('loading-overlay'); if (ov) ov.style.display = 'none'; }, 500);
             }, 800);
           } else if (!status.loaded && loadedCount === 0 && availableCount === 0) {
-            // No databases at all — not an error, just empty install
-            showError(null, true);
+            // No databases at all — not an error, just an empty install
+            jumpToDownloadManager();
           } else {
             if (subtitleEl) subtitleEl.textContent = 'Loading routing graph...';
             setTimeout(poll, 1000);
@@ -6535,6 +6553,11 @@ label.switch-row {
         dmFetchInstalled();
         document.querySelector('.dm-tab[data-tab="installed"]').click();
         if (coverageVisible) fetchCoverage();
+        // The server hot-reloads the engine during this request, so endpoints
+        // that answer 503 until it is ready work from now on. On a first run
+        // they were all rejected at connect time, leaving the boat panel empty
+        // with nothing to refill it short of a page reload.
+        fetchBoatData();
       } else {
         btn.textContent = 'Download';
         btn.disabled = false;
@@ -6616,8 +6639,16 @@ label.switch-row {
   }
 
   // Modal open/close
-  document.getElementById('manage-data-btn').addEventListener('click', function() {
+  // Named (and hoisted) so the first-run path in checkDbStatus() can open the
+  // Data Manager directly instead of synthesising a click on the menu button.
+  function dmOpen(tab) {
     document.getElementById('data-manager-modal').style.display = '';
+    if (tab) {
+      // Reuse the tab button's own handler so the active-tab styling, the
+      // dmActiveTab bookkeeping and the map re-render all stay in one place.
+      var tabBtn = document.querySelector('.dm-tab[data-tab="' + tab + '"]');
+      if (tabBtn) tabBtn.click();
+    }
     dmLoadCoastline();
     dmFetchAvailable();
     dmFetchInstalled();
@@ -6627,6 +6658,10 @@ label.switch-row {
       dmInitMap();
       if (dmMap) dmMap.invalidateSize();
     }, 0);
+  }
+
+  document.getElementById('manage-data-btn').addEventListener('click', function() {
+    dmOpen();
   });
 
   function dmClose() {
