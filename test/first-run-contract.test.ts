@@ -140,7 +140,17 @@ describe('first-run API contract with no databases installed', () => {
     plugin.start({ routingDataDir: emptyDataDir });
 
     try {
-      await waitForInitError(router);
+      // Assert the precondition rather than assuming it: waitForInitError()
+      // returns whether or not the error arrived, so without this a startup that
+      // merely stalled would also leave /stats at 503 and pass this test for the
+      // wrong reason.
+      const { body } = await waitForInitError(router);
+      assert.match(
+        (body && body.initError) || '',
+        /no \.sqlite/i,
+        'precondition: startup must have failed because no databases are installed',
+      );
+
       const { status } = await get(router, '/stats');
       assert.strictEqual(
         status,
