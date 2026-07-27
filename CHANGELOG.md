@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.3 — 2026-07-27
 
 - Fixed: a first-time install could never reach the Data Manager, so there was
   no way to download the first routing database. With none installed the app sat
@@ -11,6 +11,15 @@
 - Fixed: vessel dimensions stayed blank after that first download until the page
   was reloaded, because they had been requested once at startup while the
   routing engine was still unavailable.
+- Changed: releasing now points npm's `latest` tag at the published pre-release
+  for as long as no stable version exists, so `npm install signalk-routeiq` and
+  the App Store resolve to the current build instead of whichever one happened to
+  be tagged first. Once a stable version ships, pre-releases stop touching
+  `latest`. A manual `workflow_dispatch` can also repoint a tag after the fact.
+- Fixed: `./scripts/screenshots.sh` could produce a passing screenshot of a
+  failed route — the waits for the route summary and the departure scan swallowed
+  their own timeouts. They now fail the shot, which captures a `*.FAILED` image
+  for diagnosis instead of publishing a misleading one.
 
 ## 0.1.0-alpha.2 — 2026-07-26
 
