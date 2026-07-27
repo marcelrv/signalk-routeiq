@@ -14,10 +14,24 @@ set -euo pipefail
 #
 # Credentials come from the environment:
 #   SK_USERNAME=admin SK_PASSWORD=secret ./scripts/screenshots.sh
+#
+# …or from .env.local in the repo root, so a dev server's login only has to be
+# written down once. That file is gitignored and must stay that way — see
+# .env.example for the keys it may set.
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PW_VERSION="${PW_VERSION:-1.59.1}"
 PW_IMAGE="mcr.microsoft.com/playwright:v${PW_VERSION}-noble"
+
+# Only consulted when the environment hasn't supplied both credentials, so an
+# inline SK_USERNAME=… SK_PASSWORD=… still wins over the file.
+ENV_FILE="${ENV_FILE:-$REPO_DIR/.env.local}"
+if [ -z "${SK_USERNAME:-}" ] && [ -z "${SK_PASSWORD:-}" ] && [ -f "$ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090  # path is a runtime value by design
+  . "$ENV_FILE"
+  set +a
+fi
 
 docker run --rm \
   --network host \
