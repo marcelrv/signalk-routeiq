@@ -32,6 +32,16 @@
   show the panel hidden. Every (re)route now also re-checks tide availability
   against the route's own midpoint, throttled to at most once per 5 nm of
   movement so dragging a waypoint doesn't spam the check.
+- Changed: a release now chooses its npm dist-tag based on what is already
+  published. While no stable version exists, a pre-release publishes as `latest`,
+  so `npm install signalk-routeiq` and the Signal K App Store resolve to the
+  current build rather than to whichever version happened to be tagged first.
+  Once a stable version ships, pre-releases publish under their own channel
+  (`alpha`) and leave `latest` on the stable build. The `alpha` tag stops
+  advancing while `latest` is carrying pre-releases, because a publish can set
+  only one tag and npm's trusted publishing cannot authenticate a tag change
+  afterwards. Applies from the next release; `latest` for 0.1.0-alpha.3 was set
+  by hand.
 
 ## 0.1.0-alpha.3 — 2026-07-27
 
@@ -44,11 +54,6 @@
 - Fixed: vessel dimensions stayed blank after that first download until the page
   was reloaded, because they had been requested once at startup while the
   routing engine was still unavailable.
-- Changed: releasing now points npm's `latest` tag at the published pre-release
-  for as long as no stable version exists, so `npm install signalk-routeiq` and
-  the App Store resolve to the current build instead of whichever one happened to
-  be tagged first. Once a stable version ships, pre-releases stop touching
-  `latest`. A manual `workflow_dispatch` can also repoint a tag after the fact.
 - Fixed: `./scripts/screenshots.sh` could produce a passing screenshot of a
   failed route — the waits for the route summary and the departure scan swallowed
   their own timeouts. They now fail the shot, which captures a `*.FAILED` image
