@@ -12,6 +12,14 @@
   stayed hidden and was never re-checked. It now re-checks against the vessel's
   real position as soon as that arrives. The plotter extension was unaffected —
   it awaits the real position before its first check.
+- Fixed: a route being planned somewhere the boat isn't (a different cruising
+  ground entirely) kept the tide panel keyed to the vessel's position even
+  after routing elsewhere, so a route with tide coverage along it could still
+  show the panel hidden. Every (re)route now also re-checks tide availability
+  against the route's own midpoint, throttled to at most once per 5 nm of
+  movement so dragging a waypoint doesn't spam the check.
+
+## 0.1.0-alpha.3 — 2026-07-27
 
 - Fixed: a first-time install could never reach the Data Manager, so there was
   no way to download the first routing database. With none installed the app sat

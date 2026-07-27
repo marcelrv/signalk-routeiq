@@ -1698,6 +1698,23 @@ label.switch-row {
       })
       .catch(() => {});
   }
+
+  // The planned route doesn't necessarily pass anywhere near the boat — the
+  // tide/departure-planner panel should reflect whatever area is currently
+  // being routed, not just the vessel's position. MarineRouter.route() calls
+  // this with the route's midpoint on every (re)route; the distance guard
+  // just avoids re-querying on trivial edits (a dragged waypoint a few meters,
+  // a via point added without moving start/end) that land on the same area.
+  let lastTideCheckLatLng = null;
+  function maybeCheckTidesForRoute(lat, lon) {
+    if (lastTideCheckLatLng) {
+      const dLat = (lat - lastTideCheckLatLng.lat) * 60;
+      const dLon = (lon - lastTideCheckLatLng.lon) * 60 * Math.cos(lat * Math.PI / 180);
+      if (Math.sqrt(dLat * dLat + dLon * dLon) < 5) return; // < 5 nm moved
+    }
+    lastTideCheckLatLng = { lat, lon };
+    checkTidesStatus(lat, lon);
+  }
   document.getElementById('tide-cb').addEventListener('change', function () {
     try { localStorage.setItem('routeiq-use-tides', this.checked ? '1' : '0'); } catch {}
     document.getElementById('tide-depart-row').style.display = this.checked ? '' : 'none';
@@ -4212,6 +4229,7 @@ label.switch-row {
       const toPos = ll => ({ latitude: ll.lat, longitude: ll.lng });
       const start = toPos(wpts[0]);
       const end   = toPos(wpts[wpts.length - 1]);
+      maybeCheckTidesForRoute((start.latitude + end.latitude) / 2, (start.longitude + end.longitude) / 2);
       // Waypoints arrive in applyWaypoints() order (start, vias..., dest), so
       // the leg modes can be attached to the vias by index.
       const via   = wpts.slice(1, -1).map((ll, i) => ({
