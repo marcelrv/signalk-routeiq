@@ -17,6 +17,7 @@ import { RoutingEngine } from "./routing.js";
 import {
   PluginConfig,
   RouteResult,
+  RouteWarning,
   RoutingRequest,
   VesselDimensions,
 } from "./types.js";
@@ -49,32 +50,90 @@ interface LooseCoordinate {
  *  and /route is unauthenticated, so an unbounded array is a CPU DoS vector. */
 const MAX_VIA_POINTS = 25;
 
-/** Plausible upper bounds (meters) per vessel dimension. Values are rejected
- *  rather than coerced because a bad one fails *open* on a safety constraint
- *  instead of erroring: getEdgePenalty compares `edge.min_depth < draft +
- *  safetyMarginDraft`, so a string draft makes that sum a string and every
- *  comparison NaN-false (no edge is ever too shallow), and a negative draft
- *  puts the threshold below every real depth. Same shape for air draft and
- *  beam. */
-const VESSEL_DIM_MAX_M: Record<"draft" | "beam" | "airDraft", number> = {
+/** Plausible upper bounds (meters) per vessel dimension. A value outside them
+ *  never reaches the engine, because a bad dimension fails *open* on a safety
+ *  constraint instead of erroring: getEdgePenalty compares `edge.min_depth <
+ *  draft + safetyMarginDraft`, so a string draft makes that sum a string and
+ *  every comparison NaN-false (no edge is ever too shallow), and a negative
+ *  draft puts the threshold below every real depth. Same shape for air draft
+ *  and beam. Recognisable spellings of a real number are still read (see
+ *  coerceVesselDimension) — it's the unreadable ones that must not slip
+ *  through. */
+const VESSEL_DIM_MAX_M: Record<VesselDimensionKey, number> = {
   draft: 30,
   beam: 100,
   airDraft: 150,
 };
 
+type VesselDimensionKey = "draft" | "beam" | "airDraft";
+
+const VESSEL_DIM_KEYS: VesselDimensionKey[] = ["draft", "beam", "airDraft"];
+
+/** Human wording for warnings/errors — "airDraft" reads badly in prose. */
+const VESSEL_DIM_LABEL: Record<VesselDimensionKey, string> = {
+  draft: "draft",
+  beam: "beam",
+  airDraft: "air draft",
+};
+
+/** Turns a dimension supplied by a client — or read straight off a Signal K
+ *  path — into meters.
+ *
+ *  Beyond a plain number this accepts the two shapes that legitimately reach
+ *  us carrying a perfectly good value:
+ *   - a numeric string, from a form field or a settings file that stored the
+ *     draft as text ("2");
+ *   - Signal K's own `design.draft`, whose value is an *object*
+ *     (`{maximum, minimum, current}`), plus the `{value: ...}` delta wrapper.
+ *     A UI reading `vessels/self` directly gets that object, not a scalar.
+ *
+ *  Anything else (an empty string, "2 meters", a bare object) is undefined —
+ *  never NaN, and never a string that would survive into an arithmetic
+ *  comparison. See VESSEL_DIM_MAX_M for why that distinction is a safety
+ *  property and not just tidiness. */
+export function coerceVesselDimension(
+  value: unknown,
+  depth = 0,
+): number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed === "") return undefined;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  // Bounded so a hand-crafted body of nested wrappers can't recurse forever.
+  if (typeof value === "object" && value !== null && depth < 4) {
+    const obj = value as Record<string, unknown>;
+    for (const key of ["value", "maximum", "current"] as const) {
+      const nested = coerceVesselDimension(obj[key], depth + 1);
+      if (nested !== undefined) return nested;
+    }
+  }
+  return undefined;
+}
+
 /** Shared validation for the draft/beam/airDraft trio, which arrives both as
  *  the global default (PUT /vessel) and as per-request overrides (POST /route,
  *  /route/departures). `null`/`undefined` mean "not supplied" and are dropped,
  *  so a partial update never clobbers an already-set dimension — the caller
- *  gets back only the keys that were actually present and valid. */
+ *  gets back only the keys that were actually present and valid.
+ *
+ *  This is the *strict* path, for PUT /vessel: an admin writing the
+ *  server-wide defaults is standing right there and should be told their value
+ *  didn't take. Routing requests use validateRequestConstraints instead, which
+ *  warns and carries on. */
 export function pickVesselDimensions(
   body: Record<string, unknown> | undefined,
 ): { dims: VesselDimensions } | { error: string } {
   const dims: VesselDimensions = {};
-  for (const key of ["draft", "beam", "airDraft"] as const) {
-    const value = body?.[key];
-    if (value === undefined || value === null) continue;
-    if (typeof value !== "number" || !Number.isFinite(value)) {
+  for (const key of VESSEL_DIM_KEYS) {
+    const raw = body?.[key];
+    if (raw === undefined || raw === null) continue;
+    const value = coerceVesselDimension(raw);
+    if (value === undefined) {
       return { error: `Invalid ${key} — expected a number in meters` };
     }
     if (value < 0 || value > VESSEL_DIM_MAX_M[key]) {
@@ -87,20 +146,61 @@ export function pickVesselDimensions(
   return { dims };
 }
 
+/** Short, log-safe rendering of a rejected value, for the warning text. */
+function describeValue(value: unknown): string {
+  let text: string;
+  try {
+    text = typeof value === "string" ? value : JSON.stringify(value);
+  } catch {
+    text = String(value);
+  }
+  if (text === undefined) text = String(value);
+  return text.length > 60 ? text.slice(0, 57) + "…" : text;
+}
+
 /** Normalizes the vessel-dimension and coast-distance overrides on a routing
  *  request in place (null -> undefined, so the engine falls back to the
- *  configured defaults). Returns an error string if any is unusable. See
- *  VESSEL_DIM_MAX_M for why these can't just be coerced. */
-export function validateRequestConstraints(
-  request: RoutingRequest,
-): string | null {
-  const picked = pickVesselDimensions(
-    request as unknown as Record<string, unknown>,
-  );
-  if ("error" in picked) return picked.error;
-  request.draft = picked.dims.draft;
-  request.beam = picked.dims.beam;
-  request.airDraft = picked.dims.airDraft;
+ *  configured defaults).
+ *
+ *  An unusable *vessel dimension* is dropped rather than rejected, and
+ *  reported as a route warning: a client that sends a malformed draft (the
+ *  webapp used to forward Signal K's `design.draft` object verbatim) should
+ *  still get a route. Dropping it is what makes that safe — the engine then
+ *  falls back to the configured vessel dimensions, and failing those to its
+ *  own conservative defaults (2.0 m draft, 4.0 m beam), so the depth and
+ *  air-draft constraints keep applying. Keeping the bad value would disable
+ *  them silently; see VESSEL_DIM_MAX_M.
+ *
+ *  minCoastDistance is still a hard error: it is a plain scalar with no
+ *  competing wire shapes, so a bad one means a broken client rather than a
+ *  value we can sensibly reinterpret. */
+export function validateRequestConstraints(request: RoutingRequest): {
+  error: string | null;
+  warnings: RouteWarning[];
+} {
+  const warnings: RouteWarning[] = [];
+  const body = request as unknown as Record<string, unknown>;
+  for (const key of VESSEL_DIM_KEYS) {
+    const raw = body[key];
+    if (raw === undefined || raw === null) {
+      request[key] = undefined;
+      continue;
+    }
+    const value = coerceVesselDimension(raw);
+    if (value === undefined || value < 0 || value > VESSEL_DIM_MAX_M[key]) {
+      request[key] = undefined;
+      warnings.push({
+        type: "vessel_dimension_ignored",
+        message:
+          `Ignored the supplied ${VESSEL_DIM_LABEL[key]} (${describeValue(raw)}) — ` +
+          `expected a number between 0 and ${VESSEL_DIM_MAX_M[key]} meters. ` +
+          `Routed with the ${VESSEL_DIM_LABEL[key]} configured on the server instead; ` +
+          `check the vessel dimensions in Signal K.`,
+      });
+      continue;
+    }
+    request[key] = value;
+  }
 
   if (request.minCoastDistance === null) request.minCoastDistance = undefined;
   if (request.minCoastDistance !== undefined) {
@@ -108,13 +208,19 @@ export function validateRequestConstraints(
       typeof request.minCoastDistance !== "number" ||
       !Number.isFinite(request.minCoastDistance)
     ) {
-      return "Invalid minCoastDistance — expected a number in nautical miles";
+      return {
+        error: "Invalid minCoastDistance — expected a number in nautical miles",
+        warnings,
+      };
     }
     if (request.minCoastDistance < 0 || request.minCoastDistance > 100) {
-      return "Invalid minCoastDistance — expected 0..100 nautical miles";
+      return {
+        error: "Invalid minCoastDistance — expected 0..100 nautical miles",
+        warnings,
+      };
     }
   }
-  return null;
+  return { error: null, warnings };
 }
 
 export class ApiHandler {
@@ -403,14 +509,21 @@ export class ApiHandler {
         return;
       }
 
-      const constraintError = validateRequestConstraints(request);
-      if (constraintError) {
-        res.status(400).json({ error: constraintError });
+      const constraints = validateRequestConstraints(request);
+      if (constraints.error) {
+        res.status(400).json({ error: constraints.error });
         return;
       }
+      this.logConstraintWarnings(constraints.warnings);
 
       const route: RouteResult =
         await this.routingEngine!.calculateRoute(request);
+
+      // Prepended, not appended: the dimension the route was planned against
+      // is context for every other warning below it.
+      if (constraints.warnings.length > 0) {
+        route.warnings = [...constraints.warnings, ...(route.warnings || [])];
+      }
 
       res.json(route);
     } catch (error) {
@@ -419,6 +532,14 @@ export class ApiHandler {
       // failure (constraint/graph issue) from a server error (500).
       // Do not call next(error) — the response is already sent.
       res.status(422).json({ error: message, code: "ROUTE_NOT_FOUND" });
+    }
+  }
+
+  /** A dropped dimension is visible in the route pane, but the server log is
+   *  where it can be traced back to the client that sent it. */
+  private logConstraintWarnings(warnings: RouteWarning[]): void {
+    for (const warning of warnings) {
+      console.warn(`[routeiq] ${warning.message}`);
     }
   }
 
@@ -465,11 +586,12 @@ export class ApiHandler {
         });
         return;
       }
-      const constraintError = validateRequestConstraints(request);
-      if (constraintError) {
-        res.status(400).json({ error: constraintError });
+      const constraints = validateRequestConstraints(request);
+      if (constraints.error) {
+        res.status(400).json({ error: constraints.error });
         return;
       }
+      this.logConstraintWarnings(constraints.warnings);
       const hours = Math.min(48, Math.max(1, Number(scanHours) || 24));
       const step = Math.min(240, Math.max(10, Number(stepMinutes) || 60));
 
@@ -485,7 +607,13 @@ export class ApiHandler {
         hours,
         step,
       );
-      res.json({ scanHours: hours, stepMinutes: step, departures });
+      res.json({
+        scanHours: hours,
+        stepMinutes: step,
+        departures,
+        warnings:
+          constraints.warnings.length > 0 ? constraints.warnings : undefined,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       res.status(422).json({ error: message, code: "SCAN_FAILED" });
