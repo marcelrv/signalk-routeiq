@@ -10,7 +10,7 @@ import * as express from "express";
 import * as fs from "fs";
 import * as path from "path";
 
-import { ApiHandler } from "./api.js";
+import { ApiHandler, coerceVesselDimension } from "./api.js";
 import { RoutingDatabase } from "./database.js";
 import {
   registerPlotterExtension,
@@ -691,19 +691,19 @@ export function pluginConstructor(app: ServerAPI) {
       // Try getSelfPath (preferred)
       if (typeof app_.getSelfPath === "function") {
         const draftPath = app_.getSelfPath("design.draft");
-        draft = extractNumberValue(draftPath);
+        draft = coerceVesselDimension(draftPath);
         const beamPath = app_.getSelfPath("design.beam");
-        beam = extractNumberValue(beamPath);
+        beam = coerceVesselDimension(beamPath);
         const airDraftPath = app_.getSelfPath("design.airHeight");
-        airDraft = extractNumberValue(airDraftPath);
+        airDraft = coerceVesselDimension(airDraftPath);
       } else if (typeof app_.getPath === "function") {
         // Fallback: full path
         const draftPath = app_.getPath("vessels.self.design.draft");
-        draft = extractNumberValue(draftPath);
+        draft = coerceVesselDimension(draftPath);
         const beamPath = app_.getPath("vessels.self.design.beam");
-        beam = extractNumberValue(beamPath);
+        beam = coerceVesselDimension(beamPath);
         const airDraftPath = app_.getPath("vessels.self.design.airHeight");
-        airDraft = extractNumberValue(airDraftPath);
+        airDraft = coerceVesselDimension(airDraftPath);
       }
 
       if (draft !== undefined || beam !== undefined || airDraft !== undefined) {
@@ -723,19 +723,6 @@ export function pluginConstructor(app: ServerAPI) {
         error,
       );
     }
-  }
-
-  /**
-   * Extract a numeric value from a Signal K path value (handles nested formats)
-   */
-  function extractNumberValue(v: any): number | undefined {
-    if (v === undefined || v === null) return undefined;
-    if (typeof v === "number") return v;
-    if (typeof v.value === "number") return v.value;
-    if (v.value && typeof v.value.maximum === "number") return v.value.maximum;
-    if (typeof v.maximum === "number") return v.maximum;
-    if (typeof v.current === "number") return v.current;
-    return undefined;
   }
 
   /**
@@ -927,17 +914,8 @@ export function pluginConstructor(app: ServerAPI) {
       const values = update.values || [];
       for (const entry of values) {
         const p = entry.path || "";
-        const value = entry.value;
-        const numValue =
-          typeof value === "number"
-            ? value
-            : typeof value?.value === "number"
-              ? value.value
-              : (value?.value?.maximum ??
-                value?.maximum ??
-                value?.current ??
-                value);
-        if (typeof numValue === "number") {
+        const numValue = coerceVesselDimension(entry.value);
+        if (numValue !== undefined) {
           if (p === "design.draft" || p === "design.draft.value")
             newDimensions.draft = numValue;
           if (p === "design.beam" || p === "design.beam.value")
@@ -953,21 +931,12 @@ export function pluginConstructor(app: ServerAPI) {
       const vessels = delta.vessels || {};
       for (const vessel of Object.values(vessels) as any[]) {
         const design = vessel.design || {};
-        if (design.draft !== undefined && typeof design.draft !== "string") {
-          const extracted = extractNumberValue(design.draft);
-          if (extracted !== undefined) newDimensions.draft = extracted;
-        }
-        if (design.beam !== undefined && typeof design.beam !== "string") {
-          const extracted = extractNumberValue(design.beam);
-          if (extracted !== undefined) newDimensions.beam = extracted;
-        }
-        if (
-          design.airHeight !== undefined &&
-          typeof design.airHeight !== "string"
-        ) {
-          const extracted = extractNumberValue(design.airHeight);
-          if (extracted !== undefined) newDimensions.airDraft = extracted;
-        }
+        const draft = coerceVesselDimension(design.draft);
+        if (draft !== undefined) newDimensions.draft = draft;
+        const beam = coerceVesselDimension(design.beam);
+        if (beam !== undefined) newDimensions.beam = beam;
+        const airHeight = coerceVesselDimension(design.airHeight);
+        if (airHeight !== undefined) newDimensions.airDraft = airHeight;
       }
     }
 

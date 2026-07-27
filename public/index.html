@@ -1727,9 +1727,7 @@ label.switch-row {
       })),
       endMode: state.destMode || 'auto',
       minCoastDistance: (parseFloat(document.getElementById('min-coast').value) || 0) / 1852,
-      draft: lastBoat ? lastBoat.draft : 0,
-      beam: lastBoat ? lastBoat.beam : 4,
-      airDraft: lastBoat ? lastBoat.airDraft : 0,
+      ...vesselOverrides(),
       departureTime: departureIso() || new Date().toISOString(),
       scanHours: 24,
       stepMinutes: 60,
@@ -1737,18 +1735,23 @@ label.switch-row {
     logDebug('DEPARTURES', departuresUrl(), payload);
     fetch(departuresUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
       .then(r => r.json().then(b => { if (!r.ok) throw new Error(b && b.error ? b.error : 'Error ' + r.status); return b; }))
-      .then(data => renderDepartureList(data.departures || []))
+      .then(data => renderDepartureList(data.departures || [], data.warnings || []))
       .catch(err => {
         document.getElementById('dep-list').innerHTML =
           '<div style="color:#f2938c;font-size:12px;padding:6px 0">' + err.message + '</div>';
       })
       .finally(() => { document.getElementById('dep-loading').style.display = 'none'; });
   }
-  function renderDepartureList(deps) {
+  function renderDepartureList(deps, warnings) {
     const listEl = document.getElementById('dep-list');
+    // Every departure in the scan was planned against the same constraints, so
+    // a dropped vessel dimension applies to the whole list — show it above.
+    const warnHtml = (warnings || [])
+      .map(w => '<div style="color:#e8b44a;font-size:11px;padding:4px 0">' + escapeHtml(w.message) + '</div>')
+      .join('');
     const ok = deps.filter(d => typeof d.totalSeconds === 'number');
     if (!ok.length) {
-      listEl.innerHTML = '<div style="color:#9bb8da;font-size:12px;padding:6px 0">No departures could be evaluated.</div>';
+      listEl.innerHTML = warnHtml + '<div style="color:#9bb8da;font-size:12px;padding:6px 0">No departures could be evaluated.</div>';
       return;
     }
     const minS = Math.min(...ok.map(d => d.totalSeconds));
@@ -3913,6 +3916,37 @@ label.switch-row {
   // URL + "/signalk/v1/api/vessels/self"
   function skSelfUrl() { return getApiBase() + '/signalk/v1/api/vessels/self'; }
 
+  // Signal K's design.* paths are not scalars: design.draft's value is an
+  // object ({maximum, minimum, current}), and a draft that was typed into a
+  // settings form can arrive as the string "2". Forwarding either verbatim as
+  // a routing override got the whole request rejected, so normalise here —
+  // this is the one place the raw SK tree is read.
+  function skMeters(v) {
+    if (typeof v === 'number') return Number.isFinite(v) ? v : undefined;
+    if (typeof v === 'string') {
+      const n = Number(v.trim());
+      return v.trim() !== '' && Number.isFinite(n) ? n : undefined;
+    }
+    if (v && typeof v === 'object') {
+      return skMeters(v.value) ?? skMeters(v.maximum) ?? skMeters(v.current);
+    }
+    return undefined;
+  }
+
+  // Vessel-dimension overrides for a routing request. A dimension we don't
+  // have as a number is left out entirely rather than sent as 0, so the server
+  // routes against its own configured dimensions instead of against a boat
+  // with no draft. The server warns instead of failing when an override is
+  // unusable, but the warning belongs to genuinely broken clients, not to us.
+  function vesselOverrides() {
+    const out = {};
+    for (const key of ['draft', 'beam', 'airDraft']) {
+      const v = skMeters(lastBoat ? lastBoat[key] : undefined);
+      if (v !== undefined) out[key] = v;
+    }
+    return out;
+  }
+
   function fetchBoatData(retryMs) {
     let draft, beam, airDraft;
     let lat, lng, sog, cog;
@@ -3925,12 +3959,12 @@ label.switch-row {
       fetch(sUrl).then(r => { logDebug('BOAT', sUrl, undefined, r); return r.ok ? r.json() : Promise.reject(); }),
     ]).then(([vr, sr]) => {
       if (vr.status === 'fulfilled') {
-        draft = vr.value.draft;
-        beam = vr.value.beam;
-        airDraft = vr.value.airDraft;
-        var effectiveDraft = vr.value.effectiveDraft;
-        var effectiveBeam = vr.value.effectiveBeam;
-        var effectiveAirDraft = vr.value.effectiveAirDraft;
+        draft = skMeters(vr.value.draft);
+        beam = skMeters(vr.value.beam);
+        airDraft = skMeters(vr.value.airDraft);
+        var effectiveDraft = skMeters(vr.value.effectiveDraft);
+        var effectiveBeam = skMeters(vr.value.effectiveBeam);
+        var effectiveAirDraft = skMeters(vr.value.effectiveAirDraft);
       }
       if (sr.status === 'fulfilled') {
         const nav = sr.value?.navigation;
@@ -3941,9 +3975,11 @@ label.switch-row {
         }
         if (!sog) sog = nav?.speedOverGround?.value;
         if (!cog) cog = nav?.courseOverGroundTrue?.value;
-        draft = draft || sr.value?.design?.draft?.value || nav?.draft?.value;
-        beam = beam || sr.value?.design?.beam?.value;
-        airDraft = airDraft || sr.value?.design?.airHeight?.value;
+        // `||`, not `??`: the plugin reports 0 for a dimension it never got
+        // from Signal K, and a 0 draft is not a dimension worth routing on.
+        draft = draft || skMeters(sr.value?.design?.draft) || skMeters(nav?.draft);
+        beam = beam || skMeters(sr.value?.design?.beam);
+        airDraft = airDraft || skMeters(sr.value?.design?.airHeight);
       }
       showBoatData(lat, lng, sog, cog, draft, beam, airDraft, effectiveDraft, effectiveBeam, effectiveAirDraft);
       // Retry if vessel endpoint failed (engine not ready yet)
@@ -4223,9 +4259,7 @@ label.switch-row {
         via: via,
         endMode: state.destMode || 'auto',
         minCoastDistance: minCoastNauticalMiles,
-        draft: lastBoat ? lastBoat.draft : 0,
-        beam: lastBoat ? lastBoat.beam : 4,
-        airDraft: lastBoat ? lastBoat.airDraft : 0,
+        ...vesselOverrides(),
         useTides: tideEnabled(),
       };
       if (tideEnabled() && departureIso()) payload.departureTime = departureIso();
@@ -4266,7 +4300,14 @@ label.switch-row {
           } catch (_e) { console.warn('[MarineRouter] LRM callback error:', _e); }
           renderCustomRoute(state.lastGeoJson);
           renderRoutePane(state.lastGeoJson);
-          showToast('Route updated', 'success');
+          // A dropped vessel dimension means the route was planned against
+          // something other than this boat — too important to leave to the
+          // warnings list in the route pane, which may be scrolled away.
+          const dimWarn = (geoJson.warnings || []).find(w => w.type === 'vessel_dimension_ignored');
+          // Lead clause only — the toast is gone in 3.5s; the route pane keeps
+          // the full explanation.
+          showToast(dimWarn ? dimWarn.message.split(' — ')[0] : 'Route updated',
+                    dimWarn ? 'error' : 'success');
         })
         .catch(err => {
           state.routing = false;
@@ -5447,7 +5488,9 @@ label.switch-row {
       } else {
         const div = document.createElement('div');
         div.className = 'route-overall-warn';
-        div.innerHTML = '<div class="warn-title">' + w.type.replace(/_/g, ' ') + '</div>' + w.message;
+        // Escaped: a warning message can quote a value straight out of the
+        // request body (an ignored vessel dimension), so it is not trusted HTML.
+        div.innerHTML = '<div class="warn-title">' + escapeHtml(w.type.replace(/_/g, ' ')) + '</div>' + escapeHtml(w.message);
         warningsEl.appendChild(div);
       }
     }
