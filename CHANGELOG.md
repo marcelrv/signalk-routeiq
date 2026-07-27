@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: a first-time install could never reach the Data Manager, so there was
+  no way to download the first routing database. With none installed the app sat
+  on "Loading Routing Data — Waiting for server..." indefinitely: it waited for
+  an endpoint that only answers once a routing graph is loaded, which cannot
+  happen before the first download. It now recognises the empty install and opens
+  the Data Manager on the Available tab, one click from the first download.
+- Fixed: vessel dimensions stayed blank after that first download until the page
+  was reloaded, because they had been requested once at startup while the
+  routing engine was still unavailable.
+
 ## 0.1.0-alpha.2 — 2026-07-26
 
 - Fixed: saving the plugin configuration on a fresh install failed with a 404.
