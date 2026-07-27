@@ -1,6 +1,17 @@
 # Changelog
 
-## 0.1.0-alpha.3 — 2026-07-27
+## Unreleased
+
+- Fixed: the "Consider tide" panel — including the "Best…" departure-planner
+  button — could be missing from the webapp entirely, while working fine in the
+  Freeboard-SK plotter extension for the same boat. The webapp checked tide
+  availability against the map's hardcoded placeholder center (`[45.5, -1.0]`)
+  at connect time, racing the vessel's actual position, which only arrives once
+  `fetchBoatData()`'s request resolves and re-centers the map moments later. If
+  the placeholder location happened to have no tide coverage, the whole panel
+  stayed hidden and was never re-checked. It now re-checks against the vessel's
+  real position as soon as that arrives. The plotter extension was unaffected —
+  it awaits the real position before its first check.
 
 - Fixed: a first-time install could never reach the Data Manager, so there was
   no way to download the first routing database. With none installed the app sat

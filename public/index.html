@@ -3967,6 +3967,12 @@ label.switch-row {
       pushHistory();
       applyWaypoints();
       showToast('Start set to vessel position', 'success');
+      // Re-check tide/departure-planner availability against the vessel's
+      // real position: the connect-time check (doConnect()) fires before this
+      // fetch resolves, so it runs against the map's placeholder default
+      // center instead — hiding the whole tide panel whenever that
+      // unrelated location happens to have no tide coverage.
+      checkTidesStatus(lat, lng);
     }
     const fmt = (v, u) => v != null ? v + (u ? ' ' + u : '') : '—';
     document.getElementById('boat-pos').querySelector('.value').textContent =
