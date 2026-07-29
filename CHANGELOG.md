@@ -40,8 +40,10 @@
   (`alpha`) and leave `latest` on the stable build. The `alpha` tag stops
   advancing while `latest` is carrying pre-releases, because a publish can set
   only one tag and npm's trusted publishing cannot authenticate a tag change
-  afterwards. Applies from the next release; `latest` for 0.1.0-alpha.3 was set
-  by hand.
+  afterwards. For the same reason, a release whose registry check cannot be
+  answered — an outage, a 5xx, a response that isn't a package document — now
+  fails without publishing instead of guessing a tag it would be unable to move.
+  Applies from the next release; `latest` for 0.1.0-alpha.3 was set by hand.
 
 ## 0.1.0-alpha.3 — 2026-07-27
 
