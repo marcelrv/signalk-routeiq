@@ -1738,7 +1738,7 @@ label.switch-row {
       .then(data => renderDepartureList(data.departures || [], data.warnings || []))
       .catch(err => {
         document.getElementById('dep-list').innerHTML =
-          '<div style="color:#f2938c;font-size:12px;padding:6px 0">' + err.message + '</div>';
+          '<div style="color:#f2938c;font-size:12px;padding:6px 0">' + escapeHtml(err.message) + '</div>';
       })
       .finally(() => { document.getElementById('dep-loading').style.display = 'none'; });
   }
@@ -3921,14 +3921,16 @@ label.switch-row {
   // settings form can arrive as the string "2". Forwarding either verbatim as
   // a routing override got the whole request rejected, so normalise here —
   // this is the one place the raw SK tree is read.
-  function skMeters(v) {
+  function skMeters(v, depth = 0) {
     if (typeof v === 'number') return Number.isFinite(v) ? v : undefined;
     if (typeof v === 'string') {
       const n = Number(v.trim());
       return v.trim() !== '' && Number.isFinite(n) ? n : undefined;
     }
-    if (v && typeof v === 'object') {
-      return skMeters(v.value) ?? skMeters(v.maximum) ?? skMeters(v.current);
+    // Capped to match coerceVesselDimension's server-side limit (src/api.ts) —
+    // SK deltas are JSON and can nest arbitrarily deep on the wire.
+    if (v && typeof v === 'object' && depth < 4) {
+      return skMeters(v.value, depth + 1) ?? skMeters(v.maximum, depth + 1) ?? skMeters(v.current, depth + 1);
     }
     return undefined;
   }
