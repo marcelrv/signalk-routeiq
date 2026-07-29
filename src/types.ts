@@ -109,7 +109,10 @@ export interface RouteWarning {
     | "bbox_expanded"
     | "start_connecting"
     | "end_connecting"
-    | "manual_segment";
+    | "manual_segment"
+    // A supplied draft/beam/airDraft was unusable and was dropped; the route
+    // was planned against the server's configured dimensions instead.
+    | "vessel_dimension_ignored";
   message: string;
   from?: { latitude: number; longitude: number };
   to?: { latitude: number; longitude: number };

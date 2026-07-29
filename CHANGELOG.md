@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Fixed: routing failed outright with "Invalid draft — expected a number in
+  meters" on a server whose vessel draft was set. Signal K's `design.draft` is
+  not a plain number — its value is an object (`{maximum, minimum, current}`) —
+  and the webapp forwarded it verbatim as a routing override whenever the plugin
+  had no draft of its own. A dimension is now read from that shape (and from a
+  draft stored as text, `"2"`), both in the plugin and in the webapp.
+- Changed: a draft, beam or air draft that still cannot be read no longer fails
+  the request. It is dropped and the route is planned against the dimensions
+  configured on the server, with a `vessel_dimension_ignored` warning in the
+  route result — shown in the planner's warnings and as a toast, and logged.
+  Dropping rather than zeroing is deliberate: the engine's fallbacks (2.0 m
+  draft, 4.0 m beam) keep the depth and air-draft constraints doing their job.
+  `PUT /vessel`, where an admin writes the server-wide defaults by hand, still
+  answers 400 — as does an unusable `minCoastDistance`.
 - Fixed: the "Consider tide" panel — including the "Best…" departure-planner
   button — could be missing from the webapp entirely, while working fine in the
   Freeboard-SK plotter extension for the same boat. The webapp checked tide
