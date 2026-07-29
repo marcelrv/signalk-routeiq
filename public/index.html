@@ -1683,10 +1683,21 @@ label.switch-row {
       date.getFullYear() + '-' + p(date.getMonth() + 1) + '-' + p(date.getDate()) +
       'T' + p(date.getHours()) + ':' + p(date.getMinutes());
   }
+  // Several places trigger a status check independently (connect-time
+  // placeholder, first vessel fix, every reroute) and their fetches can
+  // resolve out of order. lastTideCheckLatLng/tideCheckSeq are updated here,
+  // in the one place all of them funnel through, so (a) a stale response
+  // can never clobber a newer one, and (b) the distance throttle below
+  // always compares against the location that's actually on screen.
+  let lastTideCheckLatLng = null;
+  let tideCheckSeq = 0;
   function checkTidesStatus(lat, lon) {
+    lastTideCheckLatLng = { lat, lon };
+    const seq = ++tideCheckSeq;
     fetch(tidesStatusUrl() + '?latitude=' + lat.toFixed(3) + '&longitude=' + lon.toFixed(3))
       .then(r => r.ok ? r.json() : null)
       .then(st => {
+        if (seq !== tideCheckSeq) return; // superseded by a newer check
         tidesAvailable = !!(st && st.available);
         document.getElementById('tide-controls').style.display = tidesAvailable ? '' : 'none';
         if (!tidesAvailable) return;
@@ -1705,14 +1716,12 @@ label.switch-row {
   // this with the route's midpoint on every (re)route; the distance guard
   // just avoids re-querying on trivial edits (a dragged waypoint a few meters,
   // a via point added without moving start/end) that land on the same area.
-  let lastTideCheckLatLng = null;
   function maybeCheckTidesForRoute(lat, lon) {
     if (lastTideCheckLatLng) {
       const dLat = (lat - lastTideCheckLatLng.lat) * 60;
       const dLon = (lon - lastTideCheckLatLng.lon) * 60 * Math.cos(lat * Math.PI / 180);
       if (Math.sqrt(dLat * dLat + dLon * dLon) < 5) return; // < 5 nm moved
     }
-    lastTideCheckLatLng = { lat, lon };
     checkTidesStatus(lat, lon);
   }
   document.getElementById('tide-cb').addEventListener('change', function () {
