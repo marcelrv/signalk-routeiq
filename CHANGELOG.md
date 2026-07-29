@@ -16,6 +16,22 @@
   draft, 4.0 m beam) keep the depth and air-draft constraints doing their job.
   `PUT /vessel`, where an admin writes the server-wide defaults by hand, still
   answers 400 — as does an unusable `minCoastDistance`.
+- Fixed: the "Consider tide" panel — including the "Best…" departure-planner
+  button — could be missing from the webapp entirely, while working fine in the
+  Freeboard-SK plotter extension for the same boat. The webapp checked tide
+  availability against the map's hardcoded placeholder center (`[45.5, -1.0]`)
+  at connect time, racing the vessel's actual position, which only arrives once
+  `fetchBoatData()`'s request resolves and re-centers the map moments later. If
+  the placeholder location happened to have no tide coverage, the whole panel
+  stayed hidden and was never re-checked. It now re-checks against the vessel's
+  real position as soon as that arrives. The plotter extension was unaffected —
+  it awaits the real position before its first check.
+- Fixed: a route being planned somewhere the boat isn't (a different cruising
+  ground entirely) kept the tide panel keyed to the vessel's position even
+  after routing elsewhere, so a route with tide coverage along it could still
+  show the panel hidden. Every (re)route now also re-checks tide availability
+  against the route's own midpoint, throttled to at most once per 5 nm of
+  movement so dragging a waypoint doesn't spam the check.
 
 ## 0.1.0-alpha.3 — 2026-07-27
 
