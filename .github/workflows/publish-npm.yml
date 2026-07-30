@@ -117,12 +117,21 @@ jobs:
           set -euo pipefail
           PKG_ESCAPED="$(node -p "require('./package.json').name.replace('/', '%2f')")"
           VERSION="$(node -p "require('./package.json').version")"
-          # Digits count. A prerelease identifier is allowed to be purely
-          # numeric (2.0.0-0 is a legal semver prerelease), and matching only
-          # letters read those as stable — skipping the whole check below and
-          # publishing them straight to `latest`, silently, which is the one
-          # outcome this step exists to prevent.
-          PRERELEASE_ID="$(node -p "(require('./package.json').version.match(/-([a-zA-Z0-9]+)/) || [])[1] || ''")"
+          # Digits count: a pre-release identifier is allowed to be purely
+          # numeric (2.0.0-0 is legal semver), and matching only letters read
+          # those as stable — skipping the whole check below and publishing them
+          # straight to `latest`, silently, which is the one outcome this step
+          # exists to prevent.
+          #
+          # Build metadata is dropped first because it can carry a hyphen of its
+          # own: 1.2.3+build-7 is a stable version, and matching the raw string
+          # would take the `-7` for a pre-release identifier. No anchor is needed
+          # once it is gone — a semver version core is digits and dots, so any
+          # remaining hyphen can only be the pre-release separator. An anchored
+          # pattern would also quietly answer "stable" for a version it could not
+          # parse at all, and publishing an unrecognised version to `latest` is
+          # the wrong way to fail here.
+          PRERELEASE_ID="$(node -p "(require('./package.json').version.split('+')[0].match(/-([a-zA-Z0-9-]+)/) || [])[1] || ''")"
 
           if [ -z "$PRERELEASE_ID" ]; then
             TAG=latest
