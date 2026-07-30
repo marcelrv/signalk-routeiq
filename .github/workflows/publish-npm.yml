@@ -117,7 +117,12 @@ jobs:
           set -euo pipefail
           PKG_ESCAPED="$(node -p "require('./package.json').name.replace('/', '%2f')")"
           VERSION="$(node -p "require('./package.json').version")"
-          PRERELEASE_ID="$(node -p "(require('./package.json').version.match(/-([a-zA-Z]+)/) || [])[1] || ''")"
+          # Digits count. A prerelease identifier is allowed to be purely
+          # numeric (2.0.0-0 is a legal semver prerelease), and matching only
+          # letters read those as stable — skipping the whole check below and
+          # publishing them straight to `latest`, silently, which is the one
+          # outcome this step exists to prevent.
+          PRERELEASE_ID="$(node -p "(require('./package.json').version.match(/-([a-zA-Z0-9]+)/) || [])[1] || ''")"
 
           if [ -z "$PRERELEASE_ID" ]; then
             TAG=latest
@@ -193,6 +198,22 @@ jobs:
             esac
 
             if [ "$HAS_STABLE" = 'yes' ]; then
+              # Only reachable once a stable version exists, which is also the
+              # only time the identifier is used as the dist-tag itself. npm
+              # rejects a tag that parses as a SemVer range ("Tag name must not
+              # be a valid SemVer range: 0"), so a purely numeric identifier
+              # cannot name a channel — say that here rather than letting the
+              # publish fail on npm's own message.
+              case "$PRERELEASE_ID" in
+                *[a-zA-Z]*) ;;
+                *)
+                  echo "$VERSION is a pre-release and a stable version is already published, so"
+                  echo "it must publish under its own dist-tag — but npm will not accept"
+                  echo "'$PRERELEASE_ID' as one, since that parses as a SemVer range. Give the"
+                  echo "version a named pre-release identifier, e.g. ${VERSION%%-*}-rc.$PRERELEASE_ID."
+                  exit 1
+                  ;;
+              esac
               TAG="$PRERELEASE_ID"
               echo "A stable version is published, so this pre-release stays off 'latest'."
             else
@@ -203,4 +224,10 @@ jobs:
           echo "Publishing $VERSION under dist-tag: $TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - run: npm publish --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }}
+      # The tag goes through the environment rather than being interpolated into
+      # the command: `${{ }}` in a `run:` is expanded as raw shell text before
+      # the shell sees it, so the quoting below is the only thing that survives a
+      # future change to how the tag is chosen.
+      - run: npm publish --provenance --access public --tag "$DIST_TAG"
+        env:
+          DIST_TAG: ${{ steps.dist-tag.outputs.tag }}
