@@ -50,6 +50,22 @@ on:
   release:
     types: [published]
 
+# One release publishes at a time. The resource being serialized is this
+# package's dist-tag namespace on npm, not a branch or a ref, so the group is a
+# constant: keying it on github.ref would put every release in its own group,
+# since each carries its own tag, and serialize nothing. Two overlapping runs
+# are what let a pre-release read "no stable version is published" while a
+# stable release is mid-flight, and then take `latest` off it for good.
+#
+# cancel-in-progress must stay false — cancelling a publish partway through is
+# worse than making it wait. Note that GitHub only queues one pending run per
+# group, so a third release published while one is running and one is queued
+# cancels the queued one rather than lining it up; a cancelled run publishes
+# nothing, which is the same way this workflow fails everywhere else.
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
