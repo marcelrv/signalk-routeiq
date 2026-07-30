@@ -4,21 +4,32 @@
 # THEN create the matching GitHub Release; this workflow refuses to publish
 # if the two disagree, so a stale tag can't accidentally ship the wrong code.
 #
-# Publishes under the npm dist-tag matching the version's pre-release
-# identifier (e.g. 0.1.0-alpha.1 -> "alpha"). Versions with no pre-release
-# identifier publish as "latest" as usual.
+# The dist-tag is decided at publish time, because publishing is the ONLY thing
+# this workflow can authenticate (see below). Versions with no pre-release
+# identifier publish as "latest". A pre-release publishes as "latest" too while
+# no stable version exists — `npm install signalk-routeiq` with no version, and
+# the Signal K App Store, both resolve "latest", so leaving it behind means users
+# get a stale build. Once a stable version is out, pre-releases publish under
+# their own channel instead ("alpha" for 0.2.0-alpha.1), so a plain install is
+# never dragged onto a pre-release. If the registry cannot say which of those two
+# cases applies, this workflow fails instead of guessing and publishes nothing —
+# a release is cheap to re-run, whereas a pre-release wrongly promoted to
+# "latest" cannot be undone here at all.
 #
-# While no stable version exists yet, the pre-release ALSO becomes "latest" —
-# see the "Point latest at this pre-release" step. Without that, `npm install
-# signalk-routeiq` resolves to nothing useful (or to a stale build left behind
-# by an earlier manual publish), and the Signal K App Store reads these tags.
-# Once a stable version is out, pre-releases stop touching "latest", so a plain
-# install is never dragged onto an alpha.
+# A consequence worth knowing: during the pre-stable phase the "alpha" tag stops
+# advancing, since only one --tag can be given and "latest" is the one that
+# matters. It resumes once a stable version exists.
 #
-# The workflow_dispatch trigger can repoint a dist-tag at an already-published
-# version by hand. It has to live in THIS file: npm validates the OIDC token's
-# job_workflow_ref against the Trusted Publisher configured on npmjs.com, which
-# names this filename, so a separate workflow would be rejected at the exchange.
+# Do NOT add a post-publish `npm dist-tag` step to fix that. Trusted publishing
+# authenticates `npm publish` and nothing else: as of npm 12, lib/utils/oidc.js
+# is required from lib/commands/publish.js alone, and the credential the exchange
+# returns is rejected for other writes. Tried and measured on 2026-07-27 — both a
+# post-publish step and a standalone workflow_dispatch job, each performing a
+# fresh exchange, failed with "npm error code E401 Unable to authenticate, your
+# authentication token seems to be invalid" while `npm publish` in the same job
+# succeeded. Moving a tag after the fact needs a real credential: either
+# `npm login` locally, or a granular automation token stored as a repo secret,
+# which this workflow deliberately does without.
 #
 # Uses npm Trusted Publishing (OIDC) — no NPM_TOKEN secret at all. One-time
 # setup on npmjs.com, AFTER the package has been published at least once
@@ -39,22 +50,24 @@ on:
   release:
     types: [published]
 
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Already-published version to point a tag at, e.g. 0.1.0-alpha.3'
-        required: true
-      # Underscore, not a hyphen: GitHub expressions cannot reach a hyphenated
-      # name with dot notation — `inputs.dist-tag` parses as a subtraction.
-      dist_tag:
-        description: 'dist-tag to move (latest, alpha, next, …)'
-        required: true
-        default: latest
+# One release publishes at a time. The resource being serialized is this
+# package's dist-tag namespace on npm, not a branch or a ref, so the group is a
+# constant: keying it on github.ref would put every release in its own group,
+# since each carries its own tag, and serialize nothing. Two overlapping runs
+# are what let a pre-release read "no stable version is published" while a
+# stable release is mid-flight, and then take `latest` off it for good.
+#
+# cancel-in-progress must stay false — cancelling a publish partway through is
+# worse than making it wait. Note that GitHub only queues one pending run per
+# group, so a third release published while one is running and one is queued
+# cancels the queued one rather than lining it up; a cancelled run publishes
+# nothing, which is the same way this workflow fails everywhere else.
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
 
 jobs:
   publish:
-    # Only a release publishes; a manual dispatch just moves a tag.
-    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -81,15 +94,6 @@ jobs:
             exit 1
           fi
 
-      - name: Determine npm dist-tag from version pre-release identifier
-        id: dist-tag
-        run: |
-          VERSION="$(node -p "require('./package.json').version")"
-          PRERELEASE_ID="$(node -p "(require('./package.json').version.match(/-([a-zA-Z]+)/) || [])[1] || ''")"
-          TAG="${PRERELEASE_ID:-latest}"
-          echo "Publishing $VERSION under dist-tag: $TAG"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
       - run: npm ci
       - run: npm run build
 
@@ -98,79 +102,141 @@ jobs:
         env:
           NODE_OPTIONS: --experimental-sqlite
 
-      - run: npm publish --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }}
-
-      # `npm publish --tag alpha` does not move `latest`, so during the
-      # pre-stable phase `latest` would sit on whatever was published first (or
-      # nothing at all) and every release would silently drift further from it.
-      # Moving it needs its own credential — see the composite action.
-      - name: Get an npm credential for the dist-tag write
-        if: steps.dist-tag.outputs.tag != 'latest'
-        uses: ./.github/actions/npm-oidc-token
-
-      - name: Point latest at this pre-release while no stable version exists
-        if: steps.dist-tag.outputs.tag != 'latest'
-        run: |
-          set -euo pipefail
-          PKG="$(node -p "require('./package.json').name")"
-          VERSION="$(node -p "require('./package.json').version")"
-
-          # A stable version is any published version with no pre-release part.
-          HAS_STABLE="$(npm view "$PKG" versions --json | node -e "
-            let d = '';
-            process.stdin.on('data', (c) => (d += c)).on('end', () => {
-              const raw = JSON.parse(d);
-              const all = Array.isArray(raw) ? raw : [raw];
-              console.log(all.some((v) => !v.includes('-')) ? 'yes' : 'no');
-            });
-          ")"
-
-          if [ "$HAS_STABLE" = "yes" ]; then
-            echo "A stable version is published, so leaving 'latest' alone —"
-            echo "a plain 'npm install $PKG' must not resolve to a pre-release."
-          else
-            echo "No stable version yet, so 'latest' tracks this pre-release."
-            npm dist-tag add "$PKG@$VERSION" latest
-          fi
-          npm dist-tag ls "$PKG"
-
-  # Repoint a dist-tag at an already-published version, for the cases the
-  # release path cannot cover on its own: a version published before this
-  # automation existed, or promoting/demoting a tag after the fact.
-  move-dist-tag:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write # required to request the OIDC id_token
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check the version is actually published
+      # Deliberately the last step before publishing, not an early pre-flight.
+      # The answer below goes stale the moment it is computed, and the way it
+      # goes stale is unrecoverable: if a stable release publishes while this job
+      # is still building, an "is anything stable published?" answer taken before
+      # the build would still say no, and this job would then put `latest` on a
+      # pre-release with no way to move it back. Running it here shrinks that
+      # window to the publish itself. The cost is that an unreachable registry
+      # now fails after the build and tests rather than before — CI minutes,
+      # against a mistake npm would not let us correct.
+      - name: Determine npm dist-tag from the version and what is already published
+        id: dist-tag
         run: |
           set -euo pipefail
           PKG_ESCAPED="$(node -p "require('./package.json').name.replace('/', '%2f')")"
-          # Plain HTTP rather than `npm view`, which at this point would run
-          # against setup-node's .npmrc while NODE_AUTH_TOKEN is still unset and
-          # can fail on the empty credential instead of the real question.
-          if ! curl -sSf "https://registry.npmjs.org/$PKG_ESCAPED" \
-            | jq -e --arg v '${{ inputs.version }}' '.versions[$v]' > /dev/null; then
-            echo "Version ${{ inputs.version }} is not published — nothing to tag."
-            exit 1
+          VERSION="$(node -p "require('./package.json').version")"
+          # Digits count: a pre-release identifier is allowed to be purely
+          # numeric (2.0.0-0 is legal semver), and matching only letters read
+          # those as stable — skipping the whole check below and publishing them
+          # straight to `latest`, silently, which is the one outcome this step
+          # exists to prevent.
+          #
+          # Build metadata is dropped first because it can carry a hyphen of its
+          # own: 1.2.3+build-7 is a stable version, and matching the raw string
+          # would take the `-7` for a pre-release identifier. No anchor is needed
+          # once it is gone — a semver version core is digits and dots, so any
+          # remaining hyphen can only be the pre-release separator. An anchored
+          # pattern would also quietly answer "stable" for a version it could not
+          # parse at all, and publishing an unrecognised version to `latest` is
+          # the wrong way to fail here.
+          PRERELEASE_ID="$(node -p "(require('./package.json').version.split('+')[0].match(/-([a-zA-Z0-9-]+)/) || [])[1] || ''")"
+
+          if [ -z "$PRERELEASE_ID" ]; then
+            TAG=latest
+          else
+            # A pre-release. While nothing stable is published, `latest` has to
+            # track it: `npm install <pkg>` with no version, and the Signal K App
+            # Store, both resolve `latest`, and it cannot be moved afterwards
+            # (see the note at the top of this file). Once a stable version
+            # exists, pre-releases publish under their own channel instead and
+            # leave `latest` pointing at the stable build.
+            # Queried over plain HTTP: unauthenticated, and unlike `npm view` it
+            # is unaffected by setup-node's .npmrc while NODE_AUTH_TOKEN is unset.
+            #
+            # Only two answers are usable, and everything else aborts the release
+            # rather than guessing. A 404 means the package has never been
+            # published, so there is certainly nothing stable; a readable 200
+            # answers the question outright. Any other outcome — an outage, a 5xx
+            # that survived the retries, a body that isn't a package document —
+            # would otherwise have to be read as one case or the other, and both
+            # guesses are bad: "no stable" publishes a pre-release as `latest`,
+            # dragging every plain install onto it with no way back (moving a
+            # dist-tag is exactly what this workflow cannot authenticate), while
+            # "has stable" silently leaves `latest` on a stale build. Failing here
+            # publishes nothing at all and the release can simply be re-run, so
+            # that is the only outcome that cannot leave npm in a state we are
+            # unable to correct.
+            # The timeouts are what stop a registry that accepts the connection
+            # and then goes silent from hanging the job until GitHub's 6-hour
+            # limit; the retries alone do not cover that. Note that --max-time
+            # bounds each attempt rather than the whole call, and curl retries a
+            # timeout like any other transient error, so --retry-max-time is what
+            # actually caps the total: this can spend at most ~120s here.
+            BODY="$(mktemp)"
+            HTTP_CODE="$(curl -sS --retry 3 --retry-delay 2 --retry-connrefused \
+              --connect-timeout 10 --max-time 30 --retry-max-time 120 \
+              -o "$BODY" -w '%{http_code}' \
+              "https://registry.npmjs.org/$PKG_ESCAPED")" || {
+              echo "Could not reach the npm registry to check for a published stable version,"
+              echo "so the dist-tag for $VERSION cannot be chosen safely. Nothing has been"
+              echo "published — re-run this release once the registry is reachable."
+              exit 1
+            }
+
+            case "$HTTP_CODE" in
+              404)
+                # Never published, so there is certainly nothing stable.
+                HAS_STABLE=no
+                ;;
+              200)
+                # A 200 with no versions map is a malformed answer, not an empty
+                # package, so treat an unreadable body as inconclusive too.
+                # node's own stderr is dropped: the message below is the useful
+                # one, and the body may be a full HTML error page.
+                HAS_STABLE="$(node -e "
+                  const j = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+                  const versions = Object.keys(j.versions || {});
+                  if (versions.length === 0) throw new Error('registry response has no versions');
+                  console.log(versions.some((v) => !v.includes('-')) ? 'yes' : 'no');
+                " "$BODY" 2>/dev/null)" || {
+                  echo "The registry answered 200 but the body is not a package document, so"
+                  echo "the dist-tag for $VERSION cannot be chosen safely. Nothing has been"
+                  echo "published — first 200 bytes of the response follow."
+                  head -c 200 "$BODY"
+                  exit 1
+                }
+                ;;
+              *)
+                echo "The registry answered HTTP $HTTP_CODE after retries, so the dist-tag for"
+                echo "$VERSION cannot be chosen safely. Nothing has been published — re-run"
+                echo "this release once the registry is healthy."
+                exit 1
+                ;;
+            esac
+
+            if [ "$HAS_STABLE" = 'yes' ]; then
+              # Only reachable once a stable version exists, which is also the
+              # only time the identifier is used as the dist-tag itself. npm
+              # rejects a tag that parses as a SemVer range ("Tag name must not
+              # be a valid SemVer range: 0"), so a purely numeric identifier
+              # cannot name a channel — say that here rather than letting the
+              # publish fail on npm's own message.
+              case "$PRERELEASE_ID" in
+                *[a-zA-Z]*) ;;
+                *)
+                  echo "$VERSION is a pre-release and a stable version is already published, so"
+                  echo "it must publish under its own dist-tag — but npm will not accept"
+                  echo "'$PRERELEASE_ID' as one, since that parses as a SemVer range. Give the"
+                  echo "version a named pre-release identifier, e.g. ${VERSION%%-*}-rc.$PRERELEASE_ID."
+                  exit 1
+                  ;;
+              esac
+              TAG="$PRERELEASE_ID"
+              echo "A stable version is published, so this pre-release stays off 'latest'."
+            else
+              TAG=latest
+              echo "No stable version published yet, so 'latest' tracks this pre-release."
+            fi
           fi
-          echo "Found ${{ inputs.version }}"
+          echo "Publishing $VERSION under dist-tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          # Writes an .npmrc referencing NODE_AUTH_TOKEN, which the next step sets
-          registry-url: 'https://registry.npmjs.org'
-
-      - uses: ./.github/actions/npm-oidc-token
-
-      - name: Move the dist-tag
-        run: |
-          set -euo pipefail
-          PKG="$(node -p "require('./package.json').name")"
-          npm dist-tag add "$PKG@${{ inputs.version }}" '${{ inputs.dist_tag }}'
-          npm dist-tag ls "$PKG"
+      # The tag goes through the environment rather than being interpolated into
+      # the command: `${{ }}` in a `run:` is expanded as raw shell text before
+      # the shell sees it, so the quoting below is the only thing that survives a
+      # future change to how the tag is chosen.
+      - run: npm publish --provenance --access public --tag "$DIST_TAG"
+        env:
+          DIST_TAG: ${{ steps.dist-tag.outputs.tag }}
