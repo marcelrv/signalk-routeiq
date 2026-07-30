@@ -1,6 +1,6 @@
 {
   "name": "signalk-routeiq",
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.4",
   "description": "SignalK Nautical Route Planner - Offline tide and vessel-aware routing",
   "license": "Apache-2.0",
   "author": "Marcel Verpaalen",
