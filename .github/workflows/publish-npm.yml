@@ -78,6 +78,23 @@ jobs:
             exit 1
           fi
 
+      - run: npm ci
+      - run: npm run build
+
+      - name: Run tests
+        run: npm test
+        env:
+          NODE_OPTIONS: --experimental-sqlite
+
+      # Deliberately the last step before publishing, not an early pre-flight.
+      # The answer below goes stale the moment it is computed, and the way it
+      # goes stale is unrecoverable: if a stable release publishes while this job
+      # is still building, an "is anything stable published?" answer taken before
+      # the build would still say no, and this job would then put `latest` on a
+      # pre-release with no way to move it back. Running it here shrinks that
+      # window to the publish itself. The cost is that an unreachable registry
+      # now fails after the build and tests rather than before — CI minutes,
+      # against a mistake npm would not let us correct.
       - name: Determine npm dist-tag from the version and what is already published
         id: dist-tag
         run: |
@@ -111,8 +128,15 @@ jobs:
             # publishes nothing at all and the release can simply be re-run, so
             # that is the only outcome that cannot leave npm in a state we are
             # unable to correct.
+            # The timeouts are what stop a registry that accepts the connection
+            # and then goes silent from hanging the job until GitHub's 6-hour
+            # limit; the retries alone do not cover that. Note that --max-time
+            # bounds each attempt rather than the whole call, and curl retries a
+            # timeout like any other transient error, so --retry-max-time is what
+            # actually caps the total: this can spend at most ~120s here.
             BODY="$(mktemp)"
             HTTP_CODE="$(curl -sS --retry 3 --retry-delay 2 --retry-connrefused \
+              --connect-timeout 10 --max-time 30 --retry-max-time 120 \
               -o "$BODY" -w '%{http_code}' \
               "https://registry.npmjs.org/$PKG_ESCAPED")" || {
               echo "Could not reach the npm registry to check for a published stable version,"
@@ -162,13 +186,5 @@ jobs:
           fi
           echo "Publishing $VERSION under dist-tag: $TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - run: npm ci
-      - run: npm run build
-
-      - name: Run tests
-        run: npm test
-        env:
-          NODE_OPTIONS: --experimental-sqlite
 
       - run: npm publish --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }}
