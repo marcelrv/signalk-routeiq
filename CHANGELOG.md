@@ -37,6 +37,12 @@
   empty objects the server rejected. Reshaping a route into dozens of graph
   nodes made this certain rather than occasional. Generated waypoints are now
   numbered (`WP2`, `WP3`, …); the start and destination keep their own names.
+- Changed: a route saved from the webapp now carries the same numbered waypoints
+  as one saved from the plotter panel. The two save by different routes — the
+  webapp posts to the plugin, which writes the resource itself, while the panel
+  hands its points to Freeboard-SK, which writes its own — and the webapp's
+  omitted waypoint names altogether. The same route saved from the two windows
+  produced two different waypoint lists.
 - Changed: the Freeboard-SK plotter panel's departure list streams too, laying
   the whole window out at once and filling it in coarse to fine as results
   arrive, instead of showing "Scanning departures…" until the last one lands.
