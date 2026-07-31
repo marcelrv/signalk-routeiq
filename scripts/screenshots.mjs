@@ -276,11 +276,26 @@ const SHOTS = {
    * the scan ends. Caught deliberately in flight, so the placeholder rows, the
    * progress count and the Cancel button are all in shot.
    */
-  'webapp-departures': async ({ page }) => {
+  'webapp-departures': async ({ page, request }) => {
     await page.goto(ROUTEIQ_APP, { waitUntil: 'domcontentloaded' });
     await appReady(page);
     await resetRoute(page);
-    await planZeelandRoute(page);
+
+    // Take the endpoints off the app's own route request rather than reaching
+    // into its internals — page.evaluate cannot see the script's top-level
+    // bindings, and the pane only shows place names.
+    let planned = null;
+    const grabPayload = (r) => {
+      if (r.method() !== 'POST' || !/\/route$/.test(new URL(r.url()).pathname)) return;
+      try { planned = JSON.parse(r.postData() || 'null'); } catch { /* not ours */ }
+    };
+    page.on('request', grabPayload);
+    try {
+      await planZeelandRoute(page);
+    } finally {
+      page.off('request', grabPayload);
+    }
+    if (!planned?.start || !planned?.end) throw new Error('could not read the planned route endpoints');
 
     // The planner lives behind the tide toggle, which is off unless the plugin
     // is configured to consider tides by default.
@@ -289,6 +304,41 @@ const SHOTS = {
       await page.waitForSelector('#route-summary', { state: 'visible', timeout: 60_000 });
       await page.waitForTimeout(1500);
     }
+    // Aim the window rather than taking whatever the clock happens to say. Tide
+    // is a ~12.4 h cycle sampled here at 6 h, so what the first few results show
+    // depends entirely on the phase the window opens at: measured on this route,
+    // a good start reveals the full 35-minute spread within five results and a
+    // bad one reveals six minutes of it. The phase drifts ~50 min a day, so a
+    // hardcoded clock time would only be right on the day it was chosen.
+    //
+    // Start at the *slowest* departure of the next 24 h, which is the honest
+    // version of what the planner is for: the first row is what leaving now
+    // costs, and a departure most of an hour quicker turns up a few rows down.
+    const probe = await request.post(`${API}/route/departures`, {
+      data: {
+        start: planned.start, end: planned.end,
+        useTides: true, scanHours: 24, stepMinutes: 60,
+      },
+    });
+    if (!probe.ok()) throw new Error(`departure probe failed (${probe.status()})`);
+    const scored = (await probe.json()).departures.filter((d) => typeof d.totalSeconds === 'number');
+    if (scored.length < 2) throw new Error('departure probe returned nothing to rank');
+    const slowest = scored.reduce((a, b) => (b.totalSeconds > a.totalSeconds ? b : a));
+    const fastest = scored.reduce((a, b) => (b.totalSeconds < a.totalSeconds ? b : a));
+    log(`probe: ${(slowest.totalSeconds / 3600).toFixed(2)} h worst vs ` +
+        `${(fastest.totalSeconds / 3600).toFixed(2)} h best — ` +
+        `${Math.round((slowest.totalSeconds - fastest.totalSeconds) / 60)} min apart`);
+
+    // Typed through the real input so it registers as a chosen departure; set
+    // straight onto .value it would be treated as untouched and reset to now.
+    // The string has to be in the browser's own timezone, so build it there.
+    await page.fill('#departure-time', await page.evaluate((iso) => {
+      const d = new Date(iso);
+      const p = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+    }, slowest.departureTime));
+    await page.waitForTimeout(1200); // the edit triggers a reroute
+
     await page.waitForSelector('#best-departure-btn', { state: 'visible', timeout: 20_000 });
     await page.click('#best-departure-btn');
     await page.waitForSelector('#departure-modal', { state: 'visible', timeout: 20_000 });

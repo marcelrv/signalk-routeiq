@@ -21,6 +21,9 @@
   start. The shape of the day is legible after a handful of results, which is
   usually enough to see where the good departures are long before the scan ends.
   The colour ramp and the ★ re-scale as results land.
+- Added: a fifth App Store screenshot, `img/webapp-departures.jpg` — the
+  departure planner mid-scan. Regenerate it with
+  `./scripts/screenshots.sh webapp-departures`.
 - Fixed: the departure planner mixed clock formats in one dialog — its rows are
   24 h, but the window it covers was rendered in whatever the locale preferred,
   so an en-US browser put "08:50 PM" directly above a column reading "20:50".
