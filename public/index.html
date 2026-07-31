@@ -1683,6 +1683,17 @@ label.switch-row {
       date.getFullYear() + '-' + p(date.getMonth() + 1) + '-' + p(date.getDate()) +
       'T' + p(date.getHours()) + ':' + p(date.getMinutes());
   }
+  // The field only holds a *chosen* departure once the user has actually chosen
+  // one — by editing it, or by picking a row in the departure planner. Until
+  // then it tracks "now", and is re-read at every point that acts on it. The
+  // guard used to be "is the field empty", which meant the value written when
+  // the tide panel first appeared (page load) stayed put: enabling tides an hour
+  // later, or scanning departures, silently planned from a departure time an
+  // hour in the past.
+  let departureEdited = false;
+  function syncDepartureToNow() {
+    if (!departureEdited) setDepartureInput(new Date());
+  }
   // Several places trigger a status check independently (connect-time
   // placeholder, first vessel fix, every reroute) and their fetches can
   // resolve out of order. lastTideCheckLatLng/tideCheckSeq are updated here,
@@ -1705,7 +1716,7 @@ label.switch-row {
         const cb = document.getElementById('tide-cb');
         cb.checked = saved !== null ? saved === '1' : !!st.considerTidesDefault;
         document.getElementById('tide-depart-row').style.display = cb.checked ? '' : 'none';
-        if (!document.getElementById('departure-time').value) setDepartureInput(new Date());
+        syncDepartureToNow();
       })
       .catch(() => {});
   }
@@ -1727,10 +1738,12 @@ label.switch-row {
   document.getElementById('tide-cb').addEventListener('change', function () {
     try { localStorage.setItem('routeiq-use-tides', this.checked ? '1' : '0'); } catch {}
     document.getElementById('tide-depart-row').style.display = this.checked ? '' : 'none';
-    if (!document.getElementById('departure-time').value) setDepartureInput(new Date());
+    syncDepartureToNow();
     if (state.startLatLng && state.destLatLng) routingControl.route();
   });
   document.getElementById('departure-time').addEventListener('change', function () {
+    // Only a real edit counts — setDepartureInput() does not fire this.
+    departureEdited = true;
     if (tideEnabled() && state.startLatLng && state.destLatLng) routingControl.route();
   });
 
@@ -1741,6 +1754,8 @@ label.switch-row {
   }
   function openDeparturePlanner() {
     if (!state.startLatLng || !state.destLatLng) { showToast('Set start and destination first', 'error'); return; }
+    // Scan forward from now unless a departure was actually chosen.
+    syncDepartureToNow();
     document.getElementById('departure-modal').style.display = '';
     document.getElementById('dep-loading').style.display = 'flex';
     document.getElementById('dep-list').innerHTML = '';
@@ -1808,7 +1823,9 @@ label.switch-row {
         '<span style="width:14px;text-align:center;color:#f5d90a">' + (best ? '★' : '') + '</span>';
       row.title = 'Depart ' + dep.toLocaleString() + ' — travel time ' + fmtDurHM(d.totalSeconds) + '. Click to use this departure.';
       row.addEventListener('click', () => {
+        // Picking a row is a deliberate choice, so it stops tracking "now".
         setDepartureInput(dep);
+        departureEdited = true;
         const cb = document.getElementById('tide-cb');
         if (!cb.checked) { cb.checked = true; try { localStorage.setItem('routeiq-use-tides', '1'); } catch {} }
         document.getElementById('tide-depart-row').style.display = '';
@@ -4297,6 +4314,9 @@ label.switch-row {
         ...vesselOverrides(),
         useTides: tideEnabled(),
       };
+      // An untouched field means "leave now", not "leave whenever this page was
+      // opened", so re-read it against the clock before the route is planned.
+      if (tideEnabled()) syncDepartureToNow();
       if (tideEnabled() && departureIso()) payload.departureTime = departureIso();
 
       console.log('[MarineRouter] via payload:', JSON.stringify(via));

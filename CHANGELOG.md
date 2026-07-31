@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Fixed: the departure time used for tide-aware routing was the moment the page
+  was opened, not the current time. The field was filled in once, when the tide
+  panel first appeared, and then only ever refilled if it was empty — so ticking
+  "Consider tide" an hour later, planning a route, or scanning for the best
+  departure all worked from an hour in the past, silently. It now tracks the
+  clock until a departure is actually chosen, either by editing the field or by
+  picking a row in the departure planner. Affected the webapp and the
+  Freeboard-SK plotter panel alike.
+
 - Fixed: routing failed outright with "Invalid draft — expected a number in
   meters" on a server whose vessel draft was set. Signal K's `design.draft` is
   not a plain number — its value is an object (`{maximum, minimum, current}`) —

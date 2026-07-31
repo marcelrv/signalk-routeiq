@@ -100,7 +100,11 @@ async function init() {
 
   $('tide-cb').addEventListener('change', () => {
     $('tide-depart').style.display = $('tide-cb').checked ? '' : 'none';
-    if ($('tide-cb').checked && !$('departure-time').value) setDepartureInput(new Date());
+    if ($('tide-cb').checked) syncDepartureToNow();
+  });
+  $('departure-time').addEventListener('change', () => {
+    // Only a real edit counts — setDepartureInput() does not fire this.
+    departureEdited = true;
   });
   // "Best…" toggles the departure list: scan on first click, hide on the next.
   $('btn-departures').addEventListener('click', () => {
@@ -125,6 +129,16 @@ function setDepartureInput(date) {
     p(date.getDate()) + 'T' + p(date.getHours()) + ':' + p(date.getMinutes());
 }
 
+// The field only holds a *chosen* departure once the user has chosen one — by
+// editing it, or by picking a row in the departure list. Until then it tracks
+// "now". Guarding on "is the field empty" instead meant the value written when
+// the panel first appeared stayed put, so enabling tides or scanning departures
+// later planned from a departure time already in the past.
+let departureEdited = false;
+function syncDepartureToNow() {
+  if (!departureEdited) setDepartureInput(new Date());
+}
+
 async function checkTides() {
   try {
     const pos = await vesselPosition();
@@ -135,7 +149,7 @@ async function checkTides() {
     if (tidesAvailable && st.considerTidesDefault) {
       $('tide-cb').checked = true;
       $('tide-depart').style.display = '';
-      if (!$('departure-time').value) setDepartureInput(new Date());
+      syncDepartureToNow();
     }
   } catch {
     tidesAvailable = false;
@@ -711,6 +725,8 @@ async function scanDepartures() {
   if (!r) { setStatus('route-status', 'Select a route on the chart first.', 'error'); return; }
   const list = $('dep-list');
   list.innerHTML = '<div class="hint">Scanning departures…</div>';
+  // Scan forward from now unless a departure was actually chosen.
+  syncDepartureToNow();
 
   const { points } = await client.call('route.get', { routeId: r.routeId });
   const session = sessions.get(r.routeId);
@@ -778,7 +794,9 @@ function renderDepartures(deps) {
     row.append(t, bar, dur, star);
     row.addEventListener('click', () => run(async () => {
       hideDepartures();
+      // Picking a row is a deliberate choice, so it stops tracking "now".
       setDepartureInput(dep);
+      departureEdited = true;
       $('tide-cb').checked = true;
       $('tide-depart').style.display = '';
       await calculate();
