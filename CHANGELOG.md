@@ -29,6 +29,16 @@
   so an en-US browser put "08:50 PM" directly above a column reading "20:50".
   The window heading and the row tooltips are now 24 h too, in the webapp and in
   the plotter panel.
+- Changed: the Freeboard-SK plotter panel's departure list streams too, laying
+  the whole window out at once and filling it in coarse to fine as results
+  arrive, instead of showing "Scanning departures…" until the last one lands.
+  Hiding the list drops the request, which stops the server calculating the rest.
+- Changed: paging the departure window by 12 hours no longer recalculates the
+  half it already has. A 24 h window moved half its own width overlaps itself by
+  13 of its 25 steps — same route, same constraints, the same departure times to
+  the millisecond — so only the 12 that are genuinely new are requested, and
+  paging back to a window already seen calculates nothing at all. Kept results
+  are discarded as soon as anything that would change a travel time changes.
 - Added: the departure planner can be cancelled while it is still scanning,
   keeping the departures found so far, and can page the window backwards and
   forwards 12 hours at a time. Cancelling, paging, or closing the planner drops

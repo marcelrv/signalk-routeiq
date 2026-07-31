@@ -1764,10 +1764,19 @@ label.switch-row {
   // before any of them have a time in them.
   const DEP_SCAN_HOURS = 24;
   const DEP_STEP_MINUTES = 60;
+  const DEP_STEPS = (DEP_SCAN_HOURS * 60) / DEP_STEP_MINUTES + 1;   // ends included
   let depWindowStart = null;   // Date — first departure of the window on screen
   let depAbort = null;         // AbortController of the scan in flight, if any
   let depSteps = [];           // one slot per step: { departureTime, result }
   let depWarnings = [];
+  // Paging by 12 h moves a 24 h window half its own width, so half of the new
+  // window has already been calculated — same route, same constraints, the same
+  // departure times to the millisecond. Keeping those means a page costs the
+  // 12 hours that are actually new instead of re-running the whole 24.
+  // Keyed by departure time; dropped whenever anything that would change a
+  // result changes, which is what depSignature covers.
+  let depCache = new Map();
+  let depCacheKey = null;
 
   function depEl(id) { return document.getElementById(id); }
 
@@ -1820,7 +1829,8 @@ label.switch-row {
       '<div style="color:#f2938c;font-size:12px;padding:6px 0">' + escapeHtml(message) + '</div>';
   }
 
-  function departureScanPayload() {
+  // Everything a departure's travel time depends on, except when it leaves.
+  function departureScanConstraints() {
     const toPos = ll => ({ latitude: ll.lat, longitude: ll.lng });
     return {
       start: toPos(state.startLatLng),
@@ -1831,10 +1841,19 @@ label.switch-row {
       endMode: state.destMode || 'auto',
       minCoastDistance: (parseFloat(document.getElementById('min-coast').value) || 0) / 1852,
       ...vesselOverrides(),
-      departureTime: depWindowStart.toISOString(),
-      scanHours: DEP_SCAN_HOURS,
-      stepMinutes: DEP_STEP_MINUTES,
     };
+  }
+  function depSignature() { return JSON.stringify(departureScanConstraints()); }
+
+  // The times this window covers, computed here rather than taken from the
+  // server's `meta`: a request that only covers the part of the window still
+  // missing describes only that part, and the slots have to line up with the
+  // whole window regardless. Both sides derive from the same millisecond
+  // arithmetic on the same base, so the strings match exactly.
+  function departureWindowTimes() {
+    const t0 = depWindowStart.getTime();
+    return Array.from({ length: DEP_STEPS }, (_, i) =>
+      new Date(t0 + i * DEP_STEP_MINUTES * 60_000).toISOString());
   }
 
   async function readNdjson(resp, onEvent) {
@@ -1860,14 +1879,40 @@ label.switch-row {
     if (depAbort) depAbort.abort();          // supersede whatever is running
     const ctrl = new AbortController();
     depAbort = ctrl;
-    depSteps = [];
     depWarnings = [];
-    depEl('dep-list').innerHTML = '';
+
+    // Anything that changes a travel time invalidates every kept result.
+    const signature = depSignature();
+    if (signature !== depCacheKey) { depCache.clear(); depCacheKey = signature; }
+
+    // Lay the window out first and fill in what is already known, so a page
+    // lands with half of it already drawn.
+    const times = departureWindowTimes();
+    depSteps = times.map(t => ({ departureTime: t, result: depCache.get(t) || null }));
+    const slotByTime = new Map(times.map((t, i) => [t, i]));
     updateDepWindowLabel();
+    renderDepartureList();
     setDepScanning(true);
 
-    const payload = departureScanPayload();
-    logDebug('DEPARTURES', departuresUrl(), payload);
+    // The gap is contiguous — a window only ever moves as a block — so one
+    // request covers it. scanHours counts intervals, not steps.
+    const missing = depSteps.map((s, i) => (s.result ? -1 : i)).filter(i => i >= 0);
+    if (!missing.length) {
+      depAbort = null;
+      setDepScanning(false);
+      return;
+    }
+    const from = missing[0];
+    const span = missing[missing.length - 1] - from;
+    const payload = {
+      ...departureScanConstraints(),
+      departureTime: times[from],
+      scanHours: Math.max(1, (span * DEP_STEP_MINUTES) / 60),
+      stepMinutes: DEP_STEP_MINUTES,
+    };
+    logDebug('DEPARTURES', departuresUrl(), payload,
+      `${missing.length}/${DEP_STEPS} steps to calculate, ${DEP_STEPS - missing.length} reused`);
+
     try {
       const resp = await fetch(departuresUrl(), {
         method: 'POST',
@@ -1885,10 +1930,10 @@ label.switch-row {
       if (!streamed || !resp.body) {
         const data = await resp.json();
         depWarnings = data.warnings || [];
-        depSteps = (data.departures || []).map(d => ({ departureTime: d.departureTime, result: d }));
+        for (const d of data.departures || []) onDepartureResult(d, slotByTime);
         renderDepartureList();
       } else {
-        await readNdjson(resp, onDepartureEvent);
+        await readNdjson(resp, ev => onDepartureEvent(ev, slotByTime));
       }
     } catch (err) {
       // An abort is either the Cancel button or a window shift; both keep
@@ -1902,12 +1947,20 @@ label.switch-row {
     }
   }
 
-  function onDepartureEvent(ev) {
+  // Placed by departure time rather than by the index in the response: that
+  // index is relative to whatever slice was requested, which is not the window.
+  function onDepartureResult(d, slotByTime) {
+    const slot = slotByTime.get(d.departureTime);
+    if (slot === undefined) return;
+    depSteps[slot].result = d;
+    depCache.set(d.departureTime, d);
+  }
+
+  function onDepartureEvent(ev, slotByTime) {
     if (ev.type === 'meta') {
       depWarnings = ev.warnings || [];
-      depSteps = (ev.departureTimes || []).map(t => ({ departureTime: t, result: null }));
     } else if (ev.type === 'departure') {
-      if (depSteps[ev.index]) depSteps[ev.index].result = ev;
+      onDepartureResult(ev, slotByTime);
     } else if (ev.type === 'error') {
       showDepError(ev.error);
       return;
