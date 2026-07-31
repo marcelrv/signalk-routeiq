@@ -268,7 +268,57 @@ const SHOTS = {
     await shoot(page, 'webapp-route');
   },
 
-  /** 2. Download manager, Installed tab (the map view of what is on disk). */
+  /**
+   * 2. Departure planner mid-scan, which is the frame worth showing: every hour
+   * of the window is already listed, and the handful that have been calculated
+   * are spread across the whole day rather than bunched at the start — that is
+   * the coarse-to-fine order, and the reason the answer is legible long before
+   * the scan ends. Caught deliberately in flight, so the placeholder rows, the
+   * progress count and the Cancel button are all in shot.
+   */
+  'webapp-departures': async ({ page }) => {
+    await page.goto(ROUTEIQ_APP, { waitUntil: 'domcontentloaded' });
+    await appReady(page);
+    await resetRoute(page);
+    await planZeelandRoute(page);
+
+    // The planner lives behind the tide toggle, which is off unless the plugin
+    // is configured to consider tides by default.
+    if (!(await page.isChecked('#tide-cb'))) {
+      await page.click('#tide-cb');
+      await page.waitForSelector('#route-summary', { state: 'visible', timeout: 60_000 });
+      await page.waitForTimeout(1500);
+    }
+    await page.waitForSelector('#best-departure-btn', { state: 'visible', timeout: 20_000 });
+    await page.click('#best-departure-btn');
+    await page.waitForSelector('#departure-modal', { state: 'visible', timeout: 20_000 });
+
+    // Poll rather than sleep: a step is well under a second, so a fixed wait
+    // either catches an empty list or a finished one depending on the machine.
+    const target = 5;
+    let caught = null;
+    for (let i = 0; i < 400; i++) {
+      const s = await page.evaluate(() => {
+        const rows = [...document.querySelectorAll('#dep-list > div')];
+        return {
+          rows: rows.length,
+          filled: rows.filter((d) => !d.textContent.includes('·')).length,
+          running: document.getElementById('dep-cancel')?.style.display !== 'none',
+        };
+      });
+      if (s.rows && s.filled >= target && s.filled < s.rows) { caught = s; break; }
+      if (s.rows && !s.running) { caught = s; break; } // finished before we looked
+      await page.waitForTimeout(40);
+    }
+    if (!caught || caught.filled >= caught.rows) {
+      log(`warning: scan finished before ${target}/25 could be caught — shot shows a completed window`);
+    } else {
+      log(`caught the scan at ${caught.filled}/${caught.rows}`);
+    }
+    await shoot(page, 'webapp-departures');
+  },
+
+  /** 3. Download manager, Installed tab (the map view of what is on disk). */
   'download-manager': async ({ page }) => {
     await page.goto(ROUTEIQ_APP, { waitUntil: 'domcontentloaded' });
     await appReady(page);
@@ -290,7 +340,7 @@ const SHOTS = {
     await shoot(page, 'download-manager');
   },
 
-  /** 3. Freeboard-SK with the RouteIQ plotter-extension panel open. */
+  /** 4. Freeboard-SK with the RouteIQ plotter-extension panel open. */
   'freeboard-plugin': async ({ page }) => {
     // Freeboard opens at world zoom (0°/0°) when the server has no GPS source
     // — give it a real origin near the Oosterschelde barrier before opening
@@ -346,7 +396,7 @@ const SHOTS = {
   },
 
   /**
-   * 4. Freeboard-SK with tide-aware planning.
+   * 5. Freeboard-SK with tide-aware planning.
    *
    * Needs the Europe database loaded and the Zeeland one unloaded, so the
    * route spans enough water for the tidal model to matter. Both are done

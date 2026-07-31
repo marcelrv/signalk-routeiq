@@ -1801,11 +1801,18 @@ label.switch-row {
       : (note ? escapeHtml(note) : (depSteps.length ? escapeHtml(done + ' / ' + depSteps.length) : ''));
   }
 
+  // The rows of the planner are 24 h clock times, built by hand from
+  // getHours(). Anything else in the same dialog has to match: left to the
+  // locale's own preference, en-US renders "08:50 PM" directly above a column
+  // reading "20:50". hourCycle says what is wanted rather than relying on
+  // hour12:false, which is allowed to produce a 24:00 for midnight.
+  const DEP_STAMP = { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
+  function fmtDepStamp(dt) { return dt.toLocaleString([], DEP_STAMP); }
+
   function updateDepWindowLabel() {
     if (!depWindowStart) { depEl('dep-window').textContent = ''; return; }
     const end = new Date(depWindowStart.getTime() + DEP_SCAN_HOURS * 3600_000);
-    const d = dt => dt.toLocaleString([], { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-    depEl('dep-window').textContent = d(depWindowStart) + '  →  ' + d(end);
+    depEl('dep-window').textContent = fmtDepStamp(depWindowStart) + '  →  ' + fmtDepStamp(end);
   }
 
   function showDepError(message) {
@@ -1966,7 +1973,7 @@ label.switch-row {
         '<span style="flex:1;height:10px;border-radius:5px;background:linear-gradient(90deg,' + color + ',' + color + ') no-repeat;background-size:' + barW + '% 100%;border:1px solid rgba(79,148,212,0.15)"></span>' +
         '<span style="width:44px;text-align:right;font-family:monospace;color:' + color + '">' + fmtDurHM(secs) + '</span>' +
         '<span style="width:14px;text-align:center;color:#f5d90a">' + (best ? '★' : '') + '</span>';
-      row.title = 'Depart ' + dep.toLocaleString() + ' — travel time ' + fmtDurHM(secs) + '. Click to use this departure.';
+      row.title = 'Depart ' + fmtDepStamp(dep) + ' — travel time ' + fmtDurHM(secs) + '. Click to use this departure.';
       row.addEventListener('click', () => {
         // Picking a row is a deliberate choice, so it stops tracking "now".
         setDepartureInput(dep);

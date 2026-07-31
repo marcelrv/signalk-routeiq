@@ -774,7 +774,12 @@ function renderDepartures(deps) {
     const dep = new Date(d.departureTime);
     const row = document.createElement('div');
     row.className = 'dep-row';
-    row.title = 'Depart ' + dep.toLocaleString() + ' — travel time ' + fmtDurationSec(d.totalSeconds);
+    // 24 h, to match the row's own clock time built from getHours() below —
+    // the locale's default would put "8:50 PM" next to a column reading 20:50.
+    row.title = 'Depart ' + dep.toLocaleString([], {
+      weekday: 'short', day: '2-digit', month: 'short',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }) + ' — travel time ' + fmtDurationSec(d.totalSeconds);
     const t = document.createElement('span');
     t.className = 'dep-time';
     t.textContent = String(dep.getHours()).padStart(2, '0') + ':' + String(dep.getMinutes()).padStart(2, '0');

@@ -27,6 +27,7 @@
     "appIcon": "icon.svg",
     "screenshots": [
       "./img/webapp-route.jpg",
+      "./img/webapp-departures.jpg",
       "./img/freeboard-plugin.jpg",
       "./img/freeboard-tides.jpg",
       "./img/download-manager.jpg"

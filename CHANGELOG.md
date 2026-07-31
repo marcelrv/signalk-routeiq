@@ -21,6 +21,11 @@
   start. The shape of the day is legible after a handful of results, which is
   usually enough to see where the good departures are long before the scan ends.
   The colour ramp and the ★ re-scale as results land.
+- Fixed: the departure planner mixed clock formats in one dialog — its rows are
+  24 h, but the window it covers was rendered in whatever the locale preferred,
+  so an en-US browser put "08:50 PM" directly above a column reading "20:50".
+  The window heading and the row tooltips are now 24 h too, in the webapp and in
+  the plotter panel.
 - Added: the departure planner can be cancelled while it is still scanning,
   keeping the departures found so far, and can page the window backwards and
   forwards 12 hours at a time. Cancelling, paging, or closing the planner drops
