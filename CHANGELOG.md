@@ -10,6 +10,22 @@
   clock until a departure is actually chosen, either by editing the field or by
   picking a row in the departure planner. Affected the webapp and the
   Freeboard-SK plotter panel alike.
+- Changed: the departure planner now fills in as it scans instead of showing a
+  spinner until every departure has been calculated. A scan is one full route
+  calculation per hour of the window and can run for minutes on a long passage;
+  `POST /route/departures` now streams each result as newline-delimited JSON to
+  a client that asks for it (`Accept: application/x-ndjson`), and answers with
+  the same single JSON document as before to one that does not.
+- Changed: the scan works coarse to fine — both ends of the window first, then
+  the midpoint of each interval, and so on — rather than hour by hour from the
+  start. The shape of the day is legible after a handful of results, which is
+  usually enough to see where the good departures are long before the scan ends.
+  The colour ramp and the ★ re-scale as results land.
+- Added: the departure planner can be cancelled while it is still scanning,
+  keeping the departures found so far, and can page the window backwards and
+  forwards 12 hours at a time. Cancelling, paging, or closing the planner drops
+  the request, which is what stops the server calculating a window nobody is
+  looking at any more.
 
 - Fixed: routing failed outright with "Invalid draft — expected a number in
   meters" on a server whose vessel draft was set. Signal K's `design.draft` is

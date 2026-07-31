@@ -36,7 +36,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc && tsc test/routing.test.ts test/navmesh.test.ts test/navmesh-integration.test.ts test/zeelandbrug.test.ts test/bbox-penalty-retry.test.ts test/via-disconnected-leg.test.ts test/dynamic-loading.test.ts test/vessel-validation.test.ts test/plugin-registration.test.ts test/plugin-lifecycle.test.ts test/first-run-contract.test.ts --outDir dist-test --moduleResolution node --module es2022 --target es2022 --declaration --declarationMap --sourceMap --esModuleInterop --strict --skipLibCheck",
+    "build": "tsc && tsc test/routing.test.ts test/navmesh.test.ts test/navmesh-integration.test.ts test/zeelandbrug.test.ts test/bbox-penalty-retry.test.ts test/via-disconnected-leg.test.ts test/dynamic-loading.test.ts test/vessel-validation.test.ts test/plugin-registration.test.ts test/plugin-lifecycle.test.ts test/first-run-contract.test.ts test/departure-stream.test.ts --outDir dist-test --moduleResolution node --module es2022 --target es2022 --declaration --declarationMap --sourceMap --esModuleInterop --strict --skipLibCheck",
     "build:watch": "tsc --watch",
     "start": "node dist/index.js",
     "dev": "ts-node --esm src/index.ts",
@@ -44,7 +44,7 @@
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
-    "test": "node --test --experimental-sqlite --test-force-exit dist-test/routing.test.js dist-test/navmesh.test.js dist-test/navmesh-integration.test.js dist-test/zeelandbrug.test.js dist-test/bbox-penalty-retry.test.js dist-test/via-disconnected-leg.test.js dist-test/dynamic-loading.test.js dist-test/vessel-validation.test.js dist-test/plugin-registration.test.js dist-test/plugin-lifecycle.test.js dist-test/first-run-contract.test.js",
+    "test": "node --test --experimental-sqlite --test-force-exit dist-test/routing.test.js dist-test/navmesh.test.js dist-test/navmesh-integration.test.js dist-test/zeelandbrug.test.js dist-test/bbox-penalty-retry.test.js dist-test/via-disconnected-leg.test.js dist-test/dynamic-loading.test.js dist-test/vessel-validation.test.js dist-test/plugin-registration.test.js dist-test/plugin-lifecycle.test.js dist-test/first-run-contract.test.js dist-test/departure-stream.test.js",
     "test:unit": "node --test --test-force-exit dist-test/unit/*.test.js",
     "test:integration": "node --test --test-force-exit dist-test/integration/*.test.js",
     "deploy": "bash deploy.sh",
