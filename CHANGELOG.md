@@ -29,6 +29,14 @@
   so an en-US browser put "08:50 PM" directly above a column reading "20:50".
   The window heading and the row tooltips are now 24 h too, in the webapp and in
   the plotter panel.
+- Fixed: saving a reshaped route from the Freeboard-SK plotter panel failed with
+  "Operation could not be completed" and a wall of schema errors. Signal K's
+  route schema requires every `coordinatesMeta` entry to carry a name or an
+  href, and the host builds one entry per waypoint from that waypoint's name —
+  so the unnamed points RouteIQ generated between start and destination became
+  empty objects the server rejected. Reshaping a route into dozens of graph
+  nodes made this certain rather than occasional. Generated waypoints are now
+  numbered (`WP2`, `WP3`, …); the start and destination keep their own names.
 - Changed: the Freeboard-SK plotter panel's departure list streams too, laying
   the whole window out at once and filling it in coarse to fine as results
   arrive, instead of showing "Scanning departures…" until the last one lands.

@@ -327,7 +327,16 @@ async function calculate() {
   }
   if (coords.length < 2) throw new Error('Routing engine returned no usable geometry');
 
-  const newPoints = coords.map(([lon, lat]) => ({ position: [lon, lat] }));
+  // Every point needs a name, and it has to be a real one. The host turns each
+  // point into a coordinatesMeta entry, and Signal K's route schema requires
+  // every entry to be either {name} or {href}; a point with no name — or with
+  // an empty one, which the host discards just the same — becomes {}, which is
+  // neither. Saving then fails with a schema error naming every unnamed index,
+  // and reshaping a route into dozens of graph nodes made that a certainty
+  // rather than an edge case. Numbered rather than blank because a blank name
+  // only works for as long as the host keeps preserving whitespace, and the
+  // failure it comes back with says nothing about the cause.
+  const newPoints = coords.map(([lon, lat], i) => ({ position: [lon, lat], name: 'WP' + (i + 1) }));
   // Keep the user's start/end waypoint names on the reshaped route.
   const first = requestPoints[0], last = requestPoints[requestPoints.length - 1];
   if (first.name) newPoints[0].name = first.name;
@@ -347,7 +356,10 @@ async function calculate() {
 async function revert() {
   const session = sessions.get(selectedId);
   if (!session?.revertPoints) return;
-  await client.call('route.replace', { routeId: selectedId, points: session.revertPoints });
+  // Same naming rule as above: these came back from the host, and a route drawn
+  // on the chart rather than imported can have points with no name at all.
+  const points = session.revertPoints.map((p, i) => ({ ...p, name: p.name || 'WP' + (i + 1) }));
+  await client.call('route.replace', { routeId: selectedId, points });
   sessions.delete(selectedId);
   hideSummary();
   setStatus('route-status', 'Original waypoints restored (still unsaved).', '');
