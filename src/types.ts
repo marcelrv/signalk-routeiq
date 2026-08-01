@@ -172,6 +172,20 @@ export interface RouteResult {
   }>;
 }
 
+// One departure of a departure scan. `index` is the step's position in the
+// scan window, counted from the requested departure time — a streamed scan
+// arrives coarse-to-fine rather than chronologically, so the index is what
+// places a result in the window.
+export interface DepartureScanStep {
+  index: number;
+  departureTime: string;
+  totalSeconds?: number;
+  totalSecondsNoTide?: number;
+  arrivalTime?: string;
+  totalDistance?: number;
+  error?: string;
+}
+
 // POI search result
 export interface PoiResult {
   id: number;

@@ -100,7 +100,11 @@ async function init() {
 
   $('tide-cb').addEventListener('change', () => {
     $('tide-depart').style.display = $('tide-cb').checked ? '' : 'none';
-    if ($('tide-cb').checked && !$('departure-time').value) setDepartureInput(new Date());
+    if ($('tide-cb').checked) syncDepartureToNow();
+  });
+  $('departure-time').addEventListener('change', () => {
+    // Only a real edit counts — setDepartureInput() does not fire this.
+    departureEdited = true;
   });
   // "Best…" toggles the departure list: scan on first click, hide on the next.
   $('btn-departures').addEventListener('click', () => {
@@ -125,6 +129,16 @@ function setDepartureInput(date) {
     p(date.getDate()) + 'T' + p(date.getHours()) + ':' + p(date.getMinutes());
 }
 
+// The field only holds a *chosen* departure once the user has chosen one — by
+// editing it, or by picking a row in the departure list. Until then it tracks
+// "now". Guarding on "is the field empty" instead meant the value written when
+// the panel first appeared stayed put, so enabling tides or scanning departures
+// later planned from a departure time already in the past.
+let departureEdited = false;
+function syncDepartureToNow() {
+  if (!departureEdited) setDepartureInput(new Date());
+}
+
 async function checkTides() {
   try {
     const pos = await vesselPosition();
@@ -135,7 +149,7 @@ async function checkTides() {
     if (tidesAvailable && st.considerTidesDefault) {
       $('tide-cb').checked = true;
       $('tide-depart').style.display = '';
-      if (!$('departure-time').value) setDepartureInput(new Date());
+      syncDepartureToNow();
     }
   } catch {
     tidesAvailable = false;
@@ -313,7 +327,16 @@ async function calculate() {
   }
   if (coords.length < 2) throw new Error('Routing engine returned no usable geometry');
 
-  const newPoints = coords.map(([lon, lat]) => ({ position: [lon, lat] }));
+  // Every point needs a name, and it has to be a real one. The host turns each
+  // point into a coordinatesMeta entry, and Signal K's route schema requires
+  // every entry to be either {name} or {href}; a point with no name — or with
+  // an empty one, which the host discards just the same — becomes {}, which is
+  // neither. Saving then fails with a schema error naming every unnamed index,
+  // and reshaping a route into dozens of graph nodes made that a certainty
+  // rather than an edge case. Numbered rather than blank because a blank name
+  // only works for as long as the host keeps preserving whitespace, and the
+  // failure it comes back with says nothing about the cause.
+  const newPoints = coords.map(([lon, lat], i) => ({ position: [lon, lat], name: 'WP' + (i + 1) }));
   // Keep the user's start/end waypoint names on the reshaped route.
   const first = requestPoints[0], last = requestPoints[requestPoints.length - 1];
   if (first.name) newPoints[0].name = first.name;
@@ -333,7 +356,10 @@ async function calculate() {
 async function revert() {
   const session = sessions.get(selectedId);
   if (!session?.revertPoints) return;
-  await client.call('route.replace', { routeId: selectedId, points: session.revertPoints });
+  // Same naming rule as above: these came back from the host, and a route drawn
+  // on the chart rather than imported can have points with no name at all.
+  const points = session.revertPoints.map((p, i) => ({ ...p, name: p.name || 'WP' + (i + 1) }));
+  await client.call('route.replace', { routeId: selectedId, points });
   sessions.delete(selectedId);
   hideSummary();
   setStatus('route-status', 'Original waypoints restored (still unsaved).', '');
@@ -699,18 +725,55 @@ function fmtDurationSec(sec) {
 /* ---------- departure planner (24h scan) ---------- */
 
 let depScanVisible = false;
+let depAbort = null;   // AbortController of the scan in flight, if any
+let depSteps = [];     // one slot per step: { departureTime, result }
 
 function hideDepartures() {
+  if (depAbort) depAbort.abort();   // also tells the server to stop calculating
+  depAbort = null;
+  depSteps = [];
   $('dep-list').innerHTML = '';
   $('btn-departures').textContent = 'Best…';
   depScanVisible = false;
 }
 
+/**
+ * Read a newline-delimited JSON body, one parsed object at a time.
+ * Kept in step with the copy in public/index.html — that one is an inline
+ * script and this is a module, with no bundler between them.
+ */
+async function readNdjson(resp, onEvent) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (line) onEvent(JSON.parse(line));
+    }
+  }
+  const tail = buffer.trim();
+  if (tail) onEvent(JSON.parse(tail));
+}
+
+// A scan is a full route calculation per hour of the window, so it can run for
+// minutes on a long passage. The server streams each step as it finishes and
+// the list is drawn from whatever has arrived. Steps come back coarse to fine —
+// both ends of the window, then the midpoints — rather than in clock order, so
+// every result carries its index and the rows are laid out from the `meta` line
+// before any of them has a time in it.
 async function scanDepartures() {
   const r = selectedRoute();
   if (!r) { setStatus('route-status', 'Select a route on the chart first.', 'error'); return; }
   const list = $('dep-list');
   list.innerHTML = '<div class="hint">Scanning departures…</div>';
+  // Scan forward from now unless a departure was actually chosen.
+  syncDepartureToNow();
 
   const { points } = await client.call('route.get', { routeId: r.routeId });
   const session = sessions.get(r.routeId);
@@ -726,59 +789,123 @@ async function scanDepartures() {
     scanHours: 24,
     stepMinutes: 60,
   };
-  const resp = await fetch(API + '/route/departures', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const data = await resp.json();
-  if (!resp.ok) {
-    hideDepartures();
-    throw new Error(data.error || ('Departure scan failed (' + resp.status + ')'));
+
+  if (depAbort) depAbort.abort();
+  const ctrl = new AbortController();
+  depAbort = ctrl;
+  depSteps = [];
+
+  try {
+    const resp = await fetch(API + '/route/departures', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/x-ndjson' },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => null);
+      hideDepartures();
+      throw new Error((data && data.error) || ('Departure scan failed (' + resp.status + ')'));
+    }
+    depScanVisible = true;
+    $('btn-departures').textContent = 'Hide';
+
+    // A server still answering with the single JSON document — an older plugin
+    // behind the same panel — renders the same way, just all at once.
+    const streamed = (resp.headers.get('content-type') || '').indexOf('x-ndjson') >= 0;
+    if (!streamed || !resp.body) {
+      const data = await resp.json();
+      depSteps = (data.departures || []).map((d) => ({ departureTime: d.departureTime, result: d }));
+      renderDepartures();
+    } else {
+      await readNdjson(resp, (ev) => {
+        if (ev.type === 'meta') {
+          depSteps = (ev.departureTimes || []).map((t) => ({ departureTime: t, result: null }));
+        } else if (ev.type === 'departure') {
+          if (depSteps[ev.index]) depSteps[ev.index].result = ev;
+        } else if (ev.type === 'error') {
+          setStatus('route-status', ev.error, 'error');
+          return;
+        }
+        renderDepartures();
+      });
+    }
+  } catch (err) {
+    // Hiding the list aborts the request; that is not a failure worth reporting.
+    if (err.name !== 'AbortError') throw err;
+  } finally {
+    if (depAbort === ctrl) depAbort = null;
   }
-  renderDepartures(data.departures || []);
-  depScanVisible = true;
-  $('btn-departures').textContent = 'Hide';
 }
 
-function renderDepartures(deps) {
+function renderDepartures() {
   const list = $('dep-list');
-  list.innerHTML = '';
-  const ok = deps.filter((d) => typeof d.totalSeconds === 'number');
-  if (!ok.length) {
+  if (!depSteps.length) { list.innerHTML = ''; return; }
+
+  // The ramp is normalised over what has been computed so far, so colours and
+  // the ★ shift as the window fills in — which is the point: the best-so-far is
+  // readable from the first few results rather than only at the end.
+  const done = depSteps.filter((s) => s.result && typeof s.result.totalSeconds === 'number');
+  if (!done.length && !depAbort) {
     list.innerHTML = '<div class="hint">No departures could be evaluated.</div>';
     return;
   }
-  const minS = Math.min(...ok.map((d) => d.totalSeconds));
-  const maxS = Math.max(...ok.map((d) => d.totalSeconds));
-  for (const d of ok) {
-    // Green (fastest) → red (slowest), same ramp as the webapp planner.
-    const norm = maxS > minS ? (d.totalSeconds - minS) / (maxS - minS) : 0;
-    const color = 'hsl(' + Math.round(120 * (1 - norm)) + ',65%,42%)';
-    const dep = new Date(d.departureTime);
+  const secs = done.map((s) => s.result.totalSeconds);
+  const minS = secs.length ? Math.min(...secs) : 0;
+  const maxS = secs.length ? Math.max(...secs) : 0;
+
+  list.innerHTML = '';
+  for (const step of depSteps) {
+    const dep = new Date(step.departureTime);
     const row = document.createElement('div');
     row.className = 'dep-row';
-    row.title = 'Depart ' + dep.toLocaleString() + ' — travel time ' + fmtDurationSec(d.totalSeconds);
     const t = document.createElement('span');
     t.className = 'dep-time';
     t.textContent = String(dep.getHours()).padStart(2, '0') + ':' + String(dep.getMinutes()).padStart(2, '0');
     const bar = document.createElement('span');
     bar.className = 'dep-bar';
+    const dur = document.createElement('span');
+    dur.className = 'dep-dur';
+    const star = document.createElement('span');
+    star.className = 'dep-best';
+    row.append(t, bar, dur, star);
+
+    if (!step.result) {
+      row.classList.add('pending');
+      dur.textContent = '· ·';
+      list.appendChild(row);
+      continue;
+    }
+    if (typeof step.result.totalSeconds !== 'number') {
+      row.classList.add('pending');
+      dur.textContent = '—';
+      row.title = 'No route for this departure';
+      list.appendChild(row);
+      continue;
+    }
+
+    // Green (fastest) → red (slowest), same ramp as the webapp planner.
+    const total = step.result.totalSeconds;
+    const norm = maxS > minS ? (total - minS) / (maxS - minS) : 0;
+    const color = 'hsl(' + Math.round(120 * (1 - norm)) + ',65%,42%)';
+    // 24 h, to match the row's own clock time built from getHours() above —
+    // the locale's default would put "8:50 PM" next to a column reading 20:50.
+    row.title = 'Depart ' + dep.toLocaleString([], {
+      weekday: 'short', day: '2-digit', month: 'short',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }) + ' — travel time ' + fmtDurationSec(total);
     const fill = document.createElement('i');
     fill.style.width = Math.round(30 + 55 * norm) + '%';
     fill.style.background = color;
     bar.appendChild(fill);
-    const dur = document.createElement('span');
-    dur.className = 'dep-dur';
     dur.style.color = color;
-    dur.textContent = fmtDurationSec(d.totalSeconds);
-    const star = document.createElement('span');
-    star.className = 'dep-best';
-    star.textContent = d.totalSeconds === minS ? '★' : '';
-    row.append(t, bar, dur, star);
+    dur.textContent = fmtDurationSec(total);
+    star.textContent = total === minS ? '★' : '';
     row.addEventListener('click', () => run(async () => {
       hideDepartures();
+      // Picking a row is a deliberate choice, so it stops tracking "now".
       setDepartureInput(dep);
+      departureEdited = true;
       $('tide-cb').checked = true;
       $('tide-depart').style.display = '';
       await calculate();

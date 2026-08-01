@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+- Fixed: the departure time used for tide-aware routing was the moment the page
+  was opened, not the current time. The field was filled in once, when the tide
+  panel first appeared, and then only ever refilled if it was empty — so ticking
+  "Consider tide" an hour later, planning a route, or scanning for the best
+  departure all worked from an hour in the past, silently. It now tracks the
+  clock until a departure is actually chosen, either by editing the field or by
+  picking a row in the departure planner. Affected the webapp and the
+  Freeboard-SK plotter panel alike.
+- Changed: the departure planner now fills in as it scans instead of showing a
+  spinner until every departure has been calculated. A scan is one full route
+  calculation per hour of the window and can run for minutes on a long passage;
+  `POST /route/departures` now streams each result as newline-delimited JSON to
+  a client that asks for it (`Accept: application/x-ndjson`), and answers with
+  the same single JSON document as before to one that does not.
+- Changed: the scan works coarse to fine — both ends of the window first, then
+  the midpoint of each interval, and so on — rather than hour by hour from the
+  start. The shape of the day is legible after a handful of results, which is
+  usually enough to see where the good departures are long before the scan ends.
+  The colour ramp and the ★ re-scale as results land.
+- Added: a fifth App Store screenshot, `img/webapp-departures.jpg` — the
+  departure planner mid-scan. Regenerate it with
+  `./scripts/screenshots.sh webapp-departures`.
+- Fixed: the departure planner mixed clock formats in one dialog — its rows are
+  24 h, but the window it covers was rendered in whatever the locale preferred,
+  so an en-US browser put "08:50 PM" directly above a column reading "20:50".
+  The window heading and the row tooltips are now 24 h too, in the webapp and in
+  the plotter panel.
+- Fixed: saving a reshaped route from the Freeboard-SK plotter panel failed with
+  "Operation could not be completed" and a wall of schema errors. Signal K's
+  route schema requires every `coordinatesMeta` entry to carry a name or an
+  href, and the host builds one entry per waypoint from that waypoint's name —
+  so the unnamed points RouteIQ generated between start and destination became
+  empty objects the server rejected. Reshaping a route into dozens of graph
+  nodes made this certain rather than occasional. Generated waypoints are now
+  numbered `WP1` upwards, except that the start and destination keep whatever
+  the route already called them if they were named at all.
+- Changed: a route saved from the webapp now carries the same numbered waypoints
+  as one saved from the plotter panel. The two save by different routes — the
+  webapp posts to the plugin, which writes the resource itself, while the panel
+  hands its points to Freeboard-SK, which writes its own — and the webapp's
+  omitted waypoint names altogether. The same route saved from the two windows
+  produced two different waypoint lists.
+- Changed: the Freeboard-SK plotter panel's departure list streams too, laying
+  the whole window out at once and filling it in coarse to fine as results
+  arrive, instead of showing "Scanning departures…" until the last one lands.
+  Hiding the list drops the request, which stops the server calculating the rest.
+- Changed: paging the departure window by 12 hours no longer recalculates the
+  half it already has. A 24 h window moved half its own width overlaps itself by
+  13 of its 25 steps — same route, same constraints, the same departure times to
+  the millisecond — so only the 12 that are genuinely new are requested, and
+  paging back to a window already seen calculates nothing at all. Kept results
+  are discarded as soon as anything that would change a travel time changes.
+- Added: the departure planner can be cancelled while it is still scanning,
+  keeping the departures found so far, and can page the window backwards and
+  forwards 12 hours at a time. Cancelling, paging, or closing the planner drops
+  the request, which is what stops the server calculating a window nobody is
+  looking at any more.
+
 - Fixed: routing failed outright with "Invalid draft — expected a number in
   meters" on a server whose vessel draft was set. Signal K's `design.draft` is
   not a plain number — its value is an object (`{maximum, minimum, current}`) —

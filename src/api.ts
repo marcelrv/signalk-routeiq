@@ -602,6 +602,38 @@ export class ApiHandler {
         });
         return;
       }
+      const warnings =
+        constraints.warnings.length > 0 ? constraints.warnings : undefined;
+
+      // A scan is one full route calculation per step and can run for minutes.
+      // A client that asks for NDJSON gets each step as it lands, on one line,
+      // so it can draw the window filling in; everyone else gets the single
+      // JSON document this endpoint has always returned.
+      //
+      // The header is read directly rather than through req.accepts(): this
+      // router is mounted by the host server, but it is also driven directly in
+      // tests, where req is a plain object with no express prototype on it. The
+      // choice here is binary anyway — a client either asks for the stream by
+      // name or it does not — so negotiation adds nothing.
+      // Lowercased: Node normalises header *names*, not values, and a media
+      // type is case-insensitive — `Application/X-NDJSON` is a legal way to
+      // ask for the stream, and would otherwise silently get the batch.
+      if (
+        String(req.headers.accept || "")
+          .toLowerCase()
+          .includes("application/x-ndjson")
+      ) {
+        await this.streamDepartureScan(
+          req,
+          res,
+          request,
+          hours,
+          step,
+          warnings,
+        );
+        return;
+      }
+
       const departures = await this.routingEngine!.scanDepartures(
         request,
         hours,
@@ -611,12 +643,92 @@ export class ApiHandler {
         scanHours: hours,
         stepMinutes: step,
         departures,
-        warnings:
-          constraints.warnings.length > 0 ? constraints.warnings : undefined,
+        warnings,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       res.status(422).json({ error: message, code: "SCAN_FAILED" });
+    }
+  }
+
+  /**
+   * Stream a departure scan as newline-delimited JSON: one `meta` line naming
+   * every step the scan will cover, one `departure` line per result as it is
+   * computed, and a final `done`. NDJSON rather than server-sent events because
+   * EventSource cannot issue the POST this endpoint needs.
+   *
+   * The status code is committed the moment the first line is written, so a
+   * failure after that is reported as an `error` line rather than a 4xx — the
+   * results already delivered stay valid and the client keeps them.
+   */
+  private async streamDepartureScan(
+    req: Request,
+    res: Response,
+    request: RoutingRequest,
+    hours: number,
+    step: number,
+    warnings: RouteWarning[] | undefined,
+  ): Promise<void> {
+    const engine = this.routingEngine!;
+    const steps = RoutingEngine.departureScanSteps(hours, step);
+    // One base for the whole scan. The times announced in `meta` and the times
+    // attached to the results have to be the same instants, because that is what
+    // a client places results by — and a request without an explicit
+    // departureTime would otherwise re-read the clock for each one.
+    const baseMs = RoutingEngine.departureScanBase(request);
+
+    res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    // Proxies that buffer a response would defeat the entire point of streaming.
+    res.setHeader("X-Accel-Buffering", "no");
+
+    // Closing the planner, or navigating away, should stop the work — not leave
+    // the server computing routes for a window nobody is looking at any more.
+    const signal = { aborted: false };
+    const stop = (): void => {
+      signal.aborted = true;
+    };
+    res.on("close", stop);
+
+    const write = (obj: unknown): void => {
+      if (signal.aborted) return;
+      res.write(JSON.stringify(obj) + "\n");
+      // Present when a compression middleware is in the chain; without it the
+      // lines sit in its buffer until the response ends.
+      (res as Response & { flush?: () => void }).flush?.();
+    };
+
+    try {
+      write({
+        type: "meta",
+        scanHours: hours,
+        stepMinutes: step,
+        steps,
+        departureTimes: Array.from({ length: steps }, (_, i) =>
+          RoutingEngine.departureScanTime(baseMs, i, step),
+        ),
+        warnings,
+      });
+      for await (const d of engine.streamDepartures(
+        request,
+        hours,
+        step,
+        signal,
+        baseMs,
+      )) {
+        write({ type: "departure", ...d });
+      }
+      write({ type: signal.aborted ? "aborted" : "done" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      write({ type: "error", error: message, code: "SCAN_FAILED" });
+    } finally {
+      res.off("close", stop);
+      // Ended unconditionally: after a client hang-up the socket is already
+      // gone and this is a no-op, but leaving it out would mean a response that
+      // never completes in every path that sets `aborted` without one — and
+      // `close` also fires on a perfectly normal finish.
+      res.end();
     }
   }
 

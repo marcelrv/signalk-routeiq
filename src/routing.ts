@@ -26,6 +26,7 @@ import {
 } from "./tides.js";
 import {
   BBox,
+  DepartureScanStep,
   LegMode,
   PluginConfig,
   RouteCrossing,
@@ -579,57 +580,149 @@ export class RoutingEngine {
   }
 
   /**
-   * Scan a range of departure times and return the total travel time for
-   * each, so the user can pick the most favorable tide. Each step is a full
-   * route calculation (the optimal route may differ per tide); repeated tide
-   * API fetches are absorbed by the TidesClient cache.
+   * The order a scan visits its steps in: both ends of the window first, then
+   * the midpoint of every interval already bracketed, and so on down to
+   * neighbouring steps. Every index is still visited exactly once — only the
+   * order changes — so a caller that collects the whole thing is unaffected.
+   *
+   * It exists for the caller that renders results as they arrive. Each step is
+   * a full route calculation, and a long route can take minutes to scan; walked
+   * left to right, the window is meaningless until it is nearly complete. Coarse
+   * to fine, the shape of the day is legible after a handful of results and
+   * sharpens from there, which is usually enough to answer "when should I
+   * leave" long before the scan finishes.
    */
-  async scanDepartures(
+  static departureScanOrder(steps: number): number[] {
+    if (steps <= 0) return [];
+    if (steps === 1) return [0];
+    const order: number[] = [];
+    const taken = new Array<boolean>(steps).fill(false);
+    const take = (i: number): void => {
+      if (i >= 0 && i < steps && !taken[i]) {
+        taken[i] = true;
+        order.push(i);
+      }
+    };
+    take(0);
+    take(steps - 1);
+    // Breadth-first so whole levels of detail land together, rather than one
+    // half of the window being refined before the other is touched.
+    const queue: Array<[number, number]> = [[0, steps - 1]];
+    while (queue.length > 0) {
+      const [lo, hi] = queue.shift()!;
+      if (hi - lo < 2) continue;
+      const mid = (lo + hi) >> 1;
+      take(mid);
+      queue.push([lo, mid], [mid, hi]);
+    }
+    return order;
+  }
+
+  /**
+   * Scan a range of departure times, yielding each result as it is computed so
+   * a caller can stream them. Each step is a full route calculation (the optimal
+   * route may differ per tide); repeated tide API fetches are absorbed by the
+   * TidesClient cache.
+   *
+   * Results arrive in `departureScanOrder`, not chronological order — each
+   * carries its `index` into the window so a caller can place it. Pass a signal
+   * to stop early: a scan whose client has gone away is pure wasted CPU, and at
+   * one full search per step there is a lot of it to waste.
+   */
+  async *streamDepartures(
     request: RoutingRequest,
     scanHours: number = 24,
     stepMinutes: number = 60,
-  ): Promise<
-    Array<{
-      departureTime: string;
-      totalSeconds?: number;
-      totalSecondsNoTide?: number;
-      arrivalTime?: string;
-      totalDistance?: number;
-      error?: string;
-    }>
-  > {
-    const parsed = request.departureTime
-      ? Date.parse(request.departureTime)
-      : NaN;
-    const t0 = Number.isFinite(parsed) ? parsed : Date.now();
-    const steps = Math.min(97, Math.floor((scanHours * 60) / stepMinutes) + 1);
-
-    const out = [];
-    for (let i = 0; i < steps; i++) {
-      const departureTime = new Date(
-        t0 + i * stepMinutes * 60_000,
-      ).toISOString();
+    signal?: { aborted: boolean },
+    baseMs: number = RoutingEngine.departureScanBase(request),
+  ): AsyncGenerator<DepartureScanStep> {
+    for (const i of RoutingEngine.departureScanOrder(
+      RoutingEngine.departureScanSteps(scanHours, stepMinutes),
+    )) {
+      if (signal?.aborted) return;
+      const departureTime = RoutingEngine.departureScanTime(
+        baseMs,
+        i,
+        stepMinutes,
+      );
       try {
         const r = await this.calculateRoute({
           ...request,
           departureTime,
           useTides: true,
         });
-        out.push({
+        // Checked again on the way out, not just on the way in. A search that
+        // was already running when the client hung up finishes — cancellation
+        // is not threaded into calculateRoute itself — but its result belongs
+        // to a scan nobody is receiving, so it is dropped rather than yielded.
+        if (signal?.aborted) return;
+        yield {
+          index: i,
           departureTime,
           totalSeconds: r.totalSeconds,
           totalSecondsNoTide: r.totalSecondsNoTide,
           arrivalTime: r.arrivalTime,
           totalDistance: r.totalDistance,
-        });
+        };
       } catch (e) {
-        out.push({
+        if (signal?.aborted) return;
+        yield {
+          index: i,
           departureTime,
           error: e instanceof Error ? e.message : String(e),
-        });
+        };
       }
     }
-    return out;
+  }
+
+  /** Number of steps a scan of this length covers, ends included. */
+  static departureScanSteps(scanHours: number, stepMinutes: number): number {
+    return Math.min(97, Math.floor((scanHours * 60) / stepMinutes) + 1);
+  }
+
+  /**
+   * The instant a scan counts its steps from. Resolved once and passed around,
+   * never re-derived per step: a request that omits `departureTime` falls back
+   * to "now", and re-reading the clock for each step makes every step land on a
+   * slightly different base. The times announced up front then disagree with
+   * the times attached to the results — by milliseconds, but a client that
+   * places results by departure time (the only way to place them when a request
+   * covers part of a window) matches none of them and silently drops the lot.
+   */
+  static departureScanBase(request: RoutingRequest): number {
+    const parsed = request.departureTime
+      ? Date.parse(request.departureTime)
+      : NaN;
+    return Number.isFinite(parsed) ? parsed : Date.now();
+  }
+
+  /** The departure time of step `index`, counted from `baseMs`. */
+  static departureScanTime(
+    baseMs: number,
+    index: number,
+    stepMinutes: number,
+  ): string {
+    return new Date(baseMs + index * stepMinutes * 60_000).toISOString();
+  }
+
+  /**
+   * Collect a whole scan, in chronological order. The streaming form is what
+   * the scan actually runs on; this keeps the single-response API unchanged.
+   */
+  async scanDepartures(
+    request: RoutingRequest,
+    scanHours: number = 24,
+    stepMinutes: number = 60,
+  ): Promise<DepartureScanStep[]> {
+    const out: DepartureScanStep[] = [];
+    for await (const d of this.streamDepartures(
+      request,
+      scanHours,
+      stepMinutes,
+    )) {
+      out.push(d);
+    }
+    return out.sort((a, b) => a.index - b.index);
   }
 
   /**

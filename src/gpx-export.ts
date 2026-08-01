@@ -100,6 +100,14 @@ export class GpxExporter {
       ? waypoints.map((w) => [w.longitude, w.latitude] as [number, number])
       : (coords as [number, number][]);
 
+    // One meta entry per coordinate, each with a real name. Signal K's route
+    // schema requires every coordinatesMeta entry to be {name} or {href}, and
+    // the field is optional — so leaving it out was valid, but it left routes
+    // saved from the webapp with unnamed waypoints while the same route saved
+    // through the Freeboard panel came back numbered. Same route, two different
+    // waypoint lists depending on which window it was saved from.
+    const coordinatesMeta = coordinates.map((_, i) => ({ name: `WP${i + 1}` }));
+
     return {
       name,
       description: `Route calculated by SignalK RouteIQ Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m`,
@@ -112,6 +120,7 @@ export class GpxExporter {
         },
         properties: {
           totalCost,
+          coordinatesMeta,
           ...(waypoints
             ? {}
             : {

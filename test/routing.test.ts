@@ -398,3 +398,50 @@ describe('Itinerary', async () => {
     assert.strictEqual(itinerary[0].leg!.distance, 3 * 700, 'first leg ends at the via point');
   });
 });
+
+describe('departure scan ordering', () => {
+  // Coarse-to-fine only changes the order steps are visited in, so the
+  // guarantee the collected scan relies on is that it is still a permutation.
+  const isPermutation = (order: number[], n: number): boolean => {
+    if (order.length !== n) return false;
+    const seen = new Set(order);
+    if (seen.size !== n) return false;
+    return order.every((i) => Number.isInteger(i) && i >= 0 && i < n);
+  };
+
+  it('visits every step exactly once, for any window size', () => {
+    for (const n of [0, 1, 2, 3, 5, 13, 25, 49, 97]) {
+      const order = RoutingEngine.departureScanOrder(n);
+      assert.ok(isPermutation(order, n), `n=${n} is a permutation: ${order.join(',')}`);
+    }
+  });
+
+  it('takes both ends of the window first, then bisects', () => {
+    // 0..8: ends, then the midpoint, then the midpoints of each half.
+    assert.deepStrictEqual(
+      RoutingEngine.departureScanOrder(9),
+      [0, 8, 4, 2, 6, 1, 3, 5, 7],
+    );
+  });
+
+  it('covers the window coarsely long before the scan completes', () => {
+    // The point of the ordering: a quarter of the way in, the results already
+    // span the window rather than clustering at its start.
+    const n = 25;
+    const order = RoutingEngine.departureScanOrder(n);
+    const early = order.slice(0, Math.ceil(n / 4));
+    const gaps = [...early].sort((a, b) => a - b);
+    const widest = gaps.reduce(
+      (max, v, i) => (i === 0 ? max : Math.max(max, v - gaps[i - 1])),
+      0,
+    );
+    assert.ok(early.includes(0) && early.includes(n - 1), 'both ends are covered early');
+    assert.ok(widest <= Math.ceil(n / 4), `no early gap wider than a quarter window (was ${widest})`);
+  });
+
+  it('degenerates safely', () => {
+    assert.deepStrictEqual(RoutingEngine.departureScanOrder(0), []);
+    assert.deepStrictEqual(RoutingEngine.departureScanOrder(1), [0]);
+    assert.deepStrictEqual(RoutingEngine.departureScanOrder(2), [0, 1]);
+  });
+});

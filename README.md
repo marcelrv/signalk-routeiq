@@ -33,6 +33,7 @@ An offline-first, vessel-aware nautical route planner designed to run natively a
 |---|---|
 | ![Route planning in the RouteIQ web app](https://raw.githubusercontent.com/marcelrv/signalk-routeiq/main/img/webapp-route.jpg)<br>Planning a route through the Zeeland delta | ![RouteIQ panel inside Freeboard-SK](https://raw.githubusercontent.com/marcelrv/signalk-routeiq/main/img/freeboard-plugin.jpg)<br>Running as a Freeboard-SK plotter extension |
 | ![Tide-aware planning with a departure scan](https://raw.githubusercontent.com/marcelrv/signalk-routeiq/main/img/freeboard-tides.jpg)<br>Tide-aware routing with a 24 h departure scan | ![Routing Data Manager](https://raw.githubusercontent.com/marcelrv/signalk-routeiq/main/img/download-manager.jpg)<br>Downloading and managing regional routing data |
+| ![The departure planner filling in as it scans](https://raw.githubusercontent.com/marcelrv/signalk-routeiq/main/img/webapp-departures.jpg)<br>The departure planner mid-scan — every hour of the window is listed at once and fills in coarse to fine, so the best departure shows up long before the scan ends | |
 
 ## How It Works
 

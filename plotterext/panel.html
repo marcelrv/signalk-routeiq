@@ -131,6 +131,11 @@
   #dep-list .dep-bar > i { display: block; height: 100%; border-radius: 4px; }
   #dep-list .dep-dur { width: 38px; text-align: right; font-family: ui-monospace, monospace; }
   #dep-list .dep-best { width: 12px; text-align: center; color: #eab308; }
+  /* Steps the scan has not reached yet. The whole window is listed from the
+     start so the rows do not jump about as results land out of clock order. */
+  #dep-list .dep-row.pending { cursor: default; opacity: 0.5; }
+  #dep-list .dep-row.pending:hover { background: none; }
+  #dep-list .dep-row.pending .dep-dur { color: var(--muted); }
 
   /* Circular POI icon badge — same look as the webapp's route list icons. */
   .poi-badge {

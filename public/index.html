@@ -1468,12 +1468,15 @@ label.switch-row {
       <h2 style="margin:0;font-size:15px;color:#e0edf5;font-weight:600">Best departure time</h2>
       <button id="dep-close" style="background:none;border:none;color:#6d96c0;font-size:22px;cursor:pointer;line-height:1;padding:0 4px">&times;</button>
     </div>
-    <div id="dep-subtitle" style="padding:8px 18px 0;color:#6d96c0;font-size:11px">Total travel time per departure over the next 24&nbsp;h (estimated tidal current). Click a row to use that departure.</div>
+    <div id="dep-subtitle" style="padding:8px 18px 0;color:#6d96c0;font-size:11px">Total travel time per departure over 24&nbsp;h (estimated tidal current). Click a row to use that departure.</div>
+    <div id="dep-window" style="padding:6px 18px 0;color:#9bb8da;font-size:11px;font-family:monospace"></div>
+    <div style="display:flex;align-items:center;gap:6px;padding:8px 18px 0">
+      <button id="dep-prev" style="background:#16293d;border:1px solid rgba(79,148,212,0.35);border-radius:5px;color:#b8d4f0;font-size:11px;padding:3px 8px;cursor:pointer" title="Scan the 12 hours before this window">&lsaquo;&nbsp;12&nbsp;h</button>
+      <button id="dep-next" style="background:#16293d;border:1px solid rgba(79,148,212,0.35);border-radius:5px;color:#b8d4f0;font-size:11px;padding:3px 8px;cursor:pointer" title="Scan the 12 hours after this window">12&nbsp;h&nbsp;&rsaquo;</button>
+      <div id="dep-progress" style="flex:1;display:flex;align-items:center;justify-content:flex-end;gap:8px;color:#6d96c0;font-size:11px"></div>
+      <button id="dep-cancel" style="display:none;background:#3d1f22;border:1px solid rgba(242,147,140,0.4);border-radius:5px;color:#f2938c;font-size:11px;padding:3px 10px;cursor:pointer" title="Stop scanning and keep the departures found so far">Cancel</button>
+    </div>
     <div id="dep-body" style="padding:10px 18px 16px;overflow-y:auto">
-      <div id="dep-loading" style="display:flex;align-items:center;gap:10px;color:#9bb8da;font-size:12px;padding:12px 0">
-        <div style="width:14px;height:14px;border:2px solid rgba(59,143,212,0.3);border-top-color:#3b8fd4;border-radius:50%;animation:dm-spin 0.8s linear infinite"></div>
-        Scanning departures…
-      </div>
       <div id="dep-list"></div>
     </div>
   </div>
@@ -1683,6 +1686,17 @@ label.switch-row {
       date.getFullYear() + '-' + p(date.getMonth() + 1) + '-' + p(date.getDate()) +
       'T' + p(date.getHours()) + ':' + p(date.getMinutes());
   }
+  // The field only holds a *chosen* departure once the user has actually chosen
+  // one — by editing it, or by picking a row in the departure planner. Until
+  // then it tracks "now", and is re-read at every point that acts on it. The
+  // guard used to be "is the field empty", which meant the value written when
+  // the tide panel first appeared (page load) stayed put: enabling tides an hour
+  // later, or scanning departures, silently planned from a departure time an
+  // hour in the past.
+  let departureEdited = false;
+  function syncDepartureToNow() {
+    if (!departureEdited) setDepartureInput(new Date());
+  }
   // Several places trigger a status check independently (connect-time
   // placeholder, first vessel fix, every reroute) and their fetches can
   // resolve out of order. lastTideCheckLatLng/tideCheckSeq are updated here,
@@ -1705,7 +1719,7 @@ label.switch-row {
         const cb = document.getElementById('tide-cb');
         cb.checked = saved !== null ? saved === '1' : !!st.considerTidesDefault;
         document.getElementById('tide-depart-row').style.display = cb.checked ? '' : 'none';
-        if (!document.getElementById('departure-time').value) setDepartureInput(new Date());
+        syncDepartureToNow();
       })
       .catch(() => {});
   }
@@ -1727,10 +1741,12 @@ label.switch-row {
   document.getElementById('tide-cb').addEventListener('change', function () {
     try { localStorage.setItem('routeiq-use-tides', this.checked ? '1' : '0'); } catch {}
     document.getElementById('tide-depart-row').style.display = this.checked ? '' : 'none';
-    if (!document.getElementById('departure-time').value) setDepartureInput(new Date());
+    syncDepartureToNow();
     if (state.startLatLng && state.destLatLng) routingControl.route();
   });
   document.getElementById('departure-time').addEventListener('change', function () {
+    // Only a real edit counts — setDepartureInput() does not fire this.
+    departureEdited = true;
     if (tideEnabled() && state.startLatLng && state.destLatLng) routingControl.route();
   });
 
@@ -1739,13 +1755,89 @@ label.switch-row {
     const m = Math.round(sec / 60);
     return Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0');
   }
+  // A scan is one full route calculation per hour of the window, so it can run
+  // for minutes on a long route. The server streams each step as it finishes
+  // (NDJSON, one object per line) and the list is drawn from whatever has
+  // arrived — so the window is useful immediately instead of after the last
+  // step. Steps arrive coarse-to-fine, not in clock order, which is why every
+  // result carries its index and the rows are laid out from the `meta` line
+  // before any of them have a time in them.
+  const DEP_SCAN_HOURS = 24;
+  const DEP_STEP_MINUTES = 60;
+  const DEP_STEPS = (DEP_SCAN_HOURS * 60) / DEP_STEP_MINUTES + 1;   // ends included
+  let depWindowStart = null;   // Date — first departure of the window on screen
+  let depAbort = null;         // AbortController of the scan in flight, if any
+  let depSteps = [];           // one slot per step: { departureTime, result }
+  let depWarnings = [];
+  // Paging by 12 h moves a 24 h window half its own width, so half of the new
+  // window has already been calculated — same route, same constraints, the same
+  // departure times to the millisecond. Keeping those means a page costs the
+  // 12 hours that are actually new instead of re-running the whole 24.
+  // Keyed by departure time; dropped whenever anything that would change a
+  // result changes, which is what depSignature covers.
+  let depCache = new Map();
+  let depCacheKey = null;
+
+  function depEl(id) { return document.getElementById(id); }
+
   function openDeparturePlanner() {
     if (!state.startLatLng || !state.destLatLng) { showToast('Set start and destination first', 'error'); return; }
-    document.getElementById('departure-modal').style.display = '';
-    document.getElementById('dep-loading').style.display = 'flex';
-    document.getElementById('dep-list').innerHTML = '';
+    // Scan forward from now unless a departure was actually chosen.
+    syncDepartureToNow();
+    depEl('departure-modal').style.display = '';
+    depWindowStart = new Date(departureIso() || Date.now());
+    runDepartureScan();
+  }
+
+  // Page the window without leaving the planner. The scan in flight is dropped;
+  // aborting the request is what tells the server to stop calculating too.
+  function shiftDepartureWindow(hours) {
+    if (!depWindowStart) return;
+    depWindowStart = new Date(depWindowStart.getTime() + hours * 3600_000);
+    runDepartureScan();
+  }
+
+  function cancelDepartureScan() {
+    if (depAbort) depAbort.abort();
+  }
+
+  function setDepScanning(on, note) {
+    depEl('dep-cancel').style.display = on ? '' : 'none';
+    const done = depSteps.filter(s => s.result).length;
+    depEl('dep-progress').innerHTML = on
+      ? '<div style="width:11px;height:11px;border:2px solid rgba(59,143,212,0.3);border-top-color:#3b8fd4;border-radius:50%;animation:dm-spin 0.8s linear infinite"></div>' +
+        escapeHtml(done + ' / ' + (depSteps.length || '…'))
+      : (note ? escapeHtml(note) : (depSteps.length ? escapeHtml(done + ' / ' + depSteps.length) : ''));
+  }
+
+  // The rows of the planner are 24 h clock times, built by hand from
+  // getHours(). Anything else in the same dialog has to match: left to the
+  // locale's own preference, en-US renders "08:50 PM" directly above a column
+  // reading "20:50". hourCycle says what is wanted rather than relying on
+  // hour12:false, which is allowed to produce a 24:00 for midnight.
+  const DEP_STAMP = { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
+  function fmtDepStamp(dt) { return dt.toLocaleString([], DEP_STAMP); }
+
+  function updateDepWindowLabel() {
+    if (!depWindowStart) { depEl('dep-window').textContent = ''; return; }
+    const end = new Date(depWindowStart.getTime() + DEP_SCAN_HOURS * 3600_000);
+    depEl('dep-window').textContent = fmtDepStamp(depWindowStart) + '  →  ' + fmtDepStamp(end);
+  }
+
+  // Shown above the list, never in place of it. A scan that fails partway has
+  // still produced real departures, and the whole point of streaming them is
+  // that they stay usable — replacing the list with the message would throw
+  // away exactly what was worth keeping.
+  let depError = '';
+  function showDepError(message) {
+    depError = message;
+    renderDepartureList();
+  }
+
+  // Everything a departure's travel time depends on, except when it leaves.
+  function departureScanConstraints() {
     const toPos = ll => ({ latitude: ll.lat, longitude: ll.lng });
-    const payload = {
+    return {
       start: toPos(state.startLatLng),
       end: toPos(state.destLatLng),
       via: (state.viaPoints || []).map((ll, i) => ({
@@ -1754,75 +1846,233 @@ label.switch-row {
       endMode: state.destMode || 'auto',
       minCoastDistance: (parseFloat(document.getElementById('min-coast').value) || 0) / 1852,
       ...vesselOverrides(),
-      departureTime: departureIso() || new Date().toISOString(),
-      scanHours: 24,
-      stepMinutes: 60,
     };
-    logDebug('DEPARTURES', departuresUrl(), payload);
-    fetch(departuresUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
-      .then(r => r.json().then(b => { if (!r.ok) throw new Error(b && b.error ? b.error : 'Error ' + r.status); return b; }))
-      .then(data => renderDepartureList(data.departures || [], data.warnings || []))
-      .catch(err => {
-        document.getElementById('dep-list').innerHTML =
-          '<div style="color:#f2938c;font-size:12px;padding:6px 0">' + escapeHtml(err.message) + '</div>';
-      })
-      .finally(() => { document.getElementById('dep-loading').style.display = 'none'; });
   }
-  function renderDepartureList(deps, warnings) {
-    const listEl = document.getElementById('dep-list');
+  function depSignature() { return JSON.stringify(departureScanConstraints()); }
+
+  // The times this window covers, computed here rather than taken from the
+  // server's `meta`: a request that only covers the part of the window still
+  // missing describes only that part, and the slots have to line up with the
+  // whole window regardless. Both sides derive from the same millisecond
+  // arithmetic on the same base, so the strings match exactly.
+  function departureWindowTimes() {
+    const t0 = depWindowStart.getTime();
+    return Array.from({ length: DEP_STEPS }, (_, i) =>
+      new Date(t0 + i * DEP_STEP_MINUTES * 60_000).toISOString());
+  }
+
+  // Kept in step with the copy in plotterext/panel.js. Not shared: this is an
+  // inline script in a page the plugin serves, the panel is an ES module
+  // Freeboard loads, and there is no bundler between them.
+  async function readNdjson(resp, onEvent) {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (line) onEvent(JSON.parse(line));
+      }
+    }
+    const tail = buffer.trim();
+    if (tail) onEvent(JSON.parse(tail));
+  }
+
+  async function runDepartureScan() {
+    if (depAbort) depAbort.abort();          // supersede whatever is running
+    const ctrl = new AbortController();
+    depAbort = ctrl;
+    depWarnings = [];
+    depError = '';
+
+    // Anything that changes a travel time invalidates every kept result.
+    const signature = depSignature();
+    if (signature !== depCacheKey) { depCache.clear(); depCacheKey = signature; }
+
+    // Lay the window out first and fill in what is already known, so a page
+    // lands with half of it already drawn.
+    const times = departureWindowTimes();
+    depSteps = times.map(t => ({ departureTime: t, result: depCache.get(t) || null }));
+    const slotByTime = new Map(times.map((t, i) => [t, i]));
+    updateDepWindowLabel();
+    renderDepartureList();
+    setDepScanning(true);
+
+    // The gap is contiguous — a window only ever moves as a block — so one
+    // request covers it. scanHours counts intervals, not steps.
+    const missing = depSteps.map((s, i) => (s.result ? -1 : i)).filter(i => i >= 0);
+    if (!missing.length) {
+      depAbort = null;
+      setDepScanning(false);
+      return;
+    }
+    const from = missing[0];
+    const span = missing[missing.length - 1] - from;
+    const payload = {
+      ...departureScanConstraints(),
+      departureTime: times[from],
+      scanHours: Math.max(1, (span * DEP_STEP_MINUTES) / 60),
+      stepMinutes: DEP_STEP_MINUTES,
+    };
+    logDebug('DEPARTURES', departuresUrl(), payload,
+      `${missing.length}/${DEP_STEPS} steps to calculate, ${DEP_STEPS - missing.length} reused`);
+
+    try {
+      const resp = await fetch(departuresUrl(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/x-ndjson' },
+        body: JSON.stringify(payload),
+        signal: ctrl.signal,
+      });
+      if (!resp.ok) {
+        const b = await resp.json().catch(() => null);
+        throw new Error(b && b.error ? b.error : 'Error ' + resp.status);
+      }
+      // A server that answered with the single JSON document instead — an older
+      // plugin behind the same webapp — still renders, just all at once.
+      const streamed = (resp.headers.get('content-type') || '').indexOf('x-ndjson') >= 0;
+      if (!streamed || !resp.body) {
+        const data = await resp.json();
+        depWarnings = data.warnings || [];
+        for (const d of data.departures || []) onDepartureResult(d, slotByTime);
+        renderDepartureList();
+      } else {
+        await readNdjson(resp, ev => onDepartureEvent(ev, slotByTime));
+      }
+    } catch (err) {
+      // An abort is either the Cancel button or a window shift; both keep
+      // whatever arrived, and neither is an error worth showing.
+      if (err.name !== 'AbortError') showDepError(err.message);
+    } finally {
+      if (depAbort === ctrl) {
+        depAbort = null;
+        setDepScanning(false, ctrl.signal.aborted ? 'stopped' : undefined);
+      }
+    }
+  }
+
+  // Placed by departure time rather than by the index in the response: that
+  // index is relative to whatever slice was requested, which is not the window.
+  function onDepartureResult(d, slotByTime) {
+    const slot = slotByTime.get(d.departureTime);
+    if (slot === undefined) return;
+    depSteps[slot].result = d;
+    depCache.set(d.departureTime, d);
+  }
+
+  function onDepartureEvent(ev, slotByTime) {
+    if (ev.type === 'meta') {
+      depWarnings = ev.warnings || [];
+    } else if (ev.type === 'departure') {
+      onDepartureResult(ev, slotByTime);
+    } else if (ev.type === 'error') {
+      showDepError(ev.error);
+      return;
+    }
+    renderDepartureList();
+    setDepScanning(!!depAbort);
+  }
+
+  function renderDepartureList() {
+    const listEl = depEl('dep-list');
     // Every departure in the scan was planned against the same constraints, so
     // a dropped vessel dimension applies to the whole list — show it above.
-    const warnHtml = (warnings || [])
-      .map(w => '<div style="color:#e8b44a;font-size:11px;padding:4px 0">' + escapeHtml(w.message) + '</div>')
-      .join('');
-    const ok = deps.filter(d => typeof d.totalSeconds === 'number');
-    if (!ok.length) {
+    const warnHtml =
+      (depError ? '<div style="color:#f2938c;font-size:12px;padding:6px 0">' + escapeHtml(depError) + '</div>' : '') +
+      (depWarnings || [])
+        .map(w => '<div style="color:#e8b44a;font-size:11px;padding:4px 0">' + escapeHtml(w.message) + '</div>')
+        .join('');
+    if (!depSteps.length) {
+      listEl.innerHTML = warnHtml;
+      return;
+    }
+    // The ramp is normalised over what has been computed so far, so colours and
+    // the ★ shift as the window fills in. That is the point — the best-so-far is
+    // visible from the first few results rather than only at the end.
+    const ok = depSteps.filter(s => s.result && typeof s.result.totalSeconds === 'number');
+    const minS = ok.length ? Math.min(...ok.map(s => s.result.totalSeconds)) : 0;
+    const maxS = ok.length ? Math.max(...ok.map(s => s.result.totalSeconds)) : 0;
+    if (!ok.length && !depAbort) {
       listEl.innerHTML = warnHtml + '<div style="color:#9bb8da;font-size:12px;padding:6px 0">No departures could be evaluated.</div>';
       return;
     }
-    const minS = Math.min(...ok.map(d => d.totalSeconds));
-    const maxS = Math.max(...ok.map(d => d.totalSeconds));
-    listEl.innerHTML = '';
-    for (const d of deps) {
+    listEl.innerHTML = warnHtml;
+    for (const step of depSteps) {
+      const dep = new Date(step.departureTime);
+      const hhmm = String(dep.getHours()).padStart(2, '0') + ':' + String(dep.getMinutes()).padStart(2, '0');
       const row = document.createElement('div');
-      if (typeof d.totalSeconds !== 'number') {
+
+      if (!step.result) {
+        row.dataset.state = 'pending';
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:3px 4px;font-size:12px;color:#3f5a78';
+        row.innerHTML =
+          '<span style="width:56px;font-family:monospace">' + hhmm + '</span>' +
+          '<span style="flex:1;height:10px;border-radius:5px;background:rgba(79,148,212,0.08);border:1px solid rgba(79,148,212,0.12)"></span>' +
+          '<span style="width:44px;text-align:right;font-family:monospace">·&nbsp;·</span>' +
+          '<span style="width:14px"></span>';
+        listEl.appendChild(row);
+        continue;
+      }
+      if (typeof step.result.totalSeconds !== 'number') {
+        row.dataset.state = 'noroute';
         row.style.cssText = 'display:flex;gap:8px;padding:3px 4px;font-size:11px;color:#5f7a9a';
-        row.textContent = new Date(d.departureTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + '  — no route';
+        row.textContent = hhmm + '  — no route';
         listEl.appendChild(row);
         continue;
       }
       // Green (fastest) → red (slowest), same ramp as the plotter panel.
-      const norm = maxS > minS ? (d.totalSeconds - minS) / (maxS - minS) : 0;
+      const secs = step.result.totalSeconds;
+      const norm = maxS > minS ? (secs - minS) / (maxS - minS) : 0;
       const color = 'hsl(' + Math.round(120 * (1 - norm)) + ',65%,42%)';
-      const dep = new Date(d.departureTime);
-      const best = d.totalSeconds === minS;
+      const best = secs === minS;
+      // Read by scripts/screenshots.mjs to catch the scan mid-flight; the
+      // alternative was matching the placeholder glyph, which would quietly
+      // report every row as filled the day that markup changes.
+      row.dataset.state = 'scored';
       row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:5px;cursor:pointer;font-size:12px;color:#dce8f5';
       row.onmouseenter = () => { row.style.background = 'rgba(59,143,212,0.15)'; };
       row.onmouseleave = () => { row.style.background = ''; };
       const barW = Math.round(30 + 55 * norm);
       row.innerHTML =
-        '<span style="width:56px;color:#9bb8da;font-family:monospace">' +
-          String(dep.getHours()).padStart(2, '0') + ':' + String(dep.getMinutes()).padStart(2, '0') + '</span>' +
+        '<span style="width:56px;color:#9bb8da;font-family:monospace">' + hhmm + '</span>' +
         '<span style="flex:1;height:10px;border-radius:5px;background:linear-gradient(90deg,' + color + ',' + color + ') no-repeat;background-size:' + barW + '% 100%;border:1px solid rgba(79,148,212,0.15)"></span>' +
-        '<span style="width:44px;text-align:right;font-family:monospace;color:' + color + '">' + fmtDurHM(d.totalSeconds) + '</span>' +
+        '<span style="width:44px;text-align:right;font-family:monospace;color:' + color + '">' + fmtDurHM(secs) + '</span>' +
         '<span style="width:14px;text-align:center;color:#f5d90a">' + (best ? '★' : '') + '</span>';
-      row.title = 'Depart ' + dep.toLocaleString() + ' — travel time ' + fmtDurHM(d.totalSeconds) + '. Click to use this departure.';
+      row.title = 'Depart ' + fmtDepStamp(dep) + ' — travel time ' + fmtDurHM(secs) + '. Click to use this departure.';
       row.addEventListener('click', () => {
+        // Picking a row is a deliberate choice, so it stops tracking "now".
         setDepartureInput(dep);
+        departureEdited = true;
         const cb = document.getElementById('tide-cb');
         if (!cb.checked) { cb.checked = true; try { localStorage.setItem('routeiq-use-tides', '1'); } catch {} }
         document.getElementById('tide-depart-row').style.display = '';
-        document.getElementById('departure-modal').style.display = 'none';
+        closeDeparturePlanner();
         routingControl.route();
       });
       listEl.appendChild(row);
     }
   }
-  document.getElementById('best-departure-btn').addEventListener('click', openDeparturePlanner);
-  document.getElementById('dep-close').addEventListener('click', () => { document.getElementById('departure-modal').style.display = 'none'; });
-  document.getElementById('dep-backdrop').addEventListener('click', () => { document.getElementById('departure-modal').style.display = 'none'; });
+
+  // Leaving the planner stops the scan; the server drops it when the request
+  // closes, so an abandoned window costs nothing to finish.
+  function closeDeparturePlanner() {
+    cancelDepartureScan();
+    depEl('departure-modal').style.display = 'none';
+  }
+
+  depEl('best-departure-btn').addEventListener('click', openDeparturePlanner);
+  depEl('dep-prev').addEventListener('click', () => shiftDepartureWindow(-12));
+  depEl('dep-next').addEventListener('click', () => shiftDepartureWindow(12));
+  depEl('dep-cancel').addEventListener('click', cancelDepartureScan);
+  depEl('dep-close').addEventListener('click', closeDeparturePlanner);
+  depEl('dep-backdrop').addEventListener('click', closeDeparturePlanner);
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') document.getElementById('departure-modal').style.display = 'none';
+    if (e.key === 'Escape' && depEl('departure-modal').style.display !== 'none') closeDeparturePlanner();
   });
 
   // ---- state ----
@@ -4297,6 +4547,9 @@ label.switch-row {
         ...vesselOverrides(),
         useTides: tideEnabled(),
       };
+      // An untouched field means "leave now", not "leave whenever this page was
+      // opened", so re-read it against the clock before the route is planned.
+      if (tideEnabled()) syncDepartureToNow();
       if (tideEnabled() && departureIso()) payload.departureTime = departureIso();
 
       console.log('[MarineRouter] via payload:', JSON.stringify(via));
