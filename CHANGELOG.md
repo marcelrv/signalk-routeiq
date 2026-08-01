@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.4 — 2026-08-01
 
 - Fixed: the settings panel could run off the bottom of the window with no way
   to scroll it. The Charts tab is as long as the server has charts — with 18 of
