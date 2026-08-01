@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Fixed: the settings panel could run off the bottom of the window with no way
+  to scroll it. The Charts tab is as long as the server has charts — with 18 of
+  them the panel ended 126 px below the viewport, and everything past that was
+  unreachable. It is now bounded to the window and the tab body scrolls, with
+  the header and its close button staying put. Narrow and short screens already
+  turned the panel into a scrolling side sheet; this is the same idea for a
+  desktop window.
+
 - Fixed: the departure time used for tide-aware routing was the moment the page
   was opened, not the current time. The field was filled in once, when the tide
   panel first appeared, and then only ever refilled if it was empty — so ticking
