@@ -1,4 +1,9 @@
-<img src="public/icon.svg" alt="RouteIQ icon" width="96" />
+<!-- Markdown, not an <img> tag: the App Store's README renderer does not allow
+     inline HTML and printed the tag as literal text. Absolute raw URL for the
+     same reason the screenshots below use one — a relative path does not
+     resolve on npmjs.com. -->
+
+![RouteIQ icon](https://raw.githubusercontent.com/marcelrv/signalk-routeiq/main/public/icon.svg)
 
 # SignalK RouteIQ Nautical Route Planner
 
