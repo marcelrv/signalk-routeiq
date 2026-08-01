@@ -228,6 +228,35 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 
 /* ---------- settings (top-right) ---------- */
 #settings-panel { top: 68px; right: 28px; }
+
+/* The panel grows with its content, and the Charts tab is as long as the server
+   has charts — so it ran off the bottom of the window with no way to reach the
+   rest of it. The narrow/short layout below already turns this into a
+   full-height side sheet that scrolls; this is the same idea for a desktop
+   window, bounded to what is actually on screen. Scoped to the inverse of that
+   media query so the two never both apply.
+   Only the tab body scrolls: the header carries the close button, and having
+   that scroll out of reach is the same bug in a smaller form. */
+@media (min-width: 701px) and (min-height: 501px) {
+  #settings-panel {
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 68px - 24px); /* top offset, and a margin below */
+  }
+  #settings-pane-inner {
+    display: flex;
+    flex-direction: column;
+    min-height: 0; /* without this a flex child refuses to shrink below content */
+  }
+  #settings-panel [role="tabpanel"] {
+    overflow-y: auto;
+    min-height: 0;
+    /* Room for the scrollbar so it does not sit on top of the controls. */
+    padding-right: 4px;
+    margin-right: -4px;
+    overscroll-behavior: contain;
+  }
+}
 #settings-panel input[type="number"] {
   width: 100%;
   background: rgba(255,255,255,0.07);
