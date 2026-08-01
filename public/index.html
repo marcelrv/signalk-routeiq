@@ -9,8 +9,14 @@
      and bookmark looked like the server rather than like this app. The title
      leads with the name for the same reason: a tab truncates it, and the old
      one truncated to "SignalK RouteIQ Nau…". -->
+<!-- PNG first, SVG second: a browser that understands SVG favicons picks that
+     one, and anything that does not (Safari, in particular, where an SVG-only
+     declaration silently falls back to the server's own icon) still gets
+     RouteIQ. apple-touch-icon has to be a raster — iOS ignores an SVG there.
+     Regenerate all three from icon.svg with ./scripts/icons.sh. -->
+<link rel="icon" type="image/png" sizes="32x32" href="icon-32.png" />
 <link rel="icon" type="image/svg+xml" href="icon.svg" />
-<link rel="apple-touch-icon" href="icon.svg" />
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
