@@ -216,8 +216,8 @@ async function setVesselPosition(page, latitude, longitude) {
   await page.evaluate(
     ({ latitude, longitude }) =>
       new Promise((resolve) => {
-        const url = location.origin.replace(/^http/, 'ws') + '/signalk/v1/stream?subscribe=none';
-        const ws = new WebSocket(url);
+        const url = globalThis.location.origin.replace(/^http/, 'ws') + '/signalk/v1/stream?subscribe=none';
+        const ws = new globalThis.WebSocket(url);
         const done = () => { try { ws.close(); } catch { /* already closed */ } resolve(); };
         ws.onopen = () => {
           ws.send(JSON.stringify({
@@ -349,11 +349,11 @@ const SHOTS = {
     let caught = null;
     for (let i = 0; i < 400; i++) {
       const s = await page.evaluate(() => {
-        const rows = [...document.querySelectorAll('#dep-list > div[data-state]')];
+        const rows = [...globalThis.document.querySelectorAll('#dep-list > div[data-state]')];
         return {
           rows: rows.length,
           filled: rows.filter((d) => d.dataset.state !== 'pending').length,
-          running: document.getElementById('dep-cancel')?.style.display !== 'none',
+          running: globalThis.document.getElementById('dep-cancel')?.style.display !== 'none',
         };
       });
       if (s.rows && s.filled >= target && s.filled < s.rows) { caught = s; break; }

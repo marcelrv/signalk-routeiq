@@ -18,13 +18,15 @@ export default tseslint.config(
     // these never reached CI, but they made `eslint scripts/` useless and
     // misreported working code as broken. Browser globals are deliberately not
     // listed: page.evaluate() callbacks reach them through the element's own
-    // `ownerDocument.defaultView`, which is what the scripts already do.
+    // `ownerDocument.defaultView`, or through `globalThis`, so the Node
+    // environment here never has to pretend a DOM exists.
     files: ['scripts/**/*.mjs'],
     languageOptions: {
       globals: {
         console: 'readonly',
         process: 'readonly',
         setTimeout: 'readonly',
+        URL: 'readonly',
       },
     },
   },

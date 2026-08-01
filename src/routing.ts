@@ -651,6 +651,11 @@ export class RoutingEngine {
           departureTime,
           useTides: true,
         });
+        // Checked again on the way out, not just on the way in. A search that
+        // was already running when the client hung up finishes — cancellation
+        // is not threaded into calculateRoute itself — but its result belongs
+        // to a scan nobody is receiving, so it is dropped rather than yielded.
+        if (signal?.aborted) return;
         yield {
           index: i,
           departureTime,
@@ -660,6 +665,7 @@ export class RoutingEngine {
           totalDistance: r.totalDistance,
         };
       } catch (e) {
+        if (signal?.aborted) return;
         yield {
           index: i,
           departureTime,
