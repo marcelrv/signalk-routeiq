@@ -3,7 +3,14 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>SignalK RouteIQ Nautical Route Planner</title>
+<title>RouteIQ — Nautical Route Planner</title>
+<!-- Without these the browser asks for /signalk-routeiq/favicon.ico, gets a 404,
+     falls back to the server root and shows Signal K's own icon — so every tab
+     and bookmark looked like the server rather than like this app. The title
+     leads with the name for the same reason: a tab truncates it, and the old
+     one truncated to "SignalK RouteIQ Nau…". -->
+<link rel="icon" type="image/svg+xml" href="icon.svg" />
+<link rel="apple-touch-icon" href="icon.svg" />
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />

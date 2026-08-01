@@ -9,7 +9,15 @@
   the header and its close button staying put. Narrow and short screens already
   turned the panel into a scrolling side sheet; this is the same idea for a
   desktop window.
-
+- Fixed: the App Store listing showed the raw `<img src="public/icon.svg" …>`
+  tag as text instead of the icon. Its README renderer does not allow inline
+  HTML; the icon is now a Markdown image, with an absolute raw URL so it also
+  resolves on npmjs.com where a relative path does not.
+- Fixed: the web app showed Signal K's own favicon in the browser tab, because
+  it declared none of its own and the browser fell back to the server root. It
+  now uses the RouteIQ icon. The title leads with the name too — a tab truncated
+  "SignalK RouteIQ Nautical Route Planner" down to "SignalK RouteIQ Nau…", so
+  the app looked like the server it runs on.
 - Fixed: the departure time used for tide-aware routing was the moment the page
   was opened, not the current time. The field was filled in once, when the tide
   panel first appeared, and then only ever refilled if it was empty — so ticking
@@ -67,7 +75,6 @@
   forwards 12 hours at a time. Cancelling, paging, or closing the planner drops
   the request, which is what stops the server calculating a window nobody is
   looking at any more.
-
 - Fixed: routing failed outright with "Invalid draft — expected a number in
   meters" on a server whose vessel draft was set. Signal K's `design.draft` is
   not a plain number — its value is an object (`{maximum, minimum, current}`) —
