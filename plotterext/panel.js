@@ -737,7 +737,11 @@ function hideDepartures() {
   depScanVisible = false;
 }
 
-/** Read a newline-delimited JSON body, one parsed object at a time. */
+/**
+ * Read a newline-delimited JSON body, one parsed object at a time.
+ * Kept in step with the copy in public/index.html — that one is an inline
+ * script and this is a module, with no bundler between them.
+ */
 async function readNdjson(resp, onEvent) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();

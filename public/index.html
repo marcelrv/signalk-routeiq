@@ -1824,9 +1824,14 @@ label.switch-row {
     depEl('dep-window').textContent = fmtDepStamp(depWindowStart) + '  →  ' + fmtDepStamp(end);
   }
 
+  // Shown above the list, never in place of it. A scan that fails partway has
+  // still produced real departures, and the whole point of streaming them is
+  // that they stay usable — replacing the list with the message would throw
+  // away exactly what was worth keeping.
+  let depError = '';
   function showDepError(message) {
-    depEl('dep-list').innerHTML =
-      '<div style="color:#f2938c;font-size:12px;padding:6px 0">' + escapeHtml(message) + '</div>';
+    depError = message;
+    renderDepartureList();
   }
 
   // Everything a departure's travel time depends on, except when it leaves.
@@ -1856,6 +1861,9 @@ label.switch-row {
       new Date(t0 + i * DEP_STEP_MINUTES * 60_000).toISOString());
   }
 
+  // Kept in step with the copy in plotterext/panel.js. Not shared: this is an
+  // inline script in a page the plugin serves, the panel is an ES module
+  // Freeboard loads, and there is no bundler between them.
   async function readNdjson(resp, onEvent) {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
@@ -1880,6 +1888,7 @@ label.switch-row {
     const ctrl = new AbortController();
     depAbort = ctrl;
     depWarnings = [];
+    depError = '';
 
     // Anything that changes a travel time invalidates every kept result.
     const signature = depSignature();
@@ -1973,9 +1982,11 @@ label.switch-row {
     const listEl = depEl('dep-list');
     // Every departure in the scan was planned against the same constraints, so
     // a dropped vessel dimension applies to the whole list — show it above.
-    const warnHtml = (depWarnings || [])
-      .map(w => '<div style="color:#e8b44a;font-size:11px;padding:4px 0">' + escapeHtml(w.message) + '</div>')
-      .join('');
+    const warnHtml =
+      (depError ? '<div style="color:#f2938c;font-size:12px;padding:6px 0">' + escapeHtml(depError) + '</div>' : '') +
+      (depWarnings || [])
+        .map(w => '<div style="color:#e8b44a;font-size:11px;padding:4px 0">' + escapeHtml(w.message) + '</div>')
+        .join('');
     if (!depSteps.length) {
       listEl.innerHTML = warnHtml;
       return;
@@ -1997,6 +2008,7 @@ label.switch-row {
       const row = document.createElement('div');
 
       if (!step.result) {
+        row.dataset.state = 'pending';
         row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:3px 4px;font-size:12px;color:#3f5a78';
         row.innerHTML =
           '<span style="width:56px;font-family:monospace">' + hhmm + '</span>' +
@@ -2007,6 +2019,7 @@ label.switch-row {
         continue;
       }
       if (typeof step.result.totalSeconds !== 'number') {
+        row.dataset.state = 'noroute';
         row.style.cssText = 'display:flex;gap:8px;padding:3px 4px;font-size:11px;color:#5f7a9a';
         row.textContent = hhmm + '  — no route';
         listEl.appendChild(row);
@@ -2017,6 +2030,10 @@ label.switch-row {
       const norm = maxS > minS ? (secs - minS) / (maxS - minS) : 0;
       const color = 'hsl(' + Math.round(120 * (1 - norm)) + ',65%,42%)';
       const best = secs === minS;
+      // Read by scripts/screenshots.mjs to catch the scan mid-flight; the
+      // alternative was matching the placeholder glyph, which would quietly
+      // report every row as filled the day that markup changes.
+      row.dataset.state = 'scored';
       row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:5px;cursor:pointer;font-size:12px;color:#dce8f5';
       row.onmouseenter = () => { row.style.background = 'rgba(59,143,212,0.15)'; };
       row.onmouseleave = () => { row.style.background = ''; };

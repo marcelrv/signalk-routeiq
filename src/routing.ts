@@ -634,12 +634,17 @@ export class RoutingEngine {
     scanHours: number = 24,
     stepMinutes: number = 60,
     signal?: { aborted: boolean },
+    baseMs: number = RoutingEngine.departureScanBase(request),
   ): AsyncGenerator<DepartureScanStep> {
     for (const i of RoutingEngine.departureScanOrder(
       RoutingEngine.departureScanSteps(scanHours, stepMinutes),
     )) {
       if (signal?.aborted) return;
-      const departureTime = this.departureScanTime(request, i, stepMinutes);
+      const departureTime = RoutingEngine.departureScanTime(
+        baseMs,
+        i,
+        stepMinutes,
+      );
       try {
         const r = await this.calculateRoute({
           ...request,
@@ -669,17 +674,29 @@ export class RoutingEngine {
     return Math.min(97, Math.floor((scanHours * 60) / stepMinutes) + 1);
   }
 
-  /** The departure time of step `index`, counted from the requested start. */
-  departureScanTime(
-    request: RoutingRequest,
-    index: number,
-    stepMinutes: number,
-  ): string {
+  /**
+   * The instant a scan counts its steps from. Resolved once and passed around,
+   * never re-derived per step: a request that omits `departureTime` falls back
+   * to "now", and re-reading the clock for each step makes every step land on a
+   * slightly different base. The times announced up front then disagree with
+   * the times attached to the results — by milliseconds, but a client that
+   * places results by departure time (the only way to place them when a request
+   * covers part of a window) matches none of them and silently drops the lot.
+   */
+  static departureScanBase(request: RoutingRequest): number {
     const parsed = request.departureTime
       ? Date.parse(request.departureTime)
       : NaN;
-    const t0 = Number.isFinite(parsed) ? parsed : Date.now();
-    return new Date(t0 + index * stepMinutes * 60_000).toISOString();
+    return Number.isFinite(parsed) ? parsed : Date.now();
+  }
+
+  /** The departure time of step `index`, counted from `baseMs`. */
+  static departureScanTime(
+    baseMs: number,
+    index: number,
+    stepMinutes: number,
+  ): string {
+    return new Date(baseMs + index * stepMinutes * 60_000).toISOString();
   }
 
   /**

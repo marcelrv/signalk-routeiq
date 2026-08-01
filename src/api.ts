@@ -615,7 +615,14 @@ export class ApiHandler {
       // tests, where req is a plain object with no express prototype on it. The
       // choice here is binary anyway — a client either asks for the stream by
       // name or it does not — so negotiation adds nothing.
-      if (String(req.headers.accept || "").includes("application/x-ndjson")) {
+      // Lowercased: Node normalises header *names*, not values, and a media
+      // type is case-insensitive — `Application/X-NDJSON` is a legal way to
+      // ask for the stream, and would otherwise silently get the batch.
+      if (
+        String(req.headers.accept || "")
+          .toLowerCase()
+          .includes("application/x-ndjson")
+      ) {
         await this.streamDepartureScan(
           req,
           res,
@@ -664,6 +671,11 @@ export class ApiHandler {
   ): Promise<void> {
     const engine = this.routingEngine!;
     const steps = RoutingEngine.departureScanSteps(hours, step);
+    // One base for the whole scan. The times announced in `meta` and the times
+    // attached to the results have to be the same instants, because that is what
+    // a client places results by — and a request without an explicit
+    // departureTime would otherwise re-read the clock for each one.
+    const baseMs = RoutingEngine.departureScanBase(request);
 
     res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -693,7 +705,7 @@ export class ApiHandler {
         stepMinutes: step,
         steps,
         departureTimes: Array.from({ length: steps }, (_, i) =>
-          engine.departureScanTime(request, i, step),
+          RoutingEngine.departureScanTime(baseMs, i, step),
         ),
         warnings,
       });
@@ -702,6 +714,7 @@ export class ApiHandler {
         hours,
         step,
         signal,
+        baseMs,
       )) {
         write({ type: "departure", ...d });
       }

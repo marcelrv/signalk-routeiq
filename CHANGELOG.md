@@ -36,7 +36,8 @@
   so the unnamed points RouteIQ generated between start and destination became
   empty objects the server rejected. Reshaping a route into dozens of graph
   nodes made this certain rather than occasional. Generated waypoints are now
-  numbered (`WP2`, `WP3`, …); the start and destination keep their own names.
+  numbered `WP1` upwards, except that the start and destination keep whatever
+  the route already called them if they were named at all.
 - Changed: a route saved from the webapp now carries the same numbered waypoints
   as one saved from the plotter panel. The two save by different routes — the
   webapp posts to the plugin, which writes the resource itself, while the panel

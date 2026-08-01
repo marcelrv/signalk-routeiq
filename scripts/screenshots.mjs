@@ -349,10 +349,10 @@ const SHOTS = {
     let caught = null;
     for (let i = 0; i < 400; i++) {
       const s = await page.evaluate(() => {
-        const rows = [...document.querySelectorAll('#dep-list > div')];
+        const rows = [...document.querySelectorAll('#dep-list > div[data-state]')];
         return {
           rows: rows.length,
-          filled: rows.filter((d) => !d.textContent.includes('·')).length,
+          filled: rows.filter((d) => d.dataset.state !== 'pending').length,
           running: document.getElementById('dep-cancel')?.style.display !== 'none',
         };
       });
