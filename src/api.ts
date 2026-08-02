@@ -927,6 +927,8 @@ export class ApiHandler {
     res.json({
       averageSpeedKnots: this.config.averageSpeedKnots,
       defaultCoastDistance: this.config.defaultCoastDistance,
+      lockWaitMinutes: this.config.lockWaitMinutes,
+      bridgeWaitMinutes: this.config.bridgeWaitMinutes,
       considerTides: this.config.considerTides,
       maxTidalCurrentKnots: this.config.maxTidalCurrentKnots,
     });
