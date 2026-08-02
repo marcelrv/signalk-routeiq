@@ -49,6 +49,13 @@ export interface EdgeRow {
   edge_type_id: number;
   traffic_mode: number;
   edge_kind_id?: number;
+  // Which lock this edge passes through, on databases that record it. The
+  // nv-chart conversion does not, so it is absent rather than zero there —
+  // absent means "unknown", not "no lock".
+  lock_id?: number | null;
+  // Every lock an aggregated edge passes through, when several were collapsed
+  // into one. Only set by the aggregation, never read from the database.
+  lock_ids?: number[];
   crosses_land?: number;
   crosses_obstacle?: number;
   // No coordinates here by design: an edge's endpoints are always resolvable
@@ -2753,6 +2760,10 @@ export class RoutingDatabase {
     let edgeTypeId = EDGE_TYPE_COASTAL;
     let crossesLand = 0;
     let crossesObstacle = 0;
+    // Which locks this aggregated segment actually passes through. Knowing the
+    // traversed edge beats guessing from nearby points of interest, which
+    // cannot tell one chamber of a lock from the three beside it.
+    const lockIds = new Set<number>();
     const pathPoints: Array<[number, number]> = [];
 
     for (let i = startIdx; i < endIdx; i++) {
@@ -2776,6 +2787,7 @@ export class RoutingDatabase {
         )
           trafficMode = TRAFFIC_ONE_WAY_FWD;
         edgeTypeId = edge.edge_type_id;
+        if (typeof edge.lock_id === "number") lockIds.add(edge.lock_id);
         if (edge.crosses_land === 1) crossesLand = 1;
         if (edge.crosses_obstacle === 1) crossesObstacle = 1;
 
@@ -2805,6 +2817,8 @@ export class RoutingDatabase {
       traffic_mode: trafficMode,
       crosses_land: crossesLand,
       crosses_obstacle: crossesObstacle,
+      ...(lockIds.size > 0 ? { lock_id: [...lockIds][0] } : {}),
+      ...(lockIds.size > 0 ? { lock_ids: [...lockIds] } : {}),
       ...(pathPoints.length > 0 ? { path_points: pathPoints } : {}),
     };
   }

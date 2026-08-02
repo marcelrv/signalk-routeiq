@@ -1667,6 +1667,7 @@ export class RoutingEngine {
       costFactor: number;
       trafficMode: number;
       edgeTypeId?: number;
+      lockIds?: number[];
     },
     fromNodeId: number,
     toNodeId: number,
@@ -1693,6 +1694,9 @@ export class RoutingEngine {
         costFactor: attrs.costFactor,
         trafficMode: attrs.trafficMode,
         edgeTypeId: attrs.edgeTypeId,
+        // Only on the first sub-segment: the locks belong to the aggregated
+        // edge as a whole, and repeating them would count one locking twice.
+        ...(i === 0 && attrs.lockIds?.length ? { lockIds: attrs.lockIds } : {}),
       });
     }
     return segs;
@@ -2636,26 +2640,56 @@ export class RoutingEngine {
    * database that knows a particular lock takes twenty minutes rather than an
    * hour needs no change here.
    */
-  private crossingWaitSeconds(crossings?: RouteCrossing[]): number {
-    if (!crossings || crossings.length === 0) return 0;
+  private crossingWaitSeconds(
+    crossings?: RouteCrossing[],
+    segments?: Array<{ lockIds?: number[] }>,
+  ): number {
     const lockDefault = this.config.lockWaitMinutes ?? 60;
     const bridgeDefault = this.config.bridgeWaitMinutes ?? 30;
-    let minutes = 0;
-    for (const group of RoutingEngine.groupCrossings(crossings)) {
-      // A lock complex is a lock: you lock through once, whichever chamber you
-      // take, and any span over its heads goes with it.
+
+    // Locks the route demonstrably passed through, from the edges it used.
+    // Distinct ids, because a lock spans several edges and they are one
+    // locking. Only pipeline-built databases record this; when they do it beats
+    // the proximity guess below, which cannot tell one chamber from the three
+    // beside it.
+    const traversedLocks = new Set<number>();
+    for (const seg of segments ?? []) {
+      for (const id of seg.lockIds ?? []) traversedLocks.add(id);
+    }
+    const locksAreKnown = traversedLocks.size > 0;
+
+    let minutes = locksAreKnown ? traversedLocks.size * lockDefault : 0;
+
+    for (const group of RoutingEngine.groupCrossings(crossings ?? [])) {
       const lock = group.find((c) => c.type === "lock");
       if (lock) {
-        minutes += lock.waitMinutes ?? lockDefault;
+        // A lock complex is a lock: you lock through once, whichever chamber
+        // you take, and any span over its heads goes with it. Skipped entirely
+        // when the edges already said which locks were used.
+        if (!locksAreKnown) minutes += lock.waitMinutes ?? lockDefault;
         continue;
       }
       const opening = group.find(
         (c) => c.type === "bridge" && c.subtype === "opening",
       );
+      // Bridges stay proximity-based whatever the database: no schema marks an
+      // opening-span edge, so there is nothing more exact to prefer.
       if (opening) minutes += opening.waitMinutes ?? bridgeDefault;
       // else: the group is fixed spans only — nothing to wait for.
     }
     return Math.max(0, minutes) * 60;
+  }
+
+  /**
+   * The locks an edge passes through, as the segments carry them. A single
+   * edge records one lock; an aggregated one carries every lock it collapsed.
+   * Absent on databases with no such column, which is why the caller falls back
+   * to detecting locks from nearby points of interest.
+   */
+  private static edgeLockIds(edge: EdgeRow): { lockIds?: number[] } {
+    if (edge.lock_ids?.length) return { lockIds: edge.lock_ids };
+    if (typeof edge.lock_id === "number") return { lockIds: [edge.lock_id] };
+    return {};
   }
 
   /** Crossings closer together than this are treated as one obstacle. */
@@ -2749,7 +2783,7 @@ export class RoutingEngine {
     route.waypoints = waypoints;
     route.itinerary = itinerary;
 
-    const waitSec = this.crossingWaitSeconds(route.crossings);
+    const waitSec = this.crossingWaitSeconds(route.crossings, segments);
     const totalSec = sailingSec + waitSec;
     route.totalSeconds = Math.round(totalSec);
     if (waitSec > 0) route.totalWaitSeconds = Math.round(waitSec);
@@ -2928,6 +2962,7 @@ export class RoutingEngine {
                   costFactor: edge.cost_factor,
                   trafficMode: edge.traffic_mode,
                   edgeTypeId: edge.edge_type_id,
+                  ...RoutingEngine.edgeLockIds(edge),
                 },
                 prevNode,
                 currNode,
@@ -2944,6 +2979,7 @@ export class RoutingEngine {
               costFactor: edge.cost_factor,
               trafficMode: edge.traffic_mode,
               edgeTypeId: edge.edge_type_id,
+              ...RoutingEngine.edgeLockIds(edge),
             });
           }
         } else {

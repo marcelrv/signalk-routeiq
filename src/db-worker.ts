@@ -50,6 +50,7 @@ interface SchemaFlags {
   hasNodeDepth: boolean;
   hasRegionId: boolean;
   hasEdgeKind: boolean;
+  hasLockId: boolean;
 }
 
 interface DbHandle {
@@ -75,6 +76,7 @@ let hasCrossesObstacle = false;
 let hasNodeDepth = false;
 let hasRegionId = false;
 let hasEdgeKind = false;
+let hasLockId = false;
 let overlayHandle: DbHandle | null = null;
 
 if (!parentPort) {
@@ -95,6 +97,10 @@ function detectSchemaFlags(db: DatabaseSync): SchemaFlags & {
     hasCrossesLand: edgeCols.some((c) => c.name === "crosses_land"),
     hasCrossesObstacle: edgeCols.some((c) => c.name === "crosses_obstacle"),
     hasEdgeKind: edgeCols.some((c) => c.name === "edge_kind_id"),
+    // Pipeline-built databases say which lock an edge passes through; the
+    // nv-chart conversion has no such column. Detected rather than assumed, the
+    // same way the others here are.
+    hasLockId: edgeCols.some((c) => c.name === "lock_id"),
     hasNodeDepth: nodeCols.some((c) => c.name === "node_depth"),
     hasRegionId: nodeCols.some((c) => c.name === "region_id"),
     edgeCols,
@@ -214,6 +220,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
         hasNodeDepth = false;
         hasRegionId = false;
         hasEdgeKind = false;
+        hasLockId = false;
         handles.length = 0;
         filenames.length = 0;
         for (const dbPath of dbPaths) {
@@ -241,6 +248,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             hasCrossesLand = hasCrossesLand || flags.hasCrossesLand;
             hasCrossesObstacle = hasCrossesObstacle || flags.hasCrossesObstacle;
             hasEdgeKind = hasEdgeKind || flags.hasEdgeKind;
+            hasLockId = hasLockId || flags.hasLockId;
             hasNodeDepth = hasNodeDepth || flags.hasNodeDepth;
             hasRegionId = hasRegionId || flags.hasRegionId;
             const filename = filenameOf(dbPath);
@@ -379,6 +387,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
         hasCrossesLand = hasCrossesLand || flags.hasCrossesLand;
         hasCrossesObstacle = hasCrossesObstacle || flags.hasCrossesObstacle;
         hasEdgeKind = hasEdgeKind || flags.hasEdgeKind;
+        hasLockId = hasLockId || flags.hasLockId;
         hasNodeDepth = hasNodeDepth || flags.hasNodeDepth;
         hasRegionId = hasRegionId || flags.hasRegionId;
 
@@ -666,13 +675,14 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
         const edgeKindCol = hasEdgeKind
           ? ", edge_kind_id"
           : ", 0 AS edge_kind_id";
+        const lockCol = hasLockId ? ", lock_id" : ", NULL AS lock_id";
         let allEdges: Array<EdgeRow & { db_index: number }> = [];
         for (const { h, i } of targets) {
           const edges = h.db
             .prepare(
               `SELECT source, target, distance, min_depth, max_air_draft, min_width,
                     cost_factor, distance_to_land,
-                    edge_type_id, traffic_mode${crossesCol}${obstacleCol}${edgeKindCol}
+                    edge_type_id, traffic_mode${crossesCol}${obstacleCol}${edgeKindCol}${lockCol}
              FROM edges`,
             )
             .all() as unknown as EdgeRow[];
@@ -684,7 +694,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             .prepare(
               `SELECT source, target, distance, min_depth, max_air_draft, min_width,
                     cost_factor, distance_to_land, edge_type_id, traffic_mode,
-                    0 AS edge_kind_id
+                    0 AS edge_kind_id, NULL AS lock_id
              FROM edges`,
             )
             .all() as unknown as EdgeRow[];

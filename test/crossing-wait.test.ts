@@ -17,13 +17,13 @@ describe('crossing wait time', () => {
    * Reach the wait calculation without standing up a database. `config` is a
    * getter over `_config`, so the backing field is what has to be set.
    */
-  const waitSeconds = (crossings: unknown[], config = {}) => {
+  const waitSeconds = (crossings: unknown[], config = {}, segments?: unknown[]) => {
     const engine = Object.create(RoutingEngine.prototype) as {
       _config: unknown;
-      crossingWaitSeconds: (c: unknown[]) => number;
+      crossingWaitSeconds: (c: unknown[], s?: unknown[]) => number;
     };
     engine._config = { ...DEFAULT_CONFIG, ...config };
-    return engine.crossingWaitSeconds(crossings);
+    return engine.crossingWaitSeconds(crossings, segments);
   };
 
   const lock = (extra = {}) => ({ type: 'lock', name: 'A lock', ...extra });
@@ -110,6 +110,34 @@ describe('crossing wait time', () => {
   it('groups a run of fixed spans into no wait at all', () => {
     const stack = [0, 0, 0].map((m) => fixed({ distanceFromStart: m }));
     assert.strictEqual(waitSeconds(stack), 0);
+  });
+
+  it('uses the locks the route actually traversed when the database says', () => {
+    // Three POIs for parallel chambers, but the edges name one lock: one
+    // locking, not three, and not the grouped guess either.
+    const chambers = [0, 40, 80].map((m) => lock({ distanceFromStart: m }));
+    const segments = [{ lockIds: [7] }, {}, { lockIds: [7] }];
+    assert.strictEqual(waitSeconds(chambers, {}, segments), 3600);
+  });
+
+  it('counts distinct traversed locks, not lock edges', () => {
+    // A lock spans a dozen edges; that is still one locking.
+    const segments = [{ lockIds: [5] }, { lockIds: [5] }, { lockIds: [9] }, { lockIds: [9] }];
+    assert.strictEqual(waitSeconds([], {}, segments), 2 * 3600);
+  });
+
+  it('still charges opening bridges when the locks are known', () => {
+    // Edge data covers locks only; no schema marks an opening span, so those
+    // stay proximity-based even on a database that knows its locks.
+    const crossings = [lock({ distanceFromStart: 0 }), opening({ distanceFromStart: 5000 })];
+    assert.strictEqual(waitSeconds(crossings, {}, [{ lockIds: [3] }]), 3600 + 1800);
+  });
+
+  it('falls back to the crossing list when the database has no lock data', () => {
+    // nv-chart has no lock_id column at all: segments carry nothing.
+    const crossings = [lock({ distanceFromStart: 0 })];
+    assert.strictEqual(waitSeconds(crossings, {}, [{}, {}]), 3600);
+    assert.strictEqual(waitSeconds(crossings, {}, undefined), 3600);
   });
 
   it('is unbothered by nothing to wait for', () => {

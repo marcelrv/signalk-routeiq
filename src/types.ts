@@ -169,6 +169,10 @@ export interface RouteResult {
         costFactor: number;
         trafficMode: number;
         edgeTypeId?: number;
+        // Locks this segment passes through, on databases that record it per
+        // edge. Empty or absent means the database does not say, not that there
+        // is no lock.
+        lockIds?: number[];
         mode?: "manual"; // user-drawn straight-line segment (bypasses the graph)
         seconds?: number; // traversal time, tide-corrected when tides active
         currentKn?: number; // estimated along-track current, + = fair (with tide)
