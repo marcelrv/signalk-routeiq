@@ -1886,9 +1886,18 @@ label.switch-row {
   function depArrival(step) {
     const r = step.result;
     if (!r) return '';
-    const ms = r.arrivalTime
-      ? Date.parse(r.arrivalTime)
-      : Date.parse(step.departureTime) + (r.totalSeconds || 0) * 1000;
+    // Prefer the server's arrival, fall back to departure + duration, and show
+    // nothing at all rather than something wrong. The fallback is guarded
+    // rather than defaulted: `(totalSeconds || 0)` would turn a NaN duration
+    // into zero and render the departure time as the arrival — which reads as a
+    // real answer. NaN gets that far because `typeof NaN === 'number'` passes
+    // the caller's own check.
+    let ms = r.arrivalTime ? Date.parse(r.arrivalTime) : NaN;
+    if (!Number.isFinite(ms)) {
+      const departed = Date.parse(step.departureTime);
+      if (!Number.isFinite(departed) || !Number.isFinite(r.totalSeconds)) return '';
+      ms = departed + r.totalSeconds * 1000;
+    }
     if (!Number.isFinite(ms)) return '';
     const a = new Date(ms);
     const dep = new Date(step.departureTime);
