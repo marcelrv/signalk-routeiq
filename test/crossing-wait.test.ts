@@ -65,6 +65,53 @@ describe('crossing wait time', () => {
     assert.strictEqual(waitSeconds([fixed({ waitMinutes: 45 })]), 0);
   });
 
+  it('counts a lock complex once, not once per chamber', () => {
+    // Krammersluizen is four chambers side by side; the POI index has one entry
+    // each and the route passes through exactly one of them.
+    const chambers = [0, 40, 80, 120].map((m) => lock({ distanceFromStart: m }));
+    assert.strictEqual(waitSeconds(chambers), 3600);
+  });
+
+  it('counts an opening and a fixed span over the same cut once', () => {
+    // Middelburg: Stationsbrug exists as both, carrying different roads.
+    const pair = [
+      opening({ distanceFromStart: 1000 }),
+      fixed({ distanceFromStart: 1030 }),
+    ];
+    assert.strictEqual(waitSeconds(pair), 1800);
+    // and the other way round, so ordering cannot change the answer
+    assert.strictEqual(waitSeconds([...pair].reverse()), 1800);
+  });
+
+  it('lets a lock absorb the span over its own head', () => {
+    // Zandkreeksluis: the lock, the bridge over its outer head, and the next
+    // span, all within a couple of hundred metres.
+    const complex = [
+      opening({ distanceFromStart: 0 }),
+      lock({ distanceFromStart: 80 }),
+      opening({ distanceFromStart: 190 }),
+    ];
+    assert.strictEqual(waitSeconds(complex), 3600);
+  });
+
+  it('keeps genuinely separate crossings separate', () => {
+    // Two locks a mile apart are two lockings.
+    assert.strictEqual(
+      waitSeconds([lock({ distanceFromStart: 0 }), lock({ distanceFromStart: 1852 })]),
+      2 * 3600,
+    );
+    // Just beyond the grouping distance stays separate.
+    assert.strictEqual(
+      waitSeconds([opening({ distanceFromStart: 0 }), opening({ distanceFromStart: 251 })]),
+      2 * 1800,
+    );
+  });
+
+  it('groups a run of fixed spans into no wait at all', () => {
+    const stack = [0, 0, 0].map((m) => fixed({ distanceFromStart: m }));
+    assert.strictEqual(waitSeconds(stack), 0);
+  });
+
   it('is unbothered by nothing to wait for', () => {
     assert.strictEqual(waitSeconds([]), 0);
     assert.strictEqual(waitSeconds(undefined as never), 0);

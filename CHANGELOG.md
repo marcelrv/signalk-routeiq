@@ -10,6 +10,11 @@
   cost, so it changes what a route is expected to take but never which way it
   goes. A routing database that carries a figure for a specific lock or bridge
   overrides the default, though nothing emits that yet.
+  Crossings within 250 m of each other along the route count as one obstacle,
+  because the list is built from nearby points of interest and cannot tell which
+  of several parallel structures a vessel actually uses: two lock chambers side
+  by side are one locking, and a footbridge beside its road bridge is one
+  opening. A lock absorbs the spans over its own heads.
 
 - Added: the departure planner shows the distance of each departure. A
   tide-aware scan can pick a different route at different times, so a row that

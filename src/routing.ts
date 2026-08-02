@@ -2641,14 +2641,72 @@ export class RoutingEngine {
     const lockDefault = this.config.lockWaitMinutes ?? 60;
     const bridgeDefault = this.config.bridgeWaitMinutes ?? 30;
     let minutes = 0;
-    for (const c of crossings) {
-      if (c.type === "lock") {
-        minutes += c.waitMinutes ?? lockDefault;
-      } else if (c.type === "bridge" && c.subtype === "opening") {
-        minutes += c.waitMinutes ?? bridgeDefault;
+    for (const group of RoutingEngine.groupCrossings(crossings)) {
+      // A lock complex is a lock: you lock through once, whichever chamber you
+      // take, and any span over its heads goes with it.
+      const lock = group.find((c) => c.type === "lock");
+      if (lock) {
+        minutes += lock.waitMinutes ?? lockDefault;
+        continue;
       }
+      const opening = group.find(
+        (c) => c.type === "bridge" && c.subtype === "opening",
+      );
+      if (opening) minutes += opening.waitMinutes ?? bridgeDefault;
+      // else: the group is fixed spans only — nothing to wait for.
     }
     return Math.max(0, minutes) * 60;
+  }
+
+  /** Crossings closer together than this are treated as one obstacle. */
+  private static readonly CROSSING_GROUP_METRES = 250;
+
+  /**
+   * Collapse crossings that sit on top of each other into one obstacle.
+   *
+   * The crossing list comes from POIs near the route, which cannot tell which
+   * of several parallel structures the vessel actually uses. Krammersluizen is
+   * four chambers side by side; Middelburg has an opening span and a fixed one
+   * carrying different roads over the same cut; a footbridge sits alongside its
+   * road bridge. Charged individually, one passage through a lock complex was
+   * billed as four locks.
+   *
+   * Grouped by chainage, so this needs `distanceFromStart` — which buildItinerary
+   * assigns. Single-linkage, because a lock and the bridge over its outer head
+   * belong together even when the two ends of the complex are further apart than
+   * the threshold.
+   *
+   * This is an approximation standing in for data the databases do not carry:
+   * pipeline-built ones mark `requires_lock`/`lock_id` per edge, which would say
+   * exactly which chamber was traversed, and nothing marks opening-bridge edges
+   * at all. Both would beat guessing from proximity.
+   */
+  static groupCrossings(crossings: RouteCrossing[]): RouteCrossing[][] {
+    const placed = crossings.filter(
+      (c) => typeof c.distanceFromStart === "number",
+    );
+    // Without chainage there is nothing to group by; treat each on its own
+    // rather than silently merging unrelated crossings.
+    const unplaced = crossings
+      .filter((c) => typeof c.distanceFromStart !== "number")
+      .map((c) => [c]);
+    if (placed.length === 0) return unplaced;
+
+    const sorted = [...placed].sort(
+      (a, b) => (a.distanceFromStart ?? 0) - (b.distanceFromStart ?? 0),
+    );
+    const groups: RouteCrossing[][] = [[sorted[0]]];
+    for (let i = 1; i < sorted.length; i++) {
+      const gap =
+        (sorted[i].distanceFromStart ?? 0) -
+        (sorted[i - 1].distanceFromStart ?? 0);
+      if (gap <= RoutingEngine.CROSSING_GROUP_METRES) {
+        groups[groups.length - 1].push(sorted[i]);
+      } else {
+        groups.push([sorted[i]]);
+      }
+    }
+    return [...groups, ...unplaced];
   }
 
   /**
@@ -2673,11 +2731,25 @@ export class RoutingEngine {
       const detected = await this.detectCrossings(coords);
       if (detected.length > 0) route.crossings = detected;
     }
-    const waitSec = this.crossingWaitSeconds(route.crossings);
 
     // Sailing time & estimated current per segment (covers segments added by
     // connectUserPoint too — this runs after all geometry mutations).
     const sailingSec = this.annotateSegmentTimes(coords, segments, env, 0);
+
+    // buildItinerary is what puts each crossing at a chainage, and grouping
+    // co-located ones needs that, so the waypoints are derived before the
+    // totals rather than after.
+    const { waypoints, itinerary } = buildItinerary(
+      coords,
+      segments,
+      route.crossings || [],
+      via,
+      this.config.waypointTolerance ?? 30,
+    );
+    route.waypoints = waypoints;
+    route.itinerary = itinerary;
+
+    const waitSec = this.crossingWaitSeconds(route.crossings);
     const totalSec = sailingSec + waitSec;
     route.totalSeconds = Math.round(totalSec);
     if (waitSec > 0) route.totalWaitSeconds = Math.round(waitSec);
@@ -2701,16 +2773,6 @@ export class RoutingEngine {
         stations: env.flow.stations.map((s) => s.name),
       };
     }
-
-    const { waypoints, itinerary } = buildItinerary(
-      coords,
-      segments,
-      route.crossings || [],
-      via,
-      this.config.waypointTolerance ?? 30,
-    );
-    route.waypoints = waypoints;
-    route.itinerary = itinerary;
 
     this.splitToSegmentFeatures(route);
   }
