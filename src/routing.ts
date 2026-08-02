@@ -2623,6 +2623,35 @@ export class RoutingEngine {
   }
 
   /**
+   * Time a route spends waiting rather than moving: locks, and bridges that
+   * have to open. A fixed span costs nothing — the vessel either fits under it
+   * or the route should not be crossing it at all.
+   *
+   * This is deliberately applied to the ETA and never to the search cost, so a
+   * wait cannot make the router prefer a longer way round. Doing that properly
+   * needs the wait to be FIFO-safe, which a flat constant is not — see
+   * feature-bridge-lock-waits.md, tier 3.
+   *
+   * A per-crossing `waitMinutes` wins over the configured default, so a
+   * database that knows a particular lock takes twenty minutes rather than an
+   * hour needs no change here.
+   */
+  private crossingWaitSeconds(crossings?: RouteCrossing[]): number {
+    if (!crossings || crossings.length === 0) return 0;
+    const lockDefault = this.config.lockWaitMinutes ?? 60;
+    const bridgeDefault = this.config.bridgeWaitMinutes ?? 30;
+    let minutes = 0;
+    for (const c of crossings) {
+      if (c.type === "lock") {
+        minutes += c.waitMinutes ?? lockDefault;
+      } else if (c.type === "bridge" && c.subtype === "opening") {
+        minutes += c.waitMinutes ?? bridgeDefault;
+      }
+    }
+    return Math.max(0, minutes) * 60;
+  }
+
+  /**
    * Finalize a computed single-feature route for delivery: detect crossings
    * (when a merge dropped them), derive the simplified navigable waypoints and
    * the annotated itinerary, then split into per-segment features.
@@ -2638,15 +2667,29 @@ export class RoutingEngine {
     const coords = feature.geometry.coordinates;
     const segments = feature.properties.segments || [];
 
+    // Crossings first: a lock or an opening span costs time to get through,
+    // and the totals below have to include it.
+    if (!route.crossings) {
+      const detected = await this.detectCrossings(coords);
+      if (detected.length > 0) route.crossings = detected;
+    }
+    const waitSec = this.crossingWaitSeconds(route.crossings);
+
     // Sailing time & estimated current per segment (covers segments added by
     // connectUserPoint too — this runs after all geometry mutations).
-    const totalSec = this.annotateSegmentTimes(coords, segments, env, 0);
+    const sailingSec = this.annotateSegmentTimes(coords, segments, env, 0);
+    const totalSec = sailingSec + waitSec;
     route.totalSeconds = Math.round(totalSec);
+    if (waitSec > 0) route.totalWaitSeconds = Math.round(waitSec);
     if (env) {
       const totalDistance =
         feature.properties.totalDistance ??
         segments.reduce((s, seg) => s + (seg.distance || 0), 0);
-      route.totalSecondsNoTide = Math.round(totalDistance / env.speedMs);
+      // Waiting is unaffected by tide, so it belongs on both sides — leaving it
+      // out here would make the no-tide comparison look like a tide saving.
+      route.totalSecondsNoTide = Math.round(
+        totalDistance / env.speedMs + waitSec,
+      );
       route.departureTime = new Date(env.departureMs).toISOString();
       route.arrivalTime = new Date(
         env.departureMs + totalSec * 1000,
@@ -2657,13 +2700,6 @@ export class RoutingEngine {
         source: env.flow.source,
         stations: env.flow.stations.map((s) => s.name),
       };
-    }
-
-    // Via-point routes are merged from sub-results and lose the per-segment
-    // crossings detected in buildRouteResult — recover them here.
-    if (!route.crossings) {
-      const crossings = await this.detectCrossings(coords);
-      if (crossings.length > 0) route.crossings = crossings;
     }
 
     const { waypoints, itinerary } = buildItinerary(
@@ -3060,6 +3096,19 @@ export class RoutingEngine {
       return out.map((e) => e.crossing);
     };
 
+    // A database may carry a figure for a specific bridge or lock. Read it here
+    // so the configured default is only a fallback; nothing emits this field
+    // yet, but wiring it now means the pipeline can start to without a second
+    // change on this side.
+    const poiWaitMinutes = (
+      props?: Record<string, unknown>,
+    ): number | undefined => {
+      const v = props?.typical_wait_minutes;
+      return typeof v === "number" && Number.isFinite(v) && v >= 0
+        ? v
+        : undefined;
+    };
+
     const bridgeCrossings = detectForGroup(bridgePois, (poi) => {
       const props = poi.properties as Record<string, unknown>;
       const subtype = props?.subtype as string | undefined;
@@ -3069,12 +3118,14 @@ export class RoutingEngine {
         name: `${poi.name}${RoutingEngine.formatSpanSuffix(subtype, height)}`,
         subtype,
         height,
+        waitMinutes: poiWaitMinutes(props),
         position: { latitude: poi.lat, longitude: poi.lon },
       };
     });
     const lockCrossings = detectForGroup(lockPois, (poi) => ({
       type: "lock",
       name: poi.name,
+      waitMinutes: poiWaitMinutes(poi.properties as Record<string, unknown>),
       position: { latitude: poi.lat, longitude: poi.lon },
     }));
 

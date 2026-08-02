@@ -65,6 +65,11 @@ export interface RouteCrossing {
   name: string;
   subtype?: string; // 'opening' or 'fixed' for bridges
   height?: number; // vertical clearance (m) for fixed bridges
+  // Per-POI wait, when the database carries one, overriding the config default.
+  // Nothing populates this yet; the routing side already prefers it so that
+  // when the pipeline starts emitting typical_wait_minutes there is no second
+  // change to make.
+  waitMinutes?: number;
   position: { latitude: number; longitude: number };
   distanceFromStart?: number; // meters along the route (chainage)
 }
@@ -125,6 +130,7 @@ export interface RouteResult {
   totalDistance?: number;
   totalCost?: number;
   totalSeconds?: number; // sailing time at averageSpeedKnots, tide-corrected when tide info present
+  totalWaitSeconds?: number; // of totalSeconds, the part spent waiting at locks and opening spans
   totalSecondsNoTide?: number; // same route without current — UIs show the delta
   departureTime?: string; // ISO, echoed/defaulted from the request when tides active
   arrivalTime?: string; // ISO, departure + totalSeconds
@@ -224,6 +230,12 @@ export interface PluginConfig {
   lineOfSightSampleInterval: number; // meters, default 500
   lineOfSightSearchRadius: number; // meters, default 800
   averageSpeedKnots: number; // knots, default 6.0
+  // Typical wait at an opening span or a lock, in minutes. Applied to the ETA
+  // only — never to the routing cost — so it cannot change which way a route
+  // goes, only how long it is expected to take. A fixed bridge is either
+  // passable or it is not, so it carries no wait.
+  lockWaitMinutes: number; // minutes, default 60
+  bridgeWaitMinutes: number; // minutes, default 30 (opening spans only)
   waypointTolerance: number; // meters, max deviation when simplifying to waypoints (default 30)
   catalogUrl: string; // URL to the routing-index.json catalog for downloadable databases
   considerTides: boolean; // default for the per-request "use tides" toggle
@@ -277,6 +289,8 @@ export const DEFAULT_CONFIG: PluginConfig = {
   lineOfSightSampleInterval: 500,
   lineOfSightSearchRadius: 0,
   averageSpeedKnots: 6.0,
+  lockWaitMinutes: 60,
+  bridgeWaitMinutes: 30,
   waypointTolerance: 30,
   catalogUrl:
     "https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/routing-index.json",

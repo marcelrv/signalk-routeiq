@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added: routes now allow time for locks and opening bridges. Two settings under
+  Plugin Config — "Typical Lock Wait" (60 min) and "Typical Opening Bridge Wait"
+  (30 min) — are counted once per crossing towards the estimated duration and
+  arrival time. Fixed spans cost nothing: you either fit under one or the route
+  should not be crossing it. The wait is deliberately kept out of the routing
+  cost, so it changes what a route is expected to take but never which way it
+  goes. A routing database that carries a figure for a specific lock or bridge
+  overrides the default, though nothing emits that yet.
+
 - Added: the departure planner shows the distance of each departure. A
   tide-aware scan can pick a different route at different times, so a row that
   is slower because its route is several miles longer used to look identical to
