@@ -1518,7 +1518,23 @@ label.switch-row {
       <div id="dep-progress" style="flex:1;display:flex;align-items:center;justify-content:flex-end;gap:8px;color:#6d96c0;font-size:11px"></div>
       <button id="dep-cancel" style="display:none;background:#3d1f22;border:1px solid rgba(242,147,140,0.4);border-radius:5px;color:#f2938c;font-size:11px;padding:3px 10px;cursor:pointer" title="Stop scanning and keep the departures found so far">Cancel</button>
     </div>
-    <div id="dep-body" style="padding:10px 18px 16px;overflow-y:auto">
+    <!-- Column header. The last column is switchable, so its heading is the
+         control rather than a label — the icon sits exactly above the numbers
+         it changes. -->
+    <div style="display:flex;align-items:center;gap:8px;padding:10px 22px 0;font-size:10px;color:#5f7a9a;text-transform:uppercase;letter-spacing:0.04em">
+      <span style="width:56px">Depart</span>
+      <span style="flex:1"></span>
+      <span style="width:60px;text-align:right">Distance</span>
+      <button id="dep-mode" style="width:62px;display:flex;align-items:center;justify-content:flex-end;gap:3px;background:none;border:none;padding:0;cursor:pointer;color:#6d96c0;font:inherit;text-transform:uppercase;letter-spacing:0.04em"
+              title="Show arrival time instead of travel time">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto">
+          <path d="M3 9h13a4 4 0 0 1 0 8h-2"/><polyline points="7 5 3 9 7 13"/>
+        </svg>
+        <span id="dep-mode-label">Travel</span>
+      </button>
+      <span style="width:14px"></span>
+    </div>
+    <div id="dep-body" style="padding:4px 18px 16px;overflow-y:auto">
       <div id="dep-list"></div>
     </div>
   </div>
@@ -1860,6 +1876,47 @@ label.switch-row {
   const DEP_STAMP = { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
   function fmtDepStamp(dt) { return dt.toLocaleString([], DEP_STAMP); }
 
+  // Travel time answers "how long", arrival answers "when do I get in" — which
+  // one matters depends on whether you are working around a lock closing or a
+  // tide gate at the far end, so the column switches rather than picking one.
+  let depShowArrival = false;
+  try { depShowArrival = localStorage.getItem('routeiq-dep-arrival') === '1'; } catch {}
+
+  /** Arrival as HH:MM, with a day marker when it is not the departure's day. */
+  function depArrival(step) {
+    const r = step.result;
+    if (!r) return '';
+    // Prefer the server's arrival, fall back to departure + duration, and show
+    // nothing at all rather than something wrong. The fallback is guarded
+    // rather than defaulted: `(totalSeconds || 0)` would turn a NaN duration
+    // into zero and render the departure time as the arrival — which reads as a
+    // real answer. NaN gets that far because `typeof NaN === 'number'` passes
+    // the caller's own check.
+    let ms = r.arrivalTime ? Date.parse(r.arrivalTime) : NaN;
+    if (!Number.isFinite(ms)) {
+      const departed = Date.parse(step.departureTime);
+      if (!Number.isFinite(departed) || !Number.isFinite(r.totalSeconds)) return '';
+      ms = departed + r.totalSeconds * 1000;
+    }
+    if (!Number.isFinite(ms)) return '';
+    const a = new Date(ms);
+    const dep = new Date(step.departureTime);
+    const hhmm = String(a.getHours()).padStart(2, '0') + ':' + String(a.getMinutes()).padStart(2, '0');
+    // A 12 h passage started in the evening lands tomorrow; a bare clock time
+    // would read as if it arrived before it left.
+    const days = Math.round(
+      (new Date(a.getFullYear(), a.getMonth(), a.getDate()) -
+       new Date(dep.getFullYear(), dep.getMonth(), dep.getDate())) / 86400000);
+    return days > 0 ? hhmm + '+' + days : hhmm;
+  }
+
+  function updateDepModeLabel() {
+    depEl('dep-mode-label').textContent = depShowArrival ? 'Arrive' : 'Travel';
+    depEl('dep-mode').title = depShowArrival
+      ? 'Show travel time instead of arrival time'
+      : 'Show arrival time instead of travel time';
+  }
+
   function updateDepWindowLabel() {
     if (!depWindowStart) { depEl('dep-window').textContent = ''; return; }
     const end = new Date(depWindowStart.getTime() + DEP_SCAN_HOURS * 3600_000);
@@ -2055,7 +2112,8 @@ label.switch-row {
         row.innerHTML =
           '<span style="width:56px;font-family:monospace">' + hhmm + '</span>' +
           '<span style="flex:1;height:10px;border-radius:5px;background:rgba(79,148,212,0.08);border:1px solid rgba(79,148,212,0.12)"></span>' +
-          '<span style="width:44px;text-align:right;font-family:monospace">·&nbsp;·</span>' +
+          '<span style="width:60px;text-align:right;font-family:monospace">·&nbsp;·</span>' +
+          '<span style="width:62px;text-align:right;font-family:monospace">·&nbsp;·</span>' +
           '<span style="width:14px"></span>';
         listEl.appendChild(row);
         continue;
@@ -2080,12 +2138,22 @@ label.switch-row {
       row.onmouseenter = () => { row.style.background = 'rgba(59,143,212,0.15)'; };
       row.onmouseleave = () => { row.style.background = ''; };
       const barW = Math.round(30 + 55 * norm);
+      // Distance is per departure, not per route: a tide-aware scan can pick a
+      // different path at different times, and without this column a row that
+      // is slower because it is 8 nm longer looks identical to one that is
+      // slower because the tide is against it.
+      const dist = fmtDist(step.result.totalDistance);
+      const arrive = depArrival(step);
       row.innerHTML =
         '<span style="width:56px;color:#9bb8da;font-family:monospace">' + hhmm + '</span>' +
         '<span style="flex:1;height:10px;border-radius:5px;background:linear-gradient(90deg,' + color + ',' + color + ') no-repeat;background-size:' + barW + '% 100%;border:1px solid rgba(79,148,212,0.15)"></span>' +
-        '<span style="width:44px;text-align:right;font-family:monospace;color:' + color + '">' + fmtDurHM(secs) + '</span>' +
+        '<span style="width:60px;text-align:right;font-family:monospace;color:#9bb8da">' + escapeHtml(dist) + '</span>' +
+        '<span style="width:62px;text-align:right;font-family:monospace;color:' + color + '">' +
+          (depShowArrival ? escapeHtml(arrive || '—') : fmtDurHM(secs)) + '</span>' +
         '<span style="width:14px;text-align:center;color:#f5d90a">' + (best ? '★' : '') + '</span>';
-      row.title = 'Depart ' + fmtDepStamp(dep) + ' — travel time ' + fmtDurHM(secs) + '. Click to use this departure.';
+      row.title = 'Depart ' + fmtDepStamp(dep) + ' — travel time ' + fmtDurHM(secs) +
+        (arrive ? ', arriving ' + arrive : '') + (dist ? ', ' + dist : '') +
+        '. Click to use this departure.';
       row.addEventListener('click', () => {
         // Picking a row is a deliberate choice, so it stops tracking "now".
         setDepartureInput(dep);
@@ -2111,6 +2179,13 @@ label.switch-row {
   depEl('dep-prev').addEventListener('click', () => shiftDepartureWindow(-12));
   depEl('dep-next').addEventListener('click', () => shiftDepartureWindow(12));
   depEl('dep-cancel').addEventListener('click', cancelDepartureScan);
+  depEl('dep-mode').addEventListener('click', () => {
+    depShowArrival = !depShowArrival;
+    try { localStorage.setItem('routeiq-dep-arrival', depShowArrival ? '1' : '0'); } catch {}
+    updateDepModeLabel();
+    renderDepartureList();   // redraw in place; no rescan, the data is the same
+  });
+  updateDepModeLabel();
   depEl('dep-close').addEventListener('click', closeDeparturePlanner);
   depEl('dep-backdrop').addEventListener('click', closeDeparturePlanner);
   document.addEventListener('keydown', (e) => {

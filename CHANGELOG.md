@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Added: the departure planner shows the distance of each departure. A
+  tide-aware scan can pick a different route at different times, so a row that
+  is slower because its route is several miles longer used to look identical to
+  one that is slower because the tide is against it.
+- Added: the travel-time column switches to arrival time, from the control above
+  it. Arrivals that land on a later day are marked (`06:41+1`) rather than
+  showing a bare clock time that reads as arriving before departure. The choice
+  is remembered.
+
 ## 0.1.0-alpha.4 — 2026-08-01
 
 - Fixed: the settings panel could run off the bottom of the window with no way
