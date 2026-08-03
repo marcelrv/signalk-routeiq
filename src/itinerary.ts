@@ -166,7 +166,11 @@ export function cumulativeDistances(
 }
 
 /** Index of the coordinate closest to (lat, lon). */
-function closestCoordIndex(coords: LonLat[], lat: number, lon: number): number {
+export function closestCoordIndex(
+  coords: LonLat[],
+  lat: number,
+  lon: number,
+): number {
   let best = 0;
   let bestDist = Infinity;
   for (let i = 0; i < coords.length; i++) {
@@ -331,8 +335,20 @@ export function buildItinerary(
         const d = c.distanceFromStart ?? 0;
         return d >= legStart && (isLastLeg ? d <= legEnd : d < legEnd);
       });
+      // Time held up at the locks and opening spans on this leg. Without it the
+      // legs sum to the moving time while the route total includes the waiting,
+      // so an expanded itinerary would not reconcile with its own summary.
+      const legWaitSeconds = legCrossings.reduce(
+        (t, c) => t + (c.waitSeconds ?? 0),
+        0,
+      );
+      if (legWaitSeconds > 0) {
+        legSeconds += legWaitSeconds;
+        hasSeconds = true;
+      }
       point.leg = {
         distance: Math.round(legDistance > 0 ? legDistance : legEnd - legStart),
+        ...(legWaitSeconds > 0 ? { waitSeconds: legWaitSeconds } : {}),
         ...(minDepth < Infinity ? { minDepth } : {}),
         ...(minWidth < Infinity ? { minWidth } : {}),
         ...(maxAirDraft < Infinity ? { maxAirDraft } : {}),

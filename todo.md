@@ -84,7 +84,10 @@ unmodeled delay is computed at the wrong clock time, so this quietly
 degrades items 1 and the existing tide-aware routing the more bridges/
 locks a route crosses. Full design: `feature-bridge-lock-waits.md`.
 
-- **Tier 1 (do first, no schema change needed)**: a flat config-constant
+- ~~**Tier 1**~~ — **done.** `lockWaitMinutes`/`bridgeWaitMinutes` (60/30) are
+  counted per crossing into the ETA only, never into the routing cost, and a
+  per-POI `typical_wait_minutes` overrides them when a database supplies one.
+  Originally described as: a flat config-constant
   wait added to `edgeSeconds`/ETA propagation only — reuses the
   `tSec`/`env` time-tracking `feature-tidal-routing.md` already added to
   `astarSearch`, provably doesn't change route choice.

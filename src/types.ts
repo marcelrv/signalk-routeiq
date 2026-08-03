@@ -36,6 +36,10 @@ export interface RoutingRequest {
   airDraft?: number; // Override vessel air draft
   departureTime?: string; // ISO 8601; default now. Only meaningful with tides.
   useTides?: boolean; // Override config.considerTides for this request
+  // Override the configured waits for this request. Local knowledge beats a
+  // default: a lock that always has a chamber ready is not an hour.
+  lockWaitMinutes?: number;
+  bridgeWaitMinutes?: number;
 }
 
 // Edge attributes from routing database
@@ -65,8 +69,24 @@ export interface RouteCrossing {
   name: string;
   subtype?: string; // 'opening' or 'fixed' for bridges
   height?: number; // vertical clearance (m) for fixed bridges
+  // The wait actually charged here, in seconds — set on the crossing that owns
+  // an obstacle group, and left off the ones it absorbs, so the numbers add up
+  // exactly once. Distinct from waitMinutes below, which is an input.
+  waitSeconds?: number;
+  // Per-POI wait, overriding the config default. Populated by detectCrossings
+  // from the POI's `typical_wait_minutes` property, for both bridges and locks,
+  // on databases that carry one.
+  waitMinutes?: number;
   position: { latitude: number; longitude: number };
   distanceFromStart?: number; // meters along the route (chainage)
+  /**
+   * For a lock the route's own edges place it inside: the chainage range it
+   * spends there, start to end. A lock is a stretch of waterway, not a point,
+   * and the spans carried over its heads sit at the far end of that stretch —
+   * so this is what says a bridge belongs to the lock. Only pipeline-built
+   * databases mark the edges this can be derived from.
+   */
+  lockSpan?: [number, number];
 }
 
 // A point of the simplified, navigable route geometry (Douglas-Peucker with
@@ -92,7 +112,8 @@ export interface ItineraryPoint {
     minDepth?: number; // m, only when known (>= 0 in the graph)
     minWidth?: number; // m
     maxAirDraft?: number; // m
-    seconds?: number; // tide-corrected sailing time for this leg
+    seconds?: number; // tide-corrected sailing time for this leg, waits included
+    waitSeconds?: number; // of `seconds`, time held at locks / opening spans
     currentKn?: number; // distance-weighted mean along-track current (+ = fair)
     crossings?: RouteCrossing[]; // bridges/locks on this leg, in route order
   };
@@ -125,6 +146,7 @@ export interface RouteResult {
   totalDistance?: number;
   totalCost?: number;
   totalSeconds?: number; // sailing time at averageSpeedKnots, tide-corrected when tide info present
+  totalWaitSeconds?: number; // of totalSeconds, the part spent waiting at locks and opening spans
   totalSecondsNoTide?: number; // same route without current — UIs show the delta
   departureTime?: string; // ISO, echoed/defaulted from the request when tides active
   arrivalTime?: string; // ISO, departure + totalSeconds
@@ -163,6 +185,10 @@ export interface RouteResult {
         costFactor: number;
         trafficMode: number;
         edgeTypeId?: number;
+        // Locks this segment passes through, on databases that record it per
+        // edge. Empty or absent means the database does not say, not that there
+        // is no lock.
+        lockIds?: number[];
         mode?: "manual"; // user-drawn straight-line segment (bypasses the graph)
         seconds?: number; // traversal time, tide-corrected when tides active
         currentKn?: number; // estimated along-track current, + = fair (with tide)
@@ -224,6 +250,12 @@ export interface PluginConfig {
   lineOfSightSampleInterval: number; // meters, default 500
   lineOfSightSearchRadius: number; // meters, default 800
   averageSpeedKnots: number; // knots, default 6.0
+  // Typical wait at an opening span or a lock, in minutes. Applied to the ETA
+  // only — never to the routing cost — so it cannot change which way a route
+  // goes, only how long it is expected to take. A fixed bridge is either
+  // passable or it is not, so it carries no wait.
+  lockWaitMinutes: number; // minutes, default 60
+  bridgeWaitMinutes: number; // minutes, default 30 (opening spans only)
   waypointTolerance: number; // meters, max deviation when simplifying to waypoints (default 30)
   catalogUrl: string; // URL to the routing-index.json catalog for downloadable databases
   considerTides: boolean; // default for the per-request "use tides" toggle
@@ -277,6 +309,8 @@ export const DEFAULT_CONFIG: PluginConfig = {
   lineOfSightSampleInterval: 500,
   lineOfSightSearchRadius: 0,
   averageSpeedKnots: 6.0,
+  lockWaitMinutes: 60,
+  bridgeWaitMinutes: 30,
   waypointTolerance: 30,
   catalogUrl:
     "https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/routing-index.json",

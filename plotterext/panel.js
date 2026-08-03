@@ -550,9 +550,16 @@ function renderSummary(result) {
   const distM = result.totalDistance || 0;
   const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 6;
   const tideActive = result.tide && result.tide.enabled && typeof result.totalSeconds === 'number';
+  // The server's total whenever it has one, tide or not — it is the only
+  // figure that includes waiting at locks, and so the only one that matches
+  // the legs listed below.
+  const hasTotal = typeof result.totalSeconds === 'number';
   let line = fmtDistance(distM) + '  ·  ' +
-    (tideActive ? fmtDurationSec(result.totalSeconds) : fmtDuration(distM)) +
+    (hasTotal ? fmtDurationSec(result.totalSeconds) : fmtDuration(distM)) +
     '  @ ' + speed.toFixed(1) + ' kn';
+  if (result.totalWaitSeconds > 0) {
+    line += '  ·  ⏳ ' + fmtDurationSec(result.totalWaitSeconds) + ' waiting';
+  }
   if (tideActive && typeof result.totalSecondsNoTide === 'number') {
     const deltaMin = Math.round((result.totalSeconds - result.totalSecondsNoTide) / 60);
     line += '  ·  tide ' + (deltaMin > 0 ? '+' : '−') + Math.abs(deltaMin) + 'm';
@@ -585,6 +592,12 @@ function renderItinerary(itinerary) {
   const ol = $('itinerary');
   ol.innerHTML = '';
   let turnNo = 0;
+  // Running total of the server's own leg times. Falling back to
+  // distance/speed here would ignore tides and lock waits, so the point
+  // headers would disagree with the leg lines under them.
+  let cumSeconds = 0;
+  let cumExact = itinerary.every((p, i) =>
+    i === itinerary.length - 1 || (p.leg && typeof p.leg.seconds === 'number'));
 
   for (let i = 0; i < itinerary.length; i++) {
     const p = itinerary[i];
@@ -618,7 +631,11 @@ function renderItinerary(itinerary) {
     const meta = document.createElement('span');
     meta.className = 'it-meta';
     meta.textContent = fmtDistance(p.distanceFromStart) +
-      (p.distanceFromStart > 0 ? ' · ' + fmtDuration(p.distanceFromStart) : '');
+      (p.distanceFromStart > 0
+        ? ' · ' + (cumExact ? fmtDurationSec(cumSeconds) : fmtDuration(p.distanceFromStart))
+        : '');
+    const legStartSeconds = cumSeconds;
+    if (!isLast && p.leg && typeof p.leg.seconds === 'number') cumSeconds += p.leg.seconds;
     head.appendChild(meta);
     li.appendChild(head);
 
@@ -630,6 +647,9 @@ function renderItinerary(itinerary) {
       if (typeof p.courseToNext === 'number') bits.push('→ ' + String(p.courseToNext).padStart(3, '0') + '°');
       bits.push(fmtDistance(p.leg.distance));
       if (typeof p.leg.seconds === 'number') bits.push(fmtDurationSec(p.leg.seconds));
+      // Part of the leg time above — shown separately so an hour at a lock is
+      // not mistaken for slow going.
+      if (p.leg.waitSeconds > 0) bits.push('incl. ⏳ ' + fmtDurationSec(p.leg.waitSeconds) + ' wait');
       if (typeof p.leg.currentKn === 'number') {
         bits.push('current ' + (p.leg.currentKn > 0 ? '+' : '') + p.leg.currentKn.toFixed(1) + ' kn');
       }
@@ -648,6 +668,11 @@ function renderItinerary(itinerary) {
         if (!grouped.has(key)) grouped.set(key, []);
         grouped.get(key).push(c);
       }
+      // Crossings come back in chainage order, so carrying the waits already
+      // spent forward gives each row the time you actually arrive there.
+      let waitSoFar = 0;
+      const legSailSeconds = typeof p.leg.seconds === 'number'
+        ? p.leg.seconds - (p.leg.waitSeconds || 0) : null;
       for (const [, entries] of grouped) {
         const e0 = entries[0];
         const hasFixed = entries.some((e) => e.subtype === 'fixed');
@@ -684,7 +709,21 @@ function renderItinerary(itinerary) {
         const cdist = document.createElement('span');
         cdist.className = 'cdist';
         if (typeof e0.distanceFromStart === 'number') {
-          cdist.textContent = fmtDistance(e0.distanceFromStart) + ' · ' + fmtDuration(e0.distanceFromStart);
+          cdist.textContent = fmtDistance(e0.distanceFromStart) + ' · ';
+          if (cumExact && legSailSeconds !== null && p.leg.distance > 0) {
+            const frac = Math.min(1, Math.max(0,
+              (e0.distanceFromStart - p.distanceFromStart) / p.leg.distance));
+            cdist.textContent += fmtDurationSec(legStartSeconds + waitSoFar + legSailSeconds * frac);
+          } else {
+            cdist.textContent += fmtDuration(e0.distanceFromStart);
+          }
+        }
+        // The server charges each group's wait to exactly one crossing, so
+        // summing the group cannot double-count.
+        const waitS = entries.reduce((t, e) => t + (e.waitSeconds || 0), 0);
+        if (waitS > 0) {
+          waitSoFar += waitS;
+          cdist.textContent += (cdist.textContent ? ' · ' : '') + '⏳ ' + fmtDurationSec(waitS);
         }
         row.append(cn, cdist);
         leg.appendChild(row);

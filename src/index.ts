@@ -233,6 +233,22 @@ export function pluginConstructor(app: ServerAPI) {
             minimum: 0.5,
             multipleOf: 0.1,
           },
+          lockWaitMinutes: {
+            type: "number",
+            title: "Typical Lock Wait (min)",
+            description:
+              "Time allowed for each lock on a route. Counts towards the estimated duration and arrival time only — it never changes which way a route goes. A routing database may carry its own figure for a specific lock, which takes precedence.",
+            default: DEFAULT_CONFIG.lockWaitMinutes,
+            minimum: 0,
+          },
+          bridgeWaitMinutes: {
+            type: "number",
+            title: "Typical Opening Bridge Wait (min)",
+            description:
+              "Time allowed for each opening bridge on a route. Fixed spans have no wait — you either fit under them or you do not. Counts towards the estimated duration and arrival time only.",
+            default: DEFAULT_CONFIG.bridgeWaitMinutes,
+            minimum: 0,
+          },
           considerTides: {
             type: "boolean",
             title: "Consider Tides by Default",

@@ -50,11 +50,20 @@ interface SchemaFlags {
   hasNodeDepth: boolean;
   hasRegionId: boolean;
   hasEdgeKind: boolean;
+  hasLockId: boolean;
 }
 
 interface DbHandle {
   db: DatabaseSync;
   path: string;
+  /**
+   * This file's own columns. The globals below OR-merge across every file
+   * loaded, which is the right answer for "can any route report a lock" but
+   * the wrong one for building a SELECT: a directory can hold databases from
+   * different pipeline generations, and naming `lock_id` in a query against
+   * one that predates the column fails the whole load.
+   */
+  flags: SchemaFlags;
 }
 
 // `handles` is tombstoned, not spliced, on a per-file close (closeDb): a
@@ -75,6 +84,7 @@ let hasCrossesObstacle = false;
 let hasNodeDepth = false;
 let hasRegionId = false;
 let hasEdgeKind = false;
+let hasLockId = false;
 let overlayHandle: DbHandle | null = null;
 
 if (!parentPort) {
@@ -95,6 +105,10 @@ function detectSchemaFlags(db: DatabaseSync): SchemaFlags & {
     hasCrossesLand: edgeCols.some((c) => c.name === "crosses_land"),
     hasCrossesObstacle: edgeCols.some((c) => c.name === "crosses_obstacle"),
     hasEdgeKind: edgeCols.some((c) => c.name === "edge_kind_id"),
+    // Pipeline-built databases say which lock an edge passes through; the
+    // nv-chart conversion has no such column. Detected rather than assumed, the
+    // same way the others here are.
+    hasLockId: edgeCols.some((c) => c.name === "lock_id"),
     hasNodeDepth: nodeCols.some((c) => c.name === "node_depth"),
     hasRegionId: nodeCols.some((c) => c.name === "region_id"),
     edgeCols,
@@ -214,6 +228,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
         hasNodeDepth = false;
         hasRegionId = false;
         hasEdgeKind = false;
+        hasLockId = false;
         handles.length = 0;
         filenames.length = 0;
         for (const dbPath of dbPaths) {
@@ -241,10 +256,11 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             hasCrossesLand = hasCrossesLand || flags.hasCrossesLand;
             hasCrossesObstacle = hasCrossesObstacle || flags.hasCrossesObstacle;
             hasEdgeKind = hasEdgeKind || flags.hasEdgeKind;
+            hasLockId = hasLockId || flags.hasLockId;
             hasNodeDepth = hasNodeDepth || flags.hasNodeDepth;
             hasRegionId = hasRegionId || flags.hasRegionId;
             const filename = filenameOf(dbPath);
-            handles.push({ db, path: dbPath });
+            handles.push({ db, path: dbPath, flags });
             filenames.push(filename);
             console.log(`[db-worker] Loaded database: ${dbPath}`);
           } catch (err: any) {
@@ -371,20 +387,22 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
         }
         // Sticky OR-merge, same convention as bulk `init` — a flag once true
         // (e.g. some loaded file has crosses_land) stays true for the life of
-        // the worker even if that specific file is later closed, so
-        // loadNodes/loadEdges' generated SQL stays valid for every handle
-        // that was ever opened concurrently with it. Heterogeneous schemas
-        // across dynamically-loaded files are a theoretical edge case today
-        // (every current pipeline output shares one schema version).
+        // the worker even if that specific file is later closed. This says
+        // what the loaded set can offer, and nothing more: the SQL in
+        // loadNodes/loadEdges is built from each handle's own flags, because
+        // a routing-data directory really does mix pipeline generations (a
+        // database downloaded before `lock_id` existed alongside one built
+        // after).
         hasCrossesLand = hasCrossesLand || flags.hasCrossesLand;
         hasCrossesObstacle = hasCrossesObstacle || flags.hasCrossesObstacle;
         hasEdgeKind = hasEdgeKind || flags.hasEdgeKind;
+        hasLockId = hasLockId || flags.hasLockId;
         hasNodeDepth = hasNodeDepth || flags.hasNodeDepth;
         hasRegionId = hasRegionId || flags.hasRegionId;
 
         const filename = filenameOf(dbPath);
         const dbIndex = handles.length;
-        handles.push({ db, path: dbPath });
+        handles.push({ db, path: dbPath, flags });
         filenames.push(filename);
         console.log(
           `[db-worker] Opened database on demand: ${dbPath} (dbIndex=${dbIndex})`,
@@ -512,7 +530,14 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             console.log(
               `[db-worker] Backfilled ${backfilled} missing reverse edges in overlay`,
             );
-          overlayHandle = { db, path: overlayPath };
+          // The overlay is created by this plugin, so its schema is known —
+          // detected anyway rather than asserted, since an overlay written by
+          // an older version outlives the upgrade that changed the schema.
+          overlayHandle = {
+            db,
+            path: overlayPath,
+            flags: detectSchemaFlags(db),
+          };
           console.log(`[db-worker] Overlay opened: ${overlayPath}`);
           parentPort!.postMessage({ id, type, result: { success: true } });
         } catch (err: any) {
@@ -615,9 +640,11 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
                 return acc;
               }, []);
 
-        const regionIdCol = hasRegionId ? "region_id" : "0 AS region_id";
         const allNodes: Array<NodeRow & { db_index: number }> = [];
         for (const { h, i } of targets) {
+          const regionIdCol = h.flags.hasRegionId
+            ? "region_id"
+            : "0 AS region_id";
           const rows = h.db
             .prepare(
               `SELECT id, lat, lon, node_depth, ${regionIdCol} FROM nodes`,
@@ -661,18 +688,23 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
                 return acc;
               }, []);
 
-        const crossesCol = hasCrossesLand ? ", crosses_land" : "";
-        const obstacleCol = hasCrossesObstacle ? ", crosses_obstacle" : "";
-        const edgeKindCol = hasEdgeKind
-          ? ", edge_kind_id"
-          : ", 0 AS edge_kind_id";
         let allEdges: Array<EdgeRow & { db_index: number }> = [];
         for (const { h, i } of targets) {
+          // Per file: an older database that lacks a column still loads, with
+          // the column substituted, instead of failing the query for everyone.
+          const crossesCol = h.flags.hasCrossesLand ? ", crosses_land" : "";
+          const obstacleCol = h.flags.hasCrossesObstacle
+            ? ", crosses_obstacle"
+            : "";
+          const edgeKindCol = h.flags.hasEdgeKind
+            ? ", edge_kind_id"
+            : ", 0 AS edge_kind_id";
+          const lockCol = h.flags.hasLockId ? ", lock_id" : ", NULL AS lock_id";
           const edges = h.db
             .prepare(
               `SELECT source, target, distance, min_depth, max_air_draft, min_width,
                     cost_factor, distance_to_land,
-                    edge_type_id, traffic_mode${crossesCol}${obstacleCol}${edgeKindCol}
+                    edge_type_id, traffic_mode${crossesCol}${obstacleCol}${edgeKindCol}${lockCol}
              FROM edges`,
             )
             .all() as unknown as EdgeRow[];
@@ -684,7 +716,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             .prepare(
               `SELECT source, target, distance, min_depth, max_air_draft, min_width,
                     cost_factor, distance_to_land, edge_type_id, traffic_mode,
-                    0 AS edge_kind_id
+                    0 AS edge_kind_id, NULL AS lock_id
              FROM edges`,
             )
             .all() as unknown as EdgeRow[];
