@@ -166,7 +166,11 @@ export function cumulativeDistances(
 }
 
 /** Index of the coordinate closest to (lat, lon). */
-function closestCoordIndex(coords: LonLat[], lat: number, lon: number): number {
+export function closestCoordIndex(
+  coords: LonLat[],
+  lat: number,
+  lon: number,
+): number {
   let best = 0;
   let bestDist = Infinity;
   for (let i = 0; i < coords.length; i++) {

@@ -17,18 +17,34 @@ describe('crossing wait time', () => {
    * Reach the wait calculation without standing up a database. `config` is a
    * getter over `_config`, so the backing field is what has to be set.
    */
-  const waitSeconds = (crossings: unknown[], config = {}, segments?: unknown[]) => {
+  const schedule = (crossings: unknown[], config = {}, segments?: unknown[]) => {
     const engine = Object.create(RoutingEngine.prototype) as {
       _config: unknown;
-      crossingWaitSeconds: (c: unknown[], s?: unknown[]) => number;
+      crossingWaitSchedule: (
+        coords: unknown[],
+        s: unknown[],
+        c?: unknown[],
+      ) => Array<{ atMetres: number; seconds: number }>;
     };
     engine._config = { ...DEFAULT_CONFIG, ...config };
-    return engine.crossingWaitSeconds(crossings, segments);
+    const segs = (segments ?? []) as Array<{ distance?: number }>;
+    // One coordinate per segment boundary; the helper only needs them to place
+    // crossings that arrive without a chainage of their own.
+    const coords = segs.map((_, i) => [4 + i * 0.001, 51] as [number, number]);
+    coords.push([4 + segs.length * 0.001, 51]);
+    return engine.crossingWaitSchedule(coords, segs, crossings);
   };
+  const waitSeconds = (crossings: unknown[], config = {}, segments?: unknown[]) =>
+    schedule(crossings, config, segments).reduce((t, w) => t + w.seconds, 0);
 
-  const lock = (extra = {}) => ({ type: 'lock', name: 'A lock', ...extra });
-  const opening = (extra = {}) => ({ type: 'bridge', subtype: 'opening', name: 'A span', ...extra });
-  const fixed = (extra = {}) => ({ type: 'bridge', subtype: 'fixed', name: 'A span', height: 12, ...extra });
+  const pos = { latitude: 51, longitude: 4 };
+  const lock = (extra = {}) => ({ type: 'lock', name: 'A lock', position: pos, ...extra });
+  const opening = (extra = {}) => ({ type: 'bridge', subtype: 'opening', name: 'A span', position: pos, ...extra });
+  const fixed = (extra = {}) => ({ type: 'bridge', subtype: 'fixed', name: 'A span', height: 12, position: pos, ...extra });
+
+  /** Spread crossings a mile apart so each is its own obstacle. */
+  const apart = (...cs: Array<(e?: object) => object>) =>
+    cs.map((make, i) => make({ distanceFromStart: i * 1852 }));
 
   it('defaults to an hour per lock and half an hour per opening bridge', () => {
     assert.strictEqual(DEFAULT_CONFIG.lockWaitMinutes, 60);
@@ -40,12 +56,12 @@ describe('crossing wait time', () => {
   it('charges nothing for a fixed span', () => {
     assert.strictEqual(waitSeconds([fixed()]), 0);
     // and a fixed span alongside real waits does not inflate them
-    assert.strictEqual(waitSeconds([fixed(), lock(), fixed()]), 3600);
+    assert.strictEqual(waitSeconds(apart(fixed, lock, fixed)), 3600);
   });
 
   it('adds up over a route', () => {
     // Two locks and three opening spans: 2h + 1h30.
-    const route = [lock(), opening(), fixed(), opening(), lock(), opening()];
+    const route = apart(lock, opening, fixed, opening, lock, opening);
     assert.strictEqual(waitSeconds(route), 2 * 3600 + 3 * 1800);
   });
 
@@ -53,14 +69,14 @@ describe('crossing wait time', () => {
     assert.strictEqual(waitSeconds([lock()], { lockWaitMinutes: 20 }), 1200);
     assert.strictEqual(waitSeconds([opening()], { bridgeWaitMinutes: 5 }), 300);
     // zero is a legitimate setting — a canal with permanently open spans
-    assert.strictEqual(waitSeconds([lock(), opening()], { lockWaitMinutes: 0, bridgeWaitMinutes: 0 }), 0);
+    assert.strictEqual(waitSeconds(apart(lock, opening), { lockWaitMinutes: 0, bridgeWaitMinutes: 0 }), 0);
   });
 
   it('lets a per-crossing figure from the database win', () => {
     assert.strictEqual(waitSeconds([lock({ waitMinutes: 15 })]), 900);
     assert.strictEqual(waitSeconds([opening({ waitMinutes: 90 })]), 5400);
     // mixed: one known lock at 15 min, one unknown falling back to the default
-    assert.strictEqual(waitSeconds([lock({ waitMinutes: 15 }), lock()]), 900 + 3600);
+    assert.strictEqual(waitSeconds([lock({ waitMinutes: 15, distanceFromStart: 0 }), lock({ distanceFromStart: 1852 })]), 900 + 3600);
     // a fixed span stays free even if the database puts a figure on it
     assert.strictEqual(waitSeconds([fixed({ waitMinutes: 45 })]), 0);
   });
@@ -116,13 +132,16 @@ describe('crossing wait time', () => {
     // Three POIs for parallel chambers, but the edges name one lock: one
     // locking, not three, and not the grouped guess either.
     const chambers = [0, 40, 80].map((m) => lock({ distanceFromStart: m }));
-    const segments = [{ lockIds: [7] }, {}, { lockIds: [7] }];
+    const segments = [{ distance: 0, lockIds: [7] }, { distance: 40 }, { distance: 40, lockIds: [7] }];
     assert.strictEqual(waitSeconds(chambers, {}, segments), 3600);
   });
 
   it('counts distinct traversed locks, not lock edges', () => {
     // A lock spans a dozen edges; that is still one locking.
-    const segments = [{ lockIds: [5] }, { lockIds: [5] }, { lockIds: [9] }, { lockIds: [9] }];
+    // The gap has to sit on the segment *before* lock 9 starts: a marker is
+    // placed at the chainage where its first edge begins.
+    const segments = [{ distance: 100, lockIds: [5] }, { distance: 5000, lockIds: [5] },
+                      { distance: 100, lockIds: [9] }, { distance: 100, lockIds: [9] }];
     assert.strictEqual(waitSeconds([], {}, segments), 2 * 3600);
   });
 
@@ -130,7 +149,7 @@ describe('crossing wait time', () => {
     // Edge data covers locks only; no schema marks an opening span, so those
     // stay proximity-based even on a database that knows its locks.
     const crossings = [lock({ distanceFromStart: 0 }), opening({ distanceFromStart: 5000 })];
-    assert.strictEqual(waitSeconds(crossings, {}, [{ lockIds: [3] }]), 3600 + 1800);
+    assert.strictEqual(waitSeconds(crossings, {}, [{ distance: 0, lockIds: [3] }]), 3600 + 1800);
   });
 
   it('falls back to the crossing list when the database has no lock data', () => {
@@ -140,10 +159,101 @@ describe('crossing wait time', () => {
     assert.strictEqual(waitSeconds(crossings, {}, undefined), 3600);
   });
 
+  it('lets a lock swallow the bridge over it, however the lock was found', () => {
+    // At most locks a span or two carries a road over the chamber, and it opens
+    // with the lock — no extra wait. This is the case where the lock is known
+    // only from the edges and the bridge only from the points of interest, so
+    // they must still land in the same group.
+    const crossings = [opening({ distanceFromStart: 60, name: 'bridge over the lock' })];
+    const segments = [{ distance: 50, lockIds: [9] }, { distance: 500 }];
+    assert.strictEqual(waitSeconds(crossings, {}, segments), 3600);
+  });
+
+  it('does not charge a lock twice when both the edges and a POI name it', () => {
+    const crossings = [lock({ distanceFromStart: 30 })];
+    const segments = [{ distance: 20, lockIds: [9] }, { distance: 900 }];
+    assert.strictEqual(waitSeconds(crossings, {}, segments), 3600);
+  });
+
+  it('still charges a bridge that is nowhere near the lock', () => {
+    const crossings = [opening({ distanceFromStart: 4000 })];
+    const segments = [{ distance: 0, lockIds: [9] }, { distance: 8000 }];
+    assert.strictEqual(waitSeconds(crossings, {}, segments), 3600 + 1800);
+  });
+
   it('is unbothered by nothing to wait for', () => {
     assert.strictEqual(waitSeconds([]), 0);
     assert.strictEqual(waitSeconds(undefined as never), 0);
     // a bridge with no subtype is not known to open, so it costs nothing
     assert.strictEqual(waitSeconds([{ type: 'bridge', name: 'unclassified' }]), 0);
+  });
+});
+
+describe('a wait moves the tide clock, not just the total', () => {
+  /**
+   * The point of placing waits rather than summing them: an hour in a lock puts
+   * every later leg an hour further into the tide. A flow field that reverses
+   * on a known schedule makes that visible — sample it too early and the legs
+   * after the lock get the wrong current, and the arrival time is wrong by more
+   * than the wait itself.
+   */
+  const annotate = (waits: Array<{ atMetres: number; seconds: number }>) => {
+    const engine = Object.create(RoutingEngine.prototype) as {
+      _config: unknown;
+      annotateSegmentTimes: (
+        coords: unknown[], segs: unknown[], env: unknown, off: number,
+        w?: Array<{ atMetres: number; seconds: number }>,
+      ) => number;
+      toRadians: (d: number) => number;
+    };
+    engine._config = { ...DEFAULT_CONFIG };
+    engine.toRadians = (d: number) => (d * Math.PI) / 180;
+
+    const sampledAt: number[] = [];
+    const departureMs = Date.parse('2026-08-03T00:00:00Z');
+    const env = {
+      departureMs,
+      speedMs: 3,           // ~5.8 kn
+      flow: {
+        estimated: true, source: 'test', stations: [],
+        sample: (_lat: number, _lon: number, atMs: number) => {
+          sampledAt.push((atMs - departureMs) / 3_600_000); // ms -> hours
+          return { u: 0, v: 0 };   // no push either way; we only watch the clock
+        },
+      },
+    };
+    // Three legs of 3 km each, due east.
+    const coords = [[4.0, 51.0], [4.043, 51.0], [4.086, 51.0], [4.129, 51.0]];
+    const segs = [{ distance: 3000 }, { distance: 3000 }, { distance: 3000 }];
+    const total = engine.annotateSegmentTimes(coords, segs, env, 0, waits);
+    return { total, sampledAt };
+  };
+
+  it('samples later legs after the wait has been spent', () => {
+    const none = annotate([]);
+    // A one-hour lock 3 km along: met after leg 1, before leg 2.
+    const withLock = annotate([{ atMetres: 3000, seconds: 3600 }]);
+
+    assert.strictEqual(none.sampledAt.length, 3);
+    assert.strictEqual(withLock.sampledAt.length, 3);
+    // Leg 1 is before the lock — unchanged.
+    assert.ok(Math.abs(withLock.sampledAt[0] - none.sampledAt[0]) < 1e-9,
+      'the leg before the lock samples at the same time');
+    // Legs 2 and 3 are after it — each an hour later than before.
+    for (const i of [1, 2]) {
+      const shift = withLock.sampledAt[i] - none.sampledAt[i];
+      assert.ok(Math.abs(shift - 1) < 1e-6,
+        `leg ${i + 1} samples an hour later (shifted ${shift.toFixed(4)} h)`);
+    }
+    // And the wait is in the total exactly once.
+    assert.ok(Math.abs((withLock.total - none.total) - 3600) < 1e-6);
+  });
+
+  it('spends a wait at the destination without sampling past it', () => {
+    const end = annotate([{ atMetres: 999999, seconds: 1800 }]);
+    const none = annotate([]);
+    assert.deepStrictEqual(end.sampledAt, none.sampledAt,
+      'a wait after the last leg shifts no sample');
+    assert.ok(Math.abs((end.total - none.total) - 1800) < 1e-6);
   });
 });

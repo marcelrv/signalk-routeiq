@@ -15,7 +15,12 @@ import {
   TRAFFIC_ONE_WAY_REV,
 } from "./database.js";
 import type { FunnelResult, NavmeshRegion } from "./navmesh.js";
-import { bearingDeg, buildItinerary } from "./itinerary.js";
+import {
+  bearingDeg,
+  buildItinerary,
+  closestCoordIndex,
+  cumulativeDistances,
+} from "./itinerary.js";
 import {
   CurrentsClient,
   FlowField,
@@ -2640,44 +2645,95 @@ export class RoutingEngine {
    * database that knows a particular lock takes twenty minutes rather than an
    * hour needs no change here.
    */
-  private crossingWaitSeconds(
+  /**
+   * Where a route has to stop, and for how long: one entry per obstacle, at the
+   * distance along the route where it is met.
+   *
+   * A schedule rather than a total because the wait has to be spent at the
+   * right moment. An hour in a lock puts every later leg an hour further into
+   * the tide, and sampling the flow field without that is the failure this
+   * whole feature exists to remove — see feature-bridge-lock-waits.md, which
+   * calls out the wrong-clock-time problem as the reason the waits matter
+   * beyond a tidier ETA.
+   */
+  private crossingWaitSchedule(
+    coords: Array<[number, number]>,
+    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
     crossings?: RouteCrossing[],
-    segments?: Array<{ lockIds?: number[] }>,
-  ): number {
+  ): Array<{ atMetres: number; seconds: number }> {
     const lockDefault = this.config.lockWaitMinutes ?? 60;
     const bridgeDefault = this.config.bridgeWaitMinutes ?? 30;
 
-    // Locks the route demonstrably passed through, from the edges it used.
-    // Distinct ids, because a lock spans several edges and they are one
-    // locking. Only pipeline-built databases record this; when they do it beats
-    // the proximity guess below, which cannot tell one chamber from the three
-    // beside it.
-    const traversedLocks = new Set<number>();
-    for (const seg of segments ?? []) {
-      for (const id of seg.lockIds ?? []) traversedLocks.add(id);
+    // Chainage for each crossing, derived the same way buildItinerary does it
+    // — that runs later, off the segment times this schedule feeds into.
+    const cum = cumulativeDistances(coords, segments);
+    const placed: RouteCrossing[] = (crossings ?? []).map((c) => ({
+      ...c,
+      distanceFromStart:
+        c.distanceFromStart ??
+        (c.position
+          ? Math.round(
+              cum[
+                closestCoordIndex(
+                  coords,
+                  c.position.latitude,
+                  c.position.longitude,
+                )
+              ],
+            )
+          : 0),
+    }));
+
+    // Locks the route demonstrably passed through, from the edges it used,
+    // placed where it used them. Distinct ids: a lock spans several edges and
+    // they are one locking. Only pipeline-built databases record this.
+    const seenLock = new Set<number>();
+    let along = 0;
+    for (const seg of segments) {
+      for (const id of seg.lockIds ?? []) {
+        if (seenLock.has(id)) continue;
+        seenLock.add(id);
+        placed.push({
+          type: "lock",
+          name: `Lock ${id}`,
+          position: { latitude: 0, longitude: 0 },
+          distanceFromStart: Math.round(along),
+        });
+      }
+      along += seg.distance ?? 0;
     }
-    const locksAreKnown = traversedLocks.size > 0;
 
-    let minutes = locksAreKnown ? traversedLocks.size * lockDefault : 0;
-
-    for (const group of RoutingEngine.groupCrossings(crossings ?? [])) {
+    const schedule: Array<{ atMetres: number; seconds: number }> = [];
+    for (const group of RoutingEngine.groupCrossings(placed)) {
+      const at = Math.min(...group.map((c) => c.distanceFromStart ?? 0));
       const lock = group.find((c) => c.type === "lock");
       if (lock) {
-        // A lock complex is a lock: you lock through once, whichever chamber
-        // you take, and any span over its heads goes with it. Skipped entirely
-        // when the edges already said which locks were used.
-        if (!locksAreKnown) minutes += lock.waitMinutes ?? lockDefault;
+        // A lock complex is a lock. Whichever chamber you take you lock through
+        // once, and the spans carried over its heads open with it — so the
+        // bridges in this group cost nothing on top, however the lock was
+        // identified.
+        schedule.push({
+          atMetres: at,
+          seconds: (lock.waitMinutes ?? lockDefault) * 60,
+        });
         continue;
       }
       const opening = group.find(
         (c) => c.type === "bridge" && c.subtype === "opening",
       );
-      // Bridges stay proximity-based whatever the database: no schema marks an
-      // opening-span edge, so there is nothing more exact to prefer.
-      if (opening) minutes += opening.waitMinutes ?? bridgeDefault;
+      // Bridges away from a lock stay proximity-based whatever the database:
+      // no schema marks an opening-span edge, so there is nothing more exact.
+      if (opening) {
+        schedule.push({
+          atMetres: at,
+          seconds: (opening.waitMinutes ?? bridgeDefault) * 60,
+        });
+      }
       // else: the group is fixed spans only — nothing to wait for.
     }
-    return Math.max(0, minutes) * 60;
+    return schedule
+      .filter((w) => w.seconds > 0)
+      .sort((a, b) => a.atMetres - b.atMetres);
   }
 
   /**
@@ -2766,13 +2822,17 @@ export class RoutingEngine {
       if (detected.length > 0) route.crossings = detected;
     }
 
-    // Sailing time & estimated current per segment (covers segments added by
-    // connectUserPoint too — this runs after all geometry mutations).
-    const sailingSec = this.annotateSegmentTimes(coords, segments, env, 0);
+    // Where the route has to stop, and for how long. Built before the times
+    // are computed, because a wait shifts every later leg's tide sample.
+    const waits = this.crossingWaitSchedule(coords, segments, route.crossings);
+    const waitSec = waits.reduce((t, w) => t + w.seconds, 0);
 
-    // buildItinerary is what puts each crossing at a chainage, and grouping
-    // co-located ones needs that, so the waypoints are derived before the
-    // totals rather than after.
+    // Sailing time & estimated current per segment (covers segments added by
+    // connectUserPoint too — this runs after all geometry mutations). Returns
+    // moving time and waiting time together, with the tide sampled at the real
+    // clock time on each leg.
+    const totalSec = this.annotateSegmentTimes(coords, segments, env, 0, waits);
+
     const { waypoints, itinerary } = buildItinerary(
       coords,
       segments,
@@ -2783,8 +2843,6 @@ export class RoutingEngine {
     route.waypoints = waypoints;
     route.itinerary = itinerary;
 
-    const waitSec = this.crossingWaitSeconds(route.crossings, segments);
-    const totalSec = sailingSec + waitSec;
     route.totalSeconds = Math.round(totalSec);
     if (waitSec > 0) route.totalWaitSeconds = Math.round(waitSec);
     if (env) {
@@ -2822,13 +2880,23 @@ export class RoutingEngine {
     segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
     env: RouteEnv | undefined,
     startOffsetSec: number,
+    waits: Array<{ atMetres: number; seconds: number }> = [],
   ): number {
     const speedMs =
       env?.speedMs ??
       Math.max(0.5, this.config.averageSpeedKnots) * KNOTS_TO_MS;
     let cum = startOffsetSec;
+    let alongM = 0;
+    let nextWait = 0;
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
+      // Spend any wait reached before this leg starts, so the flow below is
+      // sampled at the clock time the vessel actually gets here. A lock passed
+      // early otherwise leaves every later leg reading the tide an hour young.
+      while (nextWait < waits.length && waits[nextWait].atMetres <= alongM) {
+        cum += waits[nextWait].seconds;
+        nextWait++;
+      }
       const from = coords[i];
       const to = coords[i + 1];
       let sog = speedMs;
@@ -2851,6 +2919,12 @@ export class RoutingEngine {
       const sec = (seg.distance || 0) / sog;
       seg.seconds = Math.round(sec * 10) / 10;
       cum += sec;
+      alongM += seg.distance || 0;
+    }
+    // Anything due at or past the end of the route — a lock at the destination.
+    while (nextWait < waits.length) {
+      cum += waits[nextWait].seconds;
+      nextWait++;
     }
     return cum;
   }
