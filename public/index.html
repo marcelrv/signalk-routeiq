@@ -262,6 +262,10 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
     min-height: 0; /* without this a flex child refuses to shrink below content */
   }
   #settings-panel [role="tabpanel"] {
+    /* Grow into the panel and shrink below the content: without the grow, a
+       tab shorter than the panel leaves the space unclaimed, and which tab
+       scrolls depends on how tall it happens to be. */
+    flex: 1 1 auto;
     overflow-y: auto;
     min-height: 0;
     /* Room for the scrollbar so it does not sit on top of the controls. */
@@ -1307,7 +1311,11 @@ label.switch-row {
     bottom: 0;
     width: min(340px, 88vw);
     max-height: 100vh;
-    overflow-y: auto;
+    /* Only the tab body scrolls, as on the desktop layout above — scrolling
+       the whole panel took the close button out of reach. */
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     border-radius: 12px 0 0 12px;
     border-top: none;
     border-right: none;
@@ -1327,6 +1335,17 @@ label.switch-row {
   #settings-hamburger-menu { right: 12px; top: 60px; }
 
   #search-panel { width: calc(100vw - 120px); max-width: 340px; top: 12px; }
+  #settings-pane-inner {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  #settings-panel [role="tabpanel"] {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    min-height: 0;
+    overscroll-behavior: contain;
+  }
   #search-input { min-height: 44px; }
   .search-result-item { min-height: 44px; }
 
@@ -1412,7 +1431,7 @@ label.switch-row {
   <div class="hamburger-sep"></div>
   <!-- Which server to talk to is not a routing parameter, so it gets its own
        entry rather than sitting at the top of the Routing settings. -->
-  <button class="hamburger-item" data-tab="connection" role="menuitem">&#128268; Backend URL</button>
+  <button class="hamburger-item" data-tab="advanced" role="menuitem">&#128295; Advanced</button>
   <button id="manage-data-btn" class="hamburger-item" role="menuitem">&#11015; Manage Routing Data</button>
 </div>
 <!-- Settings -->
@@ -1447,9 +1466,9 @@ label.switch-row {
       </div>
     </div>
 
-    <!-- Backend URL: which server serves the routing API. Deliberately not in
+    <!-- Advanced: which server serves the routing API. Deliberately not in
          Routing — it changes where the answer comes from, not what is asked. -->
-    <div id="settings-tab-connection" role="tabpanel" style="display:none">
+    <div id="settings-tab-advanced" role="tabpanel" style="display:none">
       <label for="api-url">Backend URL</label>
       <div id="url-row">
         <span id="conn-dot" class="conn-dot conn-offline"></span>
@@ -2920,7 +2939,7 @@ label.switch-row {
     const hamburgerMenu = document.getElementById('settings-hamburger-menu');
     const settingsPanel = document.getElementById('settings-panel');
     const settingsTitle = document.getElementById('settings-panel-title');
-    const tabLabels = { routing: 'Routing', charts: 'Charts', view: 'View', connection: 'Backend URL' };
+    const tabLabels = { routing: 'Routing', charts: 'Charts', view: 'View', advanced: 'Advanced' };
 
     function closeMenu() {
       hamburgerMenu.classList.remove('visible');
@@ -2949,7 +2968,7 @@ label.switch-row {
         document.getElementById('settings-tab-routing').style.display = tab === 'routing' ? '' : 'none';
         document.getElementById('settings-tab-charts').style.display = tab === 'charts' ? '' : 'none';
         document.getElementById('settings-tab-view').style.display = tab === 'view' ? '' : 'none';
-        document.getElementById('settings-tab-connection').style.display = tab === 'connection' ? '' : 'none';
+        document.getElementById('settings-tab-advanced').style.display = tab === 'advanced' ? '' : 'none';
         settingsTitle.textContent = tabLabels[tab] || '';
         settingsPanel.classList.remove('collapsed');
         closeMenu();
