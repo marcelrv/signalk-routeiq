@@ -145,6 +145,25 @@ describe('crossing wait time', () => {
     assert.strictEqual(waitSeconds([], {}, segments), 2 * 3600);
   });
 
+  it('absorbs the bridge over a lock head from either direction', () => {
+    // Krammersluizen: the N-257 span sits over the far head. Entering from one
+    // side it is ~100 m from where the lock edges start, from the other ~320 m
+    // — so grouping from the lock's entry point charged the bridge on top of
+    // the lock depending only on which way you were going.
+    const segments = [{ distance: 200, lockIds: [7] }, { distance: 120, lockIds: [7] }];
+    assert.strictEqual(
+      waitSeconds([opening({ distanceFromStart: 360 })], {}, segments),
+      3600,
+    );
+  });
+
+  it('keeps a staircase lock counted as two lockings', () => {
+    // Distinct lock ids sharing a head: the spans abut, but the edge data has
+    // already said these are two lockings, so a span must not swallow a lock.
+    const segments = [{ distance: 300, lockIds: [1] }, { distance: 300, lockIds: [2] }];
+    assert.strictEqual(waitSeconds([], {}, segments), 2 * 3600);
+  });
+
   it('still charges opening bridges when the locks are known', () => {
     // Edge data covers locks only; no schema marks an opening span, so those
     // stay proximity-based even on a database that knows its locks.
@@ -181,11 +200,42 @@ describe('crossing wait time', () => {
     assert.strictEqual(waitSeconds(crossings, {}, segments), 3600 + 1800);
   });
 
+  it('records the charged wait on the crossing that owns the group', () => {
+    // The itinerary reads this to show where the time goes, so exactly one
+    // crossing per group carries it — otherwise an expanded route double-counts.
+    const bridge = opening({ distanceFromStart: 1000 });
+    const span = fixed({ distanceFromStart: 1020 });
+    const cs = [bridge, span];
+    schedule(cs);
+    assert.strictEqual((bridge as { waitSeconds?: number }).waitSeconds, 1800);
+    assert.strictEqual((span as { waitSeconds?: number }).waitSeconds, undefined);
+  });
+
+  it('gives the wait to the lock, not to the bridge it absorbs', () => {
+    const theLock = lock({ distanceFromStart: 1000 });
+    const itsBridge = opening({ distanceFromStart: 1060 });
+    schedule([theLock, itsBridge]);
+    assert.strictEqual((theLock as { waitSeconds?: number }).waitSeconds, 3600);
+    assert.strictEqual((itsBridge as { waitSeconds?: number }).waitSeconds, undefined);
+  });
+
+  it('adds a lock the edges knew about to the crossing list', () => {
+    // Otherwise an hour appears in the total with nothing in the itinerary to
+    // explain it.
+    const cs: Array<Record<string, unknown>> = [];
+    schedule(cs, {}, [{ distance: 500, lockIds: [4] }, { distance: 500 }]);
+    assert.strictEqual(cs.length, 1, 'the lock was added');
+    assert.strictEqual(cs[0].type, 'lock');
+    assert.strictEqual(cs[0].waitSeconds, 3600);
+  });
+
   it('is unbothered by nothing to wait for', () => {
     assert.strictEqual(waitSeconds([]), 0);
-    assert.strictEqual(waitSeconds(undefined as never), 0);
     // a bridge with no subtype is not known to open, so it costs nothing
-    assert.strictEqual(waitSeconds([{ type: 'bridge', name: 'unclassified' }]), 0);
+    assert.strictEqual(
+      waitSeconds([{ type: 'bridge', name: 'unclassified', position: pos }]),
+      0,
+    );
   });
 });
 

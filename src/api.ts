@@ -220,6 +220,20 @@ export function validateRequestConstraints(request: RoutingRequest): {
       };
     }
   }
+
+  // Waits are per-request overrides of the configured defaults. Zero is
+  // meaningful (a lock that never holds you up), so only the range is checked.
+  for (const key of ["lockWaitMinutes", "bridgeWaitMinutes"] as const) {
+    if (request[key] === null) request[key] = undefined;
+    if (request[key] === undefined) continue;
+    const v = request[key];
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 24 * 60) {
+      return {
+        error: `Invalid ${key} — expected 0..1440 minutes`,
+        warnings,
+      };
+    }
+  }
   return { error: null, warnings };
 }
 

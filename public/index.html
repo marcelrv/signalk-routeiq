@@ -706,6 +706,11 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   color: #5f7a9a;
   font-size: 10px;
 }
+.route-leg .leg-crossing .crossing-wait {
+  margin-left: auto;
+  color: #f59e0b;
+  white-space: nowrap;
+}
 
 /* highlighted leg/node (bidirectional hover) */
 .route-node.highlighted {
@@ -1405,6 +1410,9 @@ label.switch-row {
   <button class="hamburger-item" data-tab="charts" role="menuitem">&#128506; Charts</button>
   <button class="hamburger-item" data-tab="view" role="menuitem">&#128065; View</button>
   <div class="hamburger-sep"></div>
+  <!-- Which server to talk to is not a routing parameter, so it gets its own
+       entry rather than sitting at the top of the Routing settings. -->
+  <button class="hamburger-item" data-tab="connection" role="menuitem">&#128268; Backend URL</button>
   <button id="manage-data-btn" class="hamburger-item" role="menuitem">&#11015; Manage Routing Data</button>
 </div>
 <!-- Settings -->
@@ -1417,18 +1425,18 @@ label.switch-row {
 
     <!-- Routing Settings: everything that changes the calculated route -->
     <div id="settings-tab-routing" role="tabpanel">
-      <label for="api-url">Backend URL</label>
-      <div id="url-row">
-        <span id="conn-dot" class="conn-dot conn-offline"></span>
-        <input id="api-url" type="url" placeholder="http://localhost:3000" autocomplete="off" />
-        <button id="conn-btn">Connect</button>
-      </div>
-      <div id="url-history-list"></div>
-      <label for="min-coast" style="margin-top:10px">Min Coastline Distance (m)</label>
+      <label for="min-coast">Min Coastline Distance (m)</label>
       <input id="min-coast" type="number" value="50" min="0" step="50" />
       <label for="avg-speed" style="margin-top:10px">Average Speed (kn)</label>
       <input id="avg-speed" type="number" value="6" min="0.5" max="60" step="0.5" />
       <div id="tt-legend" style="font-size:10px;color:#5f7a9a;margin-top:2px">Used to estimate travel time</div>
+
+      <div class="panel-title" style="margin-top:12px">Waiting</div>
+      <div style="font-size:10px;color:#5f7a9a;margin-bottom:4px">Added to the travel time at each lock and each opening bridge on the route. Fixed bridges cost nothing.</div>
+      <label for="lock-wait">Lock (min)</label>
+      <input id="lock-wait" type="number" value="60" min="0" max="1440" step="5" />
+      <label for="bridge-wait" style="margin-top:8px">Opening bridge (min)</label>
+      <input id="bridge-wait" type="number" value="30" min="0" max="1440" step="5" />
 
       <div id="boat-info" class="boat-info" style="display:none">
         <div class="panel-title" style="margin-top:12px">Vessel</div>
@@ -1437,6 +1445,18 @@ label.switch-row {
         <div id="boat-beam" class="info-line"><span class="label">ROUTING BEAM</span><span class="value">—</span></div>
         <div id="boat-airdraft" class="info-line"><span class="label">ROUTING AIR</span><span class="value">—</span></div>
       </div>
+    </div>
+
+    <!-- Backend URL: which server serves the routing API. Deliberately not in
+         Routing — it changes where the answer comes from, not what is asked. -->
+    <div id="settings-tab-connection" role="tabpanel" style="display:none">
+      <label for="api-url">Backend URL</label>
+      <div id="url-row">
+        <span id="conn-dot" class="conn-dot conn-offline"></span>
+        <input id="api-url" type="url" placeholder="http://localhost:3000" autocomplete="off" />
+        <button id="conn-btn">Connect</button>
+      </div>
+      <div id="url-history-list"></div>
     </div>
 
     <!-- Charts: base map + nautical chart selection (Signal K resources/charts API) -->
@@ -1718,6 +1738,8 @@ label.switch-row {
         if (!c) return;
         if (c.averageSpeedKnots) document.getElementById('avg-speed').value = c.averageSpeedKnots;
         if (c.defaultCoastDistance != null) document.getElementById('min-coast').value = c.defaultCoastDistance;
+        if (c.lockWaitMinutes != null) document.getElementById('lock-wait').value = c.lockWaitMinutes;
+        if (c.bridgeWaitMinutes != null) document.getElementById('bridge-wait').value = c.bridgeWaitMinutes;
         // Refresh a route pane that rendered before the config arrived
         if (state.lastGeoJson) renderRoutePane(state.lastGeoJson);
       })
@@ -1945,6 +1967,7 @@ label.switch-row {
       endMode: state.destMode || 'auto',
       minCoastDistance: (parseFloat(document.getElementById('min-coast').value) || 0) / 1852,
       ...vesselOverrides(),
+      ...waitOverrides(),
     };
   }
   function depSignature() { return JSON.stringify(departureScanConstraints()); }
@@ -2897,7 +2920,7 @@ label.switch-row {
     const hamburgerMenu = document.getElementById('settings-hamburger-menu');
     const settingsPanel = document.getElementById('settings-panel');
     const settingsTitle = document.getElementById('settings-panel-title');
-    const tabLabels = { routing: 'Routing', charts: 'Charts', view: 'View' };
+    const tabLabels = { routing: 'Routing', charts: 'Charts', view: 'View', connection: 'Backend URL' };
 
     function closeMenu() {
       hamburgerMenu.classList.remove('visible');
@@ -2926,6 +2949,7 @@ label.switch-row {
         document.getElementById('settings-tab-routing').style.display = tab === 'routing' ? '' : 'none';
         document.getElementById('settings-tab-charts').style.display = tab === 'charts' ? '' : 'none';
         document.getElementById('settings-tab-view').style.display = tab === 'view' ? '' : 'none';
+        document.getElementById('settings-tab-connection').style.display = tab === 'connection' ? '' : 'none';
         settingsTitle.textContent = tabLabels[tab] || '';
         settingsPanel.classList.remove('collapsed');
         closeMenu();
@@ -4333,6 +4357,23 @@ label.switch-row {
   // routes against its own configured dimensions instead of against a boat
   // with no draft. The server warns instead of failing when an override is
   // unusable, but the warning belongs to genuinely broken clients, not to us.
+  /**
+   * Waiting times for this request. Sent every time rather than only when
+   * edited: the server default and the value on screen would otherwise drift
+   * apart the moment the plugin config changes under a page that is already
+   * open, and the route would not match the number the user is looking at.
+   */
+  function waitOverrides() {
+    const out = {};
+    for (const [key, id] of [['lockWaitMinutes', 'lock-wait'], ['bridgeWaitMinutes', 'bridge-wait']]) {
+      const el = document.getElementById(id);
+      const v = el ? parseFloat(el.value) : NaN;
+      // 0 is a real answer ("never waits"), so test for a number, not truth.
+      if (isFinite(v) && v >= 0) out[key] = v;
+    }
+    return out;
+  }
+
   function vesselOverrides() {
     const out = {};
     for (const key of ['draft', 'beam', 'airDraft']) {
@@ -4662,6 +4703,7 @@ label.switch-row {
         endMode: state.destMode || 'auto',
         minCoastDistance: minCoastNauticalMiles,
         ...vesselOverrides(),
+        ...waitOverrides(),
         useTides: tideEnabled(),
       };
       // An untouched field means "leave now", not "leave whenever this page was
@@ -5877,6 +5919,18 @@ label.switch-row {
           leg: p.leg || null,
         }))
       : extractMajorNodes(coords);
+    // Cumulative time straight from the server's legs. Without this the
+    // collapsed row shows distance/speed while the expanded leg shows the
+    // tide- and wait-corrected time, and the two disagree.
+    if (itinerary) {
+      let cum = 0;
+      let exact = true;
+      for (const n of nodes) {
+        n.cumSeconds = exact ? cum : null;
+        if (n.leg && typeof n.leg.seconds === 'number') cum += n.leg.seconds;
+        else if (n.leg) exact = false;
+      }
+    }
     // Pass features only in the multi-feature (format 2) case so the function
     // can walk actual geometry lengths instead of assuming 1 coord per segment.
     const segFeatures = (geoJson.features && geoJson.features.length > 1) ? geoJson.features : null;
@@ -5908,7 +5962,12 @@ label.switch-row {
       const speedKn = parseFloat(document.getElementById('avg-speed').value) || 6;
       // Tide-corrected total time from the server when available
       const tideActive = geoJson.tide && geoJson.tide.enabled && typeof geoJson.totalSeconds === 'number';
-      const timeH = tideActive ? geoJson.totalSeconds / 3600 : (speedKn > 0 ? totalNm / speedKn : 0);
+      // Use the server's total whenever it has one, tide or not: it is the only
+      // figure that counts waiting at locks, and so the only one that agrees
+      // with the leg times in the route list.
+      const timeH = typeof geoJson.totalSeconds === 'number'
+        ? geoJson.totalSeconds / 3600
+        : (speedKn > 0 ? totalNm / speedKn : 0);
       const hours = Math.floor(timeH);
       const mins = Math.round((timeH - hours) * 60);
       let timeStr = '';
@@ -5929,7 +5988,11 @@ label.switch-row {
       }
 
       summaryEl.style.display = 'block';
-      summaryEl.innerHTML = '\u23f1 ' + fmtDist(totalDistM) + '  \u00b7  ' + timeStr + '  \u00b7  ' + speedKn.toFixed(1) + ' kn' + tideStr;
+      const waitStr = geoJson.totalWaitSeconds > 0
+        ? '  \u00b7  <span style="color:#f59e0b" title="Included above: time held at locks and opening bridges">\u23f3 ' +
+          formatTime(geoJson.totalWaitSeconds / 3600) + ' waiting</span>'
+        : '';
+      summaryEl.innerHTML = '\u23f1 ' + fmtDist(totalDistM) + '  \u00b7  ' + timeStr + '  \u00b7  ' + speedKn.toFixed(1) + ' kn' + waitStr + tideStr;
     } else if (summaryEl) {
       summaryEl.style.display = 'none';
     }
@@ -6001,7 +6064,9 @@ label.switch-row {
 
       const speedKn = parseFloat(document.getElementById('avg-speed').value) || 6;
       const cumDistNm = node.cumDistKm / 1.852;
-      const cumTimeH = speedKn > 0 ? cumDistNm / speedKn : 0;
+      const cumTimeH = typeof node.cumSeconds === 'number'
+        ? node.cumSeconds / 3600
+        : (speedKn > 0 ? cumDistNm / speedKn : 0);
       const cumTimeStr = formatTime(cumTimeH);
 
       // Build collapsed crossing icons for the following leg
@@ -6111,6 +6176,13 @@ label.switch-row {
 
           let html = '<div class="leg-stat"><span>Distance</span><span class="leg-val">' + fmtDist(legDist) + '</span></div>';
           if (legTimeStr) html += '<div class="leg-stat"><span>Time</span><span class="leg-val">' + legTimeStr + '</span></div>';
+          // Part of the leg time above, called out so an hour spent at a lock
+          // does not look like slow sailing.
+          const legWaitSeconds = (itinerary && node.leg && typeof node.leg.waitSeconds === 'number') ? node.leg.waitSeconds : 0;
+          if (legWaitSeconds > 0) {
+            html += '<div class="leg-stat"><span>Waiting</span><span class="leg-val" style="color:#f59e0b">' +
+              formatTime(legWaitSeconds / 3600) + '</span></div>';
+          }
           if (legCurrentKn !== null) {
             const cCol = legCurrentKn >= 0.05 ? '#22c55e' : legCurrentKn <= -0.05 ? '#f59e0b' : '#9bb8da';
             html += '<div class="leg-stat"><span>Current (est)</span><span class="leg-val" style="color:' + cCol + '">' +
@@ -6147,10 +6219,14 @@ label.switch-row {
                   info = 'opening';
                 }
               }
+              // The server charges the wait to one crossing per group, so
+              // summing the group is safe and names the thing you wait for.
+              const waitS = entries.reduce((t, e) => t + (e.waitSeconds || 0), 0);
               html += '<div class="leg-crossing">' +
                 '<span class="leg-crossing-icon" style="background:' + color + '">' + poiIcon(e0.type, { subtype: e0.subtype }, 16) + '</span>' +
                 escapeHtml(e0.name) +
                 (info ? '<span class="crossing-type"> ' + info + '</span>' : '') +
+                (waitS > 0 ? '<span class="crossing-wait">\u23f3 ' + formatTime(waitS / 3600) + '</span>' : '') +
                 '</div>';
             }
           }

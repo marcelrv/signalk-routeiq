@@ -55,6 +55,12 @@ function isInsideBBox(lat: number, lon: number, bbox: BBox): boolean {
  * Built once in calculateRoute and threaded through the search paths —
  * never stored on the engine, so concurrent requests stay isolated.
  */
+/** Per-request replacements for the configured waits, carried to finalizeRoute. */
+type WaitOverrides = Pick<
+  RoutingRequest,
+  "lockWaitMinutes" | "bridgeWaitMinutes"
+>;
+
 interface RouteEnv {
   flow: FlowField;
   departureMs: number; // departure time of the overall route
@@ -396,7 +402,7 @@ export class RoutingEngine {
         );
         if (violationWarnings.length) navmeshRoute.warnings = violationWarnings;
         const sameRegionEnv = await this.prepareEnv(request, [start, end]);
-        await this.finalizeRoute(navmeshRoute, [], sameRegionEnv);
+        await this.finalizeRoute(navmeshRoute, [], sameRegionEnv, request);
         return navmeshRoute;
       }
     }
@@ -433,6 +439,7 @@ export class RoutingEngine {
         bboxWarnings,
         env,
         request.endMode,
+        request,
       );
     }
     // Fall through for non-via routes (bbox search below)
@@ -566,7 +573,7 @@ export class RoutingEngine {
         ...violationWarnings,
       ];
       if (result.warnings.length === 0) delete result.warnings;
-      await this.finalizeRoute(result, [], env);
+      await this.finalizeRoute(result, [], env, request);
       return result;
     }
 
@@ -581,6 +588,7 @@ export class RoutingEngine {
       via,
       effectiveDims,
       env,
+      request,
     );
   }
 
@@ -743,6 +751,7 @@ export class RoutingEngine {
     _via: Array<{ latitude: number; longitude: number }>,
     dims: VesselDimensions,
     env?: RouteEnv,
+    waitOverrides?: WaitOverrides,
     // When this result is a LEG of a via route it must stay un-finalized:
     // finalizeRoute ends in splitToSegmentFeatures, which replaces
     // features[0] with per-segment features that carry no
@@ -812,7 +821,7 @@ export class RoutingEngine {
       await this.connectUserPoint(start, route, "start");
       await this.connectUserPoint(end, route, "end");
 
-      if (finalize) await this.finalizeRoute(route, [], env);
+      if (finalize) await this.finalizeRoute(route, [], env, waitOverrides);
       return route;
     }
 
@@ -836,6 +845,7 @@ export class RoutingEngine {
     globalWarnings?: RouteWarning[],
     env?: RouteEnv,
     endMode?: LegMode,
+    waitOverrides?: WaitOverrides,
   ): Promise<RouteResult> {
     let currentStart = start;
     let elapsedSec = 0; // time offset of the current leg's departure
@@ -1013,7 +1023,7 @@ export class RoutingEngine {
     // Connect only the overall end coordinate (start is handled per-segment above)
     await this.connectUserPoint(end, result, "end");
 
-    await this.finalizeRoute(result, via, env);
+    await this.finalizeRoute(result, via, env, waitOverrides);
     return result;
   }
 
@@ -1164,6 +1174,9 @@ export class RoutingEngine {
           [],
           dims,
           env,
+          // No waits here: this is a via leg, left un-finalized (below) so the
+          // merged route is scheduled once, as a whole.
+          undefined,
           false,
         );
         if (fallback.warnings) {
@@ -2656,22 +2669,39 @@ export class RoutingEngine {
    * calls out the wrong-clock-time problem as the reason the waits matter
    * beyond a tidier ETA.
    */
+  /**
+   * Where a route has to stop, and for how long: one entry per obstacle, at the
+   * distance along the route where it is met.
+   *
+   * A schedule rather than a total because the wait has to be spent at the
+   * right moment. An hour in a lock puts every later leg an hour further into
+   * the tide, and sampling the flow field without that is the failure this
+   * whole feature exists to remove — see feature-bridge-lock-waits.md.
+   *
+   * Mutates `crossings`: each obstacle group's wait is recorded on the crossing
+   * that owns it, and a lock the route is only known to have used from the
+   * edges is added to the list so it appears in the itinerary rather than being
+   * a silent hour. The itinerary then adds up to the total.
+   */
   private crossingWaitSchedule(
     coords: Array<[number, number]>,
-    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
-    crossings?: RouteCrossing[],
+    segments: NonNullable<
+      RouteResult["features"][0]["properties"]["segments"]
+    >,
+    crossings: RouteCrossing[],
+    overrides?: WaitOverrides,
   ): Array<{ atMetres: number; seconds: number }> {
-    const lockDefault = this.config.lockWaitMinutes ?? 60;
-    const bridgeDefault = this.config.bridgeWaitMinutes ?? 30;
+    const lockDefault =
+      overrides?.lockWaitMinutes ?? this.config.lockWaitMinutes ?? 60;
+    const bridgeDefault =
+      overrides?.bridgeWaitMinutes ?? this.config.bridgeWaitMinutes ?? 30;
 
     // Chainage for each crossing, derived the same way buildItinerary does it
     // — that runs later, off the segment times this schedule feeds into.
     const cum = cumulativeDistances(coords, segments);
-    const placed: RouteCrossing[] = (crossings ?? []).map((c) => ({
-      ...c,
-      distanceFromStart:
-        c.distanceFromStart ??
-        (c.position
+    for (const c of crossings) {
+      if (typeof c.distanceFromStart !== "number") {
+        c.distanceFromStart = c.position
           ? Math.round(
               cum[
                 closestCoordIndex(
@@ -2681,59 +2711,62 @@ export class RoutingEngine {
                 )
               ],
             )
-          : 0),
-    }));
+          : 0;
+      }
+      delete c.waitSeconds; // recomputed below; never carried over from before
+    }
 
-    // Locks the route demonstrably passed through, from the edges it used,
-    // placed where it used them. Distinct ids: a lock spans several edges and
-    // they are one locking. Only pipeline-built databases record this.
-    const seenLock = new Set<number>();
+    // Locks the route demonstrably passed through, from the edges it used, at
+    // the chainage where it used them. Distinct ids: a lock spans several edges
+    // and they are one locking. Only pipeline-built databases record this.
+    const lockSpans = new Map<number, [number, number]>();
     let along = 0;
     for (const seg of segments) {
+      const end = along + (seg.distance ?? 0);
       for (const id of seg.lockIds ?? []) {
-        if (seenLock.has(id)) continue;
-        seenLock.add(id);
-        placed.push({
-          type: "lock",
-          name: `Lock ${id}`,
-          position: { latitude: 0, longitude: 0 },
-          distanceFromStart: Math.round(along),
-        });
+        const span = lockSpans.get(id);
+        // Extended rather than replaced: a lock is several edges, and its far
+        // head is where its bridges are.
+        if (span) span[1] = Math.max(span[1], end);
+        else lockSpans.set(id, [along, end]);
       }
-      along += seg.distance ?? 0;
+      along = end;
+    }
+    for (const [from, to] of lockSpans.values()) {
+      const at = Math.round(from);
+      // A position so the itinerary can place it like any other crossing.
+      let idx = 0;
+      while (idx < cum.length - 1 && cum[idx] < at) idx++;
+      const coord = coords[Math.min(idx, coords.length - 1)];
+      crossings.push({
+        type: "lock",
+        name: "Lock",
+        position: coord
+          ? { latitude: coord[1], longitude: coord[0] }
+          : { latitude: 0, longitude: 0 },
+        distanceFromStart: at,
+        lockSpan: [Math.round(from), Math.round(to)],
+      });
     }
 
     const schedule: Array<{ atMetres: number; seconds: number }> = [];
-    for (const group of RoutingEngine.groupCrossings(placed)) {
+    for (const group of RoutingEngine.groupCrossings(crossings)) {
       const at = Math.min(...group.map((c) => c.distanceFromStart ?? 0));
-      const lock = group.find((c) => c.type === "lock");
-      if (lock) {
-        // A lock complex is a lock. Whichever chamber you take you lock through
-        // once, and the spans carried over its heads open with it — so the
-        // bridges in this group cost nothing on top, however the lock was
-        // identified.
-        schedule.push({
-          atMetres: at,
-          seconds: (lock.waitMinutes ?? lockDefault) * 60,
-        });
-        continue;
-      }
-      const opening = group.find(
-        (c) => c.type === "bridge" && c.subtype === "opening",
-      );
-      // Bridges away from a lock stay proximity-based whatever the database:
-      // no schema marks an opening-span edge, so there is nothing more exact.
-      if (opening) {
-        schedule.push({
-          atMetres: at,
-          seconds: (opening.waitMinutes ?? bridgeDefault) * 60,
-        });
-      }
-      // else: the group is fixed spans only — nothing to wait for.
+      // A lock complex is a lock. Whichever chamber you take you lock through
+      // once, and the spans carried over its heads open with it — so the
+      // bridges in this group cost nothing on top, however the lock was found.
+      const owner =
+        group.find((c) => c.type === "lock") ??
+        group.find((c) => c.type === "bridge" && c.subtype === "opening");
+      if (!owner) continue; // fixed spans only — nothing to wait for
+      const minutes =
+        owner.waitMinutes ??
+        (owner.type === "lock" ? lockDefault : bridgeDefault);
+      if (minutes <= 0) continue;
+      owner.waitSeconds = minutes * 60;
+      schedule.push({ atMetres: at, seconds: minutes * 60 });
     }
-    return schedule
-      .filter((w) => w.seconds > 0)
-      .sort((a, b) => a.atMetres - b.atMetres);
+    return schedule.sort((a, b) => a.atMetres - b.atMetres);
   }
 
   /**
@@ -2764,7 +2797,8 @@ export class RoutingEngine {
    * Grouped by chainage, so this needs `distanceFromStart` — which buildItinerary
    * assigns. Single-linkage, because a lock and the bridge over its outer head
    * belong together even when the two ends of the complex are further apart than
-   * the threshold.
+   * the threshold. A lock carrying a `lockSpan` is measured from that span, so
+   * its own bridges group with it regardless of which end you enter from.
    *
    * This is an approximation standing in for data the databases do not carry:
    * pipeline-built ones mark `requires_lock`/`lock_id` per edge, which would say
@@ -2782,18 +2816,34 @@ export class RoutingEngine {
       .map((c) => [c]);
     if (placed.length === 0) return unplaced;
 
-    const sorted = [...placed].sort(
-      (a, b) => (a.distanceFromStart ?? 0) - (b.distanceFromStart ?? 0),
-    );
+    // A crossing occupies a range, not a point: a lock the edges placed knows
+    // the stretch it covers. Measuring the gap from the end of that stretch is
+    // what keeps the bridge over a lock's far head in the lock's group — from
+    // the entry point it can be a few hundred metres away, and how far depends
+    // on which way you are going.
+    const extent = (c: RouteCrossing): [number, number] =>
+      c.lockSpan ?? [c.distanceFromStart ?? 0, c.distanceFromStart ?? 0];
+
+    const sorted = [...placed].sort((a, b) => extent(a)[0] - extent(b)[0]);
     const groups: RouteCrossing[][] = [[sorted[0]]];
+    // Two ends per group: how far the last crossing reached, and how far it
+    // sat. A span absorbs the bridges over the lock's heads, but a second lock
+    // is a second locking however tightly the two abut — staircase locks share
+    // a head and the edge data has already said they are distinct.
+    let groupEndSpan = extent(sorted[0])[1];
+    let groupEndPoint = sorted[0].distanceFromStart ?? 0;
     for (let i = 1; i < sorted.length; i++) {
-      const gap =
-        (sorted[i].distanceFromStart ?? 0) -
-        (sorted[i - 1].distanceFromStart ?? 0);
-      if (gap <= RoutingEngine.CROSSING_GROUP_METRES) {
-        groups[groups.length - 1].push(sorted[i]);
+      const c = sorted[i];
+      const [start, end] = extent(c);
+      const from = c.lockSpan ? groupEndPoint : groupEndSpan;
+      if (start - from <= RoutingEngine.CROSSING_GROUP_METRES) {
+        groups[groups.length - 1].push(c);
+        groupEndSpan = Math.max(groupEndSpan, end);
+        groupEndPoint = Math.max(groupEndPoint, c.distanceFromStart ?? 0);
       } else {
-        groups.push([sorted[i]]);
+        groups.push([c]);
+        groupEndSpan = end;
+        groupEndPoint = c.distanceFromStart ?? 0;
       }
     }
     return [...groups, ...unplaced];
@@ -2809,6 +2859,7 @@ export class RoutingEngine {
     route: RouteResult,
     via: Array<{ latitude: number; longitude: number }> = [],
     env?: RouteEnv,
+    waitOverrides?: WaitOverrides,
   ): Promise<void> {
     const feature = route.features[0];
     if (!feature || feature.geometry.coordinates.length < 2) return;
@@ -2824,7 +2875,15 @@ export class RoutingEngine {
 
     // Where the route has to stop, and for how long. Built before the times
     // are computed, because a wait shifts every later leg's tide sample.
-    const waits = this.crossingWaitSchedule(coords, segments, route.crossings);
+    // A lock the edges know about but no point of interest does gets appended
+    // here, so the list has to exist even when detection found nothing.
+    route.crossings = route.crossings ?? [];
+    const waits = this.crossingWaitSchedule(
+      coords,
+      segments,
+      route.crossings,
+      waitOverrides,
+    );
     const waitSec = waits.reduce((t, w) => t + w.seconds, 0);
 
     // Sailing time & estimated current per segment (covers segments added by
