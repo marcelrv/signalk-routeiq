@@ -2685,9 +2685,7 @@ export class RoutingEngine {
    */
   private crossingWaitSchedule(
     coords: Array<[number, number]>,
-    segments: NonNullable<
-      RouteResult["features"][0]["properties"]["segments"]
-    >,
+    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
     crossings: RouteCrossing[],
     overrides?: WaitOverrides,
   ): Array<{ atMetres: number; seconds: number }> {
