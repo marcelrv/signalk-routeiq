@@ -151,8 +151,19 @@ describe('crossing wait time', () => {
     // — so grouping from the lock's entry point charged the bridge on top of
     // the lock depending only on which way you were going.
     const segments = [{ distance: 200, lockIds: [7] }, { distance: 120, lockIds: [7] }];
+    // Northbound: the lock spans 0..320 m, the bridge is 40 m past its far end.
     assert.strictEqual(
       waitSeconds([opening({ distanceFromStart: 360 })], {}, segments),
+      3600,
+    );
+    // Southbound: the same passage entered from the other side, so the bridge
+    // is met first and sits ~100 m before the lock edges begin.
+    assert.strictEqual(
+      waitSeconds(
+        [opening({ distanceFromStart: 100 })],
+        {},
+        [{ distance: 200 }, { distance: 200, lockIds: [7] }, { distance: 120, lockIds: [7] }],
+      ),
       3600,
     );
   });

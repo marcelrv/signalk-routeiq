@@ -1712,9 +1712,13 @@ export class RoutingEngine {
         costFactor: attrs.costFactor,
         trafficMode: attrs.trafficMode,
         edgeTypeId: attrs.edgeTypeId,
-        // Only on the first sub-segment: the locks belong to the aggregated
-        // edge as a whole, and repeating them would count one locking twice.
-        ...(i === 0 && attrs.lockIds?.length ? { lockIds: attrs.lockIds } : {}),
+        // On every sub-segment: the lock belongs to the aggregated edge as a
+        // whole, so the span recorded for it has to cover the whole length.
+        // Marking only the first one understated the lock's extent, and that
+        // extent is what decides whether the bridge over its far head is part
+        // of the same locking. Safe to repeat: crossingWaitSchedule keys spans
+        // by lock id and extends them, so this never charges a second locking.
+        ...(attrs.lockIds?.length ? { lockIds: attrs.lockIds } : {}),
       });
     }
     return segs;
@@ -2645,38 +2649,24 @@ export class RoutingEngine {
   }
 
   /**
-   * Time a route spends waiting rather than moving: locks, and bridges that
-   * have to open. A fixed span costs nothing — the vessel either fits under it
-   * or the route should not be crossing it at all.
-   *
-   * This is deliberately applied to the ETA and never to the search cost, so a
-   * wait cannot make the router prefer a longer way round. Doing that properly
-   * needs the wait to be FIFO-safe, which a flat constant is not — see
-   * feature-bridge-lock-waits.md, tier 3.
-   *
-   * A per-crossing `waitMinutes` wins over the configured default, so a
-   * database that knows a particular lock takes twenty minutes rather than an
-   * hour needs no change here.
-   */
-  /**
-   * Where a route has to stop, and for how long: one entry per obstacle, at the
-   * distance along the route where it is met.
-   *
-   * A schedule rather than a total because the wait has to be spent at the
-   * right moment. An hour in a lock puts every later leg an hour further into
-   * the tide, and sampling the flow field without that is the failure this
-   * whole feature exists to remove — see feature-bridge-lock-waits.md, which
-   * calls out the wrong-clock-time problem as the reason the waits matter
-   * beyond a tidier ETA.
-   */
-  /**
-   * Where a route has to stop, and for how long: one entry per obstacle, at the
-   * distance along the route where it is met.
+   * Where a route has to stop, and for how long: locks, and bridges that have
+   * to open. One entry per obstacle, at the distance along the route where it
+   * is met. A fixed span costs nothing — the vessel either fits under it or
+   * the route should not be crossing it at all.
    *
    * A schedule rather than a total because the wait has to be spent at the
    * right moment. An hour in a lock puts every later leg an hour further into
    * the tide, and sampling the flow field without that is the failure this
    * whole feature exists to remove — see feature-bridge-lock-waits.md.
+   *
+   * Deliberately applied to the ETA and never to the search cost, so a wait
+   * cannot make the router prefer a longer way round. Doing that properly needs
+   * the wait to be FIFO-safe, which a flat constant is not — same document,
+   * tier 3.
+   *
+   * A per-crossing `waitMinutes` wins over the configured default, so a
+   * database that knows a particular lock takes twenty minutes rather than an
+   * hour needs no change here.
    *
    * Mutates `crossings`: each obstacle group's wait is recorded on the crossing
    * that owns it, and a lock the route is only known to have used from the
