@@ -1,24 +1,46 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.5 — 2026-08-03
 
-- Added: routes now allow time for locks and opening bridges. Two settings under
-  Plugin Config — "Typical Lock Wait" (60 min) and "Typical Opening Bridge Wait"
-  (30 min) — are counted once per crossing towards the estimated duration and
-  arrival time. Fixed spans cost nothing: you either fit under one or the route
-  should not be crossing it. The wait is deliberately kept out of the routing
-  cost, so it changes what a route is expected to take but never which way it
-  goes. A routing database that carries a figure for a specific lock or bridge
-  overrides the default, though nothing emits that yet.
+- Added: routes now allow time for locks and opening bridges. A route through
+  the Zeeland delta crosses four locks and eight opening spans, and was reported
+  as if every one of them were standing open. Defaults of 60 and 30 minutes,
+  set under Plugin Config and adjustable per route under ☰ → Routing, are
+  counted once per crossing towards the estimated duration and arrival time.
+  Fixed spans cost nothing: you either fit under one or the route should not be
+  crossing it. The wait is deliberately kept out of the routing cost, so it
+  changes what a route is expected to take but never which way it goes. A
+  routing database that carries a figure for a specific lock or bridge overrides
+  both, though nothing emits that yet.
   A wait is spent where it happens, not added to the end: an hour in a lock puts
   every later leg an hour further into the tide, and sampling the flow field
   without that was the wrong-clock-time problem these waits exist to remove.
-  Crossings within 250 m of each other along the route count as one obstacle,
-  because the list is built from nearby points of interest and cannot tell which
-  of several parallel structures a vessel actually uses: two lock chambers side
-  by side are one locking, and a footbridge beside its road bridge is one
-  opening. A lock absorbs the spans over its own heads — they open with it, so
-  they cost nothing on top — however the lock was identified.
+  Crossings close together along the route count as one obstacle, because the
+  list is built from nearby points of interest and cannot tell which of several
+  parallel structures a vessel actually uses: two lock chambers side by side are
+  one locking, and a footbridge beside its road bridge is one opening. A lock
+  absorbs the spans over its own heads — they open with it. Where the routing
+  data records which lock a route went through, the lock's whole extent is used
+  rather than a radius around its entry: the bridge over the Krammersluizen's
+  far head is 316 m from the entry going north and 113 m going south, so a fixed
+  radius charged an extra half hour in one direction only. Two locks never merge
+  into one, however tightly they abut.
+- Added: the waiting time is shown where the travel time is. It appears in the
+  route summary, on each leg that has one, and against the lock or bridge that
+  causes it. The summary, the turn list and the expanded leg detail now all take
+  their times from the same source, so they agree with each other and with the
+  total — previously the collapsed turn list was distance over average speed, so
+  expanding a turn showed a different figure from the one above it.
+- Fixed: a routing-data directory holding databases built by different pipeline
+  versions could fail to load. Column availability was merged across every
+  loaded database and then applied to all of them, so a query naming a column
+  that only some of them have failed for the rest. Each database is now read
+  with its own columns.
+- Changed: the settings panel's tab body scrolls on every screen size, and its
+  close button no longer scrolls out of reach on narrow ones. Which tab
+  scrolled previously depended on how tall its content happened to be.
+- Changed: "Backend URL" moves out of the Routing settings into its own
+  "Advanced" section — it decides which server answers, not what is asked of it.
 
 - Added: the departure planner shows the distance of each departure. A
   tide-aware scan can pick a different route at different times, so a row that
