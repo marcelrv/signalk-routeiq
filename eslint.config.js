@@ -20,7 +20,7 @@ export default tseslint.config(
     // listed: page.evaluate() callbacks reach them through the element's own
     // `ownerDocument.defaultView`, or through `globalThis`, so the Node
     // environment here never has to pretend a DOM exists.
-    files: ['scripts/**/*.mjs'],
+    files: ['scripts/**/*.mjs', 'test/ui/**/*.mjs'],
     languageOptions: {
       globals: {
         console: 'readonly',

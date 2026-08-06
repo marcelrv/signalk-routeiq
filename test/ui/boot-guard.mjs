@@ -68,7 +68,7 @@ const overlayText = (page) => page.locator('#loading-overlay').innerText();
 //    the overlay sat on "Initializing..." forever.
 await check('no AbortSignal.timeout -> connect loop still runs', async (page) => {
   await page.addInitScript(() => {
-    delete AbortSignal.timeout;
+    delete globalThis.AbortSignal.timeout;
   });
   await page.goto(BASE);
   await page.waitForSelector('#loading-retry.visible', { timeout: 15000 });
@@ -117,9 +117,9 @@ await check('fully offline -> map libraries still load', async (page) => {
   await page.waitForSelector('#loading-retry.visible', { timeout: 15000 });
 
   const libs = await page.evaluate(() => ({
-    leaflet: typeof window.L !== 'undefined',
-    routing: !!(window.L && window.L.Routing),
-    vectorgrid: !!(window.L && window.L.vectorGrid),
+    leaflet: typeof globalThis.L !== 'undefined',
+    routing: !!(globalThis.L && globalThis.L.Routing),
+    vectorgrid: !!(globalThis.L && globalThis.L.vectorGrid),
   }));
   for (const [name, ok] of Object.entries(libs)) {
     if (!ok) throw new Error(`${name} did not load offline (blocked: ${blocked.join(', ')})`);
@@ -128,7 +128,7 @@ await check('fully offline -> map libraries still load', async (page) => {
   // with the wrong Content-Type is fetched and then silently not parsed, which
   // leaves the map unstyled while every request looks fine.
   const css = await page.evaluate(() => ({
-    vendorSheets: [...document.styleSheets]
+    vendorSheets: [...globalThis.document.styleSheets]
       .filter((s) => s.href && s.href.includes('/vendor/'))
       .map((s) => {
         try {
@@ -138,8 +138,8 @@ await check('fully offline -> map libraries still load', async (page) => {
         }
       }),
     panePosition: (() => {
-      const el = document.querySelector('.leaflet-pane');
-      return el ? getComputedStyle(el).position : null;
+      const el = globalThis.document.querySelector('.leaflet-pane');
+      return el ? globalThis.getComputedStyle(el).position : null;
     })(),
   }));
   if (css.vendorSheets.length !== 2 || css.vendorSheets.some((s) => s.rules < 1)) {
