@@ -17,6 +17,11 @@ import { extname, join, normalize } from 'node:path';
 const ROOT = process.env.PUBLIC_DIR || '/public';
 const TYPES = {
   '.html': 'text/html',
+  // Without this the vendored stylesheets go out as application/octet-stream
+  // and Chromium fetches them but parses nothing — they end up with zero rules
+  // and no console warning, so the page renders unstyled and the tests never
+  // notice. Same trap as serving index.html without a type (ERR_ABORTED).
+  '.css': 'text/css',
   '.js': 'text/javascript',
   '.json': 'application/json',
   '.svg': 'image/svg+xml',
@@ -119,6 +124,32 @@ await check('fully offline -> map libraries still load', async (page) => {
   for (const [name, ok] of Object.entries(libs)) {
     if (!ok) throw new Error(`${name} did not load offline (blocked: ${blocked.join(', ')})`);
   }
+  // Stylesheets need checking by effect, not by "did it 200". A CSS response
+  // with the wrong Content-Type is fetched and then silently not parsed, which
+  // leaves the map unstyled while every request looks fine.
+  const css = await page.evaluate(() => ({
+    vendorSheets: [...document.styleSheets]
+      .filter((s) => s.href && s.href.includes('/vendor/'))
+      .map((s) => {
+        try {
+          return { file: s.href.split('/').pop(), rules: s.cssRules.length };
+        } catch {
+          return { file: s.href.split('/').pop(), rules: -1 };
+        }
+      }),
+    panePosition: (() => {
+      const el = document.querySelector('.leaflet-pane');
+      return el ? getComputedStyle(el).position : null;
+    })(),
+  }));
+  if (css.vendorSheets.length !== 2 || css.vendorSheets.some((s) => s.rules < 1)) {
+    throw new Error(`vendored CSS not parsed: ${JSON.stringify(css.vendorSheets)}`);
+  }
+  // Leaflet's own rule, so this fails if the stylesheet loaded but did nothing.
+  if (css.panePosition !== 'absolute') {
+    throw new Error(`leaflet CSS not in effect: .leaflet-pane position=${css.panePosition}`);
+  }
+
   // The globals existing is not enough — the app builds an L.Routing.control()
   // further down the same script, past the point where the connect timer is
   // registered, so a bundle that loads but misbehaves would still reach the
