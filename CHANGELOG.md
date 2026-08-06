@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: the planner hung on "Loading Routing Data" forever on older tablets and
+  chart plotters. The first request it makes passes `AbortSignal.timeout()`,
+  which browsers older than Chrome/Android WebView 103, Firefox 100 or Safari 16
+  do not have. Evaluating it threw before `fetch` was ever called, so the retry
+  loop wrapped around that request never started and the failure was silent. A
+  polyfill now covers those browsers, and the same fetch pattern is used in six
+  other places that would have failed the same way.
+- Fixed: Leaflet and Leaflet Routing Machine were loaded from unpkg.com, so the
+  planner needed internet to start — on a boat it would sit on the loading
+  overlay waiting for a CDN it could not reach, while a device that had the
+  files cached from an earlier trip ashore worked fine. Both, and their
+  stylesheets and images, are now vendored under `public/vendor/` alongside the
+  chart renderer that was already local. Base map tiles still come from the
+  network; offline use wants a Signal K chart provider.
+- Added: a startup error now says what went wrong on the loading overlay itself,
+  with a button to continue past it. Anything that fails before the app is up —
+  an incompatible browser, a missing file — previously reached the console only,
+  which is unreachable on the devices where this actually happens.
+
 ## 0.1.0-alpha.5 — 2026-08-03
 
 - Added: routes now allow time for locks and opening bridges. A route through

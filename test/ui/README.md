@@ -18,3 +18,22 @@ docker run --rm --network host -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright -e HOM
   mcr.microsoft.com/playwright:v1.54.0-noble \
   sh -c "npm init -y >/dev/null && npm i playwright@1.54.0 --no-audit --no-fund >/dev/null && node ui-e2e.mjs"
 ```
+
+## boot-guard.mjs
+
+Separate, and needs **no SignalK server** — it serves `public/` statically and
+checks the three ways startup fails on an old or offline device: a browser
+without `AbortSignal.timeout`, an uncaught exception during startup, and the
+unpkg.com map libraries being unreachable. In each case the loading overlay must
+say what went wrong instead of spinning forever.
+
+```bash
+docker run --rm -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright -e HOME=/tmp \
+  -v "$PWD/test/ui:/tests" -v "$PWD/public:/public:ro" -w /tests \
+  mcr.microsoft.com/playwright:v1.54.0-noble \
+  sh -c "npm init -y >/dev/null && npm i playwright@1.54.0 --no-audit --no-fund >/dev/null && node boot-guard.mjs"
+```
+
+Point `PUBLIC_DIR` elsewhere to test a different build of the page. Note that
+npm writes `package.json` and `node_modules` into `test/ui` as root; delete them
+afterwards if you care about a clean tree.

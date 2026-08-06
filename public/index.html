@@ -18,8 +18,11 @@
 <link rel="icon" type="image/svg+xml" href="icon.svg" />
 <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
 
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-<link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
+<!-- Map libraries are vendored (see vendor/README.md): a boat has no internet,
+     and a CDN fetch that never resolves leaves the planner stuck on its
+     loading overlay. -->
+<link rel="stylesheet" href="vendor/leaflet.css" />
+<link rel="stylesheet" href="vendor/leaflet-routing-machine.css" />
 <style>
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #0b1a2b; color: #e0edf5; }
@@ -1406,7 +1409,7 @@ label.switch-row {
   <div id="loading-subtitle">Initializing nautical route planner... <span id="loading-dots">⏳</span></div>
   <div id="loading-retry"></div>
   <div id="loading-dbs"></div>
-  <div id="loading-error-detail" style="display:none;margin-top:10px;max-width:420px;padding:10px 14px;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.4);border-radius:6px;font-size:12px;color:#fca5a5;text-align:left;word-break:break-word"></div>
+  <div id="loading-error-detail" style="display:none;margin-top:10px;max-width:420px;padding:10px 14px;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.4);border-radius:6px;font-size:12px;color:#fca5a5;text-align:left;word-break:break-word;white-space:pre-line"></div>
   <button id="loading-dismiss" style="display:none;margin-top:16px;padding:8px 20px;background:rgba(59,143,212,0.2);border:1px solid rgba(59,143,212,0.5);border-radius:6px;color:#e0edf5;font-size:13px;cursor:pointer">Continue without routing</button>
 </div>
 
@@ -1684,10 +1687,108 @@ label.switch-row {
 <!-- Toast -->
 <div id="toast"></div>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
-<!-- Vector-tile renderer for S-57 charts served by Signal K chart providers.
-     Vendored locally (see vendor/README.md) so the planner works offline. -->
+<!-- Boot guard. Deliberately ES5 and deliberately first: it has to survive the
+     very browsers it exists to report on, and it has to be parsed before the
+     scripts below so it can see them fail. Chart plotters and cheap tablets
+     have no devtools, so an uncaught startup error is otherwise completely
+     invisible — the loading overlay simply sits there forever. -->
+<script>
+(function () {
+  'use strict';
+
+  // AbortSignal.timeout() is Chrome/WebView 103, Firefox 100, Safari 16. Older
+  // browsers throw a TypeError while evaluating the fetch options, i.e. before
+  // fetch() is ever called, so the .catch() retry loops around the app's
+  // requests never arm and the first connect attempt dies silently.
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout !== 'function') {
+    AbortSignal.timeout = function (ms) {
+      var c = new AbortController();
+      setTimeout(function () {
+        try {
+          c.abort(new DOMException('signal timed out', 'TimeoutError'));
+        } catch (e) {
+          c.abort(); // pre-2022 abort() takes no reason argument
+        }
+      }, ms);
+      return c.signal;
+    };
+  }
+
+  var reported = 0;
+  var firstMsg = '';
+
+  function report(msg) {
+    reported++;
+    var detail = document.getElementById('loading-error-detail');
+    var overlay = document.getElementById('loading-overlay');
+    // Once the app is running the overlay is gone; later errors belong in the
+    // console, not pasted back over a working screen.
+    if (!detail || !overlay || overlay.style.display === 'none'
+        || overlay.className.indexOf('hidden') !== -1) return;
+    if (reported > 1) {
+      // Rewrite the tail rather than appending to it — a repeating failure
+      // would otherwise grow the box without bound.
+      detail.textContent = firstMsg + '\n\n(+' + (reported - 1) + ' more — see console)';
+      return;
+    }
+    firstMsg = msg;
+
+    var spinner = document.getElementById('loading-spinner');
+    if (spinner) spinner.style.display = 'none';
+    var dots = document.getElementById('loading-dots');
+    if (dots) { dots.className = ''; dots.textContent = ''; }
+    var title = document.getElementById('loading-title');
+    if (title) { title.textContent = 'Startup Error'; title.style.color = '#ef4444'; }
+    var subtitle = document.getElementById('loading-subtitle');
+    if (subtitle) {
+      subtitle.textContent = 'The planner could not start in this browser.';
+    }
+    detail.textContent = msg;
+    detail.style.display = '';
+
+    var dismiss = document.getElementById('loading-dismiss');
+    if (dismiss) {
+      dismiss.textContent = 'Dismiss';
+      dismiss.style.display = '';
+      dismiss.onclick = function () {
+        overlay.className += ' hidden';
+        setTimeout(function () { overlay.style.display = 'none'; }, 500);
+      };
+    }
+  }
+
+  // Capture phase, because resource load failures (a <script src> that 404s or
+  // cannot be reached) do not bubble.
+  window.addEventListener('error', function (e) {
+    var t = e.target;
+    if (t && t !== window && (t.src || t.href)) {
+      // Only the app shell. Every map tile is an <img> that fails when there is
+      // no internet, which is the normal state on a boat — reporting those
+      // would put a "reinstall the plugin" error over the overlay precisely
+      // when the plugin is working as intended.
+      var tag = (t.tagName || '').toUpperCase();
+      if (tag !== 'SCRIPT' && tag !== 'LINK') return;
+      report('Could not load ' + (t.src || t.href)
+        + '\n\nThis file ships with the plugin. If it 404s, the install is '
+        + 'incomplete — reinstall RouteIQ.');
+      return;
+    }
+    var where = e.filename ? ' (' + e.filename + ':' + e.lineno + ')' : '';
+    report((e.message || 'Script error') + where
+      + '\n\nThis browser may be too old for the planner. '
+      + 'Check chrome://version — Chrome or Android System WebView 103 or newer is needed.');
+  }, true);
+
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason;
+    report('Unhandled error: ' + ((r && (r.message || r)) || 'unknown'));
+  });
+})();
+</script>
+
+<script src="vendor/leaflet.js"></script>
+<script src="vendor/leaflet-routing-machine.min.js"></script>
+<!-- Vector-tile renderer for S-57 charts served by Signal K chart providers. -->
 <script src="vendor/leaflet.vectorgrid.min.js"></script>
 <script>
 (function () {
