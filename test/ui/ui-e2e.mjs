@@ -4,9 +4,9 @@
  *
  * Covers:
  *  1. page load + loading overlay dismissal
- *  2. settings panel: tabs (Routing / View), switch toggles
+ *  2. settings panel: hamburger menu tabs (Routing / Advanced / View), switches
  *  3. left-click waypoint placement + auto-routing
- *  4. click-on-route via insertion
+ *  4. drag-on-route via insertion
  *  5. undo / redo (buttons + Ctrl+Z/Y)
  *  6. right-click context menu (set start/dest, escape/close)
  *  7. manual draw mode: toggle, manual leg request, dashed orange rendering
@@ -35,6 +35,23 @@ async function waitState(page, fn, timeout = 25000, label = 'state condition') {
   }
 }
 
+// Open the settings panel on a given tab. The panel used to have its own edge
+// tab (#settings-pane-tab); it is now reached through the hamburger menu, which
+// both selects the tab and opens the panel.
+async function openSettings(p, tab) {
+  // With the panel already open the hamburger acts as a close button rather
+  // than reopening the menu, so switching tabs takes a second click.
+  await p.click('#settings-hamburger-btn');
+  if (!(await p.isVisible('#settings-hamburger-menu.visible'))) {
+    await p.click('#settings-hamburger-btn');
+  }
+  await p.click(`#settings-hamburger-menu .hamburger-item[data-tab="${tab}"]`);
+}
+
+async function closeSettings(p) {
+  await p.click('#settings-close-btn');
+}
+
 // Click the map at a lat/lng by converting through Leaflet. The map may have
 // auto-fitted to a route since the last action, so re-center on the target
 // first to guarantee it is on-screen.
@@ -50,6 +67,28 @@ async function clickMapAt(page, lat, lng, button = 'left') {
   }, [lat, lng]);
   await page.mouse.click(pt.x, pt.y, { button });
   return pt;
+}
+
+// Drag the route line to insert a via. A plain click on the route does nothing
+// by design — onSegmentDragUp only inserts when the pointer actually moved
+// (>5px), and suppressRouteClick stops the older click-to-add-via handler from
+// firing, so dragging is the only left-button gesture that adds a via.
+async function dragRouteAt(p, lat, lng, dLat = 0.004, dLng = 0) {
+  await p.evaluate(([la, ln]) => {
+    window.__marine.map.setView([la, ln], window.__marine.map.getZoom(), { animate: false });
+  }, [lat, lng]);
+  await p.waitForTimeout(150);
+  const pts = await p.evaluate(([la, ln, dla, dln]) => {
+    const m = window.__marine.map;
+    const r = m.getContainer().getBoundingClientRect();
+    const a = m.latLngToContainerPoint([la, ln]);
+    const b = m.latLngToContainerPoint([la + dla, ln + dln]);
+    return { from: { x: r.left + a.x, y: r.top + a.y }, to: { x: r.left + b.x, y: r.top + b.y } };
+  }, [lat, lng, dLat, dLng]);
+  await p.mouse.move(pts.from.x, pts.from.y);
+  await p.mouse.down();
+  await p.mouse.move(pts.to.x, pts.to.y, { steps: 12 });
+  await p.mouse.up();
 }
 
 const browser = await chromium.launch();
@@ -75,13 +114,18 @@ await page.evaluate(() => {
 await page.screenshot({ path: `${SHOTS}/01-desktop-initial.png` });
 
 console.log('== 2. Settings panel: tabs + switches ==');
-await page.click('#settings-pane-tab');
+await page.click('#settings-hamburger-btn');
+check('hamburger opens the menu', await page.isVisible('#settings-hamburger-menu.visible'));
+await page.click('#settings-hamburger-menu .hamburger-item[data-tab="routing"]');
 check('settings panel opens', await page.evaluate(() => !document.getElementById('settings-panel').classList.contains('collapsed')));
-check('routing tab visible by default', await page.evaluate(() =>
+check('menu closes once a tab is chosen', !(await page.isVisible('#settings-hamburger-menu.visible')));
+check('routing tab shown, others hidden', await page.evaluate(() =>
   document.getElementById('settings-tab-routing').style.display !== 'none' &&
   document.getElementById('settings-tab-view').style.display === 'none'));
-check('backend URL field in routing tab', await page.isVisible('#settings-tab-routing #api-url'));
-await page.click('#settings-panel .panel-tab[data-tab="view"]');
+// The backend URL is not a routing parameter, so it lives under Advanced.
+await openSettings(page, 'advanced');
+check('backend URL field in advanced tab', await page.isVisible('#settings-tab-advanced #api-url'));
+await openSettings(page, 'view');
 check('view tab shows switches', await page.evaluate(() =>
   document.getElementById('settings-tab-view').style.display !== 'none'));
 check('graph toggle is styled switch', await page.evaluate(() => {
@@ -93,7 +137,9 @@ await page.click('#settings-tab-view .switch-row:first-child');
 check('switch toggles on', await page.evaluate(() => document.getElementById('graph-cb').checked));
 await page.click('#settings-tab-view .switch-row:first-child');
 await page.screenshot({ path: `${SHOTS}/02-settings-view-tab.png` });
-await page.click('#settings-pane-tab'); // collapse again
+await closeSettings(page);
+check('close button collapses the panel', await page.evaluate(() =>
+  document.getElementById('settings-panel').classList.contains('collapsed')));
 
 console.log('== 3. Waypoints by left click + auto route ==');
 // Clear anything (e.g. vessel auto-start) first — exercises the confirm dialog
@@ -120,8 +166,8 @@ check('no manual segments in auto route', await page.evaluate(() =>
   window.__marine.state.routeSegments.every(s => !s.isManual)));
 await page.screenshot({ path: `${SHOTS}/03-auto-route.png` });
 
-console.log('== 4. Click on route inserts via ==');
-// pick a point midway along the drawn route and click exactly on it
+console.log('== 4. Drag on route inserts via ==');
+// pick a point midway along the drawn route and drag it aside
 const mid = await page.evaluate(() => {
   const segs = window.__marine.state.routeSegments;
   const seg = segs[Math.floor(segs.length / 2)];
@@ -130,7 +176,10 @@ const mid = await page.evaluate(() => {
   return { lat: ll.lat, lng: ll.lng };
 });
 await clickMapAt(page, mid.lat, mid.lng);
-check('via inserted by clicking route', await waitState(page, () =>
+check('clicking the route alone adds nothing', await page.evaluate(() =>
+  window.__marine.state.viaPoints.length === 0));
+await dragRouteAt(page, mid.lat, mid.lng);
+check('via inserted by dragging route', await waitState(page, () =>
   window.__marine.state.viaPoints.length === 1, 10000, 'via added'));
 await waitState(page, () => window.__marine.state.routeSegments.length > 0, 30000, 'route recalc');
 
@@ -179,9 +228,10 @@ check('route with manual leg calculated', await waitState(page, () => {
   const g = window.__marine.state.lastGeoJson;
   return g && g.features && g.features.some(f => f.properties && f.properties.mode === 'manual');
 }, 30000, 'manual feature in result'));
-check('manual segment drawn dashed orange', await page.evaluate(() => {
+// Manual legs are dashed magenta (#d946ef); orange is the warning colour.
+check('manual segment drawn dashed magenta', await page.evaluate(() => {
   const seg = window.__marine.state.routeSegments.find(s => s.isManual);
-  return !!seg && seg.originalStyle.color === '#f97316' && !!seg.originalStyle.dashArray;
+  return !!seg && seg.originalStyle.color === '#d946ef' && !!seg.originalStyle.dashArray;
 }));
 check('auto segments still solid blue', await page.evaluate(() =>
   window.__marine.state.routeSegments.some(s => !s.isManual && s.originalStyle.color === '#3b8fd4')));
@@ -234,20 +284,45 @@ const tapOk = await mob.evaluate(() => {
 check('toolbar buttons are >=44px tall on mobile', tapOk);
 await mob.click('#route-pane-tab'); // close sheet
 // settings slide-over
-await mob.click('#settings-pane-tab');
+await openSettings(mob, 'routing');
 const setBox = await mob.evaluate(() => {
   const r = document.getElementById('settings-panel').getBoundingClientRect();
   return { top: r.top, right: r.right, height: r.height, vw: window.innerWidth, vh: window.innerHeight };
 });
 check('settings is a full-height slide-over on mobile',
   Math.abs(setBox.right - setBox.vw) < 2 && setBox.height >= setBox.vh - 2, JSON.stringify(setBox));
-const switchOk = await mob.evaluate(() => {
-  document.querySelector('#settings-panel .panel-tab[data-tab="view"]').click();
-  return [...document.querySelectorAll('.switch-row')].every(r => r.getBoundingClientRect().height >= 44);
-});
-check('switch rows are >=44px tall on mobile (coarse pointer)', switchOk);
+// Measure each tab while it is actually on screen. A .switch-row in a
+// display:none tab has height 0, so querying the whole document at once tests
+// nothing useful — the Charts tab holds one row per installed chart and those
+// are exactly the rows a tap has to hit.
+async function switchRowsAtLeast44(p, tab) {
+  await openSettings(p, tab);
+  await p.waitForTimeout(250);
+  return p.evaluate((t) => {
+    const rows = [...document.querySelectorAll('#settings-tab-' + t + ' .switch-row')];
+    const short = rows.filter((r) => r.getBoundingClientRect().height < 44);
+    return {
+      count: rows.length,
+      short: short.length,
+      worst: short.length ? Math.min(...short.map((r) => +r.getBoundingClientRect().height.toFixed(1))) : null,
+    };
+  }, tab);
+}
+
+const viewRows = await switchRowsAtLeast44(mob, 'view');
+check('View switch rows are >=44px tall on mobile (coarse pointer)',
+  viewRows.count > 0 && viewRows.short === 0, JSON.stringify(viewRows));
+// Chart rows come from whatever the server has installed, so an empty list is
+// legitimate here — but any row that does exist still has to be tappable.
+const chartRows = await switchRowsAtLeast44(mob, 'charts');
+check('Chart switch rows are >=44px tall on mobile (coarse pointer)',
+  chartRows.short === 0, JSON.stringify(chartRows));
+await openSettings(mob, 'view');
 await mob.screenshot({ path: `${SHOTS}/05-mobile-settings.png` });
-await mob.click('#settings-pane-tab');
+// Not #settings-close-btn: on a narrow viewport the fixed hamburger sits on
+// top of the panel header and swallows the tap (see notes in README). The
+// hamburger itself collapses an open panel, which is the reachable way out.
+await mob.click('#settings-hamburger-btn');
 await mob.screenshot({ path: `${SHOTS}/06-mobile-map.png` });
 
 console.log(`\n== RESULT: ${passes} passed, ${failures} failed ==`);

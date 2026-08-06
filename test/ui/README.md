@@ -4,7 +4,7 @@ Validates the webapp against a **live SignalK server** with routing data loaded
 (default `http://localhost:3000/signalk-routeiq/`, override with `BASE_URL`).
 
 Covers: page load, settings Routing/View tabs + switch toggles, left-click
-waypoint placement, click-on-route via insertion, undo/redo (buttons and
+waypoint placement, drag-on-route via insertion, undo/redo (buttons and
 Ctrl+Z/Y), right-click context menu, manual draw mode (dashed-orange straight
 legs), clear-route confirmation, and the mobile bottom-sheet/slide-over layout
 with >=44 px tap targets. Screenshots land in `/shots`.
