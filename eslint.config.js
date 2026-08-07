@@ -107,7 +107,9 @@ export default tseslint.config(
       // Third-party, and the world-countries GeoJSON. public/app.js is ours
       // and is linted — see the block above.
       'public/vendor/**/*',
-      'public/*.json',
+      // Currently inert — ESLint does not lint JSON without a plugin — but
+      // recursive so it still holds if one is ever added.
+      'public/**/*.json',
       // Local-only directories, also listed in .gitignore. Repeated here on
       // purpose: ESLint does not read .gitignore, and --ignore-path is not
       // available under flat config, so gitignoring them alone still leaves
