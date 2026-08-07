@@ -176,6 +176,19 @@ await check('missing vendored file -> names it', async (page) => {
   }
 });
 
+// 4b. The webapp itself is a separate file now, so failing to fetch it is a new
+//     way to get a permanently blank overlay. The boot guard is inline and
+//     parsed first precisely so it survives this and can say so.
+await check('missing app.js -> names it', async (page) => {
+  await page.route('**/app.js', (r) => r.abort());
+  await page.goto(BASE);
+  await page.waitForSelector('#loading-error-detail:visible', { timeout: 10000 });
+  const detail = await page.locator('#loading-error-detail').innerText();
+  if (!detail.includes('app.js')) {
+    throw new Error(`did not name the file: ${JSON.stringify(detail)}`);
+  }
+});
+
 // 5. Static regression guard: no <script>/<link>/<img> may load from off-host.
 //    Plain <a href> to openstreetmap.org and the like is fine — map attribution
 //    has to link somewhere, and nothing is fetched until you tap it.
