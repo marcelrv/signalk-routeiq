@@ -40,9 +40,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Not engines' 22.5.0. npm 10.8.2, which ships with that exact release,
+      # dies with "Exit handler never called!" while installing the current dev
+      # tree — and it exits 0 while doing it, so `npm ci` looks like it passed
+      # and the next step fails with `eslint: not found`. Reproducible: node
+      # 22.5.0 crashes, node 22 latest and 24 install the same lockfile fine.
+      # This job lints, it does not exercise the runtime floor — the test matrix
+      # does that on 22 and 24.
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.5.0'
+          node-version: '22'
           cache: 'npm'
 
       - run: npm ci
