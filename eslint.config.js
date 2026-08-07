@@ -49,13 +49,65 @@ export default tseslint.config(
     },
   },
   {
+    // The webapp, now that it is a file ESLint can read rather than a script
+    // tag inside index.html. Same reasoning as plotterext above: it genuinely
+    // runs in a browser, so declaring the environment is honest. `L` is
+    // Leaflet, loaded from vendor/ by a separate tag before this one.
+    files: ['public/app.js'],
+    languageOptions: {
+      globals: {
+        document: 'readonly',
+        window: 'readonly',
+        console: 'readonly',
+        fetch: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+        localStorage: 'readonly',
+        location: 'readonly',
+        navigator: 'readonly',
+        alert: 'readonly',
+        confirm: 'readonly',
+        Image: 'readonly',
+        Blob: 'readonly',
+        URL: 'readonly',
+        FormData: 'readonly',
+        Headers: 'readonly',
+        Response: 'readonly',
+        AbortSignal: 'readonly',
+        AbortController: 'readonly',
+        DOMParser: 'readonly',
+        XMLHttpRequest: 'readonly',
+        requestAnimationFrame: 'readonly',
+        getComputedStyle: 'readonly',
+        TextDecoder: 'readonly',
+        L: 'readonly',
+      },
+    },
+    rules: {
+      // Every one of these is `try { localStorage… } catch {}`. Storage throws
+      // in private mode and when it is disabled, and there is nothing useful to
+      // do about it, so the empty block is the intent rather than an omission.
+      'no-empty': ['error', { allowEmptyCatch: true }],
+      // Pre-existing, found the moment this file became lintable. Warnings, not
+      // errors, matching how src/ already carries its no-explicit-any backlog:
+      // two redundant regex escapes, and two `var btn = this` aliases in
+      // non-arrow event handlers. Worth clearing, not worth blocking on, and
+      // not something to fix in the same commit that turns linting on.
+      'no-useless-escape': 'warn',
+      '@typescript-eslint/no-this-alias': 'warn',
+    },
+  },
+  {
     ignores: [
       'dist/**/*',
       'dist-test/**/*',
       'node_modules/**/*',
-      // The webapp is 5,600 lines of JavaScript inline in index.html, which
-      // ESLint cannot read without a plugin for script tags.
-      'public/**/*',
+      // Third-party, and the world-countries GeoJSON. public/app.js is ours
+      // and is linted — see the block above.
+      'public/vendor/**/*',
+      'public/*.json',
       // Local-only directories, also listed in .gitignore. Repeated here on
       // purpose: ESLint does not read .gitignore, and --ignore-path is not
       // available under flat config, so gitignoring them alone still leaves
