@@ -69,6 +69,7 @@
   "engines": {
     "node": ">=22.5.0"
   },
+  "browserslist": ["chrome >= 66", "edge >= 79", "firefox >= 60", "safari >= 12.1", "ios_saf >= 12.2"],
   "signalK": {
     "pluginConstructor": "pluginConstructor",
     "name": "signalk-routeiq",
