@@ -2720,7 +2720,49 @@ export class RoutingEngine {
       }
       along = end;
     }
-    for (const [from, to] of lockSpans.values()) {
+    // Zandkreeksluis and Hansweert carry lock_id on their edges AND have a POI
+    // of the same name in the database. A span's start is always the earliest
+    // point in its group, so left unreconciled it would always win the "who
+    // owns the wait" contest in groupCrossings below — leaving the real,
+    // named lock in the itinerary with nothing on it and a bare "Lock" entry
+    // carrying the hour in its place. Reconcile them here instead: a POI
+    // already on the list for the same locking gets the span attached to it,
+    // rather than being shadowed by a synthetic duplicate.
+    const poiLocks = crossings.filter((c) => c.type === "lock");
+    const claimedPois = new Set<RouteCrossing>();
+    // Chainage order, not Map insertion order, so which span reaches for
+    // which POI cannot depend on the order lock ids happened to be inserted.
+    const spans = [...lockSpans.values()].sort((a, b) => a[0] - b[0]);
+    for (const [from, to] of spans) {
+      // The charted POI and the traversed edges rarely land on the same
+      // metre, so allow the usual grouping tolerance at each end of the span.
+      const lo = from - RoutingEngine.CROSSING_GROUP_METRES;
+      const hi = to + RoutingEngine.CROSSING_GROUP_METRES;
+      // Nearest unclaimed POI wins, and each POI can be claimed once: a
+      // staircase lock's two distinct spans must not both reach for the one
+      // POI sitting between them (that would silently turn two lockings back
+      // into one), and Hansweert's Oost- and Westsluis sit at the same
+      // chainage inside a single span but only one of them needs the span —
+      // the other groups alongside it the same way it always has.
+      let owner: RouteCrossing | undefined;
+      let ownerDistance = Infinity;
+      for (const c of poiLocks) {
+        if (claimedPois.has(c)) continue;
+        const at = c.distanceFromStart ?? 0;
+        if (at < lo || at > hi) continue;
+        const distance = Math.abs(at - (from + to) / 2);
+        if (distance < ownerDistance) {
+          owner = c;
+          ownerDistance = distance;
+        }
+      }
+      if (owner) {
+        claimedPois.add(owner);
+        owner.lockSpan = [Math.round(from), Math.round(to)];
+        continue;
+      }
+      // No POI for this locking — Krammersluizen's database has none named —
+      // so fall back to a synthetic entry, same as before.
       const at = Math.round(from);
       // A position so the itinerary can place it like any other crossing.
       let idx = 0;
