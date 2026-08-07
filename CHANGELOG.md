@@ -1,25 +1,24 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.6 — 2026-08-07
 
-- Fixed: the planner hung on "Loading Routing Data" forever on older tablets and
-  chart plotters. The first request it makes passes `AbortSignal.timeout()`,
-  which browsers older than Chrome/Android WebView 103, Firefox 100 or Safari 16
-  do not have. Evaluating it threw before `fetch` was ever called, so the retry
-  loop wrapped around that request never started and the failure was silent. A
-  polyfill now covers those browsers, and the same fetch pattern is used in six
-  other places that would have failed the same way.
-- Fixed: Leaflet and Leaflet Routing Machine were loaded from unpkg.com, so the
-  planner needed internet to start — on a boat it would sit on the loading
-  overlay waiting for a CDN it could not reach, while a device that had the
-  files cached from an earlier trip ashore worked fine. Both, and their
-  stylesheets and images, are now vendored under `public/vendor/` alongside the
-  chart renderer that was already local. Base map tiles still come from the
-  network; offline use wants a Signal K chart provider.
-- Added: a startup error now says what went wrong on the loading overlay itself,
-  with a button to continue past it. Anything that fails before the app is up —
-  an incompatible browser, a missing file — previously reached the console only,
-  which is unreachable on the devices where this actually happens.
+- Fixed: the planner could hang on "Loading Routing Data" forever on older
+  tablets and chart plotters, without ever showing a connection retry. It now
+  connects and retries normally on those devices too.
+- Fixed: the planner needed internet just to start, because the map library it
+  draws on was loaded from the web. It's now bundled with the plugin, so the
+  app starts offline. Base map tiles still need a network; for offline charts,
+  use a Signal K chart provider.
+- Added: if something goes wrong during startup — an incompatible browser, a
+  missing file — the loading screen now says what happened, with a button to
+  dismiss it and carry on, instead of sitting on a spinner with no explanation.
+- Changed: a route result's `totalSeconds` now includes time spent waiting at
+  locks and opening bridges, not just time spent moving — so a client reading
+  it as pure travel time will be off by roughly an hour for each lock or bridge
+  crossed. `totalSecondsNoTide` includes the same waits, deliberately, so
+  comparing the two isn't skewed into looking like a tide saving. The waiting
+  time is also broken out on its own, per leg as `leg.waitSeconds` and for the
+  whole route as `totalWaitSeconds`.
 
 ## 0.1.0-alpha.5 — 2026-08-03
 
@@ -62,7 +61,6 @@
   scrolled previously depended on how tall its content happened to be.
 - Changed: "Backend URL" moves out of the Routing settings into its own
   "Advanced" section — it decides which server answers, not what is asked of it.
-
 - Added: the departure planner shows the distance of each departure. A
   tide-aware scan can pick a different route at different times, so a row that
   is slower because its route is several miles longer used to look identical to

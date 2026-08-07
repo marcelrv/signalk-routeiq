@@ -73,3 +73,6 @@ scratch*/
 # screenshot tooling (scripts/screenshots.sh installs playwright here)
 scripts/node_modules/
 scripts/package*.json
+
+# boot-guard tooling (test/ui/README.md installs playwright here)
+test/ui/package*.json

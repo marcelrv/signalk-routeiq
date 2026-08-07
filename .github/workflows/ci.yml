@@ -55,3 +55,36 @@ jobs:
       - run: npm ci
 
       - run: npm run lint
+
+  # Also not part of the reusable workflow, and also a sibling job for the same
+  # reason lint is: no input for it and no steps alongside a `uses:`. Protects
+  # this release's headline guarantees — booting on a browser without
+  # AbortSignal.timeout, booting fully offline, naming a missing vendored file
+  # or a missing app.js on the loading overlay instead of hanging silently, and
+  # no external/CDN asset creeping back into index.html — none of which is
+  # exercised anywhere else in this workflow. It needs no SignalK server: the
+  # script serves public/ itself, so there is nothing here for the reusable
+  # workflow's server-backed test job to share.
+  #
+  # Runs inside the Playwright image itself (same tag test/ui/README.md
+  # documents for the local invocation) so the browsers are already on disk;
+  # PLAYWRIGHT_BROWSERS_PATH points at where the image put them.
+  boot-guard:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.54.0-noble
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    steps:
+      - uses: actions/checkout@v4
+
+      # npm init -y first, deliberately: test/ui has no package.json of its
+      # own (see README.md), and without one to anchor it `npm install` walks
+      # up to the repo root's and installs the dependency there instead —
+      # silently, and it rewrites the whole file when it does.
+      - run: npm init -y && npm install playwright@1.54.0 --no-audit --no-fund
+        working-directory: test/ui
+
+      - run: node test/ui/boot-guard.mjs
+        env:
+          PUBLIC_DIR: ${{ github.workspace }}/public
