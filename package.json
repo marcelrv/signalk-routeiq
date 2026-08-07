@@ -61,6 +61,7 @@
     "@types/geojson": "^7946.0.14",
     "@types/node": "^22.0.0",
     "eslint": "^8.56.0",
+    "eslint-plugin-compat": "^6.2.1",
     "prettier": "^3.2.4",
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3",
@@ -69,6 +70,7 @@
   "engines": {
     "node": ">=22.5.0"
   },
+  "browserslist": ["chrome >= 66", "edge >= 79", "firefox >= 60", "safari >= 12.1", "ios_saf >= 12.2"],
   "signalK": {
     "pluginConstructor": "pluginConstructor",
     "name": "signalk-routeiq",

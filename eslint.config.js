@@ -1,5 +1,6 @@
 import eslint from '@eslint/js';
 import tseslint from 'typescript-eslint';
+import compat from 'eslint-plugin-compat';
 
 export default tseslint.config(
   eslint.configs.recommended,
@@ -36,6 +37,11 @@ export default tseslint.config(
     // Node environment here being asked to pretend a DOM exists. It ships in
     // the npm package (see "files" in package.json) and was never linted,
     // because the lint script only ever covered src/.
+    //
+    // Deliberately not covered by compat/compat, unlike public/app.js. This
+    // panel only ever runs inside Freeboard-SK, so Freeboard's baseline governs
+    // it, not the plotter floor in browserslist. Holding it to Chrome 66 would
+    // report ~25 findings for optional chaining that no real host cares about.
     files: ['plotterext/**/*.js'],
     languageOptions: {
       globals: {
@@ -85,7 +91,18 @@ export default tseslint.config(
         L: 'readonly',
       },
     },
+    plugins: { compat },
     rules: {
+      // Enforce the browser floor in package.json's browserslist instead of
+      // leaving it to review. Note it did NOT catch AbortSignal.timeout(), the
+      // API that froze the app on older tablets and prompted all this — its
+      // dataset misses that static method. A net with holes, not a guarantee;
+      // the ES5 boot guard and the polyfill are the real defence.
+      //
+      // (AbortSignal.timeout landed in Chrome 103 and was only fully correct in
+      // 124. The polyfill installs on absence alone, and nothing here inspects
+      // the abort reason, so the partial window does not affect us.)
+      'compat/compat': 'error',
       // Every one of these is `try { localStorage… } catch {}`. Storage throws
       // in private mode and when it is disabled, and there is nothing useful to
       // do about it, so the empty block is the intent rather than an omission.

@@ -62,6 +62,66 @@ RouteIQ can be used two ways: as its own standalone web app (served by the plugi
 
 Want tide-aware routing? Install and enable a tide data plugin first — [`signalk-tidal-currents`](https://github.com/marcelrv/signalk-tidal-currents) for real harmonic current stations, and/or [`signalk-tides`](https://github.com/openwatersio/signalk-tides) for a height-derived estimate — then turn on "Consider Tides" in RouteIQ's settings (☰ menu → Routing) or per request. When both are available RouteIQ prefers the current stations and falls back to the height estimate outside their range.
 
+## Browser support
+
+RouteIQ runs on chart plotters and tablets that are often years behind a desktop
+browser, so the web app is deliberately held to an old baseline.
+
+| | version | notes |
+|---|---|---|
+| **Minimum** | Chrome / Android WebView **66**, Safari **12.1**, Firefox **60** | everything works |
+| **Best** | Chrome / WebView **84+**, Safari **14.1+** | below this, flex `gap` is ignored and some panels lose their spacing — cosmetic only |
+
+State the requirement as a **WebView version, not an Android version** — they are
+not the same thing. Since Android 5, WebView updates through the Play Store
+independently of the OS, so an old tablet with Play can be far newer than the
+Android version suggests:
+
+| Android | WebView it shipped with | highest WebView ever built for it |
+|---|---|---|
+| 5 (Lollipop) | ~37 | **96** — last build for API 21, late 2021 |
+| 9 (Pie) | ~66 | last build for that API level |
+| 10 | ~77 | current — still updated |
+| 11 | ~85 | current — still updated |
+
+Read the third column as a ceiling, not a promise. Only Android 10 and later
+still receive new WebView builds; for 5 through 9 the updates stopped, so a
+device sits at whatever version it happened to reach before then and **cannot be
+brought up to date anymore**. Telling a user to update WebView only helps on
+Android 10+.
+
+In practice:
+
+- **Android 10+** — fine. Updatable, and already well past the floor.
+- **Android 6–9** — usually fine. These were receiving updates long after
+  WebView 66, so most devices that ever saw Play are comfortably above it.
+- **Android 5** — best effort. The ceiling of 96 clears our floor, but the
+  device had to reach it before updates ended, and Play Services support for
+  Lollipop has itself ended. Worth trying; not worth promising.
+- **No Play Services at all** (AOSP builds, embedded MFDs) — stuck on the
+  shipped version, so Android 9 or newer is needed.
+
+To check a device: open `chrome://version`, or Settings → Apps → Android System
+WebView. If the app cannot start it says so on the loading screen rather than
+hanging — that message names the file or API that failed.
+
+What pins the floor at 66, should anyone be tempted to use something newer:
+`AbortController` (Chrome 66) and optional catch binding (`catch {}`, Chrome 66).
+`AbortSignal.timeout()` is Chrome 103 and is polyfilled in an ES5 block at the
+top of `index.html`; that polyfill is what makes the Android 5 ceiling reachable
+at all. Avoid `?.`, `??` (Chrome 80) and `Promise.allSettled` (Chrome 76) in
+`public/app.js` — they were removed deliberately, and `browserslist` in
+`package.json` records the target.
+
+`npm run lint` enforces this on `public/app.js` via `eslint-plugin-compat`. Note
+that it is a net with holes rather than a guarantee: it catches `structuredClone`
+and `navigator.clipboard`, but not `AbortSignal.timeout` — the very API that
+caused this. The boot guard is still the thing that tells a user what went wrong.
+
+This floor applies to the **web app only**. `plotterext/panel.js` runs inside
+Freeboard-SK and follows Freeboard's baseline instead, so it is not held to
+Chrome 66 and is not compat-checked.
+
 ## Configuration
 
 These settings are available under Server → Plugin Config → RouteIQ:

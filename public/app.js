@@ -200,7 +200,7 @@
   // aborting the request is what tells the server to stop calculating too.
   function shiftDepartureWindow(hours) {
     if (!depWindowStart) return;
-    depWindowStart = new Date(depWindowStart.getTime() + hours * 3600_000);
+    depWindowStart = new Date(depWindowStart.getTime() + hours * 3600000);
     runDepartureScan();
   }
 
@@ -268,7 +268,7 @@
 
   function updateDepWindowLabel() {
     if (!depWindowStart) { depEl('dep-window').textContent = ''; return; }
-    const end = new Date(depWindowStart.getTime() + DEP_SCAN_HOURS * 3600_000);
+    const end = new Date(depWindowStart.getTime() + DEP_SCAN_HOURS * 3600000);
     depEl('dep-window').textContent = fmtDepStamp(depWindowStart) + '  →  ' + fmtDepStamp(end);
   }
 
@@ -307,7 +307,7 @@
   function departureWindowTimes() {
     const t0 = depWindowStart.getTime();
     return Array.from({ length: DEP_STEPS }, (_, i) =>
-      new Date(t0 + i * DEP_STEP_MINUTES * 60_000).toISOString());
+      new Date(t0 + i * DEP_STEP_MINUTES * 60000).toISOString());
   }
 
   // Kept in step with the copy in plotterext/panel.js. Not shared: this is an
@@ -1667,17 +1667,17 @@
   function buildHourTrack() {
     const track = document.getElementById('time-scrubber-hourbar');
     track.innerHTML = '';
-    const totalMs = 24 * 3600_000;
+    const totalMs = 24 * 3600000;
     const start = stationsWindowStart;
     const end = start + totalMs;
 
     const boundaries = [start];
     let t = new Date(start);
     t.setMinutes(0, 0, 0);
-    t = t.getTime() + 3600_000;
+    t = t.getTime() + 3600000;
     while (t < end) {
       boundaries.push(t);
-      t += 3600_000;
+      t += 3600000;
     }
     boundaries.push(end);
 
@@ -1751,7 +1751,7 @@
   }
 
   function updateStationMarkers(minutes) {
-    const t = stationsWindowStart + minutes * 60_000;
+    const t = stationsWindowStart + minutes * 60000;
     document.getElementById('time-scrubber-pill').textContent = scrubDayLabel(t) + ' · ' + clockStr(t);
     updateScrubberPosition(minutes);
     const idx = Math.round(minutes / 15);
@@ -1770,7 +1770,7 @@
     for (const id in currentStationMarkers) delete currentStationMarkers[id];
     const center = map.getCenter();
     stationsWindowStart = Date.now();
-    const windowEnd = stationsWindowStart + 24 * 3600_000;
+    const windowEnd = stationsWindowStart + 24 * 3600000;
     buildHourTrack();
     updateScrubberPosition(Number(document.getElementById('time-scrubber').value));
 
@@ -1838,7 +1838,7 @@
     currentGridLayer.clearLayers();
     if (!stationsVisible) return;
     const minutes = Number(document.getElementById('time-scrubber').value);
-    const t = (stationsWindowStart || Date.now()) + minutes * 60_000;
+    const t = (stationsWindowStart || Date.now()) + minutes * 60000;
     const token = ++gridFetchToken;
     fetch(currentGridUrl(t))
       .then((r) => (r.ok ? r.json() : null))
@@ -2223,7 +2223,7 @@
         fetch(getApiBase() + '/signalk/v1/api/router/graph/nodes/' + nodeData.id, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dbIndex: 0, lat: lat, lon: lon, node_depth: nodeData.node_depth ?? -1, resolution: nodeData.resolution ?? 0 }),
+          body: JSON.stringify({ dbIndex: 0, lat: lat, lon: lon, node_depth: nodeData.node_depth != null ? nodeData.node_depth : -1, resolution: nodeData.resolution != null ? nodeData.resolution : 0 }),
         })
           .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
           .then(function (data) {
@@ -2682,7 +2682,13 @@
     // Capped to match coerceVesselDimension's server-side limit (src/api.ts) —
     // SK deltas are JSON and can nest arbitrarily deep on the wire.
     if (v && typeof v === 'object' && depth < 4) {
-      return skMeters(v.value, depth + 1) ?? skMeters(v.maximum, depth + 1) ?? skMeters(v.current, depth + 1);
+      // Early returns rather than ??, which needs Chrome 80. Same short-circuit:
+      // v.maximum is only recursed into when v.value yielded nothing.
+      const byValue = skMeters(v.value, depth + 1);
+      if (byValue != null) return byValue;
+      const byMax = skMeters(v.maximum, depth + 1);
+      if (byMax != null) return byMax;
+      return skMeters(v.current, depth + 1);
     }
     return undefined;
   }
@@ -2725,9 +2731,15 @@
     const vUrl = vesselUrl(), sUrl = skSelfUrl();
     logDebug('BOAT', vUrl);
     logDebug('BOAT', sUrl);
-    return Promise.allSettled([
-      fetch(vUrl).then(r => { logDebug('BOAT', vUrl, undefined, r); return r.ok ? r.json() : Promise.reject(); }),
-      fetch(sUrl).then(r => { logDebug('BOAT', sUrl, undefined, r); return r.ok ? r.json() : Promise.reject(); }),
+    // Promise.allSettled is Chrome 76 and this was the only use, so reflecting
+    // each promise by hand keeps the floor at 66. Same shape of result.
+    const settle = (p) => p.then(
+      (value) => ({ status: 'fulfilled', value: value }),
+      (reason) => ({ status: 'rejected', reason: reason })
+    );
+    return Promise.all([
+      settle(fetch(vUrl).then(r => { logDebug('BOAT', vUrl, undefined, r); return r.ok ? r.json() : Promise.reject(); })),
+      settle(fetch(sUrl).then(r => { logDebug('BOAT', sUrl, undefined, r); return r.ok ? r.json() : Promise.reject(); })),
     ]).then(([vr, sr]) => {
       if (vr.status === 'fulfilled') {
         draft = skMeters(vr.value.draft);
@@ -2738,19 +2750,24 @@
         var effectiveAirDraft = skMeters(vr.value.effectiveAirDraft);
       }
       if (sr.status === 'fulfilled') {
-        const nav = sr.value?.navigation;
-        const pos = nav?.position;
+        // Written out rather than with ?., which needs Chrome 80 — see the
+        // browser floor in README. `!= null` is exactly what ?. tests.
+        const sv = sr.value;
+        const nav = sv != null ? sv.navigation : undefined;
+        const design = sv != null ? sv.design : undefined;
+        const pos = nav != null ? nav.position : undefined;
         if (pos && pos.value) {
           lat = pos.value.latitude;
           lng = pos.value.longitude;
         }
-        if (!sog) sog = nav?.speedOverGround?.value;
-        if (!cog) cog = nav?.courseOverGroundTrue?.value;
+        if (!sog) sog = nav != null && nav.speedOverGround != null ? nav.speedOverGround.value : undefined;
+        if (!cog) cog = nav != null && nav.courseOverGroundTrue != null ? nav.courseOverGroundTrue.value : undefined;
         // `||`, not `??`: the plugin reports 0 for a dimension it never got
         // from Signal K, and a 0 draft is not a dimension worth routing on.
-        draft = draft || skMeters(sr.value?.design?.draft) || skMeters(nav?.draft);
-        beam = beam || skMeters(sr.value?.design?.beam);
-        airDraft = airDraft || skMeters(sr.value?.design?.airHeight);
+        draft = draft || skMeters(design != null ? design.draft : undefined)
+          || skMeters(nav != null ? nav.draft : undefined);
+        beam = beam || skMeters(design != null ? design.beam : undefined);
+        airDraft = airDraft || skMeters(design != null ? design.airHeight : undefined);
       }
       showBoatData(lat, lng, sog, cog, draft, beam, airDraft, effectiveDraft, effectiveBeam, effectiveAirDraft);
       // Retry if vessel endpoint failed (engine not ready yet)
@@ -2784,9 +2801,9 @@
     const fmt = (v, u) => v != null ? v + (u ? ' ' + u : '') : '—';
     document.getElementById('boat-pos').querySelector('.value').textContent =
       (lat != null && lng != null) ? lat.toFixed(4) + ', ' + lng.toFixed(4) : '—';
-    document.getElementById('boat-draft').querySelector('.value').textContent = fmt(effectiveDraft ?? draft, 'm');
-    document.getElementById('boat-beam').querySelector('.value').textContent = fmt(effectiveBeam ?? beam, 'm');
-    document.getElementById('boat-airdraft').querySelector('.value').textContent = fmt(effectiveAirDraft ?? airDraft, 'm');
+    document.getElementById('boat-draft').querySelector('.value').textContent = fmt(effectiveDraft != null ? effectiveDraft : draft, 'm');
+    document.getElementById('boat-beam').querySelector('.value').textContent = fmt(effectiveBeam != null ? effectiveBeam : beam, 'm');
+    document.getElementById('boat-airdraft').querySelector('.value').textContent = fmt(effectiveAirDraft != null ? effectiveAirDraft : airDraft, 'm');
     boatInfo.style.display = 'block';
   }
 
@@ -4217,10 +4234,10 @@
     } else if (geoJson.features && geoJson.features.length > 1) {
       for (const f of geoJson.features) {
         segments.push({
-          distance: f.properties.distance ?? 0,
-          minDepth: f.properties.minDepth ?? -1,
-          maxAirDraft: f.properties.maxAirDraft ?? -1,
-          isFairway: f.properties.isFairway ?? false,
+          distance: f.properties.distance != null ? f.properties.distance : 0,
+          minDepth: f.properties.minDepth != null ? f.properties.minDepth : -1,
+          maxAirDraft: f.properties.maxAirDraft != null ? f.properties.maxAirDraft : -1,
+          isFairway: f.properties.isFairway != null ? f.properties.isFairway : false,
         });
       }
     }
