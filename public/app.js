@@ -2750,8 +2750,8 @@
         var effectiveAirDraft = skMeters(vr.value.effectiveAirDraft);
       }
       if (sr.status === 'fulfilled') {
-        // Written out rather than with ?., which needs Chrome 80 — see the
-        // browser floor in README. `!= null` is exactly what ?. tests.
+        // Written out rather than with ?., which needs Chrome 80 — the floor
+        // is browserslist in package.json. `!= null` is exactly what ?. tests.
         const sv = sr.value;
         const nav = sv != null ? sv.navigation : undefined;
         const design = sv != null ? sv.design : undefined;
