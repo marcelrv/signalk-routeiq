@@ -94,9 +94,14 @@ export default tseslint.config(
     plugins: { compat },
     rules: {
       // Enforce the browser floor in package.json's browserslist instead of
-      // leaving it to review. This is the rule that would have caught
-      // AbortSignal.timeout() — a valid global that simply does not exist
-      // before Chrome 103 — which shipped and froze the app on older tablets.
+      // leaving it to review. Note it did NOT catch AbortSignal.timeout(), the
+      // API that froze the app on older tablets and prompted all this — its
+      // dataset misses that static method. A net with holes, not a guarantee;
+      // the ES5 boot guard and the polyfill are the real defence.
+      //
+      // (AbortSignal.timeout landed in Chrome 103 and was only fully correct in
+      // 124. The polyfill installs on absence alone, and nothing here inspects
+      // the abort reason, so the partial window does not affect us.)
       'compat/compat': 'error',
       // Every one of these is `try { localStorage… } catch {}`. Storage throws
       // in private mode and when it is disabled, and there is nothing useful to

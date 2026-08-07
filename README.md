@@ -77,15 +77,29 @@ not the same thing. Since Android 5, WebView updates through the Play Store
 independently of the OS, so an old tablet with Play can be far newer than the
 Android version suggests:
 
-| Android | WebView it shipped with | highest it can reach |
+| Android | WebView it shipped with | highest WebView ever built for it |
 |---|---|---|
-| 5 (Lollipop) | ~37 | **96** — the last build for API 21 |
-| 9 (Pie) | ~66 | current |
-| 10 | ~77 | current |
-| 11 | ~85 | current |
+| 5 (Lollipop) | ~37 | **96** — last build for API 21, late 2021 |
+| 9 (Pie) | ~66 | last build for that API level |
+| 10 | ~77 | current — still updated |
+| 11 | ~85 | current — still updated |
 
-So Android 5 is supported *provided WebView has been updated*. A device with no
-Play Services stays on what it shipped with, and needs Android 9 or newer.
+Read the third column as a ceiling, not a promise. Only Android 10 and later
+still receive new WebView builds; for 5 through 9 the updates stopped, so a
+device sits at whatever version it happened to reach before then and **cannot be
+brought up to date any more**. Telling a user to update WebView only helps on
+Android 10+.
+
+In practice:
+
+- **Android 10+** — fine. Updatable, and already well past the floor.
+- **Android 6–9** — usually fine. These were receiving updates long after
+  WebView 66, so most devices that ever saw Play are comfortably above it.
+- **Android 5** — best effort. The ceiling of 96 clears our floor, but the
+  device had to reach it before updates ended, and Play Services support for
+  Lollipop has itself ended. Worth trying; not worth promising.
+- **No Play Services at all** (AOSP builds, embedded MFDs) — stuck on the
+  shipped version, so Android 9 or newer is needed.
 
 To check a device: open `chrome://version`, or Settings → Apps → Android System
 WebView. If the app cannot start it says so on the loading screen rather than
