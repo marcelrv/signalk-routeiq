@@ -56,9 +56,11 @@ export default tseslint.config(
       // The webapp is 5,600 lines of JavaScript inline in index.html, which
       // ESLint cannot read without a plugin for script tags.
       'public/**/*',
-      // Untracked local scratch. Absent from a CI checkout, but ESLint walks
-      // the working tree and does not read .gitignore, so without these
-      // `npm run lint` is unusable on a working machine even though CI is green.
+      // Local-only directories, also listed in .gitignore. Repeated here on
+      // purpose: ESLint does not read .gitignore, and --ignore-path is not
+      // available under flat config, so gitignoring them alone still leaves
+      // `npm run lint` failing on a working machine while CI — which checks
+      // out neither — stays green.
       'node-server/**/*',
       'scratch*/**',
       // Vendored JavaScript inside the Python virtualenv under backend/.
