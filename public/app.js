@@ -2127,15 +2127,6 @@
       .catch(function () {});
   }
 
-  function makeEditNodeIcon(n) {
-    return L.divIcon({
-      className: '',
-      html: '<div style="width:22px;height:22px;background:#8b5cf6;border:2px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:10px;color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.4)">' + n + '</div>',
-      iconSize: [22, 22],
-      iconAnchor: [11, 11],
-    });
-  }
-
   function clearEditorSelection() {
     if (state.selectedLayer) {
       if (state.selectedLayer.setStyle && state.selectedLayer._editOrigStyle) {
@@ -2611,7 +2602,12 @@
   function renderUrlHistory(filter) {
     const list = loadRecentUrls();
     const filtered = filter ? list.filter(u => u !== urlInput.value && u.toLowerCase().includes(filter.toLowerCase())) : list.filter(u => u !== urlInput.value);
-    urlHistoryEl.innerHTML = filtered.map(u => `<div class="url-history-item" data-url="${u.replace(/"/g, '&quot;')}">${u}</div>`).join('');
+    // Both positions need escaping, not just the attribute: a stored URL
+    // containing < renders as markup in the element body. Now that escapeHtml
+    // covers quotes it serves for both.
+    urlHistoryEl.innerHTML = filtered
+      .map(u => `<div class="url-history-item" data-url="${escapeHtml(u)}">${escapeHtml(u)}</div>`)
+      .join('');
     if (filtered.length > 0) urlHistoryEl.classList.add('visible');
     else urlHistoryEl.classList.remove('visible');
   }
@@ -3912,12 +3908,6 @@
           var color = getSearchColor(t, props);
           var iconHtml = poiIcon(t, props, 16);
           var typeLabel = t.charAt(0).toUpperCase() + t.slice(1);
-          var lat = item.latitude, lon = item.longitude;
-          var coordsStr = lat != null && lon != null
-            ? (lat > 0 ? lat.toFixed(3) + '\u00b0N' : (-lat).toFixed(3) + '\u00b0S') + ' ' +
-              (lon > 0 ? lon.toFixed(3) + '\u00b0E' : (-lon).toFixed(3) + '\u00b0W')
-            : '';
-
           html += '<div class="search-result-item" data-idx="' + i + '">' +
             '<span class="search-result-icon" style="background:' + color + ';font-size:14px;line-height:1">' + iconHtml + '</span>' +
             '<span class="search-result-name">' + highlightText(name, qLower) + '</span>' +
@@ -4396,7 +4386,6 @@
       else if (node._viaIdx !== undefined) label = 'Via ' + (node._viaIdx + 1);
       else label = 'Turn ' + i;
 
-      let badgeHtml = '';
 
       const speedKn = parseFloat(document.getElementById('avg-speed').value) || 6;
       const cumDistNm = node.cumDistKm / 1.852;
@@ -4730,8 +4719,6 @@
   });
 
   // ---- Data Manager (download dialog) ----
-  var dmTabAvailable = document.getElementById('dm-tab-available');
-  var dmTabInstalled = document.getElementById('dm-tab-installed');
   var dmList = document.getElementById('dm-list');
   var dmInstalledList = document.getElementById('dm-installed-list');
   var dmLoading = document.getElementById('dm-loading');
