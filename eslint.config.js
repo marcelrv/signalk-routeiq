@@ -31,6 +31,40 @@ export default tseslint.config(
     },
   },
   {
-    ignores: ['dist/**/*', 'dist-test/**/*', 'node_modules/**/*', 'public/**/*'],
+    // The plotter extension really does run in a browser, so unlike the Node
+    // test runners above it gets its globals declared outright — there is no
+    // Node environment here being asked to pretend a DOM exists. It ships in
+    // the npm package (see "files" in package.json) and was never linted,
+    // because the lint script only ever covered src/.
+    files: ['plotterext/**/*.js'],
+    languageOptions: {
+      globals: {
+        document: 'readonly',
+        window: 'readonly',
+        fetch: 'readonly',
+        Option: 'readonly',
+        TextDecoder: 'readonly',
+        AbortController: 'readonly',
+      },
+    },
+  },
+  {
+    ignores: [
+      'dist/**/*',
+      'dist-test/**/*',
+      'node_modules/**/*',
+      // The webapp is 5,600 lines of JavaScript inline in index.html, which
+      // ESLint cannot read without a plugin for script tags.
+      'public/**/*',
+      // Local-only directories, also listed in .gitignore. Repeated here on
+      // purpose: ESLint does not read .gitignore, and --ignore-path is not
+      // available under flat config, so gitignoring them alone still leaves
+      // `npm run lint` failing on a working machine while CI — which checks
+      // out neither — stays green.
+      'node-server/**/*',
+      'scratch*/**',
+      // Vendored JavaScript inside the Python virtualenv under backend/.
+      '**/.venv/**',
+    ],
   }
 );
