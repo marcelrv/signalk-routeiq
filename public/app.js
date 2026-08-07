@@ -1,57 +1,77 @@
 (function () {
-  'use strict';
+  "use strict";
 
   // ---- config ----
-  const STORAGE_KEY = 'sandbox_recent_urls';
-  const DEFAULT_URL = '';
+  const STORAGE_KEY = "sandbox_recent_urls";
+  const DEFAULT_URL = "";
 
   // auto-detect plugin path from URL like /plugins/signalk-routeiq/
   const PLUGIN_PATH = (() => {
     const m = window.location.pathname.match(/^(\/plugins\/[^\/]+)\//);
-    return m ? m[1] : '';
+    return m ? m[1] : "";
   })();
 
-  function isDebug() { return document.getElementById('debug-cb').checked; }
+  function isDebug() {
+    return document.getElementById("debug-cb").checked;
+  }
 
   function logDebug(type, url, payload, response) {
     if (!isDebug()) return;
     const ts = new Date().toISOString().slice(11, 23);
     console.groupCollapsed(`[${ts}] ${type}`);
-    console.log('URL:', url);
-    if (payload !== undefined) console.log('Payload:', JSON.parse(JSON.stringify(payload)));
+    console.log("URL:", url);
+    if (payload !== undefined)
+      console.log("Payload:", JSON.parse(JSON.stringify(payload)));
     if (response !== undefined) {
       if (response instanceof Response) {
-        console.log('Status:', response.status, response.statusText);
-        console.log('Headers:', [...response.headers.entries()]);
+        console.log("Status:", response.status, response.statusText);
+        console.log("Headers:", [...response.headers.entries()]);
       } else {
-        console.log('Response:', response);
+        console.log("Response:", response);
       }
     }
     console.groupEnd();
   }
 
   function getApiBase() {
-    const v = document.getElementById('api-url').value.replace(/\/+$/, '');
+    const v = document.getElementById("api-url").value.replace(/\/+$/, "");
     if (v) return v;
     return PLUGIN_PATH || DEFAULT_URL;
   }
-  function routeUrl()   { return getApiBase() + '/signalk/v1/api/router/route'; }
-  function searchUrl()  { return getApiBase() + '/signalk/v1/api/router/search'; }
-  function gpxUrl()     { return getApiBase() + '/signalk/v1/api/router/export/gpx'; }
-  function pushUrl()    { return getApiBase() + '/signalk/v1/api/router/push'; }
-  function tidesStatusUrl() { return getApiBase() + '/signalk/v1/api/router/tides/status'; }
-  function departuresUrl()  { return getApiBase() + '/signalk/v1/api/router/route/departures'; }
+  function routeUrl() {
+    return getApiBase() + "/signalk/v1/api/router/route";
+  }
+  function searchUrl() {
+    return getApiBase() + "/signalk/v1/api/router/search";
+  }
+  function gpxUrl() {
+    return getApiBase() + "/signalk/v1/api/router/export/gpx";
+  }
+  function pushUrl() {
+    return getApiBase() + "/signalk/v1/api/router/push";
+  }
+  function tidesStatusUrl() {
+    return getApiBase() + "/signalk/v1/api/router/tides/status";
+  }
+  function departuresUrl() {
+    return getApiBase() + "/signalk/v1/api/router/route/departures";
+  }
 
   // ---- recent URLs (localStorage, max 3) ----
   function loadRecentUrls() {
-    try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; }
-    catch { return []; }
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+    } catch {
+      return [];
+    }
   }
   function saveRecentUrl(url) {
-    let list = loadRecentUrls().filter(u => u !== url);
+    let list = loadRecentUrls().filter((u) => u !== url);
     list.unshift(url);
     if (list.length > 3) list = list.slice(0, 3);
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); } catch {}
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+    } catch {}
     return list;
   }
 
@@ -59,14 +79,18 @@
   // Average speed and min coast distance are plugin configuration; the inputs
   // always start from the configured values (edits are session-only overrides).
   function loadConfigDefaults() {
-    fetch(getApiBase() + '/signalk/v1/api/router/config')
-      .then(r => r.ok ? r.json() : null)
-      .then(c => {
+    fetch(getApiBase() + "/signalk/v1/api/router/config")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((c) => {
         if (!c) return;
-        if (c.averageSpeedKnots) document.getElementById('avg-speed').value = c.averageSpeedKnots;
-        if (c.defaultCoastDistance != null) document.getElementById('min-coast').value = c.defaultCoastDistance;
-        if (c.lockWaitMinutes != null) document.getElementById('lock-wait').value = c.lockWaitMinutes;
-        if (c.bridgeWaitMinutes != null) document.getElementById('bridge-wait').value = c.bridgeWaitMinutes;
+        if (c.averageSpeedKnots)
+          document.getElementById("avg-speed").value = c.averageSpeedKnots;
+        if (c.defaultCoastDistance != null)
+          document.getElementById("min-coast").value = c.defaultCoastDistance;
+        if (c.lockWaitMinutes != null)
+          document.getElementById("lock-wait").value = c.lockWaitMinutes;
+        if (c.bridgeWaitMinutes != null)
+          document.getElementById("bridge-wait").value = c.bridgeWaitMinutes;
         // Refresh a route pane that rendered before the config arrived
         if (state.lastGeoJson) renderRoutePane(state.lastGeoJson);
       })
@@ -74,24 +98,33 @@
   }
   loadConfigDefaults();
   // Recompute the itinerary times when the session speed override changes
-  document.getElementById('avg-speed').addEventListener('change', function () {
+  document.getElementById("avg-speed").addEventListener("change", function () {
     if (state.lastGeoJson) renderRoutePane(state.lastGeoJson);
   });
 
   // ---- tide controls ----
   // Shown only when the signalk-tides plugin knows stations near the map.
   let tidesAvailable = false;
-  function tideEnabled() { return tidesAvailable && document.getElementById('tide-cb').checked; }
+  function tideEnabled() {
+    return tidesAvailable && document.getElementById("tide-cb").checked;
+  }
   function departureIso() {
-    const v = document.getElementById('departure-time').value;
+    const v = document.getElementById("departure-time").value;
     const d = v ? new Date(v) : null;
     return d && !isNaN(d) ? d.toISOString() : undefined;
   }
   function setDepartureInput(date) {
-    const p = n => String(n).padStart(2, '0');
-    document.getElementById('departure-time').value =
-      date.getFullYear() + '-' + p(date.getMonth() + 1) + '-' + p(date.getDate()) +
-      'T' + p(date.getHours()) + ':' + p(date.getMinutes());
+    const p = (n) => String(n).padStart(2, "0");
+    document.getElementById("departure-time").value =
+      date.getFullYear() +
+      "-" +
+      p(date.getMonth() + 1) +
+      "-" +
+      p(date.getDate()) +
+      "T" +
+      p(date.getHours()) +
+      ":" +
+      p(date.getMinutes());
   }
   // The field only holds a *chosen* departure once the user has actually chosen
   // one — by editing it, or by picking a row in the departure planner. Until
@@ -115,17 +148,27 @@
   function checkTidesStatus(lat, lon) {
     lastTideCheckLatLng = { lat, lon };
     const seq = ++tideCheckSeq;
-    fetch(tidesStatusUrl() + '?latitude=' + lat.toFixed(3) + '&longitude=' + lon.toFixed(3))
-      .then(r => r.ok ? r.json() : null)
-      .then(st => {
+    fetch(
+      tidesStatusUrl() +
+        "?latitude=" +
+        lat.toFixed(3) +
+        "&longitude=" +
+        lon.toFixed(3),
+    )
+      .then((r) => (r.ok ? r.json() : null))
+      .then((st) => {
         if (seq !== tideCheckSeq) return; // superseded by a newer check
         tidesAvailable = !!(st && st.available);
-        document.getElementById('tide-controls').style.display = tidesAvailable ? '' : 'none';
+        document.getElementById("tide-controls").style.display = tidesAvailable
+          ? ""
+          : "none";
         if (!tidesAvailable) return;
-        const saved = localStorage.getItem('routeiq-use-tides');
-        const cb = document.getElementById('tide-cb');
-        cb.checked = saved !== null ? saved === '1' : !!st.considerTidesDefault;
-        document.getElementById('tide-depart-row').style.display = cb.checked ? '' : 'none';
+        const saved = localStorage.getItem("routeiq-use-tides");
+        const cb = document.getElementById("tide-cb");
+        cb.checked = saved !== null ? saved === "1" : !!st.considerTidesDefault;
+        document.getElementById("tide-depart-row").style.display = cb.checked
+          ? ""
+          : "none";
         syncDepartureToNow();
       })
       .catch(() => {});
@@ -140,27 +183,35 @@
   function maybeCheckTidesForRoute(lat, lon) {
     if (lastTideCheckLatLng) {
       const dLat = (lat - lastTideCheckLatLng.lat) * 60;
-      const dLon = (lon - lastTideCheckLatLng.lon) * 60 * Math.cos(lat * Math.PI / 180);
+      const dLon =
+        (lon - lastTideCheckLatLng.lon) * 60 * Math.cos((lat * Math.PI) / 180);
       if (Math.sqrt(dLat * dLat + dLon * dLon) < 5) return; // < 5 nm moved
     }
     checkTidesStatus(lat, lon);
   }
-  document.getElementById('tide-cb').addEventListener('change', function () {
-    try { localStorage.setItem('routeiq-use-tides', this.checked ? '1' : '0'); } catch {}
-    document.getElementById('tide-depart-row').style.display = this.checked ? '' : 'none';
+  document.getElementById("tide-cb").addEventListener("change", function () {
+    try {
+      localStorage.setItem("routeiq-use-tides", this.checked ? "1" : "0");
+    } catch {}
+    document.getElementById("tide-depart-row").style.display = this.checked
+      ? ""
+      : "none";
     syncDepartureToNow();
     if (state.startLatLng && state.destLatLng) routingControl.route();
   });
-  document.getElementById('departure-time').addEventListener('change', function () {
-    // Only a real edit counts — setDepartureInput() does not fire this.
-    departureEdited = true;
-    if (tideEnabled() && state.startLatLng && state.destLatLng) routingControl.route();
-  });
+  document
+    .getElementById("departure-time")
+    .addEventListener("change", function () {
+      // Only a real edit counts — setDepartureInput() does not fire this.
+      departureEdited = true;
+      if (tideEnabled() && state.startLatLng && state.destLatLng)
+        routingControl.route();
+    });
 
   // ---- departure planner (24h scan, color-coded) ----
   function fmtDurHM(sec) {
     const m = Math.round(sec / 60);
-    return Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0');
+    return Math.floor(m / 60) + ":" + String(m % 60).padStart(2, "0");
   }
   // A scan is one full route calculation per hour of the window, so it can run
   // for minutes on a long route. The server streams each step as it finishes
@@ -171,10 +222,10 @@
   // before any of them have a time in them.
   const DEP_SCAN_HOURS = 24;
   const DEP_STEP_MINUTES = 60;
-  const DEP_STEPS = (DEP_SCAN_HOURS * 60) / DEP_STEP_MINUTES + 1;   // ends included
-  let depWindowStart = null;   // Date — first departure of the window on screen
-  let depAbort = null;         // AbortController of the scan in flight, if any
-  let depSteps = [];           // one slot per step: { departureTime, result }
+  const DEP_STEPS = (DEP_SCAN_HOURS * 60) / DEP_STEP_MINUTES + 1; // ends included
+  let depWindowStart = null; // Date — first departure of the window on screen
+  let depAbort = null; // AbortController of the scan in flight, if any
+  let depSteps = []; // one slot per step: { departureTime, result }
   let depWarnings = [];
   // Paging by 12 h moves a 24 h window half its own width, so half of the new
   // window has already been calculated — same route, same constraints, the same
@@ -185,13 +236,18 @@
   let depCache = new Map();
   let depCacheKey = null;
 
-  function depEl(id) { return document.getElementById(id); }
+  function depEl(id) {
+    return document.getElementById(id);
+  }
 
   function openDeparturePlanner() {
-    if (!state.startLatLng || !state.destLatLng) { showToast('Set start and destination first', 'error'); return; }
+    if (!state.startLatLng || !state.destLatLng) {
+      showToast("Set start and destination first", "error");
+      return;
+    }
     // Scan forward from now unless a departure was actually chosen.
     syncDepartureToNow();
-    depEl('departure-modal').style.display = '';
+    depEl("departure-modal").style.display = "";
     depWindowStart = new Date(departureIso() || Date.now());
     runDepartureScan();
   }
@@ -209,12 +265,16 @@
   }
 
   function setDepScanning(on, note) {
-    depEl('dep-cancel').style.display = on ? '' : 'none';
-    const done = depSteps.filter(s => s.result).length;
-    depEl('dep-progress').innerHTML = on
+    depEl("dep-cancel").style.display = on ? "" : "none";
+    const done = depSteps.filter((s) => s.result).length;
+    depEl("dep-progress").innerHTML = on
       ? '<div style="width:11px;height:11px;border:2px solid rgba(59,143,212,0.3);border-top-color:#3b8fd4;border-radius:50%;animation:dm-spin 0.8s linear infinite"></div>' +
-        escapeHtml(done + ' / ' + (depSteps.length || '…'))
-      : (note ? escapeHtml(note) : (depSteps.length ? escapeHtml(done + ' / ' + depSteps.length) : ''));
+        escapeHtml(done + " / " + (depSteps.length || "…"))
+      : note
+        ? escapeHtml(note)
+        : depSteps.length
+          ? escapeHtml(done + " / " + depSteps.length)
+          : "";
   }
 
   // The rows of the planner are 24 h clock times, built by hand from
@@ -222,19 +282,30 @@
   // locale's own preference, en-US renders "08:50 PM" directly above a column
   // reading "20:50". hourCycle says what is wanted rather than relying on
   // hour12:false, which is allowed to produce a 24:00 for midnight.
-  const DEP_STAMP = { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
-  function fmtDepStamp(dt) { return dt.toLocaleString([], DEP_STAMP); }
+  const DEP_STAMP = {
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  };
+  function fmtDepStamp(dt) {
+    return dt.toLocaleString([], DEP_STAMP);
+  }
 
   // Travel time answers "how long", arrival answers "when do I get in" — which
   // one matters depends on whether you are working around a lock closing or a
   // tide gate at the far end, so the column switches rather than picking one.
   let depShowArrival = false;
-  try { depShowArrival = localStorage.getItem('routeiq-dep-arrival') === '1'; } catch {}
+  try {
+    depShowArrival = localStorage.getItem("routeiq-dep-arrival") === "1";
+  } catch {}
 
   /** Arrival as HH:MM, with a day marker when it is not the departure's day. */
   function depArrival(step) {
     const r = step.result;
-    if (!r) return '';
+    if (!r) return "";
     // Prefer the server's arrival, fall back to departure + duration, and show
     // nothing at all rather than something wrong. The fallback is guarded
     // rather than defaulted: `(totalSeconds || 0)` would turn a NaN duration
@@ -244,39 +315,49 @@
     let ms = r.arrivalTime ? Date.parse(r.arrivalTime) : NaN;
     if (!Number.isFinite(ms)) {
       const departed = Date.parse(step.departureTime);
-      if (!Number.isFinite(departed) || !Number.isFinite(r.totalSeconds)) return '';
+      if (!Number.isFinite(departed) || !Number.isFinite(r.totalSeconds))
+        return "";
       ms = departed + r.totalSeconds * 1000;
     }
-    if (!Number.isFinite(ms)) return '';
+    if (!Number.isFinite(ms)) return "";
     const a = new Date(ms);
     const dep = new Date(step.departureTime);
-    const hhmm = String(a.getHours()).padStart(2, '0') + ':' + String(a.getMinutes()).padStart(2, '0');
+    const hhmm =
+      String(a.getHours()).padStart(2, "0") +
+      ":" +
+      String(a.getMinutes()).padStart(2, "0");
     // A 12 h passage started in the evening lands tomorrow; a bare clock time
     // would read as if it arrived before it left.
     const days = Math.round(
       (new Date(a.getFullYear(), a.getMonth(), a.getDate()) -
-       new Date(dep.getFullYear(), dep.getMonth(), dep.getDate())) / 86400000);
-    return days > 0 ? hhmm + '+' + days : hhmm;
+        new Date(dep.getFullYear(), dep.getMonth(), dep.getDate())) /
+        86400000,
+    );
+    return days > 0 ? hhmm + "+" + days : hhmm;
   }
 
   function updateDepModeLabel() {
-    depEl('dep-mode-label').textContent = depShowArrival ? 'Arrive' : 'Travel';
-    depEl('dep-mode').title = depShowArrival
-      ? 'Show travel time instead of arrival time'
-      : 'Show arrival time instead of travel time';
+    depEl("dep-mode-label").textContent = depShowArrival ? "Arrive" : "Travel";
+    depEl("dep-mode").title = depShowArrival
+      ? "Show travel time instead of arrival time"
+      : "Show arrival time instead of travel time";
   }
 
   function updateDepWindowLabel() {
-    if (!depWindowStart) { depEl('dep-window').textContent = ''; return; }
+    if (!depWindowStart) {
+      depEl("dep-window").textContent = "";
+      return;
+    }
     const end = new Date(depWindowStart.getTime() + DEP_SCAN_HOURS * 3600000);
-    depEl('dep-window').textContent = fmtDepStamp(depWindowStart) + '  →  ' + fmtDepStamp(end);
+    depEl("dep-window").textContent =
+      fmtDepStamp(depWindowStart) + "  →  " + fmtDepStamp(end);
   }
 
   // Shown above the list, never in place of it. A scan that fails partway has
   // still produced real departures, and the whole point of streaming them is
   // that they stay usable — replacing the list with the message would throw
   // away exactly what was worth keeping.
-  let depError = '';
+  let depError = "";
   function showDepError(message) {
     depError = message;
     renderDepartureList();
@@ -284,20 +365,25 @@
 
   // Everything a departure's travel time depends on, except when it leaves.
   function departureScanConstraints() {
-    const toPos = ll => ({ latitude: ll.lat, longitude: ll.lng });
+    const toPos = (ll) => ({ latitude: ll.lat, longitude: ll.lng });
     return {
       start: toPos(state.startLatLng),
       end: toPos(state.destLatLng),
       via: (state.viaPoints || []).map((ll, i) => ({
-        latitude: ll.lat, longitude: ll.lng, mode: state.viaModes[i] || 'auto',
+        latitude: ll.lat,
+        longitude: ll.lng,
+        mode: state.viaModes[i] || "auto",
       })),
-      endMode: state.destMode || 'auto',
-      minCoastDistance: (parseFloat(document.getElementById('min-coast').value) || 0) / 1852,
+      endMode: state.destMode || "auto",
+      minCoastDistance:
+        (parseFloat(document.getElementById("min-coast").value) || 0) / 1852,
       ...vesselOverrides(),
       ...waitOverrides(),
     };
   }
-  function depSignature() { return JSON.stringify(departureScanConstraints()); }
+  function depSignature() {
+    return JSON.stringify(departureScanConstraints());
+  }
 
   // The times this window covers, computed here rather than taken from the
   // server's `meta`: a request that only covers the part of the window still
@@ -307,7 +393,8 @@
   function departureWindowTimes() {
     const t0 = depWindowStart.getTime();
     return Array.from({ length: DEP_STEPS }, (_, i) =>
-      new Date(t0 + i * DEP_STEP_MINUTES * 60000).toISOString());
+      new Date(t0 + i * DEP_STEP_MINUTES * 60000).toISOString(),
+    );
   }
 
   // Kept in step with the copy in plotterext/panel.js. Not shared: this is an
@@ -316,13 +403,13 @@
   async function readNdjson(resp, onEvent) {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = '';
+    let buffer = "";
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       let nl;
-      while ((nl = buffer.indexOf('\n')) >= 0) {
+      while ((nl = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, nl).trim();
         buffer = buffer.slice(nl + 1);
         if (line) onEvent(JSON.parse(line));
@@ -333,20 +420,26 @@
   }
 
   async function runDepartureScan() {
-    if (depAbort) depAbort.abort();          // supersede whatever is running
+    if (depAbort) depAbort.abort(); // supersede whatever is running
     const ctrl = new AbortController();
     depAbort = ctrl;
     depWarnings = [];
-    depError = '';
+    depError = "";
 
     // Anything that changes a travel time invalidates every kept result.
     const signature = depSignature();
-    if (signature !== depCacheKey) { depCache.clear(); depCacheKey = signature; }
+    if (signature !== depCacheKey) {
+      depCache.clear();
+      depCacheKey = signature;
+    }
 
     // Lay the window out first and fill in what is already known, so a page
     // lands with half of it already drawn.
     const times = departureWindowTimes();
-    depSteps = times.map(t => ({ departureTime: t, result: depCache.get(t) || null }));
+    depSteps = times.map((t) => ({
+      departureTime: t,
+      result: depCache.get(t) || null,
+    }));
     const slotByTime = new Map(times.map((t, i) => [t, i]));
     updateDepWindowLabel();
     renderDepartureList();
@@ -354,7 +447,9 @@
 
     // The gap is contiguous — a window only ever moves as a block — so one
     // request covers it. scanHours counts intervals, not steps.
-    const missing = depSteps.map((s, i) => (s.result ? -1 : i)).filter(i => i >= 0);
+    const missing = depSteps
+      .map((s, i) => (s.result ? -1 : i))
+      .filter((i) => i >= 0);
     if (!missing.length) {
       depAbort = null;
       setDepScanning(false);
@@ -368,39 +463,47 @@
       scanHours: Math.max(1, (span * DEP_STEP_MINUTES) / 60),
       stepMinutes: DEP_STEP_MINUTES,
     };
-    logDebug('DEPARTURES', departuresUrl(), payload,
-      `${missing.length}/${DEP_STEPS} steps to calculate, ${DEP_STEPS - missing.length} reused`);
+    logDebug(
+      "DEPARTURES",
+      departuresUrl(),
+      payload,
+      `${missing.length}/${DEP_STEPS} steps to calculate, ${DEP_STEPS - missing.length} reused`,
+    );
 
     try {
       const resp = await fetch(departuresUrl(), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/x-ndjson' },
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/x-ndjson",
+        },
         body: JSON.stringify(payload),
         signal: ctrl.signal,
       });
       if (!resp.ok) {
         const b = await resp.json().catch(() => null);
-        throw new Error(b && b.error ? b.error : 'Error ' + resp.status);
+        throw new Error(b && b.error ? b.error : "Error " + resp.status);
       }
       // A server that answered with the single JSON document instead — an older
       // plugin behind the same webapp — still renders, just all at once.
-      const streamed = (resp.headers.get('content-type') || '').indexOf('x-ndjson') >= 0;
+      const streamed =
+        (resp.headers.get("content-type") || "").indexOf("x-ndjson") >= 0;
       if (!streamed || !resp.body) {
         const data = await resp.json();
         depWarnings = data.warnings || [];
         for (const d of data.departures || []) onDepartureResult(d, slotByTime);
         renderDepartureList();
       } else {
-        await readNdjson(resp, ev => onDepartureEvent(ev, slotByTime));
+        await readNdjson(resp, (ev) => onDepartureEvent(ev, slotByTime));
       }
     } catch (err) {
       // An abort is either the Cancel button or a window shift; both keep
       // whatever arrived, and neither is an error worth showing.
-      if (err.name !== 'AbortError') showDepError(err.message);
+      if (err.name !== "AbortError") showDepError(err.message);
     } finally {
       if (depAbort === ctrl) {
         depAbort = null;
-        setDepScanning(false, ctrl.signal.aborted ? 'stopped' : undefined);
+        setDepScanning(false, ctrl.signal.aborted ? "stopped" : undefined);
       }
     }
   }
@@ -415,11 +518,11 @@
   }
 
   function onDepartureEvent(ev, slotByTime) {
-    if (ev.type === 'meta') {
+    if (ev.type === "meta") {
       depWarnings = ev.warnings || [];
-    } else if (ev.type === 'departure') {
+    } else if (ev.type === "departure") {
       onDepartureResult(ev, slotByTime);
-    } else if (ev.type === 'error') {
+    } else if (ev.type === "error") {
       showDepError(ev.error);
       return;
     }
@@ -428,14 +531,23 @@
   }
 
   function renderDepartureList() {
-    const listEl = depEl('dep-list');
+    const listEl = depEl("dep-list");
     // Every departure in the scan was planned against the same constraints, so
     // a dropped vessel dimension applies to the whole list — show it above.
     const warnHtml =
-      (depError ? '<div style="color:#f2938c;font-size:12px;padding:6px 0">' + escapeHtml(depError) + '</div>' : '') +
+      (depError
+        ? '<div style="color:#f2938c;font-size:12px;padding:6px 0">' +
+          escapeHtml(depError) +
+          "</div>"
+        : "") +
       (depWarnings || [])
-        .map(w => '<div style="color:#e8b44a;font-size:11px;padding:4px 0">' + escapeHtml(w.message) + '</div>')
-        .join('');
+        .map(
+          (w) =>
+            '<div style="color:#e8b44a;font-size:11px;padding:4px 0">' +
+            escapeHtml(w.message) +
+            "</div>",
+        )
+        .join("");
     if (!depSteps.length) {
       listEl.innerHTML = warnHtml;
       return;
@@ -443,24 +555,38 @@
     // The ramp is normalised over what has been computed so far, so colours and
     // the ★ shift as the window fills in. That is the point — the best-so-far is
     // visible from the first few results rather than only at the end.
-    const ok = depSteps.filter(s => s.result && typeof s.result.totalSeconds === 'number');
-    const minS = ok.length ? Math.min(...ok.map(s => s.result.totalSeconds)) : 0;
-    const maxS = ok.length ? Math.max(...ok.map(s => s.result.totalSeconds)) : 0;
+    const ok = depSteps.filter(
+      (s) => s.result && typeof s.result.totalSeconds === "number",
+    );
+    const minS = ok.length
+      ? Math.min(...ok.map((s) => s.result.totalSeconds))
+      : 0;
+    const maxS = ok.length
+      ? Math.max(...ok.map((s) => s.result.totalSeconds))
+      : 0;
     if (!ok.length && !depAbort) {
-      listEl.innerHTML = warnHtml + '<div style="color:#9bb8da;font-size:12px;padding:6px 0">No departures could be evaluated.</div>';
+      listEl.innerHTML =
+        warnHtml +
+        '<div style="color:#9bb8da;font-size:12px;padding:6px 0">No departures could be evaluated.</div>';
       return;
     }
     listEl.innerHTML = warnHtml;
     for (const step of depSteps) {
       const dep = new Date(step.departureTime);
-      const hhmm = String(dep.getHours()).padStart(2, '0') + ':' + String(dep.getMinutes()).padStart(2, '0');
-      const row = document.createElement('div');
+      const hhmm =
+        String(dep.getHours()).padStart(2, "0") +
+        ":" +
+        String(dep.getMinutes()).padStart(2, "0");
+      const row = document.createElement("div");
 
       if (!step.result) {
-        row.dataset.state = 'pending';
-        row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:3px 4px;font-size:12px;color:#3f5a78';
+        row.dataset.state = "pending";
+        row.style.cssText =
+          "display:flex;align-items:center;gap:8px;padding:3px 4px;font-size:12px;color:#3f5a78";
         row.innerHTML =
-          '<span style="width:56px;font-family:monospace">' + hhmm + '</span>' +
+          '<span style="width:56px;font-family:monospace">' +
+          hhmm +
+          "</span>" +
           '<span style="flex:1;height:10px;border-radius:5px;background:rgba(79,148,212,0.08);border:1px solid rgba(79,148,212,0.12)"></span>' +
           '<span style="width:60px;text-align:right;font-family:monospace">·&nbsp;·</span>' +
           '<span style="width:62px;text-align:right;font-family:monospace">·&nbsp;·</span>' +
@@ -468,25 +594,31 @@
         listEl.appendChild(row);
         continue;
       }
-      if (typeof step.result.totalSeconds !== 'number') {
-        row.dataset.state = 'noroute';
-        row.style.cssText = 'display:flex;gap:8px;padding:3px 4px;font-size:11px;color:#5f7a9a';
-        row.textContent = hhmm + '  — no route';
+      if (typeof step.result.totalSeconds !== "number") {
+        row.dataset.state = "noroute";
+        row.style.cssText =
+          "display:flex;gap:8px;padding:3px 4px;font-size:11px;color:#5f7a9a";
+        row.textContent = hhmm + "  — no route";
         listEl.appendChild(row);
         continue;
       }
       // Green (fastest) → red (slowest), same ramp as the plotter panel.
       const secs = step.result.totalSeconds;
       const norm = maxS > minS ? (secs - minS) / (maxS - minS) : 0;
-      const color = 'hsl(' + Math.round(120 * (1 - norm)) + ',65%,42%)';
+      const color = "hsl(" + Math.round(120 * (1 - norm)) + ",65%,42%)";
       const best = secs === minS;
       // Read by scripts/screenshots.mjs to catch the scan mid-flight; the
       // alternative was matching the placeholder glyph, which would quietly
       // report every row as filled the day that markup changes.
-      row.dataset.state = 'scored';
-      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:5px;cursor:pointer;font-size:12px;color:#dce8f5';
-      row.onmouseenter = () => { row.style.background = 'rgba(59,143,212,0.15)'; };
-      row.onmouseleave = () => { row.style.background = ''; };
+      row.dataset.state = "scored";
+      row.style.cssText =
+        "display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:5px;cursor:pointer;font-size:12px;color:#dce8f5";
+      row.onmouseenter = () => {
+        row.style.background = "rgba(59,143,212,0.15)";
+      };
+      row.onmouseleave = () => {
+        row.style.background = "";
+      };
       const barW = Math.round(30 + 55 * norm);
       // Distance is per departure, not per route: a tide-aware scan can pick a
       // different path at different times, and without this column a row that
@@ -495,22 +627,47 @@
       const dist = fmtDist(step.result.totalDistance);
       const arrive = depArrival(step);
       row.innerHTML =
-        '<span style="width:56px;color:#9bb8da;font-family:monospace">' + hhmm + '</span>' +
-        '<span style="flex:1;height:10px;border-radius:5px;background:linear-gradient(90deg,' + color + ',' + color + ') no-repeat;background-size:' + barW + '% 100%;border:1px solid rgba(79,148,212,0.15)"></span>' +
-        '<span style="width:60px;text-align:right;font-family:monospace;color:#9bb8da">' + escapeHtml(dist) + '</span>' +
-        '<span style="width:62px;text-align:right;font-family:monospace;color:' + color + '">' +
-          (depShowArrival ? escapeHtml(arrive || '—') : fmtDurHM(secs)) + '</span>' +
-        '<span style="width:14px;text-align:center;color:#f5d90a">' + (best ? '★' : '') + '</span>';
-      row.title = 'Depart ' + fmtDepStamp(dep) + ' — travel time ' + fmtDurHM(secs) +
-        (arrive ? ', arriving ' + arrive : '') + (dist ? ', ' + dist : '') +
-        '. Click to use this departure.';
-      row.addEventListener('click', () => {
+        '<span style="width:56px;color:#9bb8da;font-family:monospace">' +
+        hhmm +
+        "</span>" +
+        '<span style="flex:1;height:10px;border-radius:5px;background:linear-gradient(90deg,' +
+        color +
+        "," +
+        color +
+        ") no-repeat;background-size:" +
+        barW +
+        '% 100%;border:1px solid rgba(79,148,212,0.15)"></span>' +
+        '<span style="width:60px;text-align:right;font-family:monospace;color:#9bb8da">' +
+        escapeHtml(dist) +
+        "</span>" +
+        '<span style="width:62px;text-align:right;font-family:monospace;color:' +
+        color +
+        '">' +
+        (depShowArrival ? escapeHtml(arrive || "—") : fmtDurHM(secs)) +
+        "</span>" +
+        '<span style="width:14px;text-align:center;color:#f5d90a">' +
+        (best ? "★" : "") +
+        "</span>";
+      row.title =
+        "Depart " +
+        fmtDepStamp(dep) +
+        " — travel time " +
+        fmtDurHM(secs) +
+        (arrive ? ", arriving " + arrive : "") +
+        (dist ? ", " + dist : "") +
+        ". Click to use this departure.";
+      row.addEventListener("click", () => {
         // Picking a row is a deliberate choice, so it stops tracking "now".
         setDepartureInput(dep);
         departureEdited = true;
-        const cb = document.getElementById('tide-cb');
-        if (!cb.checked) { cb.checked = true; try { localStorage.setItem('routeiq-use-tides', '1'); } catch {} }
-        document.getElementById('tide-depart-row').style.display = '';
+        const cb = document.getElementById("tide-cb");
+        if (!cb.checked) {
+          cb.checked = true;
+          try {
+            localStorage.setItem("routeiq-use-tides", "1");
+          } catch {}
+        }
+        document.getElementById("tide-depart-row").style.display = "";
         closeDeparturePlanner();
         routingControl.route();
       });
@@ -522,45 +679,59 @@
   // closes, so an abandoned window costs nothing to finish.
   function closeDeparturePlanner() {
     cancelDepartureScan();
-    depEl('departure-modal').style.display = 'none';
+    depEl("departure-modal").style.display = "none";
   }
 
-  depEl('best-departure-btn').addEventListener('click', openDeparturePlanner);
-  depEl('dep-prev').addEventListener('click', () => shiftDepartureWindow(-12));
-  depEl('dep-next').addEventListener('click', () => shiftDepartureWindow(12));
-  depEl('dep-cancel').addEventListener('click', cancelDepartureScan);
-  depEl('dep-mode').addEventListener('click', () => {
+  depEl("best-departure-btn").addEventListener("click", openDeparturePlanner);
+  depEl("dep-prev").addEventListener("click", () => shiftDepartureWindow(-12));
+  depEl("dep-next").addEventListener("click", () => shiftDepartureWindow(12));
+  depEl("dep-cancel").addEventListener("click", cancelDepartureScan);
+  depEl("dep-mode").addEventListener("click", () => {
     depShowArrival = !depShowArrival;
-    try { localStorage.setItem('routeiq-dep-arrival', depShowArrival ? '1' : '0'); } catch {}
+    try {
+      localStorage.setItem("routeiq-dep-arrival", depShowArrival ? "1" : "0");
+    } catch {}
     updateDepModeLabel();
-    renderDepartureList();   // redraw in place; no rescan, the data is the same
+    renderDepartureList(); // redraw in place; no rescan, the data is the same
   });
   updateDepModeLabel();
-  depEl('dep-close').addEventListener('click', closeDeparturePlanner);
-  depEl('dep-backdrop').addEventListener('click', closeDeparturePlanner);
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && depEl('departure-modal').style.display !== 'none') closeDeparturePlanner();
+  depEl("dep-close").addEventListener("click", closeDeparturePlanner);
+  depEl("dep-backdrop").addEventListener("click", closeDeparturePlanner);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && depEl("departure-modal").style.display !== "none")
+      closeDeparturePlanner();
   });
 
   // ---- state ----
-  const unitsConfig = { distance: {}, depth: {}, length: {}, speed: {}, temperature: {} };
+  const unitsConfig = {
+    distance: {},
+    depth: {},
+    length: {},
+    speed: {},
+    temperature: {},
+  };
 
   function evalFormula(formula, value) {
     if (!formula) return value;
     // Unit formulas from SK are always "value", or "value OP number" (e.g. "value * 1.94384").
     // Reject anything that doesn't match that shape before evaluating, so a compromised
     // API response can't run arbitrary JS via the Function constructor.
-    if (!/^value(\s*[+\-*/]\s*[\d.e+\-]+)?\s*$/.test(formula.trim())) return value;
+    if (!/^value(\s*[+\-*/]\s*[\d.e+\-]+)?\s*$/.test(formula.trim()))
+      return value;
     try {
       // Pass value as a parameter — never interpolate it into the formula string.
-      return (new Function('value', '"use strict"; return (' + formula + ');'))(value);
-    } catch { return value; }
+      return new Function("value", '"use strict"; return (' + formula + ");")(
+        value,
+      );
+    } catch {
+      return value;
+    }
   }
 
   function fetchUnits() {
-    fetch(getApiBase() + '/signalk/v1/unitpreferences/active')
-      .then(r => r.ok ? r.json() : null)
-      .then(config => {
+    fetch(getApiBase() + "/signalk/v1/unitpreferences/active")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((config) => {
         if (config && config.categories) {
           const cats = config.categories;
           if (cats.distance) unitsConfig.distance = cats.distance;
@@ -574,43 +745,43 @@
   }
 
   const state = {
-    startLatLng:  null,
-    destLatLng:   null,
-    waypointNext: 'start',   // 'start' | 'dest'
-    routing:      false,
-    latestRoute:  null,       // stored from LRM 'routesfound' event
-    startMarker:  null,
-    destMarker:   null,
-    viaMarkers:   [],
-    routeLayers:  null,
-    lastGeoJson:  null,
-    viaPoints:    [],
-    viaModes:     [],         // parallel to viaPoints: 'auto' | 'manual' (mode of the leg ARRIVING at the via)
-    destMode:     'auto',     // mode of the final leg into the destination
-    manualMode:   false,      // toolbar toggle: new points connect with straight lines
-    routeSegments: [],        // { polyline, startIdx, endIdx, isWarning, originalStyle }
-    junctionMarkers: null,    // L.layerGroup for hover junction markers
-    startPoiName: '',         // POI name when start was set via search
-    destPoiName: '',          // POI name when destination was set via search
-    routeName:    '',         // computed route name for display/export
+    startLatLng: null,
+    destLatLng: null,
+    waypointNext: "start", // 'start' | 'dest'
+    routing: false,
+    latestRoute: null, // stored from LRM 'routesfound' event
+    startMarker: null,
+    destMarker: null,
+    viaMarkers: [],
+    routeLayers: null,
+    lastGeoJson: null,
+    viaPoints: [],
+    viaModes: [], // parallel to viaPoints: 'auto' | 'manual' (mode of the leg ARRIVING at the via)
+    destMode: "auto", // mode of the final leg into the destination
+    manualMode: false, // toolbar toggle: new points connect with straight lines
+    routeSegments: [], // { polyline, startIdx, endIdx, isWarning, originalStyle }
+    junctionMarkers: null, // L.layerGroup for hover junction markers
+    startPoiName: "", // POI name when start was set via search
+    destPoiName: "", // POI name when destination was set via search
+    routeName: "", // computed route name for display/export
     // Graph editor state
-    editMode:     false,
-    selectedItem: null,        // { type: 'node'|'edge', data: ... }
-    selectedLayer: null,       // Leaflet layer for highlight
-    editAddMode:  null,        // 'node' | 'edge' | null
-    editAddSource: null,       // source node id when adding edge
+    editMode: false,
+    selectedItem: null, // { type: 'node'|'edge', data: ... }
+    selectedLayer: null, // Leaflet layer for highlight
+    editAddMode: null, // 'node' | 'edge' | null
+    editAddSource: null, // source node id when adding edge
     deleteConfirmPending: false,
     deleteConfirmTimer: null,
   };
 
-  const map = L.map('map', {
+  const map = L.map("map", {
     center: [45.5, -1.0],
     zoom: 10,
     maxZoom: 18,
     zoomControl: true,
   });
 
-  L.control.scale({ position: 'bottomleft', imperial: false }).addTo(map);
+  L.control.scale({ position: "bottomleft", imperial: false }).addTo(map);
 
   // ==================== chart sources ====================
   // Base map / nautical chart selection backed by the Signal K
@@ -623,28 +794,37 @@
   // from OpenCPN's s52plib. This is deliberately a *simplified* rendering
   // (no symbol sprites, no soundings text) — enough to plan a route over,
   // not a navigation display.
-  const CHART_STORE_KEY = 'routeiq-charts';
+  const CHART_STORE_KEY = "routeiq-charts";
 
-  map.createPane('charts').style.zIndex = 210;   // above base tiles (200)
-  map.createPane('seamarks').style.zIndex = 220; // seamark overlay above charts
+  map.createPane("charts").style.zIndex = 210; // above base tiles (200)
+  map.createPane("seamarks").style.zIndex = 220; // seamark overlay above charts
 
   // S-52 DAY_BRIGHT palette (subset) from Freeboard-SK's chartsymbols.xml
   const S52 = {
-    CHBLK: 'rgb(7,7,7)',       CHGRD: 'rgb(125,137,140)',
-    CHYLW: 'rgb(244,218,72)',  CHMGD: 'rgb(197,69,195)',
-    CHMGF: 'rgb(211,166,233)', CHBRN: 'rgb(177,145,57)',
-    LANDA: 'rgb(201,185,122)', CSTLN: 'rgb(82,90,92)',
-    DEPCN: 'rgb(125,137,140)', DEPDW: 'rgb(212,234,238)',
-    DEPMD: 'rgb(186,213,225)', DEPMS: 'rgb(152,197,242)',
-    DEPVS: 'rgb(115,182,239)', DEPIT: 'rgb(131,178,149)',
+    CHBLK: "rgb(7,7,7)",
+    CHGRD: "rgb(125,137,140)",
+    CHYLW: "rgb(244,218,72)",
+    CHMGD: "rgb(197,69,195)",
+    CHMGF: "rgb(211,166,233)",
+    CHBRN: "rgb(177,145,57)",
+    LANDA: "rgb(201,185,122)",
+    CSTLN: "rgb(82,90,92)",
+    DEPCN: "rgb(125,137,140)",
+    DEPDW: "rgb(212,234,238)",
+    DEPMD: "rgb(186,213,225)",
+    DEPMS: "rgb(152,197,242)",
+    DEPVS: "rgb(115,182,239)",
+    DEPIT: "rgb(131,178,149)",
   };
   // Depth bands (m), matching Freeboard-SK defaults
   const DEPTH_BANDS = { shallow: 2, safety: 3, deep: 6 };
 
   // Seabed colour by depth range — port of OpenCPN GetSeabed01 (via Freeboard-SK)
   function depareFill(p) {
-    let d1 = parseFloat(p.DRVAL1); if (isNaN(d1)) d1 = -1;
-    let d2 = parseFloat(p.DRVAL2); if (isNaN(d2)) d2 = d1 + 0.01;
+    let d1 = parseFloat(p.DRVAL1);
+    if (isNaN(d1)) d1 = -1;
+    let d2 = parseFloat(p.DRVAL2);
+    if (isNaN(d2)) d2 = d1 + 0.01;
     let c = S52.DEPIT;
     if (d1 >= 0 && d2 > 0) c = S52.DEPVS;
     if (d1 >= DEPTH_BANDS.shallow && d2 > DEPTH_BANDS.shallow) c = S52.DEPMS;
@@ -655,24 +835,50 @@
 
   // S-57 COLOUR attribute codes → display colours (buoys/beacons)
   const S57_COLOUR = {
-    1: '#ffffff', 2: '#070707', 3: '#d5382d', 4: '#289b38', 5: '#2a5dd8',
-    6: '#f4da48', 7: '#808285', 8: '#b19139', 9: '#e0a445', 10: '#7d4fbe',
-    11: '#e88a2d', 12: '#c545c3', 13: '#eda9c0',
+    1: "#ffffff",
+    2: "#070707",
+    3: "#d5382d",
+    4: "#289b38",
+    5: "#2a5dd8",
+    6: "#f4da48",
+    7: "#808285",
+    8: "#b19139",
+    9: "#e0a445",
+    10: "#7d4fbe",
+    11: "#e88a2d",
+    12: "#c545c3",
+    13: "#eda9c0",
   };
   function buoyFill(p) {
-    const first = String(p.COLOUR || '').split(',')[0];
+    const first = String(p.COLOUR || "").split(",")[0];
     return S57_COLOUR[parseInt(first, 10)] || S52.CHYLW;
   }
 
   function areaStyle(color, extra) {
-    return Object.assign({ fill: true, fillColor: color, fillOpacity: 1, stroke: false }, extra);
+    return Object.assign(
+      { fill: true, fillColor: color, fillOpacity: 1, stroke: false },
+      extra,
+    );
   }
   function lineStyle(color, weight, dash) {
-    return { fill: false, stroke: true, color: color, weight: weight, dashArray: dash || null };
+    return {
+      fill: false,
+      stroke: true,
+      color: color,
+      weight: weight,
+      dashArray: dash || null,
+    };
   }
   function pointStyle(fillColor, radius) {
-    return { radius: radius || 4, fill: true, fillColor: fillColor, fillOpacity: 1,
-             stroke: true, color: S52.CHBLK, weight: 1 };
+    return {
+      radius: radius || 4,
+      fill: true,
+      fillColor: fillColor,
+      fillOpacity: 1,
+      stroke: true,
+      color: S52.CHBLK,
+      weight: 1,
+    };
   }
 
   // Style for one S-57 vector-tile layer (uppercase = coastal ENC,
@@ -680,47 +886,137 @@
   // Returns a (properties, zoom) => style function, or null to hide the layer.
   function s57LayerStyle(name) {
     switch (name.toUpperCase()) {
-      case 'DEPARE': case 'DRGARE':
-        return function (p) { return areaStyle(depareFill(p)); };
-      case 'LNDARE':
-        return function () { return areaStyle(S52.LANDA, { stroke: true, color: S52.CSTLN, weight: 1 }); };
-      case 'BUAARE':
-        return function () { return areaStyle(S52.CHBRN, { fillOpacity: 0.5 }); };
-      case 'LAKARE': case 'RIVERS': case 'CANALS':
-      case 'LOKBSN': case 'HRBBSN': case 'TRNBSN': case 'LKBSPT':
-        return function () { return areaStyle(S52.DEPVS, { stroke: true, color: S52.CSTLN, weight: 1 }); };
-      case 'PONTON': case 'HULKES': case 'FLODOC': case 'DRYDOC':
-        return function () { return areaStyle(S52.CHBRN, { stroke: true, color: S52.CSTLN, weight: 1 }); };
-      case 'COALNE': case 'SLCONS': case 'GATCON': case 'DAMCON': case 'DYKCON':
-      case 'MORFAC': case 'TERMNL': case 'BERTHS':
-        return function () { return lineStyle(S52.CSTLN, 1.2); };
-      case 'BRIDGE':
-        return function () { return lineStyle(S52.CHGRD, 3); };
-      case 'DEPCNT':
-        return function (p, z) { return z >= 11 ? lineStyle(S52.DEPCN, 0.8) : []; };
-      case 'FAIRWY':
-        return function (p, z) { return z >= 10 ? lineStyle(S52.CHGRD, 1, '4,4') : []; };
-      case 'WTWAXS':
-        return function (p, z) { return z >= 10 ? lineStyle(S52.CHGRD, 1, '6,4') : []; };
-      case 'FERYRT':
-        return function (p, z) { return z >= 12 ? lineStyle(S52.CHMGF, 1, '4,4') : []; };
-      case 'RECTRC': case 'NAVLNE':
-        return function (p, z) { return z >= 12 ? lineStyle(S52.CHBLK, 0.8, '6,4') : []; };
-      case 'RESARE': case 'CTNARE': case 'ACHARE': case 'ACHBRT': case 'MIPARE':
-      case 'DMPGRD': case 'TSEZNE': case 'COMARE':
-        return function (p, z) { return z >= 11 ? lineStyle(S52.CHMGD, 1.2, '3,4') : []; };
-      case 'CBLSUB': case 'CBLARE': case 'CBLOHD': case 'PIPSOL': case 'PIPARE': case 'CONVYR':
-        return function (p, z) { return z >= 13 ? lineStyle(S52.CHMGF, 1, '2,4') : []; };
-      case 'BOYLAT': case 'BOYCAR': case 'BOYSAW': case 'BOYSPP': case 'BOYISD': case 'BOYINB':
-      case 'BCNLAT': case 'BCNCAR': case 'BCNSAW': case 'BCNSPP': case 'BCNISD':
-        return function (p, z) { return z >= 11 ? pointStyle(buoyFill(p)) : []; };
-      case 'LIGHTS':
-        return function (p, z) { return z >= 12 ? pointStyle(S52.CHYLW, 3) : []; };
-      case 'WRECKS': case 'OBSTRN': case 'UWTROC':
+      case "DEPARE":
+      case "DRGARE":
+        return function (p) {
+          return areaStyle(depareFill(p));
+        };
+      case "LNDARE":
+        return function () {
+          return areaStyle(S52.LANDA, {
+            stroke: true,
+            color: S52.CSTLN,
+            weight: 1,
+          });
+        };
+      case "BUAARE":
+        return function () {
+          return areaStyle(S52.CHBRN, { fillOpacity: 0.5 });
+        };
+      case "LAKARE":
+      case "RIVERS":
+      case "CANALS":
+      case "LOKBSN":
+      case "HRBBSN":
+      case "TRNBSN":
+      case "LKBSPT":
+        return function () {
+          return areaStyle(S52.DEPVS, {
+            stroke: true,
+            color: S52.CSTLN,
+            weight: 1,
+          });
+        };
+      case "PONTON":
+      case "HULKES":
+      case "FLODOC":
+      case "DRYDOC":
+        return function () {
+          return areaStyle(S52.CHBRN, {
+            stroke: true,
+            color: S52.CSTLN,
+            weight: 1,
+          });
+        };
+      case "COALNE":
+      case "SLCONS":
+      case "GATCON":
+      case "DAMCON":
+      case "DYKCON":
+      case "MORFAC":
+      case "TERMNL":
+      case "BERTHS":
+        return function () {
+          return lineStyle(S52.CSTLN, 1.2);
+        };
+      case "BRIDGE":
+        return function () {
+          return lineStyle(S52.CHGRD, 3);
+        };
+      case "DEPCNT":
+        return function (p, z) {
+          return z >= 11 ? lineStyle(S52.DEPCN, 0.8) : [];
+        };
+      case "FAIRWY":
+        return function (p, z) {
+          return z >= 10 ? lineStyle(S52.CHGRD, 1, "4,4") : [];
+        };
+      case "WTWAXS":
+        return function (p, z) {
+          return z >= 10 ? lineStyle(S52.CHGRD, 1, "6,4") : [];
+        };
+      case "FERYRT":
+        return function (p, z) {
+          return z >= 12 ? lineStyle(S52.CHMGF, 1, "4,4") : [];
+        };
+      case "RECTRC":
+      case "NAVLNE":
+        return function (p, z) {
+          return z >= 12 ? lineStyle(S52.CHBLK, 0.8, "6,4") : [];
+        };
+      case "RESARE":
+      case "CTNARE":
+      case "ACHARE":
+      case "ACHBRT":
+      case "MIPARE":
+      case "DMPGRD":
+      case "TSEZNE":
+      case "COMARE":
+        return function (p, z) {
+          return z >= 11 ? lineStyle(S52.CHMGD, 1.2, "3,4") : [];
+        };
+      case "CBLSUB":
+      case "CBLARE":
+      case "CBLOHD":
+      case "PIPSOL":
+      case "PIPARE":
+      case "CONVYR":
+        return function (p, z) {
+          return z >= 13 ? lineStyle(S52.CHMGF, 1, "2,4") : [];
+        };
+      case "BOYLAT":
+      case "BOYCAR":
+      case "BOYSAW":
+      case "BOYSPP":
+      case "BOYISD":
+      case "BOYINB":
+      case "BCNLAT":
+      case "BCNCAR":
+      case "BCNSAW":
+      case "BCNSPP":
+      case "BCNISD":
+        return function (p, z) {
+          return z >= 11 ? pointStyle(buoyFill(p)) : [];
+        };
+      case "LIGHTS":
+        return function (p, z) {
+          return z >= 12 ? pointStyle(S52.CHYLW, 3) : [];
+        };
+      case "WRECKS":
+      case "OBSTRN":
+      case "UWTROC":
         return function (p, z) {
           return z >= 11
-            ? { radius: 4, fill: true, fillColor: S52.CHMGF, fillOpacity: 0.5,
-                stroke: true, color: S52.CHBLK, weight: 1, dashArray: '2,2' }
+            ? {
+                radius: 4,
+                fill: true,
+                fillColor: S52.CHMGF,
+                fillOpacity: 0.5,
+                stroke: true,
+                color: S52.CHBLK,
+                weight: 1,
+                dashArray: "2,2",
+              }
             : [];
         };
       default:
@@ -730,7 +1026,7 @@
 
   // Chart tiles are served from the SK server root, not the plugin router mount
   function chartServerBase() {
-    return getApiBase().replace(/\/plugins\/[^/]+$/, '');
+    return getApiBase().replace(/\/plugins\/[^/]+$/, "");
   }
   function resolveChartUrl(url) {
     return /^https?:\/\//i.test(url) ? url : chartServerBase() + url;
@@ -741,20 +1037,26 @@
     return {
       id: id,
       name: c.name || id,
-      description: c.description || '',
-      url: c.url || c.tilemapUrl || '',
+      description: c.description || "",
+      url: c.url || c.tilemapUrl || "",
       layers: c.layers || c.chartLayers || [],
-      bounds: Array.isArray(c.bounds) && c.bounds.length === 4 ? c.bounds : null,
+      bounds:
+        Array.isArray(c.bounds) && c.bounds.length === 4 ? c.bounds : null,
       minZoom: c.minzoom != null ? c.minzoom : 0,
       maxZoom: c.maxzoom != null ? c.maxzoom : 18,
-      format: c.format || 'png',
-      type: c.type || 'tilelayer',
-      scale: typeof c.scale === 'number' ? c.scale : 250000,
+      format: c.format || "png",
+      type: c.type || "tilelayer",
+      scale: typeof c.scale === "number" ? c.scale : 250000,
     };
   }
-  function isVectorChart(c) { return c.format === 'pbf' || c.type === 'S-57'; }
+  function isVectorChart(c) {
+    return c.format === "pbf" || c.type === "S-57";
+  }
   function isRasterChart(c) {
-    return /^(tilelayer|tilejson)$/i.test(c.type) && /^(png|jpe?g|webp)$/i.test(c.format);
+    return (
+      /^(tilelayer|tilejson)$/i.test(c.type) &&
+      /^(png|jpe?g|webp)$/i.test(c.format)
+    );
   }
   // There were two of these, and the later declaration silently won for every
   // caller through hoisting. The one that won guarded with `if (!str) return ''`,
@@ -764,25 +1066,28 @@
   // Quotes are escaped too. No call site interpolates into an attribute value
   // today, and neither previous version was safe if one ever did.
   function escapeHtml(s) {
-    if (s == null) return '';
+    if (s == null) return "";
     return String(s)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
   }
 
   function makeChartLayer(c) {
     if (!c.url) return null;
     const opts = {
-      pane: 'charts',
+      pane: "charts",
       minZoom: c.minZoom,
       maxNativeZoom: c.maxZoom,
       maxZoom: 18,
       attribution: escapeHtml(c.name),
     };
     if (c.bounds) {
-      opts.bounds = L.latLngBounds([c.bounds[1], c.bounds[0]], [c.bounds[3], c.bounds[2]]);
+      opts.bounds = L.latLngBounds(
+        [c.bounds[1], c.bounds[0]],
+        [c.bounds[3], c.bounds[2]],
+      );
     }
     if (isRasterChart(c)) {
       return L.tileLayer(resolveChartUrl(c.url), opts);
@@ -800,8 +1105,14 @@
       // in a neutral land style instead.
       if (!matched) {
         c.layers.forEach(function (name) {
-          styles[name] = { fill: true, fillColor: S52.LANDA, fillOpacity: 0.6,
-                           stroke: true, color: S52.CSTLN, weight: 1 };
+          styles[name] = {
+            fill: true,
+            fillColor: S52.LANDA,
+            fillOpacity: 0.6,
+            stroke: true,
+            color: S52.CSTLN,
+            weight: 1,
+          };
         });
       }
       opts.rendererFactory = L.canvas.tile;
@@ -820,19 +1131,26 @@
       const v = JSON.parse(localStorage.getItem(CHART_STORE_KEY));
       if (Array.isArray(v)) return v;
     } catch {}
-    return ['openstreetmap']; // default = previous hardcoded base map
+    return ["openstreetmap"]; // default = previous hardcoded base map
   }
   function saveChartSelection() {
     const on = [];
-    chartSources.forEach(function (s) { if (s.enabled) on.push(s.id); });
-    try { localStorage.setItem(CHART_STORE_KEY, JSON.stringify(on)); } catch {}
+    chartSources.forEach(function (s) {
+      if (s.enabled) on.push(s.id);
+    });
+    try {
+      localStorage.setItem(CHART_STORE_KEY, JSON.stringify(on));
+    } catch {}
   }
 
   function setChartEnabled(src, on) {
     src.enabled = on;
     if (on) {
       if (!src.layer) src.layer = src.make();
-      if (!src.layer) { src.enabled = false; return; }
+      if (!src.layer) {
+        src.enabled = false;
+        return;
+      }
       src.layer.addTo(map);
       if (src.zIndex && src.layer.setZIndex) src.layer.setZIndex(src.zIndex);
     } else if (src.layer) {
@@ -841,20 +1159,23 @@
   }
 
   function renderChartList() {
-    const box = document.getElementById('chart-list');
-    box.innerHTML = '';
+    const box = document.getElementById("chart-list");
+    box.innerHTML = "";
     chartSources.forEach(function (src) {
-      const label = document.createElement('label');
-      label.className = 'switch-row';
-      const span = document.createElement('span');
-      span.className = 'switch-label';
-      span.textContent = src.supported ? src.name : src.name + ' (unsupported)';
+      const label = document.createElement("label");
+      label.className = "switch-row";
+      const span = document.createElement("span");
+      span.className = "switch-label";
+      span.textContent = src.supported ? src.name : src.name + " (unsupported)";
       if (src.description) label.title = src.description;
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
       cb.checked = !!src.enabled;
-      if (!src.supported) { cb.disabled = true; label.style.opacity = '0.5'; }
-      cb.addEventListener('change', function () {
+      if (!src.supported) {
+        cb.disabled = true;
+        label.style.opacity = "0.5";
+      }
+      cb.addEventListener("change", function () {
         setChartEnabled(src, this.checked);
         saveChartSelection();
       });
@@ -866,12 +1187,14 @@
 
   // Fetch the chart list from the server; called on (re)connect
   function refreshChartList() {
-    const url = chartServerBase() + '/signalk/v1/api/resources/charts';
-    logDebug('CHARTS', url);
+    const url = chartServerBase() + "/signalk/v1/api/resources/charts";
+    logDebug("CHARTS", url);
     fetch(url, { signal: AbortSignal.timeout(8000) })
-      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (r) {
+        return r.ok ? r.json() : null;
+      })
       .then(function (res) {
-        if (!res || typeof res !== 'object') return;
+        if (!res || typeof res !== "object") return;
         const saved = loadChartSelection();
         // drop server charts that disappeared
         chartSources.forEach(function (src, id) {
@@ -882,7 +1205,9 @@
         });
         // smaller scale number = more detail = drawn on top (Freeboard-SK ordering)
         const ids = Object.keys(res).sort(function (a, b) {
-          return ((res[b].scale || 0) - (res[a].scale || 0)) || a.localeCompare(b);
+          return (
+            (res[b].scale || 0) - (res[a].scale || 0) || a.localeCompare(b)
+          );
         });
         let z = 1;
         ids.forEach(function (id) {
@@ -895,10 +1220,14 @@
           }
           src.name = c.name;
           src.description = c.description;
-          src.supported = isRasterChart(c) || (isVectorChart(c) && !!L.vectorGrid);
-          src.make = function () { return makeChartLayer(c); };
+          src.supported =
+            isRasterChart(c) || (isVectorChart(c) && !!L.vectorGrid);
+          src.make = function () {
+            return makeChartLayer(c);
+          };
           src.zIndex = z++;
-          if (src.enabled && src.supported && !src.layer) setChartEnabled(src, true);
+          if (src.enabled && src.supported && !src.layer)
+            setChartEnabled(src, true);
         });
         renderChartList();
       })
@@ -907,24 +1236,49 @@
 
   // Built-in sources (always listed, no server needed)
   [
-    { id: 'openstreetmap', name: 'OpenStreetMap', description: 'World base map',
+    {
+      id: "openstreetmap",
+      name: "OpenStreetMap",
+      description: "World base map",
       make: function () {
-        return L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-          maxZoom: 18,
-          attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
-        });
-      } },
-    { id: 'openseamap', name: 'OpenSeaMap seamarks', description: 'Seamark overlay (buoys, lights…)',
+        return L.tileLayer(
+          "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+          {
+            maxZoom: 18,
+            attribution:
+              '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
+          },
+        );
+      },
+    },
+    {
+      id: "openseamap",
+      name: "OpenSeaMap seamarks",
+      description: "Seamark overlay (buoys, lights…)",
       make: function () {
-        return L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png', {
-          pane: 'seamarks',
-          maxZoom: 18,
-          attribution: '&copy; <a href="https://www.openseamap.org">OpenSeaMap</a>',
-        });
-      } },
+        return L.tileLayer(
+          "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
+          {
+            pane: "seamarks",
+            maxZoom: 18,
+            attribution:
+              '&copy; <a href="https://www.openseamap.org">OpenSeaMap</a>',
+          },
+        );
+      },
+    },
   ].forEach(function (b) {
-    const src = { id: b.id, name: b.name, description: b.description, builtin: true,
-                  supported: true, enabled: false, layer: null, make: b.make, zIndex: 0 };
+    const src = {
+      id: b.id,
+      name: b.name,
+      description: b.description,
+      builtin: true,
+      supported: true,
+      enabled: false,
+      layer: null,
+      make: b.make,
+      zIndex: 0,
+    };
     chartSources.set(b.id, src);
     if (loadChartSelection().includes(b.id)) setChartEnabled(src, true);
   });
@@ -933,7 +1287,7 @@
   // Standard map conventions: left-drag pans (Leaflet default), left-click
   // places waypoints (Leaflet suppresses 'click' after a drag), right-click
   // opens the context menu. The menu itself is wired up further below.
-  map.on('contextmenu', function (e) {
+  map.on("contextmenu", function (e) {
     L.DomEvent.preventDefault(e.originalEvent);
     openContextMenu(e.latlng, e.originalEvent.clientX, e.originalEvent.clientY);
   });
@@ -945,10 +1299,14 @@
 
   function snapshotRoute() {
     return {
-      start: state.startLatLng ? { lat: state.startLatLng.lat, lng: state.startLatLng.lng } : null,
-      dest: state.destLatLng ? { lat: state.destLatLng.lat, lng: state.destLatLng.lng } : null,
+      start: state.startLatLng
+        ? { lat: state.startLatLng.lat, lng: state.startLatLng.lng }
+        : null,
+      dest: state.destLatLng
+        ? { lat: state.destLatLng.lat, lng: state.destLatLng.lng }
+        : null,
       vias: state.viaPoints.map(function (ll, i) {
-        return { lat: ll.lat, lng: ll.lng, mode: state.viaModes[i] || 'auto' };
+        return { lat: ll.lat, lng: ll.lng, mode: state.viaModes[i] || "auto" };
       }),
       destMode: state.destMode,
       startPoiName: state.startPoiName,
@@ -968,12 +1326,16 @@
   function restoreSnapshot(s) {
     state.startLatLng = s.start ? L.latLng(s.start.lat, s.start.lng) : null;
     state.destLatLng = s.dest ? L.latLng(s.dest.lat, s.dest.lng) : null;
-    state.viaPoints = s.vias.map(function (v) { return L.latLng(v.lat, v.lng); });
-    state.viaModes = s.vias.map(function (v) { return v.mode; });
-    state.destMode = s.destMode || 'auto';
-    state.startPoiName = s.startPoiName || '';
-    state.destPoiName = s.destPoiName || '';
-    state.waypointNext = s.waypointNext || 'start';
+    state.viaPoints = s.vias.map(function (v) {
+      return L.latLng(v.lat, v.lng);
+    });
+    state.viaModes = s.vias.map(function (v) {
+      return v.mode;
+    });
+    state.destMode = s.destMode || "auto";
+    state.startPoiName = s.startPoiName || "";
+    state.destPoiName = s.destPoiName || "";
+    state.waypointNext = s.waypointNext || "start";
     applyWaypoints(); // clears the drawn route itself when < 2 points remain
   }
 
@@ -982,7 +1344,7 @@
     history.idx--;
     restoreSnapshot(history.stack[history.idx]);
     updateHistoryButtons();
-    showToast('Undone', '');
+    showToast("Undone", "");
   }
 
   function redoRoute() {
@@ -990,55 +1352,73 @@
     history.idx++;
     restoreSnapshot(history.stack[history.idx]);
     updateHistoryButtons();
-    showToast('Redone', '');
+    showToast("Redone", "");
   }
 
   function updateHistoryButtons() {
-    document.getElementById('undo-btn').disabled = history.idx <= 0;
-    document.getElementById('redo-btn').disabled = history.idx >= history.stack.length - 1;
+    document.getElementById("undo-btn").disabled = history.idx <= 0;
+    document.getElementById("redo-btn").disabled =
+      history.idx >= history.stack.length - 1;
   }
 
-  document.getElementById('undo-btn').addEventListener('click', undoRoute);
-  document.getElementById('redo-btn').addEventListener('click', redoRoute);
-  document.addEventListener('keydown', function (e) {
-    const tag = document.activeElement ? document.activeElement.tagName : '';
-    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
-    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
-      e.preventDefault(); undoRoute();
-    } else if (((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z') ||
-               ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y')) {
-      e.preventDefault(); redoRoute();
+  document.getElementById("undo-btn").addEventListener("click", undoRoute);
+  document.getElementById("redo-btn").addEventListener("click", redoRoute);
+  document.addEventListener("keydown", function (e) {
+    const tag = document.activeElement ? document.activeElement.tagName : "";
+    if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+    if (
+      (e.ctrlKey || e.metaKey) &&
+      !e.shiftKey &&
+      e.key.toLowerCase() === "z"
+    ) {
+      e.preventDefault();
+      undoRoute();
+    } else if (
+      ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z") ||
+      ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y")
+    ) {
+      e.preventDefault();
+      redoRoute();
     }
   });
 
   // ==================== confirm dialog ====================
   function confirmDialog(title, msg, yesLabel) {
     return new Promise(function (resolve) {
-      const modal = document.getElementById('confirm-modal');
-      modal.querySelector('.confirm-title').textContent = title;
-      modal.querySelector('.confirm-msg').textContent = msg;
-      const yesBtn = modal.querySelector('.confirm-yes');
-      const noBtn = modal.querySelector('.confirm-no');
-      yesBtn.textContent = yesLabel || 'Confirm';
-      modal.classList.add('visible');
+      const modal = document.getElementById("confirm-modal");
+      modal.querySelector(".confirm-title").textContent = title;
+      modal.querySelector(".confirm-msg").textContent = msg;
+      const yesBtn = modal.querySelector(".confirm-yes");
+      const noBtn = modal.querySelector(".confirm-no");
+      yesBtn.textContent = yesLabel || "Confirm";
+      modal.classList.add("visible");
       function done(answer) {
-        modal.classList.remove('visible');
-        yesBtn.removeEventListener('click', onYes);
-        noBtn.removeEventListener('click', onNo);
-        modal.querySelector('.confirm-backdrop').removeEventListener('click', onNo);
-        document.removeEventListener('keydown', onKey);
+        modal.classList.remove("visible");
+        yesBtn.removeEventListener("click", onYes);
+        noBtn.removeEventListener("click", onNo);
+        modal
+          .querySelector(".confirm-backdrop")
+          .removeEventListener("click", onNo);
+        document.removeEventListener("keydown", onKey);
         resolve(answer);
       }
-      function onYes() { done(true); }
-      function onNo() { done(false); }
-      function onKey(e) {
-        if (e.key === 'Escape') { e.stopPropagation(); done(false); }
-        if (e.key === 'Enter') done(true);
+      function onYes() {
+        done(true);
       }
-      yesBtn.addEventListener('click', onYes);
-      noBtn.addEventListener('click', onNo);
-      modal.querySelector('.confirm-backdrop').addEventListener('click', onNo);
-      document.addEventListener('keydown', onKey);
+      function onNo() {
+        done(false);
+      }
+      function onKey(e) {
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          done(false);
+        }
+        if (e.key === "Enter") done(true);
+      }
+      yesBtn.addEventListener("click", onYes);
+      noBtn.addEventListener("click", onNo);
+      modal.querySelector(".confirm-backdrop").addEventListener("click", onNo);
+      document.addEventListener("keydown", onKey);
       yesBtn.focus();
     });
   }
@@ -1046,43 +1426,51 @@
   // ==================== manual (draw) mode toggle ====================
   function setManualMode(on) {
     state.manualMode = !!on;
-    const btn = document.getElementById('manual-btn');
-    btn.classList.toggle('active', state.manualMode);
-    btn.setAttribute('aria-pressed', state.manualMode ? 'true' : 'false');
-    document.getElementById('manual-banner').classList.toggle('visible', state.manualMode);
-    map.getContainer().classList.toggle('manual-cursor', state.manualMode);
-    document.getElementById('hint-action').textContent = state.manualMode
-      ? 'Manual mode: taps add straight-line points'
-      : 'Tap map: 1st=Start, 2nd=Dest, 3rd+=Via · Shift+tap=straight leg · right-click for menu';
+    const btn = document.getElementById("manual-btn");
+    btn.classList.toggle("active", state.manualMode);
+    btn.setAttribute("aria-pressed", state.manualMode ? "true" : "false");
+    document
+      .getElementById("manual-banner")
+      .classList.toggle("visible", state.manualMode);
+    map.getContainer().classList.toggle("manual-cursor", state.manualMode);
+    document.getElementById("hint-action").textContent = state.manualMode
+      ? "Manual mode: taps add straight-line points"
+      : "Tap map: 1st=Start, 2nd=Dest, 3rd+=Via · Shift+tap=straight leg · right-click for menu";
   }
-  document.getElementById('manual-btn').addEventListener('click', function () {
+  document.getElementById("manual-btn").addEventListener("click", function () {
     setManualMode(!state.manualMode);
   });
-  function currentLegMode() { return state.manualMode ? 'manual' : 'auto'; }
+  function currentLegMode() {
+    return state.manualMode ? "manual" : "auto";
+  }
 
   // ==================== map context menu ====================
-  const ctxMenuEl = document.getElementById('map-context-menu');
+  const ctxMenuEl = document.getElementById("map-context-menu");
 
-  function closeContextMenu() { ctxMenuEl.classList.remove('visible'); clearBothHighlights(); }
+  function closeContextMenu() {
+    ctxMenuEl.classList.remove("visible");
+    clearBothHighlights();
+  }
 
   // hoverRange: optional {fromIdx, toIdx} — while the pointer is over this
   // item, highlight that stretch of the route on the map/itinerary pane so
   // it's obvious which leg an item like "Make this leg auto-routed" affects.
   function ctxItem(icon, label, danger, onClick, hoverRange) {
-    const div = document.createElement('div');
-    div.className = 'ctx-item' + (danger ? ' ctx-danger' : '');
-    div.innerHTML = '<span class="ctx-icon">' + icon + '</span><span>' + label + '</span>';
-    div.addEventListener('click', function (e) {
+    const div = document.createElement("div");
+    div.className = "ctx-item" + (danger ? " ctx-danger" : "");
+    div.innerHTML =
+      '<span class="ctx-icon">' + icon + "</span><span>" + label + "</span>";
+    div.addEventListener("click", function (e) {
       e.stopPropagation();
       closeContextMenu();
       onClick();
     });
     if (hoverRange) {
-      div.addEventListener('mouseenter', function () {
+      div.addEventListener("mouseenter", function () {
         highlightMapByCoordRange(hoverRange.fromIdx, hoverRange.toIdx);
         highlightPaneByCoordRange(hoverRange.fromIdx, hoverRange.toIdx);
       });
-      div.addEventListener('mouseleave', clearBothHighlights);
+      div.addEventListener("mouseleave", clearBothHighlights);
     }
     return div;
   }
@@ -1093,118 +1481,179 @@
   // on a rendered route segment (see attachSegmentContextMenu).
   function openContextMenu(latlng, clientX, clientY, opts) {
     opts = opts || {};
-    ctxMenuEl.innerHTML = '';
+    ctxMenuEl.innerHTML = "";
 
     if (opts.legTarget) {
       const lt = opts.legTarget;
       const range = { fromIdx: lt.fromIdx, toIdx: lt.toIdx };
-      const isManualLeg = legMode(lt.legIdx) === 'manual';
-      ctxMenuEl.appendChild(ctxItem(isManualLeg ? '🧭' : '✏',
-        isManualLeg ? 'Make this leg auto-routed' : 'Make this leg straight (manual)', false, function () {
-        setLegMode(lt.legIdx, isManualLeg ? 'auto' : 'manual');
-        pushHistory();
-        applyWaypoints();
-      }, range));
-      ctxMenuEl.appendChild(ctxItem('🟣', 'Insert via point here', false, function () {
-        insertViaIntoLeg(lt.legIdx, latlng);
-        pushHistory();
-        applyWaypoints();
-      }, range));
-      ctxMenuEl.appendChild(document.createElement('div')).className = 'ctx-sep';
+      const isManualLeg = legMode(lt.legIdx) === "manual";
+      ctxMenuEl.appendChild(
+        ctxItem(
+          isManualLeg ? "🧭" : "✏",
+          isManualLeg
+            ? "Make this leg auto-routed"
+            : "Make this leg straight (manual)",
+          false,
+          function () {
+            setLegMode(lt.legIdx, isManualLeg ? "auto" : "manual");
+            pushHistory();
+            applyWaypoints();
+          },
+          range,
+        ),
+      );
+      ctxMenuEl.appendChild(
+        ctxItem(
+          "🟣",
+          "Insert via point here",
+          false,
+          function () {
+            insertViaIntoLeg(lt.legIdx, latlng);
+            pushHistory();
+            applyWaypoints();
+          },
+          range,
+        ),
+      );
+      ctxMenuEl.appendChild(document.createElement("div")).className =
+        "ctx-sep";
     }
 
     if (opts.removeTarget) {
       const t = opts.removeTarget;
-      const label = t.kind === 'start' ? 'Remove start' : t.kind === 'dest' ? 'Remove destination' : 'Remove via point';
-      ctxMenuEl.appendChild(ctxItem('🗑', label, true, function () {
-        if (t.kind === 'start') { state.startLatLng = null; state.startPoiName = ''; }
-        else if (t.kind === 'dest') { state.destLatLng = null; state.destPoiName = ''; state.destMode = 'auto'; }
-        else if (t.viaIdx != null && t.viaIdx >= 0) {
-          state.viaPoints.splice(t.viaIdx, 1);
-          state.viaModes.splice(t.viaIdx, 1);
-        }
+      const label =
+        t.kind === "start"
+          ? "Remove start"
+          : t.kind === "dest"
+            ? "Remove destination"
+            : "Remove via point";
+      ctxMenuEl.appendChild(
+        ctxItem("🗑", label, true, function () {
+          if (t.kind === "start") {
+            state.startLatLng = null;
+            state.startPoiName = "";
+          } else if (t.kind === "dest") {
+            state.destLatLng = null;
+            state.destPoiName = "";
+            state.destMode = "auto";
+          } else if (t.viaIdx != null && t.viaIdx >= 0) {
+            state.viaPoints.splice(t.viaIdx, 1);
+            state.viaModes.splice(t.viaIdx, 1);
+          }
+          pushHistory();
+          applyWaypoints();
+        }),
+      );
+      if (t.kind === "via") {
+        const isManual = state.viaModes[t.viaIdx] === "manual";
+        ctxMenuEl.appendChild(
+          ctxItem(
+            isManual ? "🧭" : "✏",
+            isManual ? "Make leg auto-routed" : "Make leg manual (straight)",
+            false,
+            function () {
+              state.viaModes[t.viaIdx] = isManual ? "auto" : "manual";
+              pushHistory();
+              applyWaypoints();
+            },
+            legCoordRange(t.viaIdx),
+          ),
+        );
+      } else if (t.kind === "dest" && state.lastGeoJson) {
+        const finalLegIdx = state.viaPoints.length;
+        const isManualFinal = state.destMode === "manual";
+        ctxMenuEl.appendChild(
+          ctxItem(
+            isManualFinal ? "🧭" : "✏",
+            isManualFinal
+              ? "Make final leg auto-routed"
+              : "Make final leg straight (manual)",
+            false,
+            function () {
+              state.destMode = isManualFinal ? "auto" : "manual";
+              pushHistory();
+              applyWaypoints();
+            },
+            legCoordRange(finalLegIdx),
+          ),
+        );
+      }
+      ctxMenuEl.appendChild(document.createElement("div")).className =
+        "ctx-sep";
+    }
+
+    ctxMenuEl.appendChild(
+      ctxItem("🟢", "Set start here", false, function () {
+        state.startLatLng = latlng;
+        state.startPoiName = "";
+        state.waypointNext = "dest";
+        lookupNearestPoi(latlng.lat, latlng.lng, "start");
         pushHistory();
         applyWaypoints();
-      }));
-      if (t.kind === 'via') {
-        const isManual = state.viaModes[t.viaIdx] === 'manual';
-        ctxMenuEl.appendChild(ctxItem(isManual ? '🧭' : '✏',
-          isManual ? 'Make leg auto-routed' : 'Make leg manual (straight)', false, function () {
-          state.viaModes[t.viaIdx] = isManual ? 'auto' : 'manual';
-          pushHistory();
-          applyWaypoints();
-        }, legCoordRange(t.viaIdx)));
-      } else if (t.kind === 'dest' && state.lastGeoJson) {
-        const finalLegIdx = state.viaPoints.length;
-        const isManualFinal = state.destMode === 'manual';
-        ctxMenuEl.appendChild(ctxItem(isManualFinal ? '🧭' : '✏',
-          isManualFinal ? 'Make final leg auto-routed' : 'Make final leg straight (manual)', false, function () {
-          state.destMode = isManualFinal ? 'auto' : 'manual';
-          pushHistory();
-          applyWaypoints();
-        }, legCoordRange(finalLegIdx)));
-      }
-      ctxMenuEl.appendChild(document.createElement('div')).className = 'ctx-sep';
-    }
-
-    ctxMenuEl.appendChild(ctxItem('🟢', 'Set start here', false, function () {
-      state.startLatLng = latlng;
-      state.startPoiName = '';
-      state.waypointNext = 'dest';
-      lookupNearestPoi(latlng.lat, latlng.lng, 'start');
-      pushHistory();
-      applyWaypoints();
-    }));
-    ctxMenuEl.appendChild(ctxItem('🔴', 'Set destination here', false, function () {
-      state.destLatLng = latlng;
-      state.destPoiName = '';
-      state.destMode = currentLegMode();
-      state.waypointNext = 'start';
-      lookupNearestPoi(latlng.lat, latlng.lng, 'dest');
-      pushHistory();
-      applyWaypoints();
-    }));
+      }),
+    );
+    ctxMenuEl.appendChild(
+      ctxItem("🔴", "Set destination here", false, function () {
+        state.destLatLng = latlng;
+        state.destPoiName = "";
+        state.destMode = currentLegMode();
+        state.waypointNext = "start";
+        lookupNearestPoi(latlng.lat, latlng.lng, "dest");
+        pushHistory();
+        applyWaypoints();
+      }),
+    );
     if (state.startLatLng && state.destLatLng) {
-      ctxMenuEl.appendChild(ctxItem('🟣', 'Add via point', false, function () {
-        addViaPoint(latlng, 'auto');
-      }));
-      ctxMenuEl.appendChild(ctxItem('✏', 'Add manual point (straight leg)', false, function () {
-        addViaPoint(latlng, 'manual');
-      }));
+      ctxMenuEl.appendChild(
+        ctxItem("🟣", "Add via point", false, function () {
+          addViaPoint(latlng, "auto");
+        }),
+      );
+      ctxMenuEl.appendChild(
+        ctxItem("✏", "Add manual point (straight leg)", false, function () {
+          addViaPoint(latlng, "manual");
+        }),
+      );
     }
 
-    const hasRoute = state.startLatLng || state.destLatLng || state.viaPoints.length > 0;
+    const hasRoute =
+      state.startLatLng || state.destLatLng || state.viaPoints.length > 0;
     if (hasRoute) {
-      ctxMenuEl.appendChild(document.createElement('div')).className = 'ctx-sep';
+      ctxMenuEl.appendChild(document.createElement("div")).className =
+        "ctx-sep";
       if (history.idx > 0) {
-        ctxMenuEl.appendChild(ctxItem('↶', 'Undo', false, undoRoute));
+        ctxMenuEl.appendChild(ctxItem("↶", "Undo", false, undoRoute));
       }
-      ctxMenuEl.appendChild(ctxItem('✕', 'Clear route…', true, requestClearRoute));
+      ctxMenuEl.appendChild(
+        ctxItem("✕", "Clear route…", true, requestClearRoute),
+      );
     }
 
-    const coordsDiv = document.createElement('div');
-    coordsDiv.className = 'ctx-coords';
+    const coordsDiv = document.createElement("div");
+    coordsDiv.className = "ctx-coords";
     coordsDiv.textContent = fmtCoord(latlng.lat, latlng.lng);
     ctxMenuEl.appendChild(coordsDiv);
 
     // Position, clamped to the viewport
-    ctxMenuEl.classList.add('visible');
+    ctxMenuEl.classList.add("visible");
     const rect = ctxMenuEl.getBoundingClientRect();
     const x = Math.min(clientX, window.innerWidth - rect.width - 8);
     const y = Math.min(clientY, window.innerHeight - rect.height - 8);
-    ctxMenuEl.style.left = Math.max(8, x) + 'px';
-    ctxMenuEl.style.top = Math.max(8, y) + 'px';
+    ctxMenuEl.style.left = Math.max(8, x) + "px";
+    ctxMenuEl.style.top = Math.max(8, y) + "px";
   }
 
-  document.addEventListener('click', function () { closeContextMenu(); });
-  map.on('movestart zoomstart', closeContextMenu);
-  document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') closeContextMenu();
+  document.addEventListener("click", function () {
+    closeContextMenu();
+  });
+  map.on("movestart zoomstart", closeContextMenu);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") closeContextMenu();
   });
 
   function addViaPoint(latlng, mode) {
     state.viaPoints.push(latlng);
-    state.viaModes.push(mode || 'auto');
+    state.viaModes.push(mode || "auto");
     sortViasWithModes();
     pushHistory();
     applyWaypoints();
@@ -1216,26 +1665,42 @@
     const coords = getRouteCoords(state.lastGeoJson);
     if (!coords || coords.length < 2) return;
     const paired = state.viaPoints.map(function (vp, i) {
-      return { vp: vp, mode: state.viaModes[i] || 'auto', idx: closestCoordIndex(coords, vp.lat, vp.lng) };
+      return {
+        vp: vp,
+        mode: state.viaModes[i] || "auto",
+        idx: closestCoordIndex(coords, vp.lat, vp.lng),
+      };
     });
-    paired.sort(function (a, b) { return a.idx - b.idx; });
-    state.viaPoints = paired.map(function (p) { return p.vp; });
-    state.viaModes = paired.map(function (p) { return p.mode; });
+    paired.sort(function (a, b) {
+      return a.idx - b.idx;
+    });
+    state.viaPoints = paired.map(function (p) {
+      return p.vp;
+    });
+    state.viaModes = paired.map(function (p) {
+      return p.mode;
+    });
   }
 
   // ==================== clear route (with confirmation) ====================
   function doClearRoute() {
     state.startLatLng = null;
-    state.destLatLng  = null;
-    state.startPoiName = '';
-    state.destPoiName = '';
-    state.routeName = '';
+    state.destLatLng = null;
+    state.startPoiName = "";
+    state.destPoiName = "";
+    state.routeName = "";
     state.viaPoints = [];
     state.viaModes = [];
-    state.destMode = 'auto';
-    state.waypointNext = 'start';
-    if (state.startMarker) { map.removeLayer(state.startMarker); state.startMarker = null; }
-    if (state.destMarker) { map.removeLayer(state.destMarker); state.destMarker = null; }
+    state.destMode = "auto";
+    state.waypointNext = "start";
+    if (state.startMarker) {
+      map.removeLayer(state.startMarker);
+      state.startMarker = null;
+    }
+    if (state.destMarker) {
+      map.removeLayer(state.destMarker);
+      state.destMarker = null;
+    }
     for (const m of state.viaMarkers) map.removeLayer(m);
     state.viaMarkers = [];
     state.routeLayers.clearLayers();
@@ -1247,64 +1712,93 @@
   }
 
   function requestClearRoute() {
-    const hasAnything = state.startLatLng || state.destLatLng || state.viaPoints.length > 0;
+    const hasAnything =
+      state.startLatLng || state.destLatLng || state.viaPoints.length > 0;
     if (!hasAnything) return;
-    confirmDialog('Clear route?', 'This removes the start, destination and all via points. You can undo afterwards.', 'Clear route')
-      .then(function (yes) { if (yes) doClearRoute(); });
+    confirmDialog(
+      "Clear route?",
+      "This removes the start, destination and all via points. You can undo afterwards.",
+      "Clear route",
+    ).then(function (yes) {
+      if (yes) doClearRoute();
+    });
   }
 
   // ==================== settings hamburger menu ====================
   (function () {
-    const hamburgerBtn = document.getElementById('settings-hamburger-btn');
-    const hamburgerMenu = document.getElementById('settings-hamburger-menu');
-    const settingsPanel = document.getElementById('settings-panel');
-    const settingsTitle = document.getElementById('settings-panel-title');
-    const tabLabels = { routing: 'Routing', charts: 'Charts', view: 'View', advanced: 'Advanced' };
+    const hamburgerBtn = document.getElementById("settings-hamburger-btn");
+    const hamburgerMenu = document.getElementById("settings-hamburger-menu");
+    const settingsPanel = document.getElementById("settings-panel");
+    const settingsTitle = document.getElementById("settings-panel-title");
+    const tabLabels = {
+      routing: "Routing",
+      charts: "Charts",
+      view: "View",
+      advanced: "Advanced",
+    };
 
     function closeMenu() {
-      hamburgerMenu.classList.remove('visible');
-      hamburgerBtn.setAttribute('aria-expanded', 'false');
+      hamburgerMenu.classList.remove("visible");
+      hamburgerBtn.setAttribute("aria-expanded", "false");
     }
 
-    hamburgerBtn.addEventListener('click', function (e) {
+    hamburgerBtn.addEventListener("click", function (e) {
       e.stopPropagation();
-      if (!settingsPanel.classList.contains('collapsed')) {
+      if (!settingsPanel.classList.contains("collapsed")) {
         // panel already open: close it instead of showing the menu again
-        settingsPanel.classList.add('collapsed');
+        settingsPanel.classList.add("collapsed");
         closeMenu();
         return;
       }
-      const willShow = !hamburgerMenu.classList.contains('visible');
-      hamburgerMenu.classList.toggle('visible', willShow);
-      hamburgerBtn.setAttribute('aria-expanded', willShow ? 'true' : 'false');
+      const willShow = !hamburgerMenu.classList.contains("visible");
+      hamburgerMenu.classList.toggle("visible", willShow);
+      hamburgerBtn.setAttribute("aria-expanded", willShow ? "true" : "false");
     });
 
-    document.querySelectorAll('#settings-hamburger-menu .hamburger-item[data-tab]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        const tab = btn.dataset.tab;
-        document.querySelectorAll('#settings-hamburger-menu .hamburger-item[data-tab]').forEach(function (b) {
-          b.classList.toggle('active-tab', b === btn);
+    document
+      .querySelectorAll("#settings-hamburger-menu .hamburger-item[data-tab]")
+      .forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          const tab = btn.dataset.tab;
+          document
+            .querySelectorAll(
+              "#settings-hamburger-menu .hamburger-item[data-tab]",
+            )
+            .forEach(function (b) {
+              b.classList.toggle("active-tab", b === btn);
+            });
+          document.getElementById("settings-tab-routing").style.display =
+            tab === "routing" ? "" : "none";
+          document.getElementById("settings-tab-charts").style.display =
+            tab === "charts" ? "" : "none";
+          document.getElementById("settings-tab-view").style.display =
+            tab === "view" ? "" : "none";
+          document.getElementById("settings-tab-advanced").style.display =
+            tab === "advanced" ? "" : "none";
+          settingsTitle.textContent = tabLabels[tab] || "";
+          settingsPanel.classList.remove("collapsed");
+          closeMenu();
         });
-        document.getElementById('settings-tab-routing').style.display = tab === 'routing' ? '' : 'none';
-        document.getElementById('settings-tab-charts').style.display = tab === 'charts' ? '' : 'none';
-        document.getElementById('settings-tab-view').style.display = tab === 'view' ? '' : 'none';
-        document.getElementById('settings-tab-advanced').style.display = tab === 'advanced' ? '' : 'none';
-        settingsTitle.textContent = tabLabels[tab] || '';
-        settingsPanel.classList.remove('collapsed');
-        closeMenu();
       });
-    });
 
     // "Manage Routing Data" opens the download modal directly (handled elsewhere); just close the menu.
-    document.getElementById('manage-data-btn').addEventListener('click', closeMenu);
+    document
+      .getElementById("manage-data-btn")
+      .addEventListener("click", closeMenu);
 
-    document.getElementById('settings-close-btn').addEventListener('click', function () {
-      settingsPanel.classList.add('collapsed');
-    });
+    document
+      .getElementById("settings-close-btn")
+      .addEventListener("click", function () {
+        settingsPanel.classList.add("collapsed");
+      });
 
-    document.addEventListener('click', function (e) {
-      if (!hamburgerMenu.classList.contains('visible')) return;
-      if (e.target.closest('#settings-hamburger-menu') || e.target.closest('#settings-hamburger-btn')) return;
+    document.addEventListener("click", function (e) {
+      if (!hamburgerMenu.classList.contains("visible")) return;
+      if (
+        e.target.closest("#settings-hamburger-menu") ||
+        e.target.closest("#settings-hamburger-btn")
+      )
+        return;
       closeMenu();
     });
   })();
@@ -1332,63 +1826,140 @@
 
   function getBboxStr() {
     const b = map.getBounds();
-    return b.getWest().toFixed(4) + ',' + b.getSouth().toFixed(4) + ',' + b.getEast().toFixed(4) + ',' + b.getNorth().toFixed(4);
+    return (
+      b.getWest().toFixed(4) +
+      "," +
+      b.getSouth().toFixed(4) +
+      "," +
+      b.getEast().toFixed(4) +
+      "," +
+      b.getNorth().toFixed(4)
+    );
   }
 
-  function graphNodesUrl() { return getApiBase() + '/signalk/v1/api/router/graph/nodes?bbox=' + getBboxStr() + '&limit=8000'; }
-  function graphEdgesUrl() { return getApiBase() + '/signalk/v1/api/router/graph/edges?bbox=' + getBboxStr() + '&limit=5000'; }
-  function poisUrl()        { return getApiBase() + '/signalk/v1/api/router/pois?bbox=' + getBboxStr() + '&limit=4000'; }
-  function waterwaysUrl()   { return getApiBase() + '/signalk/v1/api/router/waterways?bbox=' + getBboxStr(); }
-  function databasesUrl()   { return getApiBase() + '/signalk/v1/api/router/databases'; }
+  function graphNodesUrl() {
+    return (
+      getApiBase() +
+      "/signalk/v1/api/router/graph/nodes?bbox=" +
+      getBboxStr() +
+      "&limit=8000"
+    );
+  }
+  function graphEdgesUrl() {
+    return (
+      getApiBase() +
+      "/signalk/v1/api/router/graph/edges?bbox=" +
+      getBboxStr() +
+      "&limit=5000"
+    );
+  }
+  function poisUrl() {
+    return (
+      getApiBase() +
+      "/signalk/v1/api/router/pois?bbox=" +
+      getBboxStr() +
+      "&limit=4000"
+    );
+  }
+  function waterwaysUrl() {
+    return (
+      getApiBase() + "/signalk/v1/api/router/waterways?bbox=" + getBboxStr()
+    );
+  }
+  function databasesUrl() {
+    return getApiBase() + "/signalk/v1/api/router/databases";
+  }
 
   // Tide/current stations come straight from their own plugins on this same
   // Signal K server (signalk-tides, signalk-tidal-currents) — not proxied
   // through the routeiq backend.
   function tideStationsUrl(lat, lon) {
-    return '/signalk/v2/api/tides/stations?latitude=' + lat.toFixed(4) + '&longitude=' + lon.toFixed(4);
+    return (
+      "/signalk/v2/api/tides/stations?latitude=" +
+      lat.toFixed(4) +
+      "&longitude=" +
+      lon.toFixed(4)
+    );
   }
   // bbox (not a nearest-N point) so every station in the current viewport is
   // returned, not just the closest handful to the map center.
   function currentStationsUrl() {
-    return '/signalk/v2/api/currents/stations?bbox=' + getBboxStr() + '&limit=500';
+    return (
+      "/signalk/v2/api/currents/stations?bbox=" + getBboxStr() + "&limit=500"
+    );
   }
   function currentTimelineUrl(id, startMs, endMs) {
-    return '/signalk/v2/api/currents/stations/' + encodeURIComponent(id) + '/timeline' +
-      '?start=' + new Date(startMs).toISOString() + '&end=' + new Date(endMs).toISOString() + '&step=15';
+    return (
+      "/signalk/v2/api/currents/stations/" +
+      encodeURIComponent(id) +
+      "/timeline" +
+      "?start=" +
+      new Date(startMs).toISOString() +
+      "&end=" +
+      new Date(endMs).toISOString() +
+      "&step=15"
+    );
   }
   // Gridded GRIB current field over the viewport — fills in coverage away
   // from harmonic station locations, where the plugin has GRIB data loaded.
   function currentGridUrl(timeMs) {
-    return '/signalk/v2/api/currents/grid?bbox=' + getBboxStr() + '&time=' + new Date(timeMs).toISOString() + '&maxPoints=300';
+    return (
+      "/signalk/v2/api/currents/grid?bbox=" +
+      getBboxStr() +
+      "&time=" +
+      new Date(timeMs).toISOString() +
+      "&maxPoints=300"
+    );
   }
 
   function fetchGraphNodes() {
     if (!graphVisible) return;
     graphLayer.clearLayers();
-    logDebug('GRAPH', graphNodesUrl());
+    logDebug("GRAPH", graphNodesUrl());
     fetch(graphNodesUrl())
-      .then(r => { logDebug('GRAPH', graphNodesUrl(), undefined, r); return r.ok ? r.json() : null; })
-      .then(data => {
+      .then((r) => {
+        logDebug("GRAPH", graphNodesUrl(), undefined, r);
+        return r.ok ? r.json() : null;
+      })
+      .then((data) => {
         if (!data || !data.nodes) return;
         for (const n of data.nodes) {
           const isOverlay = n.region_id === 0 && state.editMode;
-          const color = isOverlay ? '#8b5cf6'
-            : n.min_depth > 2 ? '#3b8fd4' : n.min_depth >= 1.2 ? '#eab308' : n.min_depth >= 0 ? '#ef4444' : '#888888';
-          const radius = n.resolution > 0 ? Math.max(3, Math.min(8, n.resolution * 1000)) : 5;
+          const color = isOverlay
+            ? "#8b5cf6"
+            : n.min_depth > 2
+              ? "#3b8fd4"
+              : n.min_depth >= 1.2
+                ? "#eab308"
+                : n.min_depth >= 0
+                  ? "#ef4444"
+                  : "#888888";
+          const radius =
+            n.resolution > 0
+              ? Math.max(3, Math.min(8, n.resolution * 1000))
+              : 5;
           const marker = isOverlay
-            ? L.marker([n.lat, n.lon], { icon: L.divIcon({
-                className: '',
-                html: '<div style="width:18px;height:18px;background:#8b5cf6;border:2px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.5)">O</div>',
-                iconSize: [18, 18], iconAnchor: [9, 9],
-              }) })
+            ? L.marker([n.lat, n.lon], {
+                icon: L.divIcon({
+                  className: "",
+                  html: '<div style="width:18px;height:18px;background:#8b5cf6;border:2px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.5)">O</div>',
+                  iconSize: [18, 18],
+                  iconAnchor: [9, 9],
+                }),
+              })
             : L.circleMarker([n.lat, n.lon], {
-                radius, color, fillColor: color, fillOpacity: 0.6, weight: 1.5, opacity: 0.8,
+                radius,
+                color,
+                fillColor: color,
+                fillOpacity: 0.6,
+                weight: 1.5,
+                opacity: 0.8,
               });
           if (state.editMode) {
             marker._nodeData = n;
-            marker.on('click', function (e) {
+            marker.on("click", function (e) {
               L.DomEvent.stopPropagation(e);
-              if (state.editAddMode === 'edge') {
+              if (state.editAddMode === "edge") {
                 handleAddEdgeClick(n, marker);
               } else {
                 selectNode(n, this);
@@ -1404,23 +1975,26 @@
   function fetchEdges() {
     if (!edgesVisible) return;
     edgesLayer.clearLayers();
-    logDebug('EDGES', graphEdgesUrl());
+    logDebug("EDGES", graphEdgesUrl());
     fetch(graphEdgesUrl())
-      .then(r => { logDebug('EDGES', graphEdgesUrl(), undefined, r); return r.ok ? r.json() : null; })
-      .then(data => {
+      .then((r) => {
+        logDebug("EDGES", graphEdgesUrl(), undefined, r);
+        return r.ok ? r.json() : null;
+      })
+      .then((data) => {
         if (!data || !data.edges) return;
         // Three independent visual channels, always on (no mode toggle):
         //  - color:   edge_kind_id (centerline/navmesh_boundary/lane/macro)
         //  - dash:    edge_type_id (coastal long-dot-long vs. inland solid)
         //  - opacity: traffic_mode (one-way edges more prominent)
-        const KIND_COLORS = ['#22c55e', '#f59e0b', '#8b5cf6', '#ec4899'];
+        const KIND_COLORS = ["#22c55e", "#f59e0b", "#8b5cf6", "#ec4899"];
         // Long,dot,long — tuned to actually read at debug-overlay opacity;
         // the original 10,3,2,3 was invisible at 0.35 opacity/weight 3 (short
         // segments blur out at low alpha, verified with pixel-level checks
         // against a live render, not just eyeballing).
-        const COASTAL_DASH = '16,6,4,6';
+        const COASTAL_DASH = "16,6,4,6";
         for (const e of data.edges) {
-          const color = KIND_COLORS[e.edge_kind_id] || '#6d96c0';
+          const color = KIND_COLORS[e.edge_kind_id] || "#6d96c0";
           const dash = e.edge_type_id === 0 ? COASTAL_DASH : null;
           const opacity = e.traffic_mode !== 0 ? 0.85 : 0.6;
           const opts = { color, weight: 3, opacity, dashArray: dash };
@@ -1430,12 +2004,13 @@
           // before. path_points is [lat,lon] source->target order, matching
           // Leaflet's own coordinate order, so no reordering is needed.
           const latlngs = [[e.source_lat, e.source_lon]];
-          if (e.path_points && e.path_points.length) latlngs.push(...e.path_points);
+          if (e.path_points && e.path_points.length)
+            latlngs.push(...e.path_points);
           latlngs.push([e.target_lat, e.target_lon]);
           const line = L.polyline(latlngs, opts);
           if (state.editMode) {
             line._edgeData = e;
-            line.on('click', function (e) {
+            line.on("click", function (e) {
               L.DomEvent.stopPropagation(e);
               selectEdge(this._edgeData, this);
             });
@@ -1446,88 +2021,131 @@
       .catch(() => {});
   }
 
-  const POI_TYPE_NAMES = ['harbour', 'lock', 'bridge', 'fairway', 'waterway'];
-  function poiTypeName(poi) { return poi.type || POI_TYPE_NAMES[poi.typeId] || 'harbour'; }
+  const POI_TYPE_NAMES = ["harbour", "lock", "bridge", "fairway", "waterway"];
+  function poiTypeName(poi) {
+    return poi.type || POI_TYPE_NAMES[poi.typeId] || "harbour";
+  }
 
   function poiIcon(type, props, size) {
     size = size || 22;
-    if (type === 'bridge') {
-      if (props.subtype === 'opening') {
-        return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 22 22"><line x1="3" y1="11" x2="7" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="9.7" y2="3.5" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="19" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="7" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="15" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>';
+    if (type === "bridge") {
+      if (props.subtype === "opening") {
+        return (
+          '<svg width="' +
+          size +
+          '" height="' +
+          size +
+          '" viewBox="0 0 22 22"><line x1="3" y1="11" x2="7" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="9.7" y2="3.5" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="19" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="7" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="15" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>'
+        );
       }
-      return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 22 22"><line x1="3" y1="11" x2="19" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="7" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="15" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>';
+      return (
+        '<svg width="' +
+        size +
+        '" height="' +
+        size +
+        '" viewBox="0 0 22 22"><line x1="3" y1="11" x2="19" y2="11" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="7" y1="11" x2="7" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="15" y1="11" x2="15" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>'
+      );
     }
-    if (type === 'lock') {
-      return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 22 22"><line x1="3" y1="8" x2="3" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="3" y1="18" x2="19" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="19" y1="8" x2="19" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><polyline points="8,14 11,16 14,14" stroke="white" stroke-width="1.5" fill="none" stroke-linejoin="round"/><line x1="11" y1="14" x2="11" y2="10" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>';
+    if (type === "lock") {
+      return (
+        '<svg width="' +
+        size +
+        '" height="' +
+        size +
+        '" viewBox="0 0 22 22"><line x1="3" y1="8" x2="3" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="3" y1="18" x2="19" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="19" y1="8" x2="19" y2="18" stroke="white" stroke-width="2" stroke-linecap="round"/><polyline points="8,14 11,16 14,14" stroke="white" stroke-width="1.5" fill="none" stroke-linejoin="round"/><line x1="11" y1="14" x2="11" y2="10" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>'
+      );
     }
-    return ({ harbour: '⚓', fairway: '⛵', waterway: '💧' }[type] || '📍');
+    return { harbour: "⚓", fairway: "⛵", waterway: "💧" }[type] || "📍";
   }
 
   function fetchPois() {
     if (!poiVisible) return;
     poiLayer.clearLayers();
-    logDebug('POIS', poisUrl());
+    logDebug("POIS", poisUrl());
     fetch(poisUrl())
-      .then(r => { logDebug('POIS', poisUrl(), undefined, r); return r.ok ? r.json() : null; })
-      .then(data => {
+      .then((r) => {
+        logDebug("POIS", poisUrl(), undefined, r);
+        return r.ok ? r.json() : null;
+      })
+      .then((data) => {
         if (!data || !data.pois) return;
         const subtypeColor = {
-          bridge: { opening: '#22c55e', fixed: '#ef4444' }
+          bridge: { opening: "#22c55e", fixed: "#ef4444" },
         };
-        const typeColor = { harbour: '#3b8fd4', lock: '#f59e0b', bridge: '#ef4444', fairway: '#8b5cf6', waterway: '#14b8a6' };
+        const typeColor = {
+          harbour: "#3b8fd4",
+          lock: "#f59e0b",
+          bridge: "#ef4444",
+          fairway: "#8b5cf6",
+          waterway: "#14b8a6",
+        };
         for (const p of data.pois) {
           const props = p.properties || {};
           const t = poiTypeName(p);
           const subtypeColors = subtypeColor[t];
-          let color = subtypeColors && props.subtype ? subtypeColors[props.subtype] : (typeColor[t] || '#6d96c0');
+          let color =
+            subtypeColors && props.subtype
+              ? subtypeColors[props.subtype]
+              : typeColor[t] || "#6d96c0";
           const iconHtml = poiIcon(t, props);
           let label = p.name;
-          if (t === 'bridge') {
-            if (props.subtype === 'fixed') {
-              if (props.height != null && props.height < 999) label += ' — ' + props.height + 'm';
-            } else if (props.subtype === 'opening') {
-              label += ' (opening)';
+          if (t === "bridge") {
+            if (props.subtype === "fixed") {
+              if (props.height != null && props.height < 999)
+                label += " — " + props.height + "m";
+            } else if (props.subtype === "opening") {
+              label += " (opening)";
             }
           }
           const m = L.marker([p.lat, p.lon], {
             icon: L.divIcon({
-              className: '',
-              html: '<div style="font-size:14px;line-height:18px;text-align:center;background:' + color + ';color:#fff;width:22px;height:22px;border-radius:11px;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.3)">' + iconHtml + '</div>',
+              className: "",
+              html:
+                '<div style="font-size:14px;line-height:18px;text-align:center;background:' +
+                color +
+                ';color:#fff;width:22px;height:22px;border-radius:11px;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.3)">' +
+                iconHtml +
+                "</div>",
               iconSize: [22, 22],
               iconAnchor: [11, 11],
             }),
           });
-          m.bindTooltip(label, { direction: 'top', offset: [0, -12] });
-          m.on('click', function () {
-            const name = p.name || 'POI';
-            const lat = p.lat, lng = p.lon;
+          m.bindTooltip(label, { direction: "top", offset: [0, -12] });
+          m.on("click", function () {
+            const name = p.name || "POI";
+            const lat = p.lat,
+              lng = p.lon;
             const html =
               '<div style="font-size:12px;color:#ccc;padding:0 0 6px;border-bottom:1px solid rgba(79,148,212,0.2);margin-bottom:6px;text-align:center">' +
-                name +
-              '</div>' +
+              name +
+              "</div>" +
               '<div style="display:flex;gap:6px;justify-content:center">' +
-                '<button class="poi-route-btn" data-action="from" style="font-size:11px;padding:3px 10px;background:#3b8fd4;color:#fff;border:none;border-radius:4px;cursor:pointer">Route from</button>' +
-                '<button class="poi-route-btn" data-action="to" style="font-size:11px;padding:3px 10px;background:#22c55e;color:#fff;border:none;border-radius:4px;cursor:pointer">Route to</button>' +
-              '</div>';
-            const popup = L.popup({ closeButton: true, className: 'poi-popup', offset: [0, -10] })
+              '<button class="poi-route-btn" data-action="from" style="font-size:11px;padding:3px 10px;background:#3b8fd4;color:#fff;border:none;border-radius:4px;cursor:pointer">Route from</button>' +
+              '<button class="poi-route-btn" data-action="to" style="font-size:11px;padding:3px 10px;background:#22c55e;color:#fff;border:none;border-radius:4px;cursor:pointer">Route to</button>' +
+              "</div>";
+            const popup = L.popup({
+              closeButton: true,
+              className: "poi-popup",
+              offset: [0, -10],
+            })
               .setLatLng([lat, lng])
               .setContent(html)
               .openOn(map);
             // Delegate click on buttons
-            L.DomEvent.on(popup.getElement(), 'click', function (e) {
-              const btn = e.target.closest('.poi-route-btn');
+            L.DomEvent.on(popup.getElement(), "click", function (e) {
+              const btn = e.target.closest(".poi-route-btn");
               if (!btn) return;
-              const action = btn.getAttribute('data-action');
+              const action = btn.getAttribute("data-action");
               const ll = L.latLng(lat, lng);
-              if (action === 'from') {
+              if (action === "from") {
                 state.startLatLng = ll;
                 state.startPoiName = name;
-                state.waypointNext = 'dest';
+                state.waypointNext = "dest";
               } else {
                 state.destLatLng = ll;
                 state.destPoiName = name;
                 state.destMode = currentLegMode();
-                state.waypointNext = 'start';
+                state.waypointNext = "start";
               }
               pushHistory();
               applyWaypoints();
@@ -1544,11 +2162,11 @@
     if (!waterwaysVisible) return;
     waterwaysLayer.clearLayers();
     fetch(waterwaysUrl())
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
         if (!data || !data.features) return;
         L.geoJSON(data, {
-          style: { color: '#f97316', weight: 2, opacity: 0.7 },
+          style: { color: "#f97316", weight: 2, opacity: 0.7 },
         }).addTo(waterwaysLayer);
       })
       .catch(() => {});
@@ -1566,33 +2184,65 @@
     // only what happens to be in memory. /databases now returns one record
     // per installed DB carrying both its state and its rich metadata
     // (precise boundaryGeometry, name, country), so a single fetch is enough.
-    fetch(databasesUrl()).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
+    fetch(databasesUrl())
+      .then(function (r) {
+        return r.ok ? r.json() : null;
+      })
+      .catch(function () {
+        return null;
+      })
       .then(function (res) {
         const list = (res && res.databases) || [];
         list.forEach(function (db) {
-          const loaded = db.state === 'loaded';
+          const loaded = db.state === "loaded";
           const style = loaded
-            ? { color: '#22c55e', weight: 2, opacity: 0.9, fillColor: '#22c55e', fillOpacity: 0.10 }
-            : { color: '#94a3b8', weight: 1.5, opacity: 0.75, fillColor: '#94a3b8', fillOpacity: 0.04, dashArray: '6,5' };
+            ? {
+                color: "#22c55e",
+                weight: 2,
+                opacity: 0.9,
+                fillColor: "#22c55e",
+                fillOpacity: 0.1,
+              }
+            : {
+                color: "#94a3b8",
+                weight: 1.5,
+                opacity: 0.75,
+                fillColor: "#94a3b8",
+                fillOpacity: 0.04,
+                dashArray: "6,5",
+              };
           let layer = null;
           if (loaded && db.boundaryGeometry) {
             layer = L.geoJSON(db.boundaryGeometry, { style: style });
           } else {
             const bb = db.coverage || db.boundingBox;
-            if (bb) layer = L.rectangle([[bb.min_lat, bb.min_lon], [bb.max_lat, bb.max_lon]], style);
+            if (bb)
+              layer = L.rectangle(
+                [
+                  [bb.min_lat, bb.min_lon],
+                  [bb.max_lat, bb.max_lon],
+                ],
+                style,
+              );
           }
           if (!layer) return;
-          const nm = db.name || db.filename || 'Unknown';
-          const label = escapeHtml(nm + (db.country ? ' (' + db.country + ')' : '') + ' — ' + (loaded ? 'loaded' : 'not loaded'));
+          const nm = db.name || db.filename || "Unknown";
+          const label = escapeHtml(
+            nm +
+              (db.country ? " (" + db.country + ")" : "") +
+              " — " +
+              (loaded ? "loaded" : "not loaded"),
+          );
           layer.bindTooltip(label, { sticky: true });
           layer.addTo(coverageLayer);
         });
-      }).catch(() => {});
+      })
+      .catch(() => {});
   }
 
   function tideStationIcon() {
     return L.divIcon({
-      className: '',
+      className: "",
       html: '<div style="font-size:12px;line-height:18px;text-align:center;background:#3b8fd4;color:#fff;width:18px;height:18px;border-radius:9px;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.3)">〜</div>',
       iconSize: [18, 18],
       iconAnchor: [9, 9],
@@ -1607,32 +2257,51 @@
   // outline keeps it readable on blue water.
   function currentArrowIcon(direction, speedKn, variant) {
     const len = Math.max(16, Math.min(36, 12 + Math.abs(speedKn) * 9));
-    const color = variant === 'grid'
-      ? '#2563eb'
-      : speedKn >= 0.05 ? '#16a34a' : speedKn <= -0.05 ? '#d97706' : '#64748b';
+    const color =
+      variant === "grid"
+        ? "#2563eb"
+        : speedKn >= 0.05
+          ? "#16a34a"
+          : speedKn <= -0.05
+            ? "#d97706"
+            : "#64748b";
     return L.divIcon({
-      className: '',
-      html: '<div style="position:relative;width:' + len + 'px;height:' + len + 'px">' +
-        '<div style="width:100%;height:100%;transform:rotate(' + direction + 'deg)">' +
+      className: "",
+      html:
+        '<div style="position:relative;width:' +
+        len +
+        "px;height:" +
+        len +
+        'px">' +
+        '<div style="width:100%;height:100%;transform:rotate(' +
+        direction +
+        'deg)">' +
         '<svg width="100%" height="100%" viewBox="0 0 24 24">' +
         '<line x1="12" y1="22" x2="12" y2="6" stroke="#fff" stroke-width="5.5" stroke-linecap="round"/>' +
         '<polygon points="12,1 5.2,11.5 18.8,11.5" fill="#fff"/>' +
-        '<line x1="12" y1="21" x2="12" y2="6" stroke="' + color + '" stroke-width="3" stroke-linecap="round"/>' +
-        '<polygon points="12,2 6,11 18,11" fill="' + color + '"/>' +
-        '</svg></div>' +
-        '<div style="position:absolute;top:100%;left:50%;transform:translateX(-50%);font-size:10px;font-weight:600;color:' + color + ';text-shadow:0 1px 2px #fff,0 -1px 2px #fff,1px 0 2px #fff,-1px 0 2px #fff;white-space:nowrap">' +
-        Math.abs(speedKn).toFixed(1) + ' kn</div>' +
-        '</div>',
+        '<line x1="12" y1="21" x2="12" y2="6" stroke="' +
+        color +
+        '" stroke-width="3" stroke-linecap="round"/>' +
+        '<polygon points="12,2 6,11 18,11" fill="' +
+        color +
+        '"/>' +
+        "</svg></div>" +
+        '<div style="position:absolute;top:100%;left:50%;transform:translateX(-50%);font-size:10px;font-weight:600;color:' +
+        color +
+        ';text-shadow:0 1px 2px #fff,0 -1px 2px #fff,1px 0 2px #fff,-1px 0 2px #fff;white-space:nowrap">' +
+        Math.abs(speedKn).toFixed(1) +
+        " kn</div>" +
+        "</div>",
       iconSize: [len, len],
       iconAnchor: [len / 2, len / 2],
     });
   }
 
-  const p2 = (n) => String(n).padStart(2, '0');
+  const p2 = (n) => String(n).padStart(2, "0");
 
   function clockStr(ms) {
     const d = new Date(ms);
-    return p2(d.getHours()) + ':' + p2(d.getMinutes());
+    return p2(d.getHours()) + ":" + p2(d.getMinutes());
   }
 
   // '+2h15' / 'now' relative to the window start (the moment the 24h
@@ -1640,7 +2309,9 @@
   // last (re-)enabled).
   function scrubOffsetStr(ms) {
     const deltaMin = Math.round((ms - stationsWindowStart) / 60000);
-    return deltaMin === 0 ? 'now' : '+' + Math.floor(deltaMin / 60) + 'h' + p2(deltaMin % 60);
+    return deltaMin === 0
+      ? "now"
+      : "+" + Math.floor(deltaMin / 60) + "h" + p2(deltaMin % 60);
   }
 
   // The scrubber window is at most 24h, so the scrubbed time is either the
@@ -1648,12 +2319,15 @@
   function scrubDayLabel(ms) {
     const d = new Date(ms);
     const start = new Date(stationsWindowStart);
-    const sameDay = d.getFullYear() === start.getFullYear() && d.getMonth() === start.getMonth() && d.getDate() === start.getDate();
-    return sameDay ? 'Today' : 'Tomorrow';
+    const sameDay =
+      d.getFullYear() === start.getFullYear() &&
+      d.getMonth() === start.getMonth() &&
+      d.getDate() === start.getDate();
+    return sameDay ? "Today" : "Tomorrow";
   }
 
   function fmtScrubTime(ms) {
-    return clockStr(ms) + ' (' + scrubOffsetStr(ms) + ')';
+    return clockStr(ms) + " (" + scrubOffsetStr(ms) + ")";
   }
 
   // Builds the 24h ruler: one segment per real clock hour (the edge
@@ -1665,8 +2339,8 @@
   // (e.g. "Fri 4") so the day change is legible on the ruler itself, not
   // just in the pill.
   function buildHourTrack() {
-    const track = document.getElementById('time-scrubber-hourbar');
-    track.innerHTML = '';
+    const track = document.getElementById("time-scrubber-hourbar");
+    track.innerHTML = "";
     const totalMs = 24 * 3600000;
     const start = stationsWindowStart;
     const end = start + totalMs;
@@ -1681,8 +2355,8 @@
     }
     boundaries.push(end);
 
-    const dayLabelEl = document.getElementById('time-scrubber-daylabel');
-    dayLabelEl.style.display = 'none';
+    const dayLabelEl = document.getElementById("time-scrubber-daylabel");
+    dayLabelEl.style.display = "none";
 
     for (let i = 0; i < boundaries.length - 1; i++) {
       const segStart = boundaries[i];
@@ -1690,20 +2364,26 @@
       const widthPct = ((segEnd - segStart) / totalMs) * 100;
       const hour = new Date(segStart).getHours();
       const isDayStart = i > 0 && hour === 0;
-      const seg = document.createElement('div');
+      const seg = document.createElement("div");
       // day-start gets a highlighted left edge (the one midnight crossing
       // possible in a 24h window) — the caption below spells out which day.
-      seg.className = 'ts-hour-seg' + (hour % 2 === 1 ? ' odd' : '') + (isDayStart ? ' day-start' : '');
-      seg.style.width = widthPct + '%';
+      seg.className =
+        "ts-hour-seg" +
+        (hour % 2 === 1 ? " odd" : "") +
+        (isDayStart ? " day-start" : "");
+      seg.style.width = widthPct + "%";
       if (widthPct > 2) {
         seg.textContent = p2(hour);
       }
       track.appendChild(seg);
 
       if (isDayStart) {
-        dayLabelEl.style.display = '';
-        dayLabelEl.style.left = ((segStart - start) / totalMs) * 100 + '%';
-        dayLabelEl.textContent = new Date(segStart).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' });
+        dayLabelEl.style.display = "";
+        dayLabelEl.style.left = ((segStart - start) / totalMs) * 100 + "%";
+        dayLabelEl.textContent = new Date(segStart).toLocaleDateString(
+          undefined,
+          { weekday: "short", day: "numeric" },
+        );
       }
     }
   }
@@ -1721,46 +2401,76 @@
   // past track-wrap's horizontal edge at the extremes doesn't reach it.
   function updateScrubberPosition(minutes) {
     const pct = (minutes / 1440) * 100;
-    document.getElementById('time-scrubber-marker').style.left = pct + '%';
-    document.getElementById('time-scrubber-pill').style.left = pct + '%';
+    document.getElementById("time-scrubber-marker").style.left = pct + "%";
+    document.getElementById("time-scrubber-pill").style.left = pct + "%";
   }
 
   // Hover card for tide-height stations: the next high/low waters.
   function tideTooltipHtml(name, extremes) {
-    let html = '<div style="font-weight:600;margin-bottom:2px">' + name + '</div>';
-    if (!extremes) return html + '<span style="color:#5f7a9a">Loading tide times…</span>';
+    let html =
+      '<div style="font-weight:600;margin-bottom:2px">' + name + "</div>";
+    if (!extremes)
+      return html + '<span style="color:#5f7a9a">Loading tide times…</span>';
     const now = Date.now();
-    const next = extremes.filter((e) => new Date(e.time).getTime() > now).slice(0, 4);
-    if (next.length === 0) return html + '<span style="color:#5f7a9a">No tide data</span>';
+    const next = extremes
+      .filter((e) => new Date(e.time).getTime() > now)
+      .slice(0, 4);
+    if (next.length === 0)
+      return html + '<span style="color:#5f7a9a">No tide data</span>';
     html += '<table style="border-collapse:collapse;font-size:11px">';
     for (const e of next) {
       const d = new Date(e.time);
       const relMin = Math.round((d.getTime() - now) / 60000);
-      const sym = e.high ? '▲' : '▼';
-      const col = e.high ? '#3b8fd4' : '#d97706';
-      html += '<tr>' +
-        '<td style="color:' + col + ';font-weight:700;padding:0 4px 0 0">' + sym + '</td>' +
-        '<td style="padding:0 8px 0 0">' + (e.high ? 'High' : 'Low') + '</td>' +
-        '<td style="padding:0 8px 0 0">' + p2(d.getHours()) + ':' + p2(d.getMinutes()) + '</td>' +
-        '<td style="padding:0 8px 0 0;text-align:right">' + e.level.toFixed(2) + ' m</td>' +
-        '<td style="color:#5f7a9a">in ' + Math.floor(relMin / 60) + 'h' + p2(relMin % 60) + '</td>' +
-        '</tr>';
+      const sym = e.high ? "▲" : "▼";
+      const col = e.high ? "#3b8fd4" : "#d97706";
+      html +=
+        "<tr>" +
+        '<td style="color:' +
+        col +
+        ';font-weight:700;padding:0 4px 0 0">' +
+        sym +
+        "</td>" +
+        '<td style="padding:0 8px 0 0">' +
+        (e.high ? "High" : "Low") +
+        "</td>" +
+        '<td style="padding:0 8px 0 0">' +
+        p2(d.getHours()) +
+        ":" +
+        p2(d.getMinutes()) +
+        "</td>" +
+        '<td style="padding:0 8px 0 0;text-align:right">' +
+        e.level.toFixed(2) +
+        " m</td>" +
+        '<td style="color:#5f7a9a">in ' +
+        Math.floor(relMin / 60) +
+        "h" +
+        p2(relMin % 60) +
+        "</td>" +
+        "</tr>";
     }
-    html += '</table>';
+    html += "</table>";
     return html;
   }
 
   function updateStationMarkers(minutes) {
     const t = stationsWindowStart + minutes * 60000;
-    document.getElementById('time-scrubber-pill').textContent = scrubDayLabel(t) + ' · ' + clockStr(t);
+    document.getElementById("time-scrubber-pill").textContent =
+      scrubDayLabel(t) + " · " + clockStr(t);
     updateScrubberPosition(minutes);
     const idx = Math.round(minutes / 15);
     for (const id in currentStationMarkers) {
       const entry = currentStationMarkers[id];
-      const sample = entry.timeline[Math.max(0, Math.min(entry.timeline.length - 1, idx))];
+      const sample =
+        entry.timeline[Math.max(0, Math.min(entry.timeline.length - 1, idx))];
       if (!sample || sample.direction === null) continue;
       entry.marker.setIcon(currentArrowIcon(sample.direction, sample.speedKn));
-      entry.marker.setTooltipContent(entry.name + '<br/>' + sample.speedKn.toFixed(1) + ' kn @ ' + fmtScrubTime(new Date(sample.time).getTime()));
+      entry.marker.setTooltipContent(
+        entry.name +
+          "<br/>" +
+          sample.speedKn.toFixed(1) +
+          " kn @ " +
+          fmtScrubTime(new Date(sample.time).getTime()),
+      );
     }
   }
 
@@ -1772,30 +2482,41 @@
     stationsWindowStart = Date.now();
     const windowEnd = stationsWindowStart + 24 * 3600000;
     buildHourTrack();
-    updateScrubberPosition(Number(document.getElementById('time-scrubber').value));
+    updateScrubberPosition(
+      Number(document.getElementById("time-scrubber").value),
+    );
 
     fetch(tideStationsUrl(center.lat, center.lng))
       .then((r) => (r.ok ? r.json() : []))
       .then((stations) => {
         for (const s of stations || []) {
-          if (typeof s.latitude !== 'number' || typeof s.longitude !== 'number') continue;
-          const name = s.name || 'Tide station';
-          const m = L.marker([s.latitude, s.longitude], { icon: tideStationIcon() })
-            .bindTooltip(tideTooltipHtml(name, null), { direction: 'top', offset: [0, -10] })
+          if (typeof s.latitude !== "number" || typeof s.longitude !== "number")
+            continue;
+          const name = s.name || "Tide station";
+          const m = L.marker([s.latitude, s.longitude], {
+            icon: tideStationIcon(),
+          })
+            .bindTooltip(tideTooltipHtml(name, null), {
+              direction: "top",
+              offset: [0, -10],
+            })
             .addTo(stationsLayer);
           let extremesRequested = false;
-          m.on('mouseover', function () {
+          m.on("mouseover", function () {
             if (extremesRequested) return;
             extremesRequested = true;
             // Note: signalk-tides ids contain a literal '/' (e.g. "ticon/…")
             // and its route only matches the raw, unencoded form.
-            fetch('/signalk/v2/api/tides/stations/' + s.id + '/extremes')
+            fetch("/signalk/v2/api/tides/stations/" + s.id + "/extremes")
               .then((r) => (r.ok ? r.json() : null))
               .then((d) => {
-                if (d && d.extremes) m.setTooltipContent(tideTooltipHtml(name, d.extremes));
+                if (d && d.extremes)
+                  m.setTooltipContent(tideTooltipHtml(name, d.extremes));
                 else extremesRequested = false;
               })
-              .catch(() => { extremesRequested = false; });
+              .catch(() => {
+                extremesRequested = false;
+              });
           });
         }
       })
@@ -1806,8 +2527,10 @@
       .then((stations) => {
         const vectorCapable = (stations || []).filter((s) => s.vectorCapable);
         vectorCapable.forEach((s) => {
-          const marker = L.marker([s.latitude, s.longitude], { icon: currentArrowIcon(0, 0) })
-            .bindTooltip(s.name, { direction: 'top', offset: [0, -10] })
+          const marker = L.marker([s.latitude, s.longitude], {
+            icon: currentArrowIcon(0, 0),
+          })
+            .bindTooltip(s.name, { direction: "top", offset: [0, -10] })
             .addTo(stationsLayer);
           currentStationMarkers[s.id] = { marker, name: s.name, timeline: [] };
           fetch(currentTimelineUrl(s.id, stationsWindowStart, windowEnd))
@@ -1816,7 +2539,9 @@
               const entry = currentStationMarkers[s.id];
               if (!entry || !data || !data.timeline) return; // marker replaced by a newer fetch
               entry.timeline = data.timeline;
-              updateStationMarkers(Number(document.getElementById('time-scrubber').value));
+              updateStationMarkers(
+                Number(document.getElementById("time-scrubber").value),
+              );
             })
             .catch(() => {});
         });
@@ -1837,7 +2562,7 @@
   function fetchCurrentGrid() {
     currentGridLayer.clearLayers();
     if (!stationsVisible) return;
-    const minutes = Number(document.getElementById('time-scrubber').value);
+    const minutes = Number(document.getElementById("time-scrubber").value);
     const t = (stationsWindowStart || Date.now()) + minutes * 60000;
     const token = ++gridFetchToken;
     fetch(currentGridUrl(t))
@@ -1846,8 +2571,13 @@
         if (token !== gridFetchToken) return; // superseded by a newer request
         if (!data || !data.points) return; // no GRIB source configured, or 503/404
         for (const p of data.points) {
-          L.marker([p.latitude, p.longitude], { icon: currentArrowIcon(p.direction, p.speedKn, 'grid') })
-            .bindTooltip('GRIB current<br/>' + p.speedKn.toFixed(1) + ' kn', { direction: 'top', offset: [0, -10] })
+          L.marker([p.latitude, p.longitude], {
+            icon: currentArrowIcon(p.direction, p.speedKn, "grid"),
+          })
+            .bindTooltip("GRIB current<br/>" + p.speedKn.toFixed(1) + " kn", {
+              direction: "top",
+              offset: [0, -10],
+            })
             .addTo(currentGridLayer);
         }
       })
@@ -1862,19 +2592,19 @@
     if (!playTimer) return;
     clearInterval(playTimer);
     playTimer = null;
-    const btn = document.getElementById('play-btn');
-    btn.textContent = '▶';
-    btn.title = 'Play';
+    const btn = document.getElementById("play-btn");
+    btn.textContent = "▶";
+    btn.title = "Play";
   }
   function togglePlay() {
     if (playTimer) {
       stopPlay();
       return;
     }
-    const btn = document.getElementById('play-btn');
-    btn.textContent = '⏸';
-    btn.title = 'Pause';
-    const slider = document.getElementById('time-scrubber');
+    const btn = document.getElementById("play-btn");
+    btn.textContent = "⏸";
+    btn.title = "Pause";
+    const slider = document.getElementById("time-scrubber");
     playTimer = setInterval(function () {
       const step = Number(slider.step) || 15;
       const max = Number(slider.max);
@@ -1885,41 +2615,53 @@
       fetchCurrentGrid();
     }, PLAY_STEP_MS);
   }
-  document.getElementById('play-btn').addEventListener('click', togglePlay);
+  document.getElementById("play-btn").addEventListener("click", togglePlay);
 
-  document.getElementById('stations-cb').addEventListener('change', function () {
-    stationsVisible = this.checked;
-    document.getElementById('time-scrubber-bar').style.display = stationsVisible ? 'flex' : 'none';
-    if (stationsVisible) {
-      document.getElementById('time-scrubber').value = 0;
-      fetchStations();
-    } else {
-      stopPlay();
-      stationsLayer.clearLayers();
-      currentGridLayer.clearLayers();
-      for (const id in currentStationMarkers) delete currentStationMarkers[id];
-    }
-  });
+  document
+    .getElementById("stations-cb")
+    .addEventListener("change", function () {
+      stationsVisible = this.checked;
+      document.getElementById("time-scrubber-bar").style.display =
+        stationsVisible ? "flex" : "none";
+      if (stationsVisible) {
+        document.getElementById("time-scrubber").value = 0;
+        fetchStations();
+      } else {
+        stopPlay();
+        stationsLayer.clearLayers();
+        currentGridLayer.clearLayers();
+        for (const id in currentStationMarkers)
+          delete currentStationMarkers[id];
+      }
+    });
 
   // Keyboard path: the native input stays focusable (Tab + arrow keys)
   // and dispatches real input/change events when the browser itself
   // changes its value.
-  document.getElementById('time-scrubber').addEventListener('input', function () {
-    stopPlay();
-    updateStationMarkers(Number(this.value));
-  });
-  document.getElementById('time-scrubber').addEventListener('change', function () {
-    fetchCurrentGrid();
-  });
+  document
+    .getElementById("time-scrubber")
+    .addEventListener("input", function () {
+      stopPlay();
+      updateStationMarkers(Number(this.value));
+    });
+  document
+    .getElementById("time-scrubber")
+    .addEventListener("change", function () {
+      fetchCurrentGrid();
+    });
 
   // Keyboard-focus ring: the native input is visually hidden (opacity:0)
   // and its own focus outline doesn't line up with our custom ruler, so
   // draw a ring around the ruler itself instead when the input has focus.
   (function () {
-    const input = document.getElementById('time-scrubber');
-    const wrap = document.getElementById('time-scrubber-track-wrap');
-    input.addEventListener('focus', function () { wrap.classList.add('focused'); });
-    input.addEventListener('blur', function () { wrap.classList.remove('focused'); });
+    const input = document.getElementById("time-scrubber");
+    const wrap = document.getElementById("time-scrubber-track-wrap");
+    input.addEventListener("focus", function () {
+      wrap.classList.add("focused");
+    });
+    input.addEventListener("blur", function () {
+      wrap.classList.remove("focused");
+    });
   })();
 
   // Pointer path: click-or-drag anywhere on the ruler to jump straight to
@@ -1928,8 +2670,8 @@
   // touch and pen, and setPointerCapture keeps the drag tracking correctly
   // even if the pointer leaves the bar while held down.
   (function () {
-    const hourbar = document.getElementById('time-scrubber-hourbar');
-    const input = document.getElementById('time-scrubber');
+    const hourbar = document.getElementById("time-scrubber-hourbar");
+    const input = document.getElementById("time-scrubber");
     let dragging = false;
 
     function minutesFromClientX(clientX) {
@@ -1945,7 +2687,7 @@
       updateStationMarkers(minutes);
     }
 
-    hourbar.addEventListener('pointerdown', function (e) {
+    hourbar.addEventListener("pointerdown", function (e) {
       e.preventDefault(); // stop the browser's default drag-to-select-text behavior
       dragging = true;
       stopPlay();
@@ -1953,11 +2695,11 @@
       hourbar.setPointerCapture(e.pointerId);
       scrubTo(minutesFromClientX(e.clientX));
     });
-    hourbar.addEventListener('pointermove', function (e) {
+    hourbar.addEventListener("pointermove", function (e) {
       if (!dragging) return;
       scrubTo(minutesFromClientX(e.clientX));
     });
-    hourbar.addEventListener('pointerup', function (e) {
+    hourbar.addEventListener("pointerup", function (e) {
       if (!dragging) return;
       dragging = false;
       scrubTo(minutesFromClientX(e.clientX));
@@ -1966,7 +2708,7 @@
   })();
 
   let moveTimer = null;
-  map.on('moveend', function () {
+  map.on("moveend", function () {
     clearTimeout(moveTimer);
     moveTimer = setTimeout(function () {
       if (waterwaysVisible) fetchWaterways();
@@ -1977,33 +2719,37 @@
     }, 400);
   });
 
-  document.getElementById('graph-cb').addEventListener('change', function () {
+  document.getElementById("graph-cb").addEventListener("change", function () {
     graphVisible = this.checked;
     if (graphVisible) fetchGraphNodes();
     else graphLayer.clearLayers();
   });
-  document.getElementById('edges-cb').addEventListener('change', function () {
+  document.getElementById("edges-cb").addEventListener("change", function () {
     edgesVisible = this.checked;
     if (edgesVisible) fetchEdges();
     else edgesLayer.clearLayers();
   });
-  document.getElementById('poi-cb').addEventListener('change', function () {
+  document.getElementById("poi-cb").addEventListener("change", function () {
     poiVisible = this.checked;
     if (poiVisible) fetchPois();
     else poiLayer.clearLayers();
   });
-  document.getElementById('waterways-cb').addEventListener('change', function () {
-    waterwaysVisible = this.checked;
-    if (waterwaysVisible) fetchWaterways();
-    else waterwaysLayer.clearLayers();
-  });
-  document.getElementById('coverage-cb').addEventListener('change', function () {
-    coverageVisible = this.checked;
-    if (coverageVisible) fetchCoverage();
-    else coverageLayer.clearLayers();
-  });
+  document
+    .getElementById("waterways-cb")
+    .addEventListener("change", function () {
+      waterwaysVisible = this.checked;
+      if (waterwaysVisible) fetchWaterways();
+      else waterwaysLayer.clearLayers();
+    });
+  document
+    .getElementById("coverage-cb")
+    .addEventListener("change", function () {
+      coverageVisible = this.checked;
+      if (coverageVisible) fetchCoverage();
+      else coverageLayer.clearLayers();
+    });
 
-  document.getElementById('edit-cb').addEventListener('change', function () {
+  document.getElementById("edit-cb").addEventListener("change", function () {
     state.editMode = this.checked;
     toggleEditMode(state.editMode);
   });
@@ -2013,71 +2759,75 @@
   // last-clicked position, in a corner overlay, so bug reports can quote
   // exact lat/lon for a problem spot.
   (function () {
-    var overlay = document.getElementById('debug-coords-overlay');
-    var curEl = document.getElementById('debug-coords-cur');
-    var clickEl = document.getElementById('debug-coords-click');
-    var copyBtn = document.getElementById('debug-coords-copy');
+    var overlay = document.getElementById("debug-coords-overlay");
+    var curEl = document.getElementById("debug-coords-cur");
+    var clickEl = document.getElementById("debug-coords-click");
+    var copyBtn = document.getElementById("debug-coords-copy");
     var lastClicked = null; // {lat, lng} of the last map click while debug logging was on
 
     function fmt(latlng) {
-      return latlng.lat.toFixed(5) + ', ' + latlng.lng.toFixed(5);
+      return latlng.lat.toFixed(5) + ", " + latlng.lng.toFixed(5);
     }
 
     function updateDebugCoordsVisibility() {
-      overlay.classList.toggle('visible', isDebug());
+      overlay.classList.toggle("visible", isDebug());
     }
 
     // Passive listeners: never stopPropagation/preventDefault, so existing
     // map click handlers (start/dest/via, editor add-node, etc.) are unaffected.
-    map.on('mousemove', function (e) {
+    map.on("mousemove", function (e) {
       if (!isDebug()) return;
-      curEl.textContent = 'cur: ' + fmt(e.latlng);
+      curEl.textContent = "cur: " + fmt(e.latlng);
     });
-    map.on('click', function (e) {
+    map.on("click", function (e) {
       if (!isDebug()) return;
       lastClicked = e.latlng;
-      clickEl.textContent = 'click: ' + fmt(e.latlng);
+      clickEl.textContent = "click: " + fmt(e.latlng);
     });
 
-    copyBtn.addEventListener('click', function () {
+    copyBtn.addEventListener("click", function () {
       if (!lastClicked) return;
-      var text = lastClicked.lat.toFixed(5) + ', ' + lastClicked.lng.toFixed(5);
+      var text = lastClicked.lat.toFixed(5) + ", " + lastClicked.lng.toFixed(5);
       var showCopied = function () {
-        copyBtn.textContent = '✓';
-        copyBtn.classList.add('copied');
+        copyBtn.textContent = "✓";
+        copyBtn.classList.add("copied");
         setTimeout(function () {
-          copyBtn.textContent = '📋';
-          copyBtn.classList.remove('copied');
+          copyBtn.textContent = "📋";
+          copyBtn.classList.remove("copied");
         }, 1000);
       };
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(showCopied, function () { /* clipboard denied — no-op */ });
+        navigator.clipboard.writeText(text).then(showCopied, function () {
+          /* clipboard denied — no-op */
+        });
       }
     });
 
-    document.getElementById('debug-cb').addEventListener('change', updateDebugCoordsVisibility);
+    document
+      .getElementById("debug-cb")
+      .addEventListener("change", updateDebugCoordsVisibility);
     updateDebugCoordsVisibility();
   })();
 
   // ---- Graph Editor functions ----
 
   function toggleEditMode(enabled) {
-    var panel = document.getElementById('editor-panel');
+    var panel = document.getElementById("editor-panel");
     if (enabled) {
-      panel.style.display = '';
-      document.getElementById('graph-cb').checked = true;
+      panel.style.display = "";
+      document.getElementById("graph-cb").checked = true;
       graphVisible = true;
-      document.getElementById('edges-cb').checked = true;
+      document.getElementById("edges-cb").checked = true;
       edgesVisible = true;
       fetchOverlayStats();
       fetchGraphNodes();
       fetchEdges();
     } else {
-      panel.style.display = 'none';
+      panel.style.display = "none";
       clearEditorSelection();
       if (state.editAddMode) {
-        document.getElementById('editor-cancel-btn').style.display = 'none';
-        map.getContainer().style.cursor = '';
+        document.getElementById("editor-cancel-btn").style.display = "none";
+        map.getContainer().style.cursor = "";
       }
       state.editAddMode = null;
       state.editAddSource = null;
@@ -2087,41 +2837,76 @@
   }
 
   function fetchOverlayStats() {
-    fetch(getApiBase() + '/signalk/v1/api/router/graph/overlay/stats')
-      .then(function (r) { return r.ok ? r.json() : null; })
+    fetch(getApiBase() + "/signalk/v1/api/router/graph/overlay/stats")
+      .then(function (r) {
+        return r.ok ? r.json() : null;
+      })
       .then(function (data) {
         if (!data) return;
         var parts = [];
-        if (data.nodes > 0) parts.push(data.nodes + ' node' + (data.nodes !== 1 ? 's' : ''));
-        if (data.edges > 0) parts.push(data.edges + ' edge' + (data.edges !== 1 ? 's' : ''));
-        if (data.deletedNodes > 0) parts.push(data.deletedNodes + ' deletion' + (data.deletedNodes !== 1 ? 's' : ''));
-        if (data.deletedEdges > 0) parts.push(data.deletedEdges + ' hidden edge' + (data.deletedEdges !== 1 ? 's' : ''));
-        var el = document.getElementById('editor-overlay-stats');
-        el.textContent = parts.length > 0 ? '· ' + parts.join(' · ') : '· no edits yet';
+        if (data.nodes > 0)
+          parts.push(data.nodes + " node" + (data.nodes !== 1 ? "s" : ""));
+        if (data.edges > 0)
+          parts.push(data.edges + " edge" + (data.edges !== 1 ? "s" : ""));
+        if (data.deletedNodes > 0)
+          parts.push(
+            data.deletedNodes +
+              " deletion" +
+              (data.deletedNodes !== 1 ? "s" : ""),
+          );
+        if (data.deletedEdges > 0)
+          parts.push(
+            data.deletedEdges +
+              " hidden edge" +
+              (data.deletedEdges !== 1 ? "s" : ""),
+          );
+        var el = document.getElementById("editor-overlay-stats");
+        el.textContent =
+          parts.length > 0 ? "· " + parts.join(" · ") : "· no edits yet";
         // Show repair button if hidden edges exist
-        var repairEl = document.getElementById('editor-repair-btn');
+        var repairEl = document.getElementById("editor-repair-btn");
         if (!repairEl) {
-          repairEl = document.createElement('button');
-          repairEl.id = 'editor-repair-btn';
-          repairEl.title = 'Restore hidden edges so routing can use all your drawn edges';
-          repairEl.style.cssText = 'margin-top:6px;width:100%;padding:5px;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.4);border-radius:4px;color:#fca5a5;cursor:pointer;font-size:11px;display:none';
-          document.getElementById('editor-overlay-info').after(repairEl);
-          repairEl.addEventListener('click', function () {
+          repairEl = document.createElement("button");
+          repairEl.id = "editor-repair-btn";
+          repairEl.title =
+            "Restore hidden edges so routing can use all your drawn edges";
+          repairEl.style.cssText =
+            "margin-top:6px;width:100%;padding:5px;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.4);border-radius:4px;color:#fca5a5;cursor:pointer;font-size:11px;display:none";
+          document.getElementById("editor-overlay-info").after(repairEl);
+          repairEl.addEventListener("click", function () {
             repairEl.disabled = true;
-            repairEl.textContent = 'Restoring…';
-            fetch(getApiBase() + '/signalk/v1/api/router/graph/overlay/repair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-              .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+            repairEl.textContent = "Restoring…";
+            fetch(
+              getApiBase() + "/signalk/v1/api/router/graph/overlay/repair",
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: "{}",
+              },
+            )
+              .then(function (r) {
+                return r.ok ? r.json() : Promise.reject(r);
+              })
               .then(function (d) {
-                repairEl.textContent = '✓ Restored ' + (d.restored || 0) + ' edge(s)';
-                repairEl.style.color = '#4ade80';
+                repairEl.textContent =
+                  "✓ Restored " + (d.restored || 0) + " edge(s)";
+                repairEl.style.color = "#4ade80";
                 fetchEdges();
                 fetchOverlayStats();
               })
-              .catch(function () { repairEl.textContent = '✗ Repair failed'; repairEl.disabled = false; });
+              .catch(function () {
+                repairEl.textContent = "✗ Repair failed";
+                repairEl.disabled = false;
+              });
           });
         }
-        repairEl.style.display = data.deletedEdges > 0 ? '' : 'none';
-        repairEl.textContent = '⚠ ' + data.deletedEdges + ' hidden edge' + (data.deletedEdges !== 1 ? 's' : '') + ' — click to restore for routing';
+        repairEl.style.display = data.deletedEdges > 0 ? "" : "none";
+        repairEl.textContent =
+          "⚠ " +
+          data.deletedEdges +
+          " hidden edge" +
+          (data.deletedEdges !== 1 ? "s" : "") +
+          " — click to restore for routing";
         repairEl.disabled = false;
       })
       .catch(function () {});
@@ -2131,7 +2916,10 @@
     if (state.selectedLayer) {
       if (state.selectedLayer.setStyle && state.selectedLayer._editOrigStyle) {
         state.selectedLayer.setStyle(state.selectedLayer._editOrigStyle);
-      } else if (state.selectedLayer.setIcon && state.selectedLayer._editOrigIcon) {
+      } else if (
+        state.selectedLayer.setIcon &&
+        state.selectedLayer._editOrigIcon
+      ) {
         state.selectedLayer.setIcon(state.selectedLayer._editOrigIcon);
       }
     }
@@ -2140,331 +2928,569 @@
     // Reset any pending delete confirm
     state.deleteConfirmPending = false;
     clearTimeout(state.deleteConfirmTimer);
-    var tb = document.getElementById('editor-trash-btn');
-    if (tb) { tb.classList.remove('confirm'); tb.title = 'Delete (click twice to confirm)'; }
-    document.getElementById('editor-props').style.display = 'none';
-    setEditorStatus('');
+    var tb = document.getElementById("editor-trash-btn");
+    if (tb) {
+      tb.classList.remove("confirm");
+      tb.title = "Delete (click twice to confirm)";
+    }
+    document.getElementById("editor-props").style.display = "none";
+    setEditorStatus("");
   }
 
   function setEditorStatus(msg, flash) {
-    var el = document.getElementById('editor-status');
-    el.className = flash ? 'editor-saved' : '';
-    el.textContent = msg || '\u2014';
+    var el = document.getElementById("editor-status");
+    el.className = flash ? "editor-saved" : "";
+    el.textContent = msg || "\u2014";
     if (flash) {
-      setTimeout(function() { if (el) { el.className = ''; el.textContent = '\u2014'; } }, 1500);
+      setTimeout(function () {
+        if (el) {
+          el.className = "";
+          el.textContent = "\u2014";
+        }
+      }, 1500);
     }
   }
 
   // Map a cost_factor number to the nearest named preset value
   var COST_PRESETS = [
-    { value: 0.8,  label: '\u2605 Preferred (fairway)' },
-    { value: 1.2,  label: '\u25cb Normal water' },
-    { value: 5.0,  label: '\u26a0 Avoid if possible' },
-    { value: 999,  label: '\u26d4 Block (impassable)' },
+    { value: 0.8, label: "\u2605 Preferred (fairway)" },
+    { value: 1.2, label: "\u25cb Normal water" },
+    { value: 5.0, label: "\u26a0 Avoid if possible" },
+    { value: 999, label: "\u26d4 Block (impassable)" },
   ];
   function costPresetOptions(current) {
     var val = current != null ? current : 1.2;
-    var matched = COST_PRESETS.some(function(p) { return Math.abs(p.value - val) < 0.01; });
-    var html = COST_PRESETS.map(function(p) {
-      var sel = Math.abs(p.value - val) < 0.01 ? ' selected' : '';
-      return '<option value="' + p.value + '"' + sel + '>' + p.label + '</option>';
-    }).join('');
+    var matched = COST_PRESETS.some(function (p) {
+      return Math.abs(p.value - val) < 0.01;
+    });
+    var html = COST_PRESETS.map(function (p) {
+      var sel = Math.abs(p.value - val) < 0.01 ? " selected" : "";
+      return (
+        '<option value="' + p.value + '"' + sel + ">" + p.label + "</option>"
+      );
+    }).join("");
     if (!matched) {
-      html = '<option value="' + val + '" selected>Custom (' + val + ')</option>' + html;
+      html =
+        '<option value="' +
+        val +
+        '" selected>Custom (' +
+        val +
+        ")</option>" +
+        html;
     }
     return html;
   }
 
   function attachAutoSave(form) {
-    form.querySelectorAll('input:not([readonly]), select').forEach(function(el) {
-      el.addEventListener('change', saveEditedItem);
-    });
+    form
+      .querySelectorAll("input:not([readonly]), select")
+      .forEach(function (el) {
+        el.addEventListener("change", saveEditedItem);
+      });
   }
 
   function selectNode(nodeData, layer) {
     clearEditorSelection();
-    state.selectedItem = { type: 'node', data: nodeData };
+    state.selectedItem = { type: "node", data: nodeData };
     state.selectedLayer = layer;
     if (layer && layer.setStyle) {
-      layer._editOrigStyle = { color: layer.options.color, fillColor: layer.options.fillColor, weight: layer.options.weight, radius: layer.options.radius };
-      layer.setStyle({ color: '#f59e0b', fillColor: '#f59e0b', weight: 2, radius: layer.options.radius + 2 });
+      layer._editOrigStyle = {
+        color: layer.options.color,
+        fillColor: layer.options.fillColor,
+        weight: layer.options.weight,
+        radius: layer.options.radius,
+      };
+      layer.setStyle({
+        color: "#f59e0b",
+        fillColor: "#f59e0b",
+        weight: 2,
+        radius: layer.options.radius + 2,
+      });
     } else if (layer && layer.setIcon) {
       layer._editOrigIcon = layer.options.icon;
-      layer.setIcon(L.divIcon({
-        className: '',
-        html: '<div style="width:18px;height:18px;background:#f59e0b;border:2px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.5)">O</div>',
-        iconSize: [18, 18], iconAnchor: [9, 9],
-      }));
+      layer.setIcon(
+        L.divIcon({
+          className: "",
+          html: '<div style="width:18px;height:18px;background:#f59e0b;border:2px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.5)">O</div>',
+          iconSize: [18, 18],
+          iconAnchor: [9, 9],
+        }),
+      );
     }
     // Human-readable header: coordinates not internal ID
-    var lat = nodeData.lat, lon = nodeData.lon || nodeData.lng;
-    document.getElementById('editor-props-title').textContent =
-      '\ud83d\udccd ' + Math.abs(lat).toFixed(4) + '\u00b0' + (lat >= 0 ? 'N' : 'S') +
-      ' \u00b7 ' + Math.abs(lon).toFixed(4) + '\u00b0' + (lon >= 0 ? 'E' : 'W');
-    var form = document.getElementById('editor-props-form');
+    var lat = nodeData.lat,
+      lon = nodeData.lon || nodeData.lng;
+    document.getElementById("editor-props-title").textContent =
+      "\ud83d\udccd " +
+      Math.abs(lat).toFixed(4) +
+      "\u00b0" +
+      (lat >= 0 ? "N" : "S") +
+      " \u00b7 " +
+      Math.abs(lon).toFixed(4) +
+      "\u00b0" +
+      (lon >= 0 ? "E" : "W");
+    var form = document.getElementById("editor-props-form");
     var isOverlayNode = nodeData.region_id === 0;
     // #6: no Resolution field; #5: coords as read-only info line
     form.innerHTML =
-      '<label>Water depth (m)</label>' +
-      '<input id="edit-node-depth" type="number" step="0.1" value="' + (nodeData.min_depth != null && nodeData.min_depth >= 0 ? nodeData.min_depth : '') + '" placeholder="unknown" />' +
+      "<label>Water depth (m)</label>" +
+      '<input id="edit-node-depth" type="number" step="0.1" value="' +
+      (nodeData.min_depth != null && nodeData.min_depth >= 0
+        ? nodeData.min_depth
+        : "") +
+      '" placeholder="unknown" />' +
       '<div style="display:flex;gap:8px;margin-top:6px">' +
-        '<div style="flex:1"><label style="color:#4a6a8a">Latitude</label><input type="text" value="' + lat.toFixed(5) + '" readonly /></div>' +
-        '<div style="flex:1"><label style="color:#4a6a8a">Longitude</label><input type="text" value="' + lon.toFixed(5) + '" readonly /></div>' +
-      '</div>' +
-      (isOverlayNode ? '<button id="editor-connect-btn" style="margin-top:8px;width:100%;padding:5px;background:rgba(139,92,246,0.15);border:1px solid rgba(139,92,246,0.4);border-radius:4px;color:#c4b5fd;cursor:pointer;font-size:11px">⚡ Connect to nearest graph nodes</button>' : '');
-    document.getElementById('editor-props').style.display = '';
+      '<div style="flex:1"><label style="color:#4a6a8a">Latitude</label><input type="text" value="' +
+      lat.toFixed(5) +
+      '" readonly /></div>' +
+      '<div style="flex:1"><label style="color:#4a6a8a">Longitude</label><input type="text" value="' +
+      lon.toFixed(5) +
+      '" readonly /></div>' +
+      "</div>" +
+      (isOverlayNode
+        ? '<button id="editor-connect-btn" style="margin-top:8px;width:100%;padding:5px;background:rgba(139,92,246,0.15);border:1px solid rgba(139,92,246,0.4);border-radius:4px;color:#c4b5fd;cursor:pointer;font-size:11px">⚡ Connect to nearest graph nodes</button>'
+        : "");
+    document.getElementById("editor-props").style.display = "";
     attachAutoSave(form);
     if (isOverlayNode) {
-      document.getElementById('editor-connect-btn').addEventListener('click', function () {
-        var btn = this;
-        btn.disabled = true;
-        btn.textContent = 'Connecting…';
-        // Re-POST the node to trigger auto-connect logic on the backend
-        fetch(getApiBase() + '/signalk/v1/api/router/graph/nodes/' + nodeData.id, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dbIndex: 0, lat: lat, lon: lon, node_depth: nodeData.node_depth != null ? nodeData.node_depth : -1, resolution: nodeData.resolution != null ? nodeData.resolution : 0 }),
-        })
-          .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
-          .then(function (data) {
-            var n = data && data.autoConnected ? data.autoConnected : 0;
-            var sk = data && data.autoConnectSkipped ? data.autoConnectSkipped : 0;
-            btn.textContent = n > 0
-              ? '✓ Connected to ' + n + ' nodes' + (sk ? ' (' + sk + ' skipped: land in the way)' : '')
-              : sk ? '⚠ ' + sk + ' candidate(s) cross land — add edges manually'
-                   : '⚠ No nearby graph nodes found';
-            btn.style.color = n > 0 ? '#4ade80' : '#fbbf24';
-            fetchEdges();
-            fetchOverlayStats();
-          })
-          .catch(function () { btn.textContent = '✗ Connection failed'; btn.style.color = '#ef4444'; btn.disabled = false; });
-      });
+      document
+        .getElementById("editor-connect-btn")
+        .addEventListener("click", function () {
+          var btn = this;
+          btn.disabled = true;
+          btn.textContent = "Connecting…";
+          // Re-POST the node to trigger auto-connect logic on the backend
+          fetch(
+            getApiBase() + "/signalk/v1/api/router/graph/nodes/" + nodeData.id,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                dbIndex: 0,
+                lat: lat,
+                lon: lon,
+                node_depth:
+                  nodeData.node_depth != null ? nodeData.node_depth : -1,
+                resolution:
+                  nodeData.resolution != null ? nodeData.resolution : 0,
+              }),
+            },
+          )
+            .then(function (r) {
+              return r.ok ? r.json() : Promise.reject(r);
+            })
+            .then(function (data) {
+              var n = data && data.autoConnected ? data.autoConnected : 0;
+              var sk =
+                data && data.autoConnectSkipped ? data.autoConnectSkipped : 0;
+              btn.textContent =
+                n > 0
+                  ? "✓ Connected to " +
+                    n +
+                    " nodes" +
+                    (sk ? " (" + sk + " skipped: land in the way)" : "")
+                  : sk
+                    ? "⚠ " +
+                      sk +
+                      " candidate(s) cross land — add edges manually"
+                    : "⚠ No nearby graph nodes found";
+              btn.style.color = n > 0 ? "#4ade80" : "#fbbf24";
+              fetchEdges();
+              fetchOverlayStats();
+            })
+            .catch(function () {
+              btn.textContent = "✗ Connection failed";
+              btn.style.color = "#ef4444";
+              btn.disabled = false;
+            });
+        });
     }
-    setEditorStatus('');
+    setEditorStatus("");
   }
 
   function selectEdge(edgeData, layer) {
     clearEditorSelection();
-    state.selectedItem = { type: 'edge', data: edgeData };
+    state.selectedItem = { type: "edge", data: edgeData };
     state.selectedLayer = layer;
     if (layer && layer.setStyle) {
-      layer._editOrigStyle = { color: layer.options.color, weight: layer.options.weight, opacity: layer.options.opacity, dashArray: layer.options.dashArray };
-      layer.setStyle({ color: '#f59e0b', weight: 3, opacity: 0.9, dashArray: null });
+      layer._editOrigStyle = {
+        color: layer.options.color,
+        weight: layer.options.weight,
+        opacity: layer.options.opacity,
+        dashArray: layer.options.dashArray,
+      };
+      layer.setStyle({
+        color: "#f59e0b",
+        weight: 3,
+        opacity: 0.9,
+        dashArray: null,
+      });
     }
     // #5: human header \u2014 distance + direction symbol
-    var dist = edgeData.distance != null ? Math.round(edgeData.distance) + '\u202fm' : '?m';
-    var dirSymbol = edgeData.traffic_mode === 1 ? '\u2192' : edgeData.traffic_mode === 2 ? '\u2190' : '\u2194';
-    document.getElementById('editor-props-title').textContent = '\u2015 Edge \u00b7 ' + dist + ' ' + dirSymbol;
-    var form = document.getElementById('editor-props-form');
+    var dist =
+      edgeData.distance != null
+        ? Math.round(edgeData.distance) + "\u202fm"
+        : "?m";
+    var dirSymbol =
+      edgeData.traffic_mode === 1
+        ? "\u2192"
+        : edgeData.traffic_mode === 2
+          ? "\u2190"
+          : "\u2194";
+    document.getElementById("editor-props-title").textContent =
+      "\u2015 Edge \u00b7 " + dist + " " + dirSymbol;
+    var form = document.getElementById("editor-props-form");
     // #7: distance read-only; #12: arrow labels; #8: cost presets; two-column rows
     form.innerHTML =
       // Distance \u2014 informational only (#7)
       '<label style="color:#4a6a8a">Distance (computed)</label>' +
-      '<input type="text" value="' + (edgeData.distance != null ? Math.round(edgeData.distance) + ' m' : 'unknown') + '" readonly />' +
+      '<input type="text" value="' +
+      (edgeData.distance != null
+        ? Math.round(edgeData.distance) + " m"
+        : "unknown") +
+      '" readonly />' +
       // Depth + Air Draft on one row (#9)
       '<div class="editor-form-row" style="margin-top:4px">' +
-        '<div><label>Min Depth (m)</label><input id="edit-edge-depth" type="number" step="0.1" value="' + (edgeData.min_depth != null ? edgeData.min_depth : '') + '" placeholder="-1" /></div>' +
-        '<div><label>Max Air Draft (m)</label><input id="edit-edge-air" type="number" step="0.1" value="' + (edgeData.max_air_draft != null ? edgeData.max_air_draft : '') + '" placeholder="-1" /></div>' +
-      '</div>' +
+      '<div><label>Min Depth (m)</label><input id="edit-edge-depth" type="number" step="0.1" value="' +
+      (edgeData.min_depth != null ? edgeData.min_depth : "") +
+      '" placeholder="-1" /></div>' +
+      '<div><label>Max Air Draft (m)</label><input id="edit-edge-air" type="number" step="0.1" value="' +
+      (edgeData.max_air_draft != null ? edgeData.max_air_draft : "") +
+      '" placeholder="-1" /></div>' +
+      "</div>" +
       // Width + Traffic on one row (#9, #12)
       '<div class="editor-form-row" style="margin-top:4px">' +
-        '<div><label>Min Width (m)</label><input id="edit-edge-width" type="number" step="0.1" value="' + (edgeData.min_width != null ? edgeData.min_width : '') + '" placeholder="-1" /></div>' +
-        '<div><label>Direction</label>' +
-          '<select id="edit-edge-traffic">' +
-            '<option value="0"' + (edgeData.traffic_mode === 0 ? ' selected' : '') + '>\u2194 Two-way</option>' +
-            '<option value="1"' + (edgeData.traffic_mode === 1 ? ' selected' : '') + '>\u2192 One direction</option>' +
-            '<option value="2"' + (edgeData.traffic_mode === 2 ? ' selected' : '') + '>\u2190 Reverse only</option>' +
-          '</select>' +
-        '</div>' +
-      '</div>' +
+      '<div><label>Min Width (m)</label><input id="edit-edge-width" type="number" step="0.1" value="' +
+      (edgeData.min_width != null ? edgeData.min_width : "") +
+      '" placeholder="-1" /></div>' +
+      "<div><label>Direction</label>" +
+      '<select id="edit-edge-traffic">' +
+      '<option value="0"' +
+      (edgeData.traffic_mode === 0 ? " selected" : "") +
+      ">\u2194 Two-way</option>" +
+      '<option value="1"' +
+      (edgeData.traffic_mode === 1 ? " selected" : "") +
+      ">\u2192 One direction</option>" +
+      '<option value="2"' +
+      (edgeData.traffic_mode === 2 ? " selected" : "") +
+      ">\u2190 Reverse only</option>" +
+      "</select>" +
+      "</div>" +
+      "</div>" +
       // Cost preset (#8)
       '<label style="margin-top:4px">Routing preference</label>' +
-      '<select id="edit-edge-cost">' + costPresetOptions(edgeData.cost_factor) + '</select>';
-    document.getElementById('editor-props').style.display = '';
+      '<select id="edit-edge-cost">' +
+      costPresetOptions(edgeData.cost_factor) +
+      "</select>";
+    document.getElementById("editor-props").style.display = "";
     attachAutoSave(form);
-    setEditorStatus('');
+    setEditorStatus("");
   }
 
   function editorFetchError(r, label) {
     if (r && r.status === 401) {
-      setEditorStatus('Login required — please log into the Signal K admin UI');
+      setEditorStatus("Login required — please log into the Signal K admin UI");
     } else {
-      setEditorStatus(label + ' failed');
+      setEditorStatus(label + " failed");
     }
   }
 
   function saveEditedItem() {
     var item = state.selectedItem;
     if (!item) return;
-    if (item.type === 'node') {
-      var depthEl = document.getElementById('edit-node-depth');
+    if (item.type === "node") {
+      var depthEl = document.getElementById("edit-node-depth");
       if (!depthEl) return;
       var depth = parseFloat(depthEl.value);
-      fetch(getApiBase() + '/signalk/v1/api/router/graph/nodes/' + item.data.id, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dbIndex: 0, node_depth: isNaN(depth) ? -1 : depth, resolution: item.data.resolution || 0 }),
-      })
-        .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+      fetch(
+        getApiBase() + "/signalk/v1/api/router/graph/nodes/" + item.data.id,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            dbIndex: 0,
+            node_depth: isNaN(depth) ? -1 : depth,
+            resolution: item.data.resolution || 0,
+          }),
+        },
+      )
+        .then(function (r) {
+          return r.ok ? r.json() : Promise.reject(r);
+        })
         .then(function () {
           item.data.min_depth = isNaN(depth) ? -1 : depth;
-          setEditorStatus('✓ Saved', true);
+          setEditorStatus("✓ Saved", true);
           fetchGraphNodes();
         })
-        .catch(function (r) { editorFetchError(r, 'Save'); });
-    } else if (item.type === 'edge') {
-      var depthE = parseFloat(document.getElementById('edit-edge-depth').value);
-      var airE   = parseFloat(document.getElementById('edit-edge-air').value);
-      var widthE = parseFloat(document.getElementById('edit-edge-width').value);
+        .catch(function (r) {
+          editorFetchError(r, "Save");
+        });
+    } else if (item.type === "edge") {
+      var depthE = parseFloat(document.getElementById("edit-edge-depth").value);
+      var airE = parseFloat(document.getElementById("edit-edge-air").value);
+      var widthE = parseFloat(document.getElementById("edit-edge-width").value);
       var body = {
         dbIndex: 0,
-        distance: item.data.distance || 0,  // keep original computed distance
-        min_depth:    isNaN(depthE) ? -1 : depthE,
-        max_air_draft: isNaN(airE)  ? -1 : airE,
-        min_width:    isNaN(widthE) ? -1 : widthE,
-        traffic_mode: parseInt(document.getElementById('edit-edge-traffic').value, 10),
-        cost_factor:  parseFloat(document.getElementById('edit-edge-cost').value),
+        distance: item.data.distance || 0, // keep original computed distance
+        min_depth: isNaN(depthE) ? -1 : depthE,
+        max_air_draft: isNaN(airE) ? -1 : airE,
+        min_width: isNaN(widthE) ? -1 : widthE,
+        traffic_mode: parseInt(
+          document.getElementById("edit-edge-traffic").value,
+          10,
+        ),
+        cost_factor: parseFloat(
+          document.getElementById("edit-edge-cost").value,
+        ),
       };
-      fetch(getApiBase() + '/signalk/v1/api/router/graph/edges/' + item.data.source + '/' + item.data.target, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-      })
-        .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+      fetch(
+        getApiBase() +
+          "/signalk/v1/api/router/graph/edges/" +
+          item.data.source +
+          "/" +
+          item.data.target,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      )
+        .then(function (r) {
+          return r.ok ? r.json() : Promise.reject(r);
+        })
         .then(function () {
           Object.assign(item.data, body);
           // Update header direction symbol live
-          var dirSymbol = body.traffic_mode === 1 ? '→' : body.traffic_mode === 2 ? '←' : '↔';
-          var dist = item.data.distance != null ? Math.round(item.data.distance) + ' m' : '?m';
-          var titleEl = document.getElementById('editor-props-title');
-          if (titleEl) titleEl.textContent = '― Edge · ' + dist + ' ' + dirSymbol;
-          setEditorStatus('✓ Saved', true);
+          var dirSymbol =
+            body.traffic_mode === 1 ? "→" : body.traffic_mode === 2 ? "←" : "↔";
+          var dist =
+            item.data.distance != null
+              ? Math.round(item.data.distance) + " m"
+              : "?m";
+          var titleEl = document.getElementById("editor-props-title");
+          if (titleEl)
+            titleEl.textContent = "― Edge · " + dist + " " + dirSymbol;
+          setEditorStatus("✓ Saved", true);
           fetchEdges();
         })
-        .catch(function (r) { editorFetchError(r, 'Save'); });
+        .catch(function (r) {
+          editorFetchError(r, "Save");
+        });
     }
   }
 
   function deleteEditedItem() {
     var item = state.selectedItem;
     if (!item) return;
-    if (item.type === 'node') {
-      fetch(getApiBase() + '/signalk/v1/api/router/graph/nodes/' + item.data.id + '/delete', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dbIndex: 0 }),
-      })
-        .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+    if (item.type === "node") {
+      fetch(
+        getApiBase() +
+          "/signalk/v1/api/router/graph/nodes/" +
+          item.data.id +
+          "/delete",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dbIndex: 0 }),
+        },
+      )
+        .then(function (r) {
+          return r.ok ? r.json() : Promise.reject(r);
+        })
         .then(function () {
           clearEditorSelection();
-          setEditorStatus('Node deleted');
+          setEditorStatus("Node deleted");
           fetchGraphNodes();
           fetchEdges();
           fetchOverlayStats();
         })
-        .catch(function (r) { editorFetchError(r, 'Delete'); });
-    } else if (item.type === 'edge') {
-      fetch(getApiBase() + '/signalk/v1/api/router/graph/edges/' + item.data.source + '/' + item.data.target + '/delete', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dbIndex: 0 }),
-      })
-        .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+        .catch(function (r) {
+          editorFetchError(r, "Delete");
+        });
+    } else if (item.type === "edge") {
+      fetch(
+        getApiBase() +
+          "/signalk/v1/api/router/graph/edges/" +
+          item.data.source +
+          "/" +
+          item.data.target +
+          "/delete",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dbIndex: 0 }),
+        },
+      )
+        .then(function (r) {
+          return r.ok ? r.json() : Promise.reject(r);
+        })
         .then(function () {
           clearEditorSelection();
-          setEditorStatus('Edge deleted');
+          setEditorStatus("Edge deleted");
           fetchEdges();
           fetchOverlayStats();
         })
-        .catch(function (r) { editorFetchError(r, 'Delete'); });
+        .catch(function (r) {
+          editorFetchError(r, "Delete");
+        });
     }
   }
 
   function startAddNode() {
     clearEditorSelection();
-    state.editAddMode = 'node';
-    document.getElementById('editor-cancel-btn').style.display = '';
-    map.getContainer().classList.add('editor-cursor-place');
-    setEditorStatus('Click map to place node — Cancel or Esc to stop');
+    state.editAddMode = "node";
+    document.getElementById("editor-cancel-btn").style.display = "";
+    map.getContainer().classList.add("editor-cursor-place");
+    setEditorStatus("Click map to place node — Cancel or Esc to stop");
   }
 
   function startAddEdge() {
     clearEditorSelection();
-    state.editAddMode = 'edge';
+    state.editAddMode = "edge";
     state.editAddSource = null;
-    document.getElementById('editor-cancel-btn').style.display = '';
-    map.getContainer().classList.add('editor-cursor-place');
-    setEditorStatus('Click a source node on the map');
+    document.getElementById("editor-cancel-btn").style.display = "";
+    map.getContainer().classList.add("editor-cursor-place");
+    setEditorStatus("Click a source node on the map");
   }
 
   function cancelAddMode() {
     state.editAddMode = null;
     state.editAddSource = null;
-    document.getElementById('editor-cancel-btn').style.display = 'none';
-    map.getContainer().classList.remove('editor-cursor-place', 'editor-cursor-target');
-    setEditorStatus('');
+    document.getElementById("editor-cancel-btn").style.display = "none";
+    map
+      .getContainer()
+      .classList.remove("editor-cursor-place", "editor-cursor-target");
+    setEditorStatus("");
   }
 
   function handleAddEdgeClick(nodeData, layer) {
     if (!state.editAddSource) {
       state.editAddSource = nodeData.id;
-      var srcLat = nodeData.lat.toFixed(3), srcLon = (nodeData.lon || nodeData.lng).toFixed(3);
-      setEditorStatus('From (' + srcLat + ', ' + srcLon + ') — now click target node');
-      map.getContainer().classList.remove('editor-cursor-place');
-      map.getContainer().classList.add('editor-cursor-target');
+      var srcLat = nodeData.lat.toFixed(3),
+        srcLon = (nodeData.lon || nodeData.lng).toFixed(3);
+      setEditorStatus(
+        "From (" + srcLat + ", " + srcLon + ") — now click target node",
+      );
+      map.getContainer().classList.remove("editor-cursor-place");
+      map.getContainer().classList.add("editor-cursor-target");
       if (layer && layer.setStyle) {
-        layer._editOrigStyle = { color: layer.options.color, fillColor: layer.options.fillColor, weight: layer.options.weight, radius: layer.options.radius };
-        layer.setStyle({ color: '#f59e0b', fillColor: '#f59e0b', weight: 2, radius: layer.options.radius + 2 });
+        layer._editOrigStyle = {
+          color: layer.options.color,
+          fillColor: layer.options.fillColor,
+          weight: layer.options.weight,
+          radius: layer.options.radius,
+        };
+        layer.setStyle({
+          color: "#f59e0b",
+          fillColor: "#f59e0b",
+          weight: 2,
+          radius: layer.options.radius + 2,
+        });
         state.selectedLayer = layer;
       }
     } else {
       var sourceId = state.editAddSource;
       var targetId = nodeData.id;
       if (sourceId === targetId) {
-        setEditorStatus('Source and target must be different');
+        setEditorStatus("Source and target must be different");
         return;
       }
-      if (state.selectedLayer && state.selectedLayer.setStyle && state.selectedLayer._editOrigStyle) {
+      if (
+        state.selectedLayer &&
+        state.selectedLayer.setStyle &&
+        state.selectedLayer._editOrigStyle
+      ) {
         state.selectedLayer.setStyle(state.selectedLayer._editOrigStyle);
         state.selectedLayer = null;
       }
-      fetch(getApiBase() + '/signalk/v1/api/router/graph/edges/' + sourceId + '/' + targetId, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dbIndex: 0, distance: 0, min_depth: -1, max_air_draft: -1, min_width: -1, cost_factor: 1.2, distance_to_land: 0, edge_type_id: 0, traffic_mode: 0 }),
-      })
-        .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+      fetch(
+        getApiBase() +
+          "/signalk/v1/api/router/graph/edges/" +
+          sourceId +
+          "/" +
+          targetId,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            dbIndex: 0,
+            distance: 0,
+            min_depth: -1,
+            max_air_draft: -1,
+            min_width: -1,
+            cost_factor: 1.2,
+            distance_to_land: 0,
+            edge_type_id: 0,
+            traffic_mode: 0,
+          }),
+        },
+      )
+        .then(function (r) {
+          return r.ok ? r.json() : Promise.reject(r);
+        })
         .then(function () {
-          setEditorStatus('Edge added \u2014 click next source node');
+          setEditorStatus("Edge added \u2014 click next source node");
           state.editAddSource = null;
-          map.getContainer().classList.remove('editor-cursor-target');
-          map.getContainer().classList.add('editor-cursor-place');
+          map.getContainer().classList.remove("editor-cursor-target");
+          map.getContainer().classList.add("editor-cursor-place");
           fetchEdges();
           fetchOverlayStats();
         })
-        .catch(function (r) { editorFetchError(r, 'Add edge'); });
+        .catch(function (r) {
+          editorFetchError(r, "Add edge");
+        });
     }
   }
 
   // Map click: add-node mode or set start/dest
-  map.on('click', function (e) {
-    if (state.editAddMode === 'node') {
+  map.on("click", function (e) {
+    if (state.editAddMode === "node") {
       var lat = e.latlng.lat;
       var lon = e.latlng.lng;
-      var latInt = Math.round((Math.round(lat * 100000) / 100000 + 90) * 100000);
-      var lonInt = Math.round((Math.round(lon * 100000) / 100000 + 180) * 100000);
-      var nodeId = 0 + (latInt * 36000000) + lonInt;
-      fetch(getApiBase() + '/signalk/v1/api/router/graph/nodes/' + nodeId, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dbIndex: 0, lat: lat, lon: lon, node_depth: -1, resolution: 0 }),
+      var latInt = Math.round(
+        (Math.round(lat * 100000) / 100000 + 90) * 100000,
+      );
+      var lonInt = Math.round(
+        (Math.round(lon * 100000) / 100000 + 180) * 100000,
+      );
+      var nodeId = 0 + latInt * 36000000 + lonInt;
+      fetch(getApiBase() + "/signalk/v1/api/router/graph/nodes/" + nodeId, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dbIndex: 0,
+          lat: lat,
+          lon: lon,
+          node_depth: -1,
+          resolution: 0,
+        }),
       })
-        .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+        .then(function (r) {
+          return r.ok ? r.json() : Promise.reject(r);
+        })
         .then(function (data) {
           var n = data && data.autoConnected ? data.autoConnected : 0;
-          var sk = data && data.autoConnectSkipped ? data.autoConnectSkipped : 0;
-          var conn = n > 0
-            ? ' (connected to ' + n + ' nearby nodes' + (sk ? ', ' + sk + ' skipped over land' : '') + ')'
-            : sk ? ' (' + sk + ' nearby candidate(s) cross land — add edges manually)'
-                 : ' (no nearby nodes to connect — add edges manually)';
-          setEditorStatus('Node placed' + conn + ' — click to place another');
+          var sk =
+            data && data.autoConnectSkipped ? data.autoConnectSkipped : 0;
+          var conn =
+            n > 0
+              ? " (connected to " +
+                n +
+                " nearby nodes" +
+                (sk ? ", " + sk + " skipped over land" : "") +
+                ")"
+              : sk
+                ? " (" +
+                  sk +
+                  " nearby candidate(s) cross land — add edges manually)"
+                : " (no nearby nodes to connect — add edges manually)";
+          setEditorStatus("Node placed" + conn + " — click to place another");
           fetchGraphNodes();
           fetchOverlayStats();
         })
-        .catch(function (r) { editorFetchError(r, 'Add node'); });
+        .catch(function (r) {
+          editorFetchError(r, "Add node");
+        });
     } else {
       // A segment drag (item 1) or its trailing no-op click already handled
       // this gesture — don't also place a waypoint from the same click.
@@ -2473,18 +3499,21 @@
       // Shift+tap always adds a straight-line ("manual") leg, regardless of
       // the manual-mode toolbar toggle — a quick one-off without switching
       // modes and back.
-      var mode = (e.originalEvent && e.originalEvent.shiftKey) ? 'manual' : currentLegMode();
+      var mode =
+        e.originalEvent && e.originalEvent.shiftKey
+          ? "manual"
+          : currentLegMode();
       if (!state.startLatLng) {
         state.startLatLng = ll;
-        state.startPoiName = '';
-        state.waypointNext = 'dest';
-        lookupNearestPoi(ll.lat, ll.lng, 'start');
+        state.startPoiName = "";
+        state.waypointNext = "dest";
+        lookupNearestPoi(ll.lat, ll.lng, "start");
       } else if (!state.destLatLng) {
         state.destLatLng = ll;
-        state.destPoiName = '';
+        state.destPoiName = "";
         state.destMode = mode;
-        state.waypointNext = 'start';
-        lookupNearestPoi(ll.lat, ll.lng, 'dest');
+        state.waypointNext = "start";
+        lookupNearestPoi(ll.lat, ll.lng, "dest");
       } else {
         state.viaPoints.push(ll);
         state.viaModes.push(mode);
@@ -2496,57 +3525,70 @@
   });
 
   // Editor toolbar buttons
-  document.getElementById('editor-add-node-btn').addEventListener('click', startAddNode);
-  document.getElementById('editor-add-edge-btn').addEventListener('click', startAddEdge);
-  document.getElementById('editor-cancel-btn').addEventListener('click', cancelAddMode);
+  document
+    .getElementById("editor-add-node-btn")
+    .addEventListener("click", startAddNode);
+  document
+    .getElementById("editor-add-edge-btn")
+    .addEventListener("click", startAddEdge);
+  document
+    .getElementById("editor-cancel-btn")
+    .addEventListener("click", cancelAddMode);
 
   // Trash icon: two-click confirm (#4)
-  document.getElementById('editor-trash-btn').addEventListener('click', function() {
-    if (!state.selectedItem) return;
-    if (state.deleteConfirmPending) {
-      clearTimeout(state.deleteConfirmTimer);
-      state.deleteConfirmPending = false;
-      this.classList.remove('confirm');
-      this.title = 'Delete (click twice to confirm)';
-      deleteEditedItem();
-    } else {
-      state.deleteConfirmPending = true;
-      this.classList.add('confirm');
-      this.title = 'Click again to confirm delete';
-      setEditorStatus('Click 🗑 again to confirm delete');
-      var btn = this;
-      state.deleteConfirmTimer = setTimeout(function() {
+  document
+    .getElementById("editor-trash-btn")
+    .addEventListener("click", function () {
+      if (!state.selectedItem) return;
+      if (state.deleteConfirmPending) {
+        clearTimeout(state.deleteConfirmTimer);
         state.deleteConfirmPending = false;
-        btn.classList.remove('confirm');
-        btn.title = 'Delete (click twice to confirm)';
-        setEditorStatus('');
-      }, 2500);
-    }
-  });
+        this.classList.remove("confirm");
+        this.title = "Delete (click twice to confirm)";
+        deleteEditedItem();
+      } else {
+        state.deleteConfirmPending = true;
+        this.classList.add("confirm");
+        this.title = "Click again to confirm delete";
+        setEditorStatus("Click 🗑 again to confirm delete");
+        var btn = this;
+        state.deleteConfirmTimer = setTimeout(function () {
+          state.deleteConfirmPending = false;
+          btn.classList.remove("confirm");
+          btn.title = "Delete (click twice to confirm)";
+          setEditorStatus("");
+        }, 2500);
+      }
+    });
 
   // Map click: deselect when in edit mode and nothing else active (#2)
-  map.on('click', function() {
+  map.on("click", function () {
     if (state.editMode && !state.editAddMode && state.selectedItem) {
       clearEditorSelection();
     }
   });
 
   // Keyboard shortcuts (#11)
-  document.addEventListener('keydown', function(e) {
-    var tag = document.activeElement ? document.activeElement.tagName : '';
-    var inInput = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
-    if (e.key === 'Escape') {
+  document.addEventListener("keydown", function (e) {
+    var tag = document.activeElement ? document.activeElement.tagName : "";
+    var inInput = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA";
+    if (e.key === "Escape") {
       if (state.editAddMode) {
         cancelAddMode();
       } else if (state.editMode && state.selectedItem) {
         clearEditorSelection();
       }
     }
-    if ((e.key === 'Delete' || e.key === 'Backspace') && !inInput && state.editMode && state.selectedItem) {
+    if (
+      (e.key === "Delete" || e.key === "Backspace") &&
+      !inInput &&
+      state.editMode &&
+      state.selectedItem
+    ) {
       e.preventDefault();
-      document.getElementById('editor-trash-btn').click();
+      document.getElementById("editor-trash-btn").click();
     }
-    if (e.key === 'Enter' && inInput && state.editMode && state.selectedItem) {
+    if (e.key === "Enter" && inInput && state.editMode && state.selectedItem) {
       document.activeElement.blur(); // blur triggers change → auto-save
     }
   });
@@ -2555,7 +3597,7 @@
   // its position along the route). Suppressed right after a segment
   // mousedown/mouseup cycle (item 1's drag-to-insert / plain-click-does-
   // nothing on the grab line) so the same gesture isn't handled twice.
-  routeLayers.on('click', function (e) {
+  routeLayers.on("click", function (e) {
     L.DomEvent.stopPropagation(e);
     if (suppressRouteClick) return;
     if (state.startLatLng && state.destLatLng) {
@@ -2564,13 +3606,13 @@
   });
 
   const startIcon = L.divIcon({
-    className: '',
+    className: "",
     html: '<div style="width:32px;height:32px;background:#22c55e;border:3px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;color:#fff;box-shadow:0 2px 6px rgba(0,0,0,.4)">S</div>',
     iconSize: [32, 32],
     iconAnchor: [16, 16],
   });
   const destIcon = L.divIcon({
-    className: '',
+    className: "",
     html: '<div style="width:32px;height:32px;background:#ef4444;border:3px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;color:#fff;box-shadow:0 2px 6px rgba(0,0,0,.4)">E</div>',
     iconSize: [32, 32],
     iconAnchor: [16, 16],
@@ -2580,36 +3622,51 @@
   function makeViaIcon(n, isManual) {
     if (isManual) {
       return L.divIcon({
-        className: '',
-        html: '<div style="width:26px;height:26px;background:#d946ef;border:3px solid #fff;transform:rotate(45deg);border-radius:6px;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,.4)">' +
-              '<span style="transform:rotate(-45deg);font-weight:700;font-size:12px;color:#fff">' + n + '</span></div>',
+        className: "",
+        html:
+          '<div style="width:26px;height:26px;background:#d946ef;border:3px solid #fff;transform:rotate(45deg);border-radius:6px;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,.4)">' +
+          '<span style="transform:rotate(-45deg);font-weight:700;font-size:12px;color:#fff">' +
+          n +
+          "</span></div>",
         iconSize: [28, 28],
         iconAnchor: [14, 14],
       });
     }
     return L.divIcon({
-      className: '',
-      html: '<div style="width:28px;height:28px;background:#8b5cf6;border:3px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;color:#fff;box-shadow:0 2px 6px rgba(0,0,0,.4)">' + n + '</div>',
+      className: "",
+      html:
+        '<div style="width:28px;height:28px;background:#8b5cf6;border:3px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;color:#fff;box-shadow:0 2px 6px rgba(0,0,0,.4)">' +
+        n +
+        "</div>",
       iconSize: [28, 28],
       iconAnchor: [14, 14],
     });
   }
 
   // ---- URL history dropdown ----
-  const urlInput = document.getElementById('api-url');
-  const urlHistoryEl = document.getElementById('url-history-list');
+  const urlInput = document.getElementById("api-url");
+  const urlHistoryEl = document.getElementById("url-history-list");
 
   function renderUrlHistory(filter) {
     const list = loadRecentUrls();
-    const filtered = filter ? list.filter(u => u !== urlInput.value && u.toLowerCase().includes(filter.toLowerCase())) : list.filter(u => u !== urlInput.value);
+    const filtered = filter
+      ? list.filter(
+          (u) =>
+            u !== urlInput.value &&
+            u.toLowerCase().includes(filter.toLowerCase()),
+        )
+      : list.filter((u) => u !== urlInput.value);
     // Both positions need escaping, not just the attribute: a stored URL
     // containing < renders as markup in the element body. Now that escapeHtml
     // covers quotes it serves for both.
     urlHistoryEl.innerHTML = filtered
-      .map(u => `<div class="url-history-item" data-url="${escapeHtml(u)}">${escapeHtml(u)}</div>`)
-      .join('');
-    if (filtered.length > 0) urlHistoryEl.classList.add('visible');
-    else urlHistoryEl.classList.remove('visible');
+      .map(
+        (u) =>
+          `<div class="url-history-item" data-url="${escapeHtml(u)}">${escapeHtml(u)}</div>`,
+      )
+      .join("");
+    if (filtered.length > 0) urlHistoryEl.classList.add("visible");
+    else urlHistoryEl.classList.remove("visible");
   }
 
   function handleUrlChange() {
@@ -2626,47 +3683,54 @@
     urlInput.value = PLUGIN_PATH;
   }
 
-  urlInput.addEventListener('focus', function () {
-    const list = loadRecentUrls().filter(u => u !== urlInput.value);
-    if (list.length > 0) renderUrlHistory('');
+  urlInput.addEventListener("focus", function () {
+    const list = loadRecentUrls().filter((u) => u !== urlInput.value);
+    if (list.length > 0) renderUrlHistory("");
   });
-  urlInput.addEventListener('input', function () {
+  urlInput.addEventListener("input", function () {
     if (this.value.trim()) renderUrlHistory(this.value);
-    else urlHistoryEl.classList.remove('visible');
+    else urlHistoryEl.classList.remove("visible");
   });
-  urlInput.addEventListener('blur', function () {
-    setTimeout(() => urlHistoryEl.classList.remove('visible'), 180);
+  urlInput.addEventListener("blur", function () {
+    setTimeout(() => urlHistoryEl.classList.remove("visible"), 180);
   });
-  urlInput.addEventListener('change', handleUrlChange);
-  urlInput.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') { handleUrlChange(); this.blur(); }
+  urlInput.addEventListener("change", handleUrlChange);
+  urlInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      handleUrlChange();
+      this.blur();
+    }
   });
-  urlHistoryEl.addEventListener('click', function (e) {
-    const item = e.target.closest('.url-history-item');
+  urlHistoryEl.addEventListener("click", function (e) {
+    const item = e.target.closest(".url-history-item");
     if (item) {
       urlInput.value = item.dataset.url;
-      urlHistoryEl.classList.remove('visible');
+      urlHistoryEl.classList.remove("visible");
       handleUrlChange();
     }
   });
 
   // ---- connection + boat data ----
-  const connDot = document.getElementById('conn-dot');
-  const connBtn = document.getElementById('conn-btn');
-  const boatInfo = document.getElementById('boat-info');
+  const connDot = document.getElementById("conn-dot");
+  const connBtn = document.getElementById("conn-btn");
+  const boatInfo = document.getElementById("boat-info");
   let connected = false;
 
   function setConnected(yes) {
     connected = yes;
-    connDot.className = 'conn-dot ' + (yes ? 'conn-online' : 'conn-offline');
-    connBtn.textContent = yes ? 'Connected' : 'Connect';
-    if (!yes) boatInfo.style.display = 'none';
+    connDot.className = "conn-dot " + (yes ? "conn-online" : "conn-offline");
+    connBtn.textContent = yes ? "Connected" : "Connect";
+    if (!yes) boatInfo.style.display = "none";
   }
 
   // URL + "/router/vessel"
-  function vesselUrl() { return getApiBase() + '/signalk/v1/api/router/vessel'; }
+  function vesselUrl() {
+    return getApiBase() + "/signalk/v1/api/router/vessel";
+  }
   // URL + "/signalk/v1/api/vessels/self"
-  function skSelfUrl() { return getApiBase() + '/signalk/v1/api/vessels/self'; }
+  function skSelfUrl() {
+    return getApiBase() + "/signalk/v1/api/vessels/self";
+  }
 
   // Signal K's design.* paths are not scalars: design.draft's value is an
   // object ({maximum, minimum, current}), and a draft that was typed into a
@@ -2674,14 +3738,14 @@
   // a routing override got the whole request rejected, so normalise here —
   // this is the one place the raw SK tree is read.
   function skMeters(v, depth = 0) {
-    if (typeof v === 'number') return Number.isFinite(v) ? v : undefined;
-    if (typeof v === 'string') {
+    if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
+    if (typeof v === "string") {
       const n = Number(v.trim());
-      return v.trim() !== '' && Number.isFinite(n) ? n : undefined;
+      return v.trim() !== "" && Number.isFinite(n) ? n : undefined;
     }
     // Capped to match coerceVesselDimension's server-side limit (src/api.ts) —
     // SK deltas are JSON and can nest arbitrarily deep on the wire.
-    if (v && typeof v === 'object' && depth < 4) {
+    if (v && typeof v === "object" && depth < 4) {
       // Early returns rather than ??, which needs Chrome 80. Same short-circuit:
       // v.maximum is only recursed into when v.value yielded nothing.
       const byValue = skMeters(v.value, depth + 1);
@@ -2706,7 +3770,10 @@
    */
   function waitOverrides() {
     const out = {};
-    for (const [key, id] of [['lockWaitMinutes', 'lock-wait'], ['bridgeWaitMinutes', 'bridge-wait']]) {
+    for (const [key, id] of [
+      ["lockWaitMinutes", "lock-wait"],
+      ["bridgeWaitMinutes", "bridge-wait"],
+    ]) {
       const el = document.getElementById(id);
       const v = el ? parseFloat(el.value) : NaN;
       // 0 is a real answer ("never waits"), so test for a number, not truth.
@@ -2717,7 +3784,7 @@
 
   function vesselOverrides() {
     const out = {};
-    for (const key of ['draft', 'beam', 'airDraft']) {
+    for (const key of ["draft", "beam", "airDraft"]) {
       const v = skMeters(lastBoat ? lastBoat[key] : undefined);
       if (v !== undefined) out[key] = v;
     }
@@ -2728,20 +3795,32 @@
     let draft, beam, airDraft;
     let lat, lng, sog, cog;
 
-    const vUrl = vesselUrl(), sUrl = skSelfUrl();
-    logDebug('BOAT', vUrl);
-    logDebug('BOAT', sUrl);
+    const vUrl = vesselUrl(),
+      sUrl = skSelfUrl();
+    logDebug("BOAT", vUrl);
+    logDebug("BOAT", sUrl);
     // Promise.allSettled is Chrome 76 and this was the only use, so reflecting
     // each promise by hand keeps the floor at 66. Same shape of result.
-    const settle = (p) => p.then(
-      (value) => ({ status: 'fulfilled', value: value }),
-      (reason) => ({ status: 'rejected', reason: reason })
-    );
+    const settle = (p) =>
+      p.then(
+        (value) => ({ status: "fulfilled", value: value }),
+        (reason) => ({ status: "rejected", reason: reason }),
+      );
     return Promise.all([
-      settle(fetch(vUrl).then(r => { logDebug('BOAT', vUrl, undefined, r); return r.ok ? r.json() : Promise.reject(); })),
-      settle(fetch(sUrl).then(r => { logDebug('BOAT', sUrl, undefined, r); return r.ok ? r.json() : Promise.reject(); })),
+      settle(
+        fetch(vUrl).then((r) => {
+          logDebug("BOAT", vUrl, undefined, r);
+          return r.ok ? r.json() : Promise.reject();
+        }),
+      ),
+      settle(
+        fetch(sUrl).then((r) => {
+          logDebug("BOAT", sUrl, undefined, r);
+          return r.ok ? r.json() : Promise.reject();
+        }),
+      ),
     ]).then(([vr, sr]) => {
-      if (vr.status === 'fulfilled') {
+      if (vr.status === "fulfilled") {
         draft = skMeters(vr.value.draft);
         beam = skMeters(vr.value.beam);
         airDraft = skMeters(vr.value.airDraft);
@@ -2749,7 +3828,7 @@
         var effectiveBeam = skMeters(vr.value.effectiveBeam);
         var effectiveAirDraft = skMeters(vr.value.effectiveAirDraft);
       }
-      if (sr.status === 'fulfilled') {
+      if (sr.status === "fulfilled") {
         // Written out rather than with ?., which needs Chrome 80 — the floor
         // is browserslist in package.json. `!= null` is exactly what ?. tests.
         const sv = sr.value;
@@ -2760,18 +3839,40 @@
           lat = pos.value.latitude;
           lng = pos.value.longitude;
         }
-        if (!sog) sog = nav != null && nav.speedOverGround != null ? nav.speedOverGround.value : undefined;
-        if (!cog) cog = nav != null && nav.courseOverGroundTrue != null ? nav.courseOverGroundTrue.value : undefined;
+        if (!sog)
+          sog =
+            nav != null && nav.speedOverGround != null
+              ? nav.speedOverGround.value
+              : undefined;
+        if (!cog)
+          cog =
+            nav != null && nav.courseOverGroundTrue != null
+              ? nav.courseOverGroundTrue.value
+              : undefined;
         // `||`, not `??`: the plugin reports 0 for a dimension it never got
         // from Signal K, and a 0 draft is not a dimension worth routing on.
-        draft = draft || skMeters(design != null ? design.draft : undefined)
-          || skMeters(nav != null ? nav.draft : undefined);
+        draft =
+          draft ||
+          skMeters(design != null ? design.draft : undefined) ||
+          skMeters(nav != null ? nav.draft : undefined);
         beam = beam || skMeters(design != null ? design.beam : undefined);
-        airDraft = airDraft || skMeters(design != null ? design.airHeight : undefined);
+        airDraft =
+          airDraft || skMeters(design != null ? design.airHeight : undefined);
       }
-      showBoatData(lat, lng, sog, cog, draft, beam, airDraft, effectiveDraft, effectiveBeam, effectiveAirDraft);
+      showBoatData(
+        lat,
+        lng,
+        sog,
+        cog,
+        draft,
+        beam,
+        airDraft,
+        effectiveDraft,
+        effectiveBeam,
+        effectiveAirDraft,
+      );
       // Retry if vessel endpoint failed (engine not ready yet)
-      if (vr.status === 'rejected') {
+      if (vr.status === "rejected") {
         setTimeout(fetchBoatData, retryMs || 3000, 5000);
       }
     });
@@ -2779,18 +3880,40 @@
 
   let lastBoat = {};
   let boatStartSet = false;
-  function showBoatData(lat, lng, sog, cog, draft, beam, airDraft, effectiveDraft, effectiveBeam, effectiveAirDraft) {
-    lastBoat = { lat, lng, sog, cog, draft, beam, airDraft, effectiveDraft, effectiveBeam, effectiveAirDraft };
+  function showBoatData(
+    lat,
+    lng,
+    sog,
+    cog,
+    draft,
+    beam,
+    airDraft,
+    effectiveDraft,
+    effectiveBeam,
+    effectiveAirDraft,
+  ) {
+    lastBoat = {
+      lat,
+      lng,
+      sog,
+      cog,
+      draft,
+      beam,
+      airDraft,
+      effectiveDraft,
+      effectiveBeam,
+      effectiveAirDraft,
+    };
     // auto-set start from boat position on first successful fetch
     if (!boatStartSet && lat != null && lng != null) {
       boatStartSet = true;
       state.startLatLng = L.latLng(lat, lng);
-      state.waypointNext = 'dest';
+      state.waypointNext = "dest";
       map.setView([lat, lng], map.getZoom());
-      lookupNearestPoi(lat, lng, 'start');
+      lookupNearestPoi(lat, lng, "start");
       pushHistory();
       applyWaypoints();
-      showToast('Start set to vessel position', 'success');
+      showToast("Start set to vessel position", "success");
       // Re-check tide/departure-planner availability against the vessel's
       // real position: the connect-time check (doConnect()) fires before this
       // fetch resolves, so it runs against the map's placeholder default
@@ -2798,13 +3921,20 @@
       // unrelated location happens to have no tide coverage.
       checkTidesStatus(lat, lng);
     }
-    const fmt = (v, u) => v != null ? v + (u ? ' ' + u : '') : '—';
-    document.getElementById('boat-pos').querySelector('.value').textContent =
-      (lat != null && lng != null) ? lat.toFixed(4) + ', ' + lng.toFixed(4) : '—';
-    document.getElementById('boat-draft').querySelector('.value').textContent = fmt(effectiveDraft != null ? effectiveDraft : draft, 'm');
-    document.getElementById('boat-beam').querySelector('.value').textContent = fmt(effectiveBeam != null ? effectiveBeam : beam, 'm');
-    document.getElementById('boat-airdraft').querySelector('.value').textContent = fmt(effectiveAirDraft != null ? effectiveAirDraft : airDraft, 'm');
-    boatInfo.style.display = 'block';
+    const fmt = (v, u) => (v != null ? v + (u ? " " + u : "") : "—");
+    document.getElementById("boat-pos").querySelector(".value").textContent =
+      lat != null && lng != null ? lat.toFixed(4) + ", " + lng.toFixed(4) : "—";
+    document.getElementById("boat-draft").querySelector(".value").textContent =
+      fmt(effectiveDraft != null ? effectiveDraft : draft, "m");
+    document.getElementById("boat-beam").querySelector(".value").textContent =
+      fmt(effectiveBeam != null ? effectiveBeam : beam, "m");
+    document
+      .getElementById("boat-airdraft")
+      .querySelector(".value").textContent = fmt(
+      effectiveAirDraft != null ? effectiveAirDraft : airDraft,
+      "m",
+    );
+    boatInfo.style.display = "block";
   }
 
   function doConnect() {
@@ -2817,38 +3947,47 @@
     // offered the Data Manager they needed in order to download anything.
     // /databases/status is deliberately built to always answer 200 with an
     // initError field (see handleDatabasesStatus) for exactly this purpose.
-    const connectUrl = getApiBase() + '/signalk/v1/api/router/databases/status';
-    var retryEl = document.getElementById('loading-retry');
-    var subtitleEl = document.getElementById('loading-subtitle');
-    var dotsEl = document.getElementById('loading-dots');
+    const connectUrl = getApiBase() + "/signalk/v1/api/router/databases/status";
+    var retryEl = document.getElementById("loading-retry");
+    var subtitleEl = document.getElementById("loading-subtitle");
+    var dotsEl = document.getElementById("loading-dots");
     var connRetry = 0;
     var connectOk = false;
 
     function tryConnect() {
-      logDebug('CONNECT', connectUrl);
+      logDebug("CONNECT", connectUrl);
       fetch(connectUrl, { signal: AbortSignal.timeout(5000) })
-        .then(r => {
-          logDebug('CONNECT', connectUrl, undefined, r);
-          if (!r.ok) throw new Error('status ' + r.status);
+        .then((r) => {
+          logDebug("CONNECT", connectUrl, undefined, r);
+          if (!r.ok) throw new Error("status " + r.status);
           connectOk = true;
           setConnected(true);
-          showToast('Connected', 'success');
-          if (dotsEl) { dotsEl.className = ''; dotsEl.textContent = '⏳'; }
-          if (retryEl) retryEl.classList.remove('visible');
-          subtitleEl.textContent = 'Checking routing data...';
+          showToast("Connected", "success");
+          if (dotsEl) {
+            dotsEl.className = "";
+            dotsEl.textContent = "⏳";
+          }
+          if (retryEl) retryEl.classList.remove("visible");
+          subtitleEl.textContent = "Checking routing data...";
           checkDbStatus();
           fetchBoatData();
           refreshChartList();
           const c = map.getCenter();
           checkTidesStatus(c.lat, c.lng);
         })
-        .catch(err => {
+        .catch((err) => {
           if (connectOk) return; // Already connected, ignore late errors
           connRetry++;
           var delay = Math.min(1000 * connRetry, 4000);
-          if (retryEl) { retryEl.textContent = 'Connecting... (' + connRetry + ')'; retryEl.classList.add('visible'); }
-          if (dotsEl) { dotsEl.className = 'pulse'; dotsEl.textContent = '⟳'; }
-          if (subtitleEl) subtitleEl.textContent = 'Waiting for server...';
+          if (retryEl) {
+            retryEl.textContent = "Connecting... (" + connRetry + ")";
+            retryEl.classList.add("visible");
+          }
+          if (dotsEl) {
+            dotsEl.className = "pulse";
+            dotsEl.textContent = "⟳";
+          }
+          if (subtitleEl) subtitleEl.textContent = "Waiting for server...";
           setTimeout(tryConnect, delay);
         });
     }
@@ -2856,44 +3995,64 @@
   }
 
   function checkDbStatus() {
-    var overlay = document.getElementById('loading-overlay');
-    var dbsEl = document.getElementById('loading-dbs');
-    var subtitleEl = document.getElementById('loading-subtitle');
-    var retryEl = document.getElementById('loading-retry');
-    var dotsEl = document.getElementById('loading-dots');
-    var spinnerEl = document.getElementById('loading-spinner');
-    var titleEl = document.getElementById('loading-title');
-    var errorDetailEl = document.getElementById('loading-error-detail');
-    var dismissBtn = document.getElementById('loading-dismiss');
+    var overlay = document.getElementById("loading-overlay");
+    var dbsEl = document.getElementById("loading-dbs");
+    var subtitleEl = document.getElementById("loading-subtitle");
+    var retryEl = document.getElementById("loading-retry");
+    var dotsEl = document.getElementById("loading-dots");
+    var spinnerEl = document.getElementById("loading-spinner");
+    var titleEl = document.getElementById("loading-title");
+    var errorDetailEl = document.getElementById("loading-error-detail");
+    var dismissBtn = document.getElementById("loading-dismiss");
     var retryCount = 0;
     var stopped = false;
 
     function stop() {
       stopped = true;
-      overlay = null; dbsEl = null; subtitleEl = null; retryEl = null;
-      dotsEl = null; spinnerEl = null; titleEl = null; errorDetailEl = null; dismissBtn = null;
+      overlay = null;
+      dbsEl = null;
+      subtitleEl = null;
+      retryEl = null;
+      dotsEl = null;
+      spinnerEl = null;
+      titleEl = null;
+      errorDetailEl = null;
+      dismissBtn = null;
     }
 
     function dismissOverlay() {
-      var ov = document.getElementById('loading-overlay');
-      if (ov) { ov.classList.add('hidden'); setTimeout(function() { ov.style.display = 'none'; }, 500); }
+      var ov = document.getElementById("loading-overlay");
+      if (ov) {
+        ov.classList.add("hidden");
+        setTimeout(function () {
+          ov.style.display = "none";
+        }, 500);
+      }
       stop();
     }
 
     function showError(msg) {
-      if (spinnerEl) spinnerEl.style.display = 'none';
-      if (dotsEl) { dotsEl.className = ''; dotsEl.textContent = ''; }
-      if (titleEl) { titleEl.textContent = 'Routing Data Error'; titleEl.style.color = '#ef4444'; }
-      if (subtitleEl) subtitleEl.textContent = 'The routing database failed to load. The map is still available.';
-      if (dbsEl) dbsEl.textContent = '';
-      if (retryEl) retryEl.classList.remove('visible');
+      if (spinnerEl) spinnerEl.style.display = "none";
+      if (dotsEl) {
+        dotsEl.className = "";
+        dotsEl.textContent = "";
+      }
+      if (titleEl) {
+        titleEl.textContent = "Routing Data Error";
+        titleEl.style.color = "#ef4444";
+      }
+      if (subtitleEl)
+        subtitleEl.textContent =
+          "The routing database failed to load. The map is still available.";
+      if (dbsEl) dbsEl.textContent = "";
+      if (retryEl) retryEl.classList.remove("visible");
       if (errorDetailEl && msg) {
         errorDetailEl.textContent = msg;
-        errorDetailEl.style.display = '';
+        errorDetailEl.style.display = "";
       }
       if (dismissBtn) {
-        dismissBtn.textContent = 'Continue without routing';
-        dismissBtn.style.display = '';
+        dismissBtn.textContent = "Continue without routing";
+        dismissBtn.style.display = "";
         dismissBtn.onclick = dismissOverlay;
       }
       stopped = true; // stop polling
@@ -2907,23 +4066,33 @@
     function jumpToDownloadManager() {
       stopped = true; // stop polling before the elements are released
       dismissOverlay();
-      showToast('No routing data installed yet — choose a region to download', 'info');
+      showToast(
+        "No routing data installed yet — choose a region to download",
+        "info",
+      );
       // dmOpen is a hoisted declaration further down this same scope, and this
       // only runs once a fetch has resolved, so it is defined by now.
-      dmOpen('available');
+      dmOpen("available");
     }
 
     function poll() {
       if (stopped) return;
-      fetch(getApiBase() + '/signalk/v1/api/router/databases/status', { signal: AbortSignal.timeout(5000) })
-        .then(function(r) { return r.ok ? r.json() : null; })
-        .then(function(status) {
+      fetch(getApiBase() + "/signalk/v1/api/router/databases/status", {
+        signal: AbortSignal.timeout(5000),
+      })
+        .then(function (r) {
+          return r.ok ? r.json() : null;
+        })
+        .then(function (status) {
           if (stopped) return;
           retryCount = 0;
-          if (retryEl) retryEl.classList.remove('visible');
-          if (dotsEl) { dotsEl.className = ''; dotsEl.textContent = '⏳'; }
+          if (retryEl) retryEl.classList.remove("visible");
+          if (dotsEl) {
+            dotsEl.className = "";
+            dotsEl.textContent = "⏳";
+          }
           if (!status) {
-            if (subtitleEl) subtitleEl.textContent = 'Waiting for server...';
+            if (subtitleEl) subtitleEl.textContent = "Waiting for server...";
             retryAfter(1500);
             return;
           }
@@ -2933,9 +4102,12 @@
             // unreadable-directory variant) mean nothing is installed yet, which
             // is the normal first-run state rather than a failure.
             var err = status.initError.toLowerCase();
-            var noDatabases = status.filenames && status.filenames.length === 0
-              && (err.includes('no .sqlite') || err.includes('no routing')
-                  || err.includes('cannot read routing data directory'));
+            var noDatabases =
+              status.filenames &&
+              status.filenames.length === 0 &&
+              (err.includes("no .sqlite") ||
+                err.includes("no routing") ||
+                err.includes("cannot read routing data directory"));
             if (noDatabases) {
               jumpToDownloadManager();
               return;
@@ -2946,37 +4118,55 @@
           var loadedCount = (status.filenames && status.filenames.length) || 0;
           var availableCount = status.available || 0;
           if (dbsEl) {
-            dbsEl.textContent = loadedCount > 0
-              ? status.filenames.join(', ')
-              : (availableCount > 0
-                  ? availableCount + ' region(s) available — none loaded yet (dynamic loading)'
-                  : 'No databases found');
+            dbsEl.textContent =
+              loadedCount > 0
+                ? status.filenames.join(", ")
+                : availableCount > 0
+                  ? availableCount +
+                    " region(s) available — none loaded yet (dynamic loading)"
+                  : "No databases found";
           }
           if (status.loaded) {
-            if (subtitleEl) subtitleEl.textContent = loadedCount > 0
-              ? 'Loaded ' + loadedCount + ' database(s)'
-              : (availableCount > 0
-                  ? availableCount + ' region(s) available — loading on demand'
-                  : 'No databases installed');
-            setTimeout(function() {
-              if (overlay) overlay.classList.add('hidden');
+            if (subtitleEl)
+              subtitleEl.textContent =
+                loadedCount > 0
+                  ? "Loaded " + loadedCount + " database(s)"
+                  : availableCount > 0
+                    ? availableCount +
+                      " region(s) available — loading on demand"
+                    : "No databases installed";
+            setTimeout(function () {
+              if (overlay) overlay.classList.add("hidden");
               stop();
-              setTimeout(function() { var ov = document.getElementById('loading-overlay'); if (ov) ov.style.display = 'none'; }, 500);
+              setTimeout(function () {
+                var ov = document.getElementById("loading-overlay");
+                if (ov) ov.style.display = "none";
+              }, 500);
             }, 800);
-          } else if (!status.loaded && loadedCount === 0 && availableCount === 0) {
+          } else if (
+            !status.loaded &&
+            loadedCount === 0 &&
+            availableCount === 0
+          ) {
             // No databases at all — not an error, just an empty install
             jumpToDownloadManager();
           } else {
-            if (subtitleEl) subtitleEl.textContent = 'Loading routing graph...';
+            if (subtitleEl) subtitleEl.textContent = "Loading routing graph...";
             setTimeout(poll, 1000);
           }
         })
-        .catch(function() {
+        .catch(function () {
           if (stopped) return;
           retryCount++;
-          if (retryEl) { retryEl.textContent = 'Retrying... (' + retryCount + ')'; retryEl.classList.add('visible'); }
-          if (dotsEl) { dotsEl.className = 'pulse'; dotsEl.textContent = '⟳'; }
-          if (subtitleEl) subtitleEl.textContent = 'Waiting for server...';
+          if (retryEl) {
+            retryEl.textContent = "Retrying... (" + retryCount + ")";
+            retryEl.classList.add("visible");
+          }
+          if (dotsEl) {
+            dotsEl.className = "pulse";
+            dotsEl.textContent = "⟳";
+          }
+          if (subtitleEl) subtitleEl.textContent = "Waiting for server...";
           retryAfter(1500);
         });
     }
@@ -2985,9 +4175,14 @@
       var elapsed = 0;
       function tick() {
         if (stopped) return;
-        if (elapsed >= ms) { poll(); return; }
+        if (elapsed >= ms) {
+          poll();
+          return;
+        }
         elapsed += 250;
-        if (dotsEl) dotsEl.textContent = '⟳ ' + (Math.ceil((ms - elapsed) / 100) / 10) + 's';
+        if (dotsEl)
+          dotsEl.textContent =
+            "⟳ " + Math.ceil((ms - elapsed) / 100) / 10 + "s";
         setTimeout(tick, 250);
       }
       tick();
@@ -2995,9 +4190,9 @@
     poll();
   }
 
-  connBtn.addEventListener('click', doConnect);
+  connBtn.addEventListener("click", doConnect);
   // re-connect when URL changes (Enter or blur)
-  urlInput.addEventListener('change', function () {
+  urlInput.addEventListener("change", function () {
     if (connected) doConnect();
   });
 
@@ -3008,11 +4203,13 @@
   // ---- toast helper ----
   let toastTimer = null;
   function showToast(msg, type) {
-    const el = document.getElementById('toast');
+    const el = document.getElementById("toast");
     el.textContent = msg;
-    el.className = 'visible' + (type ? ' ' + type : '');
+    el.className = "visible" + (type ? " " + type : "");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { el.className = ''; }, 3500);
+    toastTimer = setTimeout(() => {
+      el.className = "";
+    }, 3500);
   }
 
   // ---- custom router ----
@@ -3027,32 +4224,44 @@
 
     route: function (waypoints, callback, context) {
       if (waypoints.length < 2) {
-        callback.call(context, { status: -1, message: 'Need at least 2 waypoints' });
+        callback.call(context, {
+          status: -1,
+          message: "Need at least 2 waypoints",
+        });
         return;
       }
 
-      const wpts = waypoints.map(w => w.latLng);
-      console.log('[MarineRouter] waypoints count:', waypoints.length, 'via count:', waypoints.length > 2 ? waypoints.length - 2 : 0);
-      const toPos = ll => ({ latitude: ll.lat, longitude: ll.lng });
+      const wpts = waypoints.map((w) => w.latLng);
+      console.log(
+        "[MarineRouter] waypoints count:",
+        waypoints.length,
+        "via count:",
+        waypoints.length > 2 ? waypoints.length - 2 : 0,
+      );
+      const toPos = (ll) => ({ latitude: ll.lat, longitude: ll.lng });
       const start = toPos(wpts[0]);
-      const end   = toPos(wpts[wpts.length - 1]);
-      maybeCheckTidesForRoute((start.latitude + end.latitude) / 2, (start.longitude + end.longitude) / 2);
+      const end = toPos(wpts[wpts.length - 1]);
+      maybeCheckTidesForRoute(
+        (start.latitude + end.latitude) / 2,
+        (start.longitude + end.longitude) / 2,
+      );
       // Waypoints arrive in applyWaypoints() order (start, vias..., dest), so
       // the leg modes can be attached to the vias by index.
-      const via   = wpts.slice(1, -1).map((ll, i) => ({
+      const via = wpts.slice(1, -1).map((ll, i) => ({
         latitude: ll.lat,
         longitude: ll.lng,
-        mode: state.viaModes[i] || 'auto',
+        mode: state.viaModes[i] || "auto",
       }));
 
-      const minCoastMeters = parseFloat(document.getElementById('min-coast').value) || 0;
+      const minCoastMeters =
+        parseFloat(document.getElementById("min-coast").value) || 0;
       const minCoastNauticalMiles = minCoastMeters / 1852;
 
       const payload = {
         start: start,
         end: end,
         via: via,
-        endMode: state.destMode || 'auto',
+        endMode: state.destMode || "auto",
         minCoastDistance: minCoastNauticalMiles,
         ...vesselOverrides(),
         ...waitOverrides(),
@@ -3061,56 +4270,76 @@
       // An untouched field means "leave now", not "leave whenever this page was
       // opened", so re-read it against the clock before the route is planned.
       if (tideEnabled()) syncDepartureToNow();
-      if (tideEnabled() && departureIso()) payload.departureTime = departureIso();
+      if (tideEnabled() && departureIso())
+        payload.departureTime = departureIso();
 
-      console.log('[MarineRouter] via payload:', JSON.stringify(via));
+      console.log("[MarineRouter] via payload:", JSON.stringify(via));
       state.routing = true;
-      showToast('Routing…', '');
-      logDebug('ROUTE', routeUrl(), payload);
+      showToast("Routing…", "");
+      logDebug("ROUTE", routeUrl(), payload);
 
       fetch(routeUrl(), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(this.options.timeout),
       })
-        .then(r => {
-          logDebug('ROUTE', routeUrl(), payload, r);
+        .then((r) => {
+          logDebug("ROUTE", routeUrl(), payload, r);
           if (!r.ok) {
             return r.json().then(
-              body => { throw new Error(body && body.error ? body.error : 'Server error ' + r.status); },
-              ()   => { throw new Error('Server error ' + r.status); }
+              (body) => {
+                throw new Error(
+                  body && body.error ? body.error : "Server error " + r.status,
+                );
+              },
+              () => {
+                throw new Error("Server error " + r.status);
+              },
             );
           }
           return r.json();
         })
-        .then(geoJson => {
-          if (isDebug()) console.log('[routeiq] Route response:', JSON.stringify(geoJson, null, 2));
+        .then((geoJson) => {
+          if (isDebug())
+            console.log(
+              "[routeiq] Route response:",
+              JSON.stringify(geoJson, null, 2),
+            );
           state.lastGeoJson = geoJson;
           state.routing = false;
           const result = geoJsonToLRM(geoJson, waypoints);
           if (!result) {
-            callback.call(context, { status: -1, message: 'Empty route returned' });
-            showToast('Route returned no data', 'error');
+            callback.call(context, {
+              status: -1,
+              message: "Empty route returned",
+            });
+            showToast("Route returned no data", "error");
             return;
           }
           try {
             callback.call(context, null, [result]);
-          } catch (_e) { console.warn('[MarineRouter] LRM callback error:', _e); }
+          } catch (_e) {
+            console.warn("[MarineRouter] LRM callback error:", _e);
+          }
           renderCustomRoute(state.lastGeoJson);
           renderRoutePane(state.lastGeoJson);
           // A dropped vessel dimension means the route was planned against
           // something other than this boat — too important to leave to the
           // warnings list in the route pane, which may be scrolled away.
-          const dimWarn = (geoJson.warnings || []).find(w => w.type === 'vessel_dimension_ignored');
+          const dimWarn = (geoJson.warnings || []).find(
+            (w) => w.type === "vessel_dimension_ignored",
+          );
           // Lead clause only — the toast is gone in 3.5s; the route pane keeps
           // the full explanation.
-          showToast(dimWarn ? dimWarn.message.split(' — ')[0] : 'Route updated',
-                    dimWarn ? 'error' : 'success');
+          showToast(
+            dimWarn ? dimWarn.message.split(" — ")[0] : "Route updated",
+            dimWarn ? "error" : "success",
+          );
         })
-        .catch(err => {
+        .catch((err) => {
           state.routing = false;
-          showToast('Routing failed: ' + err.message, 'error');
+          showToast("Routing failed: " + err.message, "error");
           callback.call(context, { status: -1, message: err.message });
         });
     },
@@ -3122,9 +4351,9 @@
     const coords = getAllCoords(geojson);
     if (coords.length < 2) return null;
 
-    const latLngs = coords.map(c => L.latLng(c[1], c[0]));
+    const latLngs = coords.map((c) => L.latLng(c[1], c[0]));
 
-    const waypoints = latLngs.map(p => ({ latLng: p }));
+    const waypoints = latLngs.map((p) => ({ latLng: p }));
     const instructions = makeSimpleInstructions(latLngs, originalWpts);
 
     let totalDist = 0;
@@ -3133,7 +4362,7 @@
     }
 
     return {
-      name: '',
+      name: "",
       coordinates: latLngs,
       inputWaypoints: originalWpts,
       waypoints: waypoints,
@@ -3144,8 +4373,8 @@
 
   function extractCoords(geom) {
     if (!geom) return [];
-    if (geom.type === 'LineString') return geom.coordinates || [];
-    if (geom.type === 'MultiLineString') {
+    if (geom.type === "LineString") return geom.coordinates || [];
+    if (geom.type === "MultiLineString") {
       const out = [];
       for (const seg of geom.coordinates || []) {
         out.push(...seg);
@@ -3174,7 +4403,8 @@
     for (let i = 1; i < coords.length; i++) {
       const prev = out[out.length - 1];
       const c = coords[i];
-      if (Math.abs(c[0] - prev[0]) > EPS || Math.abs(c[1] - prev[1]) > EPS) out.push(c);
+      if (Math.abs(c[0] - prev[0]) > EPS || Math.abs(c[1] - prev[1]) > EPS)
+        out.push(c);
     }
     return out;
   }
@@ -3183,25 +4413,34 @@
   // Handles FeatureCollection, Feature, LineString, and MultiLineString.
   function getAllCoords(geoJson) {
     if (!geoJson) return [];
-    if (geoJson.type === 'FeatureCollection' && Array.isArray(geoJson.features)) {
+    if (
+      geoJson.type === "FeatureCollection" &&
+      Array.isArray(geoJson.features)
+    ) {
       let out = [];
-      for (const f of geoJson.features) out = out.concat(extractCoords(f.geometry));
+      for (const f of geoJson.features)
+        out = out.concat(extractCoords(f.geometry));
       return dedupeConsecutiveCoords(out);
     }
-    if (geoJson.type === 'Feature') return dedupeConsecutiveCoords(extractCoords(geoJson.geometry));
+    if (geoJson.type === "Feature")
+      return dedupeConsecutiveCoords(extractCoords(geoJson.geometry));
     return dedupeConsecutiveCoords(extractCoords(geoJson));
   }
 
   function closestCoordIndex(coords, lat, lng) {
     // Apply a cosine-latitude correction so that 1° of longitude is weighted
     // correctly relative to 1° of latitude (especially important above ~50°N/S).
-    const cosLat = Math.cos(lat * Math.PI / 180);
-    let minD = Infinity, minI = 0;
+    const cosLat = Math.cos((lat * Math.PI) / 180);
+    let minD = Infinity,
+      minI = 0;
     for (let i = 0; i < coords.length; i++) {
       const dlat = coords[i][1] - lat;
       const dlng = (coords[i][0] - lng) * cosLat;
       const d = dlat * dlat + dlng * dlng;
-      if (d < minD) { minD = d; minI = i; }
+      if (d < minD) {
+        minD = d;
+        minI = i;
+      }
     }
     return minI;
   }
@@ -3219,7 +4458,8 @@
   // convention as sortViasWithModes() above.
   function legAnchors(coords) {
     const anchors = [0];
-    for (const vp of state.viaPoints) anchors.push(closestCoordIndex(coords, vp.lat, vp.lng));
+    for (const vp of state.viaPoints)
+      anchors.push(closestCoordIndex(coords, vp.lat, vp.lng));
     anchors.push(coords.length - 1);
     for (let i = 1; i < anchors.length; i++) {
       if (anchors[i] < anchors[i - 1]) anchors[i] = anchors[i - 1]; // force monotonic
@@ -3247,20 +4487,29 @@
   function nearestEdgeIdxInRange(latlng, fromIdx, toIdx) {
     const coords = getRouteCoords(state.lastGeoJson);
     if (!coords) return fromIdx;
-    const lngScale = Math.cos(latlng.lat * Math.PI / 180);
-    const px = latlng.lng * lngScale, py = latlng.lat;
-    let minD = Infinity, best = Math.max(0, fromIdx);
+    const lngScale = Math.cos((latlng.lat * Math.PI) / 180);
+    const px = latlng.lng * lngScale,
+      py = latlng.lat;
+    let minD = Infinity,
+      best = Math.max(0, fromIdx);
     const last = Math.min(toIdx - 1, coords.length - 2);
     for (let i = Math.max(0, fromIdx); i <= last; i++) {
-      const ax = coords[i][0] * lngScale, ay = coords[i][1];
-      const bx = coords[i + 1][0] * lngScale, by = coords[i + 1][1];
-      const dx = bx - ax, dy = by - ay;
+      const ax = coords[i][0] * lngScale,
+        ay = coords[i][1];
+      const bx = coords[i + 1][0] * lngScale,
+        by = coords[i + 1][1];
+      const dx = bx - ax,
+        dy = by - ay;
       const len2 = dx * dx + dy * dy;
       let t = len2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
       t = Math.max(0, Math.min(1, t));
-      const ex = ax + t * dx - px, ey = ay + t * dy - py;
+      const ex = ax + t * dx - px,
+        ey = ay + t * dy - py;
       const d = ex * ex + ey * ey;
-      if (d < minD) { minD = d; best = i; }
+      if (d < minD) {
+        minD = d;
+        best = i;
+      }
     }
     return best;
   }
@@ -3279,7 +4528,9 @@
   }
 
   function legMode(legIdx) {
-    return legIdx < state.viaModes.length ? (state.viaModes[legIdx] || 'auto') : (state.destMode || 'auto');
+    return legIdx < state.viaModes.length
+      ? state.viaModes[legIdx] || "auto"
+      : state.destMode || "auto";
   }
 
   function setLegMode(legIdx, mode) {
@@ -3315,22 +4566,32 @@
 
   function highlightPaneByCoordRange(fromIdx, toIdx) {
     clearPaneHighlight();
-    document.querySelectorAll('#route-nodes .route-leg').forEach(function (el) {
+    document.querySelectorAll("#route-nodes .route-leg").forEach(function (el) {
       const f = parseInt(el.dataset.coordFrom, 10);
       const t = parseInt(el.dataset.coordTo, 10);
       if (f >= fromIdx && t <= toIdx) {
-        el.classList.add('highlighted');
+        el.classList.add("highlighted");
         const prev = el.previousElementSibling;
-        if (prev && prev.classList.contains('route-node')) prev.classList.add('highlighted');
+        if (prev && prev.classList.contains("route-node"))
+          prev.classList.add("highlighted");
         const next = el.nextElementSibling;
-        if (next && next.classList.contains('route-node')) next.classList.add('highlighted');
+        if (next && next.classList.contains("route-node"))
+          next.classList.add("highlighted");
       }
     });
   }
 
   function clearPaneHighlight() {
-    document.querySelectorAll('#route-nodes .route-leg.highlighted').forEach(function (el) { el.classList.remove('highlighted'); });
-    document.querySelectorAll('#route-nodes .route-node.highlighted').forEach(function (el) { el.classList.remove('highlighted'); });
+    document
+      .querySelectorAll("#route-nodes .route-leg.highlighted")
+      .forEach(function (el) {
+        el.classList.remove("highlighted");
+      });
+    document
+      .querySelectorAll("#route-nodes .route-node.highlighted")
+      .forEach(function (el) {
+        el.classList.remove("highlighted");
+      });
   }
 
   function clearBothHighlights() {
@@ -3346,8 +4607,11 @@
   function showJunctionMarker(latlng, label) {
     clearJunctionMarkers();
     const icon = L.divIcon({
-      className: '',
-      html: '<div style="font-size:11px;line-height:18px;text-align:center;color:#fff;background:#3b8fd4;width:20px;height:20px;border-radius:10px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);font-weight:600;font-family:sans-serif">' + label + '</div>',
+      className: "",
+      html:
+        '<div style="font-size:11px;line-height:18px;text-align:center;color:#fff;background:#3b8fd4;width:20px;height:20px;border-radius:10px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);font-weight:600;font-family:sans-serif">' +
+        label +
+        "</div>",
       iconSize: [20, 20],
       iconAnchor: [10, 10],
     });
@@ -3378,8 +4642,8 @@
   }
 
   function onSegmentDragUp(domEvt) {
-    document.removeEventListener('mousemove', onSegmentDragMove);
-    document.removeEventListener('mouseup', onSegmentDragUp);
+    document.removeEventListener("mousemove", onSegmentDragMove);
+    document.removeEventListener("mouseup", onSegmentDragUp);
     map.dragging.enable();
     if (!segmentDrag) return;
     const drag = segmentDrag;
@@ -3393,7 +4657,9 @@
     }
     // Let the browser's own 'click' (which follows this mouseup) see the
     // flag as true so nothing else reacts to it, then clear on the next tick.
-    setTimeout(function () { suppressRouteClick = false; }, 0);
+    setTimeout(function () {
+      suppressRouteClick = false;
+    }, 0);
   }
 
   // Desktop-only (mouse events): a touch/pointer-event variant was left out
@@ -3409,7 +4675,9 @@
 
   function legIdxForEventOnSegment(latlng, segStartIdx, segEndIdx) {
     if (hoveredLegIdx != null) return hoveredLegIdx;
-    return legIndexForEdgeIdx(nearestEdgeIdxInRange(latlng, segStartIdx, segEndIdx));
+    return legIndexForEdgeIdx(
+      nearestEdgeIdxInRange(latlng, segStartIdx, segEndIdx),
+    );
   }
 
   // Grab-line hover: highlight the whole LEG under the cursor (not just the
@@ -3418,23 +4686,25 @@
   function attachLegHoverHandlers(grabLine, segStartIdx, segEndIdx) {
     function update(e) {
       if (segmentDrag) return; // don't re-highlight mid-drag
-      const legIdx = legIndexForEdgeIdx(nearestEdgeIdxInRange(e.latlng, segStartIdx, segEndIdx));
+      const legIdx = legIndexForEdgeIdx(
+        nearestEdgeIdxInRange(e.latlng, segStartIdx, segEndIdx),
+      );
       if (legIdx === hoveredLegIdx) return;
       hoveredLegIdx = legIdx;
       const range = legCoordRange(legIdx);
       highlightMapByCoordRange(range.fromIdx, range.toIdx);
       highlightPaneByCoordRange(range.fromIdx, range.toIdx);
     }
-    grabLine.on('mouseover', update);
-    grabLine.on('mousemove', update);
-    grabLine.on('mouseout', function () {
+    grabLine.on("mouseover", update);
+    grabLine.on("mousemove", update);
+    grabLine.on("mouseout", function () {
       hoveredLegIdx = null;
       if (!segmentDrag) clearBothHighlights();
     });
   }
 
   function attachSegmentDragHandlers(grabLine, segStartIdx, segEndIdx) {
-    grabLine.on('mousedown', function (e) {
+    grabLine.on("mousedown", function (e) {
       if (state.editMode) return;
       if (e.originalEvent.button !== 0) return; // left button only
       L.DomEvent.stopPropagation(e);
@@ -3444,32 +4714,51 @@
 
       suppressRouteClick = true;
       map.dragging.disable();
-      const ghost = L.marker(e.latlng, { icon: makeViaIcon('+', false), opacity: 0.75, interactive: false }).addTo(map);
-      segmentDrag = { legIdx: legIdx, ghost: ghost, startPoint: map.latLngToContainerPoint(e.latlng), moved: false };
+      const ghost = L.marker(e.latlng, {
+        icon: makeViaIcon("+", false),
+        opacity: 0.75,
+        interactive: false,
+      }).addTo(map);
+      segmentDrag = {
+        legIdx: legIdx,
+        ghost: ghost,
+        startPoint: map.latLngToContainerPoint(e.latlng),
+        moved: false,
+      };
 
-      document.addEventListener('mousemove', onSegmentDragMove);
-      document.addEventListener('mouseup', onSegmentDragUp);
+      document.addEventListener("mousemove", onSegmentDragMove);
+      document.addEventListener("mouseup", onSegmentDragUp);
     });
   }
 
   function attachSegmentContextMenu(grabLine, segStartIdx, segEndIdx) {
-    grabLine.on('contextmenu', function (e) {
+    grabLine.on("contextmenu", function (e) {
       if (state.editMode) return;
       L.DomEvent.stopPropagation(e);
       L.DomEvent.preventDefault(e.originalEvent);
       const legIdx = legIdxForEventOnSegment(e.latlng, segStartIdx, segEndIdx);
       const range = legCoordRange(legIdx);
-      openContextMenu(e.latlng, e.originalEvent.clientX, e.originalEvent.clientY,
-        { legTarget: { legIdx: legIdx, fromIdx: range.fromIdx, toIdx: range.toIdx } });
+      openContextMenu(
+        e.latlng,
+        e.originalEvent.clientX,
+        e.originalEvent.clientY,
+        {
+          legTarget: {
+            legIdx: legIdx,
+            fromIdx: range.fromIdx,
+            toIdx: range.toIdx,
+          },
+        },
+      );
     });
   }
 
   function addPolylineHoverHandlers(polyline, fromIdx, toIdx) {
-    polyline.on('mouseover', function () {
+    polyline.on("mouseover", function () {
       highlightMapByCoordRange(fromIdx, toIdx);
       highlightPaneByCoordRange(fromIdx, toIdx);
     });
-    polyline.on('mouseout', clearBothHighlights);
+    polyline.on("mouseout", clearBothHighlights);
   }
 
   function renderCustomRoute(geoJson) {
@@ -3480,33 +4769,54 @@
     state.junctionMarkers = L.layerGroup().addTo(state.routeLayers);
     if (!geoJson) return;
 
-    const features = (geoJson.type === 'FeatureCollection' && Array.isArray(geoJson.features))
-      ? geoJson.features
-      : (geoJson.type === 'Feature' ? [geoJson] : []);
+    const features =
+      geoJson.type === "FeatureCollection" && Array.isArray(geoJson.features)
+        ? geoJson.features
+        : geoJson.type === "Feature"
+          ? [geoJson]
+          : [];
 
     const coords = getAllCoords(geoJson);
     if (coords.length < 2) return;
 
-    const latLngs = coords.map(c => L.latLng(c[1], c[0]));
+    const latLngs = coords.map((c) => L.latLng(c[1], c[0]));
 
     // Resolve vessel thresholds (with sensible fallbacks)
     // Use raw design values from lastBoat so we can apply the correct margin
     // exactly once. Reading effectiveDraft from the DOM would double-count the
     // safety margin that the server already added.
-    const vesselDraft = (lastBoat && lastBoat.draft != null) ? lastBoat.draft : 2.0;
-    const vesselAirDraft = (lastBoat && lastBoat.airDraft != null) ? lastBoat.airDraft : 10.0;
-    const SAFETY_MARGIN_DRAFT = (lastBoat && lastBoat.effectiveDraft != null && lastBoat.draft != null)
-      ? lastBoat.effectiveDraft - lastBoat.draft : 0.3;
-    const SAFETY_MARGIN_AIRDRAFT = (lastBoat && lastBoat.effectiveAirDraft != null && lastBoat.airDraft != null)
-      ? lastBoat.effectiveAirDraft - lastBoat.airDraft : 1.5;
+    const vesselDraft =
+      lastBoat && lastBoat.draft != null ? lastBoat.draft : 2.0;
+    const vesselAirDraft =
+      lastBoat && lastBoat.airDraft != null ? lastBoat.airDraft : 10.0;
+    const SAFETY_MARGIN_DRAFT =
+      lastBoat && lastBoat.effectiveDraft != null && lastBoat.draft != null
+        ? lastBoat.effectiveDraft - lastBoat.draft
+        : 0.3;
+    const SAFETY_MARGIN_AIRDRAFT =
+      lastBoat &&
+      lastBoat.effectiveAirDraft != null &&
+      lastBoat.airDraft != null
+        ? lastBoat.effectiveAirDraft - lastBoat.airDraft
+        : 1.5;
     const shallowThreshold = vesselDraft + SAFETY_MARGIN_DRAFT;
     const airDraftThreshold = vesselAirDraft + SAFETY_MARGIN_AIRDRAFT;
 
     const isSegmentWarning = (props) => {
       if (!props) return false;
-      if (props.edgeType === 'overland') return true;
-      if (typeof props.minDepth === 'number' && props.minDepth >= 0 && props.minDepth < shallowThreshold) return true;
-      if (typeof props.maxAirDraft === 'number' && props.maxAirDraft >= 0 && props.maxAirDraft < airDraftThreshold) return true;
+      if (props.edgeType === "overland") return true;
+      if (
+        typeof props.minDepth === "number" &&
+        props.minDepth >= 0 &&
+        props.minDepth < shallowThreshold
+      )
+        return true;
+      if (
+        typeof props.maxAirDraft === "number" &&
+        props.maxAirDraft >= 0 &&
+        props.maxAirDraft < airDraftThreshold
+      )
+        return true;
       return false;
     };
 
@@ -3522,7 +4832,7 @@
       const fc = extractCoords(f.geometry);
       if (fc.length < 2) continue;
       const w = isSegmentWarning(f.properties || {});
-      const m = (f.properties || {}).mode === 'manual';
+      const m = (f.properties || {}).mode === "manual";
       for (let j = 0; j < fc.length - 1; j++) {
         if (coordCursor + j < coordWarn.length) {
           coordWarn[coordCursor + j] = w;
@@ -3535,7 +4845,10 @@
     // A coord is "in a warning" if either adjacent segment is a warning.
     const warnIdx = new Set();
     for (let i = 0; i < coordWarn.length; i++) {
-      if (coordWarn[i]) { warnIdx.add(i); warnIdx.add(i + 1); }
+      if (coordWarn[i]) {
+        warnIdx.add(i);
+        warnIdx.add(i + 1);
+      }
     }
 
     // Split at major node boundaries, warn/no-warn transitions AND
@@ -3546,7 +4859,10 @@
     let prevWarn = warnIdx.has(0);
     for (let i = 1; i < coords.length; i++) {
       const curWarn = warnIdx.has(i);
-      if (curWarn !== prevWarn) { splitSet.add(i); prevWarn = curWarn; }
+      if (curWarn !== prevWarn) {
+        splitSet.add(i);
+        prevWarn = curWarn;
+      }
     }
     for (let i = 1; i < coordManual.length; i++) {
       if (coordManual[i] !== coordManual[i - 1]) splitSet.add(i);
@@ -3568,19 +4884,30 @@
       // Manual (hand-drawn) legs: dashed magenta. Auto legs: solid blue,
       // or dashed amber when a constraint warning applies.
       const style = isManual
-        ? { color: '#d946ef', opacity: 0.95, weight: 4, dashArray: '10, 8' }
+        ? { color: "#d946ef", opacity: 0.95, weight: 4, dashArray: "10, 8" }
         : isWarn
-          ? { color: '#f59e0b', opacity: 0.9, weight: 4, dashArray: '8, 6' }
-          : { color: '#3b8fd4', opacity: 0.9, weight: 4 };
+          ? { color: "#f59e0b", opacity: 0.9, weight: 4, dashArray: "8, 6" }
+          : { color: "#3b8fd4", opacity: 0.9, weight: 4 };
       const polyline = L.polyline(seg, style).addTo(state.routeLayers);
-      state.routeSegments.push({ polyline, startIdx: s, endIdx: e, isWarning: isWarn, isManual: isManual, originalStyle: style });
+      state.routeSegments.push({
+        polyline,
+        startIdx: s,
+        endIdx: e,
+        isWarning: isWarn,
+        isManual: isManual,
+        originalStyle: style,
+      });
       addPolylineHoverHandlers(polyline, s, e);
 
       // Wide, invisible line on top of the visible one: a much easier target
       // to grab for dragging out a new via point (Google-Maps style) and for
       // right-clicking the leg context menu — the 4px visible line is too
       // thin to reliably hit.
-      const grabLine = L.polyline(seg, { weight: 18, opacity: 0, color: '#000' }).addTo(state.routeLayers);
+      const grabLine = L.polyline(seg, {
+        weight: 18,
+        opacity: 0,
+        color: "#000",
+      }).addTo(state.routeLayers);
       attachLegHoverHandlers(grabLine, s, e);
       attachSegmentDragHandlers(grabLine, s, e);
       attachSegmentContextMenu(grabLine, s, e);
@@ -3598,10 +4925,28 @@
   function makeSimpleInstructions(latLngs, originalWpts) {
     const inst = [];
     if (latLngs.length > 1) {
-      inst.push({ type: 'Straight', text: 'Start', distance: 0, time: 0, index: 0 });
-      inst.push({ type: 'Straight', text: 'Destination', distance: 0, time: 0, index: latLngs.length - 1 });
+      inst.push({
+        type: "Straight",
+        text: "Start",
+        distance: 0,
+        time: 0,
+        index: 0,
+      });
+      inst.push({
+        type: "Straight",
+        text: "Destination",
+        distance: 0,
+        time: 0,
+        index: latLngs.length - 1,
+      });
     } else if (latLngs.length > 0) {
-      inst.push({ type: 'Straight', text: 'Start', distance: 0, time: 0, index: 0 });
+      inst.push({
+        type: "Straight",
+        text: "Start",
+        distance: 0,
+        time: 0,
+        index: 0,
+      });
     }
     return inst;
   }
@@ -3619,10 +4964,14 @@
     // toggle recalculates the route, and a zoom jump on each edit is jarring.
     // We fit once per fresh route in the routesfound handler instead.
     fitSelectedRoutes: false,
-    lineOptions: { styles: [{ color: 'transparent', weight: 0 }] },
-    createMarker: function () { return null; },
+    lineOptions: { styles: [{ color: "transparent", weight: 0 }] },
+    createMarker: function () {
+      return null;
+    },
     plan: L.Routing.plan([], {
-      createMarker: function () { return null; },
+      createMarker: function () {
+        return null;
+      },
       draggableWaypoints: false,
       addWaypoints: false,
     }),
@@ -3633,17 +4982,25 @@
   let routeAutoFitted = false;
 
   // capture the latest route result for export / push
-  routingControl.on('routesfound', function (e) {
+  routingControl.on("routesfound", function (e) {
     if (e.routes && e.routes.length > 0) {
       state.latestRoute = e.routes[0];
-      if (!routeAutoFitted && e.routes[0].coordinates && e.routes[0].coordinates.length > 1) {
+      if (
+        !routeAutoFitted &&
+        e.routes[0].coordinates &&
+        e.routes[0].coordinates.length > 1
+      ) {
         routeAutoFitted = true;
-        map.fitBounds(L.latLngBounds(e.routes[0].coordinates), { padding: [40, 40] });
+        map.fitBounds(L.latLngBounds(e.routes[0].coordinates), {
+          padding: [40, 40],
+        });
       }
     }
     try {
       renderCustomRoute(state.lastGeoJson);
-    } catch (_r) { /* ignore rendering errors */ }
+    } catch (_r) {
+      /* ignore rendering errors */
+    }
     renderRoutePane(state.lastGeoJson);
     updateInfo();
   });
@@ -3651,71 +5008,96 @@
   // ---- update info panel ----
   function updateInfo() {
     const fmtStart = state.startLatLng
-      ? (state.startPoiName ? state.startPoiName + '  ·  ' : '') + fmtLatLng(state.startLatLng)
-      : '—';
+      ? (state.startPoiName ? state.startPoiName + "  ·  " : "") +
+        fmtLatLng(state.startLatLng)
+      : "—";
     const fmtDest = state.destLatLng
-      ? (state.destPoiName ? state.destPoiName + '  ·  ' : '') + fmtLatLng(state.destLatLng)
-      : '—';
-    document.getElementById('start-info').querySelector('.coords').textContent = fmtStart;
-    document.getElementById('dest-info').querySelector('.coords').textContent = fmtDest;
-    document.getElementById('via-info').querySelector('.coords').textContent =
+      ? (state.destPoiName ? state.destPoiName + "  ·  " : "") +
+        fmtLatLng(state.destLatLng)
+      : "—";
+    document.getElementById("start-info").querySelector(".coords").textContent =
+      fmtStart;
+    document.getElementById("dest-info").querySelector(".coords").textContent =
+      fmtDest;
+    document.getElementById("via-info").querySelector(".coords").textContent =
       state.viaPoints.length
-        ? state.viaPoints.map(v => fmtLatLng(v)).join('  |  ')
-        : '—';
+        ? state.viaPoints.map((v) => fmtLatLng(v)).join("  |  ")
+        : "—";
   }
 
   function fmtLatLng(ll) {
-    return ll.lat.toFixed(4) + ', ' + ll.lng.toFixed(4);
+    return ll.lat.toFixed(4) + ", " + ll.lng.toFixed(4);
   }
 
   // ---- set waypoints on LRM ----
   function updateMarkers() {
-    if (state.startMarker) { map.removeLayer(state.startMarker); state.startMarker = null; }
-    if (state.destMarker) { map.removeLayer(state.destMarker); state.destMarker = null; }
+    if (state.startMarker) {
+      map.removeLayer(state.startMarker);
+      state.startMarker = null;
+    }
+    if (state.destMarker) {
+      map.removeLayer(state.destMarker);
+      state.destMarker = null;
+    }
     for (const m of state.viaMarkers) map.removeLayer(m);
     state.viaMarkers = [];
 
     function markerMenu(marker, target) {
-      marker.on('contextmenu', function (e) {
+      marker.on("contextmenu", function (e) {
         L.DomEvent.stopPropagation(e);
         L.DomEvent.preventDefault(e.originalEvent);
-        openContextMenu(this.getLatLng(), e.originalEvent.clientX, e.originalEvent.clientY,
-          { removeTarget: typeof target === 'function' ? target(this) : target });
+        openContextMenu(
+          this.getLatLng(),
+          e.originalEvent.clientX,
+          e.originalEvent.clientY,
+          {
+            removeTarget: typeof target === "function" ? target(this) : target,
+          },
+        );
       });
     }
 
     if (state.startLatLng) {
-      state.startMarker = L.marker(state.startLatLng, { icon: startIcon, draggable: true }).addTo(map);
-      state.startMarker.on('dragend', function () {
+      state.startMarker = L.marker(state.startLatLng, {
+        icon: startIcon,
+        draggable: true,
+      }).addTo(map);
+      state.startMarker.on("dragend", function () {
         state.startLatLng = this.getLatLng();
-        state.startPoiName = '';
+        state.startPoiName = "";
         pushHistory();
         applyWaypoints();
-        lookupNearestPoi(state.startLatLng.lat, state.startLatLng.lng, 'start');
+        lookupNearestPoi(state.startLatLng.lat, state.startLatLng.lng, "start");
       });
-      markerMenu(state.startMarker, { kind: 'start' });
+      markerMenu(state.startMarker, { kind: "start" });
     }
     if (state.destLatLng) {
-      state.destMarker = L.marker(state.destLatLng, { icon: destIcon, draggable: true }).addTo(map);
-      state.destMarker.on('dragend', function () {
+      state.destMarker = L.marker(state.destLatLng, {
+        icon: destIcon,
+        draggable: true,
+      }).addTo(map);
+      state.destMarker.on("dragend", function () {
         state.destLatLng = this.getLatLng();
-        state.destPoiName = '';
+        state.destPoiName = "";
         pushHistory();
         applyWaypoints();
-        lookupNearestPoi(state.destLatLng.lat, state.destLatLng.lng, 'dest');
+        lookupNearestPoi(state.destLatLng.lat, state.destLatLng.lng, "dest");
       });
-      markerMenu(state.destMarker, { kind: 'dest' });
+      markerMenu(state.destMarker, { kind: "dest" });
     }
     state.viaPoints.forEach(function (ll, i) {
-      const isManual = state.viaModes[i] === 'manual';
-      const m = L.marker(ll, { icon: makeViaIcon(i + 1, isManual), draggable: true }).addTo(map);
-      m.on('dragend', function () {
+      const isManual = state.viaModes[i] === "manual";
+      const m = L.marker(ll, {
+        icon: makeViaIcon(i + 1, isManual),
+        draggable: true,
+      }).addTo(map);
+      m.on("dragend", function () {
         state.viaPoints[state.viaMarkers.indexOf(this)] = this.getLatLng();
         pushHistory();
         applyWaypoints();
       });
       markerMenu(m, function (marker) {
-        return { kind: 'via', viaIdx: state.viaMarkers.indexOf(marker) };
+        return { kind: "via", viaIdx: state.viaMarkers.indexOf(marker) };
       });
       state.viaMarkers.push(m);
     });
@@ -3725,7 +5107,7 @@
     const pts = [];
     if (state.startLatLng) pts.push(state.startLatLng);
     for (const v of state.viaPoints) pts.push(v);
-    if (state.destLatLng)  pts.push(state.destLatLng);
+    if (state.destLatLng) pts.push(state.destLatLng);
     if (pts.length >= 2) {
       routingControl.setWaypoints(pts);
     } else {
@@ -3743,66 +5125,86 @@
 
   // ---- look up nearest POI for naming ----
   function lookupNearestPoi(lat, lng, endpoint) {
-    const url = getApiBase() + '/signalk/v1/api/router/poi/nearest?lat=' + lat.toFixed(6) + '&lon=' + lng.toFixed(6) + '&radius=250';
+    const url =
+      getApiBase() +
+      "/signalk/v1/api/router/poi/nearest?lat=" +
+      lat.toFixed(6) +
+      "&lon=" +
+      lng.toFixed(6) +
+      "&radius=250";
     fetch(url)
       .then(function (r) {
-        if (r.status === 404) console.warn('[POI] endpoint not found');
+        if (r.status === 404) console.warn("[POI] endpoint not found");
         return r.ok ? r.json() : null;
       })
       .then(function (data) {
         if (data && data.poi) {
-          if (endpoint === 'start') state.startPoiName = data.poi.name;
+          if (endpoint === "start") state.startPoiName = data.poi.name;
           else state.destPoiName = data.poi.name;
           updateRouteTitle();
           updateInfo();
         }
       })
-      .catch(function (err) { console.warn('[POI] lookup error:', err); });
+      .catch(function (err) {
+        console.warn("[POI] lookup error:", err);
+      });
   }
 
   // Right-click: no longer sets start/dest (left-click does that).
   // The contextmenu preventDefault is handled in the panning setup above.
 
   // ---- clear route (confirmation + undo-able via history) ----
-  document.getElementById('clear-btn').addEventListener('click', requestClearRoute);
+  document
+    .getElementById("clear-btn")
+    .addEventListener("click", requestClearRoute);
 
   // ---- synchronise state when LRM waypoints change externally ----
-  routingControl.on('waypointschanged', function () {
+  routingControl.on("waypointschanged", function () {
     const wpts = routingControl.getWaypoints();
     if (wpts.length === 0) {
       state.startLatLng = null;
-      state.destLatLng  = null;
+      state.destLatLng = null;
       state.viaPoints = [];
       state.viaModes = [];
-      state.destMode = 'auto';
-      state.waypointNext = 'start';
+      state.destMode = "auto";
+      state.waypointNext = "start";
       state.routeLayers.clearLayers();
       state.lastGeoJson = null;
       clearRoutePane();
       routeAutoFitted = false;
     } else {
-      if (wpts[0] && wpts[0].latLng)  state.startLatLng = wpts[0].latLng;
-      if (wpts.length > 1 && wpts[wpts.length - 1].latLng) state.destLatLng = wpts[wpts.length - 1].latLng;
+      if (wpts[0] && wpts[0].latLng) state.startLatLng = wpts[0].latLng;
+      if (wpts.length > 1 && wpts[wpts.length - 1].latLng)
+        state.destLatLng = wpts[wpts.length - 1].latLng;
     }
     updateMarkers();
     updateInfo();
   });
 
   // ---- search (real-time, with icons, keyboard nav) ----
-  const SEARCH_TYPE_COLORS = { harbour: '#3b8fd4', lock: '#f59e0b', bridge: '#ef4444', fairway: '#8b5cf6', waterway: '#14b8a6' };
-  const SEARCH_SUBTYPE_COLORS = { bridge: { opening: '#22c55e', fixed: '#ef4444' } };
+  const SEARCH_TYPE_COLORS = {
+    harbour: "#3b8fd4",
+    lock: "#f59e0b",
+    bridge: "#ef4444",
+    fairway: "#8b5cf6",
+    waterway: "#14b8a6",
+  };
+  const SEARCH_SUBTYPE_COLORS = {
+    bridge: { opening: "#22c55e", fixed: "#ef4444" },
+  };
 
   let searchDebounceTimer = null;
   let searchActiveIdx = -1;
   let searchItems = [];
 
-  const searchInput = document.getElementById('search-input');
-  const searchResults = document.getElementById('search-results');
+  const searchInput = document.getElementById("search-input");
+  const searchResults = document.getElementById("search-results");
 
   function getSearchColor(type, props) {
     const sub = SEARCH_SUBTYPE_COLORS[type];
-    if (sub && props && props.subtype && sub[props.subtype]) return sub[props.subtype];
-    return SEARCH_TYPE_COLORS[type] || '#6d96c0';
+    if (sub && props && props.subtype && sub[props.subtype])
+      return sub[props.subtype];
+    return SEARCH_TYPE_COLORS[type] || "#6d96c0";
   }
 
   function highlightText(text, query) {
@@ -3810,60 +5212,65 @@
     // Match against the escaped form of the query, since that is what the
     // escaped text contains: a query with & < > or " never highlighted,
     // because the haystack held &amp; while the needle still held &.
-    const re = new RegExp('(' + escapeHtml(query).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
-    return escapeHtml(text).replace(re, '<mark>$1</mark>');
+    const re = new RegExp(
+      "(" + escapeHtml(query).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")",
+      "gi",
+    );
+    return escapeHtml(text).replace(re, "<mark>$1</mark>");
   }
 
-  searchInput.addEventListener('input', function () {
+  searchInput.addEventListener("input", function () {
     const q = this.value.trim();
     clearTimeout(searchDebounceTimer);
     if (q.length < 2) {
-      searchResults.style.display = 'none';
-      searchResults.innerHTML = '';
+      searchResults.style.display = "none";
+      searchResults.innerHTML = "";
       searchItems = [];
       return;
     }
-    searchDebounceTimer = setTimeout(function () { doSearch(q); }, 250);
+    searchDebounceTimer = setTimeout(function () {
+      doSearch(q);
+    }, 250);
   });
 
-  searchInput.addEventListener('keydown', function (e) {
-    if (e.key === 'ArrowDown') {
+  searchInput.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowDown") {
       e.preventDefault();
       if (searchItems.length === 0) return;
       searchActiveIdx = Math.min(searchActiveIdx + 1, searchItems.length - 1);
       highlightActive();
-    } else if (e.key === 'ArrowUp') {
+    } else if (e.key === "ArrowUp") {
       e.preventDefault();
       if (searchItems.length === 0) return;
       searchActiveIdx = Math.max(searchActiveIdx - 1, 0);
       highlightActive();
-    } else if (e.key === 'Enter') {
+    } else if (e.key === "Enter") {
       e.preventDefault();
       if (searchActiveIdx >= 0 && searchActiveIdx < searchItems.length) {
         selectSearchItem(searchItems[searchActiveIdx]);
       } else {
         doSearch(searchInput.value.trim());
       }
-    } else if (e.key === 'Escape') {
-      searchResults.style.display = 'none';
+    } else if (e.key === "Escape") {
+      searchResults.style.display = "none";
       searchInput.blur();
     }
   });
 
-  searchInput.addEventListener('focus', function () {
+  searchInput.addEventListener("focus", function () {
     if (searchItems.length > 0 && searchInput.value.trim().length >= 2) {
-      searchResults.style.display = 'block';
+      searchResults.style.display = "block";
     }
   });
 
   function highlightActive() {
-    const items = searchResults.querySelectorAll('.search-result-item');
+    const items = searchResults.querySelectorAll(".search-result-item");
     items.forEach(function (el, i) {
-      el.classList.toggle('active', i === searchActiveIdx);
+      el.classList.toggle("active", i === searchActiveIdx);
     });
     if (searchActiveIdx >= 0) {
       const active = items[searchActiveIdx];
-      if (active) active.scrollIntoView({ block: 'nearest' });
+      if (active) active.scrollIntoView({ block: "nearest" });
     }
   }
 
@@ -3872,178 +5279,232 @@
     if (pos && pos.lat != null && pos.lng != null) {
       map.setView([pos.lat, pos.lng], 12);
       const ll = L.latLng(pos.lat, pos.lng);
-      const name = item.name || 'POI';
-      if (state.waypointNext === 'start') {
+      const name = item.name || "POI";
+      if (state.waypointNext === "start") {
         state.startLatLng = ll;
         state.startPoiName = name;
-        state.waypointNext = 'dest';
+        state.waypointNext = "dest";
       } else {
         state.destLatLng = ll;
         state.destPoiName = name;
         state.destMode = currentLegMode();
-        state.waypointNext = 'start';
+        state.waypointNext = "start";
       }
       pushHistory();
       applyWaypoints();
     }
-    searchResults.style.display = 'none';
+    searchResults.style.display = "none";
     searchInput.blur();
   }
 
   function doSearch(q) {
     if (!q || q.length < 2) return;
     searchActiveIdx = -1;
-    searchResults.style.display = 'none';
+    searchResults.style.display = "none";
     searchResults.innerHTML = '<div class="search-empty">Searching...</div>';
-    searchResults.style.display = 'block';
+    searchResults.style.display = "block";
 
-    const searchQ = searchUrl() + '?q=' + encodeURIComponent(q);
-    logDebug('SEARCH', searchQ);
+    const searchQ = searchUrl() + "?q=" + encodeURIComponent(q);
+    logDebug("SEARCH", searchQ);
     fetch(searchQ)
       .then(function (r) {
-        logDebug('SEARCH', searchQ, undefined, r);
-        if (!r.ok) throw new Error('Search error ' + r.status);
+        logDebug("SEARCH", searchQ, undefined, r);
+        if (!r.ok) throw new Error("Search error " + r.status);
         return r.json();
       })
       .then(function (data) {
-        const items = Array.isArray(data) ? data : (data.results || []);
+        const items = Array.isArray(data) ? data : data.results || [];
         searchItems = items;
         const qLower = q.toLowerCase();
 
         if (items.length === 0) {
-          searchResults.innerHTML = '<div class="search-empty">No results found for "' + escapeHtml(q) + '"</div>';
+          searchResults.innerHTML =
+            '<div class="search-empty">No results found for "' +
+            escapeHtml(q) +
+            '"</div>';
           return;
         }
 
-        var html = '';
+        var html = "";
         for (var i = 0; i < items.length; i++) {
           var item = items[i];
-          var name = item.name || 'POI';
+          var name = item.name || "POI";
           var t = poiTypeName(item);
           var props = item.properties || {};
-          if (typeof props === 'string') { try { props = JSON.parse(props); } catch (e) { props = {}; } }
+          if (typeof props === "string") {
+            try {
+              props = JSON.parse(props);
+            } catch (e) {
+              props = {};
+            }
+          }
           var color = getSearchColor(t, props);
           var iconHtml = poiIcon(t, props, 16);
           var typeLabel = t.charAt(0).toUpperCase() + t.slice(1);
-          html += '<div class="search-result-item" data-idx="' + i + '">' +
-            '<span class="search-result-icon" style="background:' + color + ';font-size:14px;line-height:1">' + iconHtml + '</span>' +
-            '<span class="search-result-name">' + highlightText(name, qLower) + '</span>' +
-            (typeLabel ? '<span class="search-result-type">' + typeLabel + '</span>' : '') +
-            '</div>';
+          html +=
+            '<div class="search-result-item" data-idx="' +
+            i +
+            '">' +
+            '<span class="search-result-icon" style="background:' +
+            color +
+            ';font-size:14px;line-height:1">' +
+            iconHtml +
+            "</span>" +
+            '<span class="search-result-name">' +
+            highlightText(name, qLower) +
+            "</span>" +
+            (typeLabel
+              ? '<span class="search-result-type">' + typeLabel + "</span>"
+              : "") +
+            "</div>";
         }
         if (items.length > 0) {
-          html += '<div class="search-status">' + items.length + ' result' + (items.length > 1 ? 's' : '') + '</div>';
+          html +=
+            '<div class="search-status">' +
+            items.length +
+            " result" +
+            (items.length > 1 ? "s" : "") +
+            "</div>";
         }
         searchResults.innerHTML = html;
-        searchResults.style.display = 'block';
+        searchResults.style.display = "block";
         searchActiveIdx = -1;
 
         // Click handlers on result items
-        Array.prototype.forEach.call(searchResults.querySelectorAll('.search-result-item'), function (el) {
-          el.addEventListener('click', function () {
-            var idx = parseInt(this.dataset.idx, 10);
-            if (!isNaN(idx) && idx >= 0 && idx < searchItems.length) {
-              selectSearchItem(searchItems[idx]);
-            }
-          });
-          el.addEventListener('mouseenter', function () {
-            var idx = parseInt(this.dataset.idx, 10);
-            if (!isNaN(idx)) {
-              searchActiveIdx = idx;
-              highlightActive();
-            }
-          });
-        });
+        Array.prototype.forEach.call(
+          searchResults.querySelectorAll(".search-result-item"),
+          function (el) {
+            el.addEventListener("click", function () {
+              var idx = parseInt(this.dataset.idx, 10);
+              if (!isNaN(idx) && idx >= 0 && idx < searchItems.length) {
+                selectSearchItem(searchItems[idx]);
+              }
+            });
+            el.addEventListener("mouseenter", function () {
+              var idx = parseInt(this.dataset.idx, 10);
+              if (!isNaN(idx)) {
+                searchActiveIdx = idx;
+                highlightActive();
+              }
+            });
+          },
+        );
       })
       .catch(function (err) {
-        searchResults.innerHTML = '<div class="search-empty">Search failed: ' + escapeHtml(err.message) + '</div>';
+        searchResults.innerHTML =
+          '<div class="search-empty">Search failed: ' +
+          escapeHtml(err.message) +
+          "</div>";
       });
   }
 
   // Close results on click outside
-  document.addEventListener('click', function (e) {
-    if (!e.target.closest('#search-panel')) {
-      searchResults.style.display = 'none';
+  document.addEventListener("click", function (e) {
+    if (!e.target.closest("#search-panel")) {
+      searchResults.style.display = "none";
     }
   });
 
   // ---- export GPX ----
-  document.getElementById('gpx-btn').addEventListener('click', function () {
+  document.getElementById("gpx-btn").addEventListener("click", function () {
     if (!state.lastGeoJson) {
-      showToast('No route to export — calculate a route first', 'error');
+      showToast("No route to export — calculate a route first", "error");
       return;
     }
-    const routeName = state.routeName || 'RouteIQ';
-    showToast('Downloading GPX…', '');
+    const routeName = state.routeName || "RouteIQ";
+    showToast("Downloading GPX…", "");
     const body = { route: state.lastGeoJson, name: routeName };
-    logDebug('GPX', gpxUrl(), body);
-    fetch(gpxUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .then(r => {
-        logDebug('GPX', gpxUrl(), body, r);
-        if (!r.ok) throw new Error('GPX export error ' + r.status);
+    logDebug("GPX", gpxUrl(), body);
+    fetch(gpxUrl(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+      .then((r) => {
+        logDebug("GPX", gpxUrl(), body, r);
+        if (!r.ok) throw new Error("GPX export error " + r.status);
         return r.text();
       })
-      .then(gpx => {
-        const blob = new Blob([gpx], { type: 'application/gpx+xml' });
-        const url  = URL.createObjectURL(blob);
-        const a    = document.createElement('a');
-        a.href     = url;
-        a.download = routeName.replace(/[^a-z0-9\-_ ]/gi, '_') + '.gpx';
+      .then((gpx) => {
+        const blob = new Blob([gpx], { type: "application/gpx+xml" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = routeName.replace(/[^a-z0-9\-_ ]/gi, "_") + ".gpx";
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        showToast('GPX downloaded', 'success');
+        showToast("GPX downloaded", "success");
       })
-      .catch(err => {
-        showToast('GPX failed: ' + err.message, 'error');
+      .catch((err) => {
+        showToast("GPX failed: " + err.message, "error");
       });
   });
 
   // ---- push to Signal K ----
-  document.getElementById('push-btn').addEventListener('click', function () {
+  document.getElementById("push-btn").addEventListener("click", function () {
     if (!state.lastGeoJson) {
-      showToast('No route to save — calculate a route first', 'error');
+      showToast("No route to save — calculate a route first", "error");
       return;
     }
-    const routeName = state.routeName || 'RouteIQ Route';
-    showToast('Saving route to Signal K…', '');
+    const routeName = state.routeName || "RouteIQ Route";
+    showToast("Saving route to Signal K…", "");
     const body = { route: state.lastGeoJson, name: routeName };
-    logDebug('PUSH', pushUrl(), body);
-    fetch(pushUrl(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .then(r => {
-        logDebug('PUSH', pushUrl(), body, r);
-        if (!r.ok) throw new Error('Push error ' + r.status);
+    logDebug("PUSH", pushUrl(), body);
+    fetch(pushUrl(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+      .then((r) => {
+        logDebug("PUSH", pushUrl(), body, r);
+        if (!r.ok) throw new Error("Push error " + r.status);
         return r.json();
       })
-      .then(data => {
-        showToast('Route saved to Signal K' + (data.routeId ? ' (' + data.routeId + ')' : ''), 'success');
+      .then((data) => {
+        showToast(
+          "Route saved to Signal K" +
+            (data.routeId ? " (" + data.routeId + ")" : ""),
+          "success",
+        );
       })
-      .catch(err => {
-        showToast('Push failed: ' + err.message, 'error');
+      .catch((err) => {
+        showToast("Push failed: " + err.message, "error");
       });
   });
 
   // ---- route pane (right sidebar) ----
   function bearing(lat1, lng1, lat2, lng2) {
-    const dLng = (lng2 - lng1) * Math.PI / 180;
-    const lat1r = lat1 * Math.PI / 180;
-    const lat2r = lat2 * Math.PI / 180;
+    const dLng = ((lng2 - lng1) * Math.PI) / 180;
+    const lat1r = (lat1 * Math.PI) / 180;
+    const lat2r = (lat2 * Math.PI) / 180;
     const y = Math.sin(dLng) * Math.cos(lat2r);
-    const x = Math.cos(lat1r) * Math.sin(lat2r) - Math.sin(lat1r) * Math.cos(lat2r) * Math.cos(dLng);
-    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    const x =
+      Math.cos(lat1r) * Math.sin(lat2r) -
+      Math.sin(lat1r) * Math.cos(lat2r) * Math.cos(dLng);
+    return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
   }
 
   function fmtCoord(lat, lng) {
-    const ns = lat >= 0 ? 'N' : 'S';
-    const ew = lng >= 0 ? 'E' : 'W';
-    return Math.abs(lat).toFixed(4) + '\u00b0' + ns + ', ' + Math.abs(lng).toFixed(4) + '\u00b0' + ew;
+    const ns = lat >= 0 ? "N" : "S";
+    const ew = lng >= 0 ? "E" : "W";
+    return (
+      Math.abs(lat).toFixed(4) +
+      "\u00b0" +
+      ns +
+      ", " +
+      Math.abs(lng).toFixed(4) +
+      "\u00b0" +
+      ew
+    );
   }
 
   function computeCumulativeDistances(coords) {
     const dists = [0];
     for (let i = 1; i < coords.length; i++) {
-      const p1 = coords[i - 1], p2 = coords[i];
+      const p1 = coords[i - 1],
+        p2 = coords[i];
       dists.push(dists[i - 1] + haversineDist(p1[1], p1[0], p2[1], p2[0]));
     }
     return dists;
@@ -4056,22 +5517,36 @@
 
     if (coords.length < 3) {
       return coords.map((c, i) => ({
-        index: i, lat: c[1], lng: c[0],
-        cumDistKm: cumDist[i] / 1000, heading: 0, bearingChange: 0, signedChange: 0,
-        isStart: i === 0, isEnd: i === coords.length - 1,
+        index: i,
+        lat: c[1],
+        lng: c[0],
+        cumDistKm: cumDist[i] / 1000,
+        heading: 0,
+        bearingChange: 0,
+        signedChange: 0,
+        isStart: i === 0,
+        isEnd: i === coords.length - 1,
       }));
     }
 
     // Compute bearing + signed change at each inner point
     const candidates = [];
     for (let i = 1; i < coords.length - 1; i++) {
-      const prev = coords[i - 1], curr = coords[i], next = coords[i + 1];
+      const prev = coords[i - 1],
+        curr = coords[i],
+        next = coords[i + 1];
       const b1 = bearing(prev[1], prev[0], curr[1], curr[0]);
       const b2 = bearing(curr[1], curr[0], next[1], next[0]);
       let signed = b2 - b1;
       if (signed > 180) signed -= 360;
       if (signed <= -180) signed += 360;
-      candidates.push({ index: i, bearingChange: Math.abs(signed), signedChange: signed, lat: curr[1], lng: curr[0] });
+      candidates.push({
+        index: i,
+        bearingChange: Math.abs(signed),
+        signedChange: signed,
+        lat: curr[1],
+        lng: curr[0],
+      });
     }
 
     // Keep nodes with bearing change above threshold
@@ -4084,12 +5559,14 @@
     // Enforce max 15 nodes by removing weakest turns (protect start/end)
     const MAX_NODES = 15;
     if (keptIdx.length > MAX_NODES) {
-      const removable = keptIdx.slice(1, -1).map(idx => {
-        const c = candidates.find(c => c.index === idx);
+      const removable = keptIdx.slice(1, -1).map((idx) => {
+        const c = candidates.find((c) => c.index === idx);
         return { index: idx, score: c ? c.bearingChange : 0 };
       });
       removable.sort((a, b) => a.score - b.score);
-      const toRemove = new Set(removable.slice(0, keptIdx.length - MAX_NODES).map(r => r.index));
+      const toRemove = new Set(
+        removable.slice(0, keptIdx.length - MAX_NODES).map((r) => r.index),
+      );
       const filtered = [0];
       for (let i = 1; i < keptIdx.length - 1; i++) {
         if (!toRemove.has(keptIdx[i])) filtered.push(keptIdx[i]);
@@ -4104,15 +5581,24 @@
       const prevIdx = i > 0 ? keptIdx[i - 1] : null;
       let hdg = 0;
       if (prevIdx !== null) {
-        hdg = bearing(coords[prevIdx][1], coords[prevIdx][0], coords[idx][1], coords[idx][0]);
+        hdg = bearing(
+          coords[prevIdx][1],
+          coords[prevIdx][0],
+          coords[idx][1],
+          coords[idx][0],
+        );
       }
-      const c = candidates.find(c => c.index === idx);
+      const c = candidates.find((c) => c.index === idx);
       return {
-        index: idx, lat: coords[idx][1], lng: coords[idx][0],
-        cumDistKm: cumDist[idx] / 1000, heading: hdg,
+        index: idx,
+        lat: coords[idx][1],
+        lng: coords[idx][0],
+        cumDistKm: cumDist[idx] / 1000,
+        heading: hdg,
         bearingChange: c ? c.bearingChange : 0,
         signedChange: c ? c.signedChange : 0,
-        isStart: idx === 0, isEnd: idx === coords.length - 1,
+        isStart: idx === 0,
+        isEnd: idx === coords.length - 1,
       };
     });
   }
@@ -4132,7 +5618,11 @@
       for (let i = 0; i < segments.length && i < features.length; i++) {
         const fc = extractCoords(features[i].geometry);
         const span = Math.max(1, fc.length - 1);
-        ranges.push({ startIdx: cursor, endIdx: cursor + span, ...segments[i] });
+        ranges.push({
+          startIdx: cursor,
+          endIdx: cursor + span,
+          ...segments[i],
+        });
         cursor += span;
       }
     } else {
@@ -4144,7 +5634,9 @@
   }
 
   function getSegmentsForLeg(segRanges, fromIdx, toIdx) {
-    return segRanges.filter(sr => sr.startIdx <= toIdx && sr.endIdx >= fromIdx);
+    return segRanges.filter(
+      (sr) => sr.startIdx <= toIdx && sr.endIdx >= fromIdx,
+    );
   }
 
   function mapCrossingsToLegs(crossings, coords, nodes) {
@@ -4160,7 +5652,10 @@
         const toIdx = nodes[i + 1].index;
         for (let ci = fromIdx; ci <= toIdx && ci < coords.length; ci++) {
           const d = haversineDist(cLat, cLon, coords[ci][1], coords[ci][0]);
-          if (d < bestDist) { bestDist = d; bestLeg = i; }
+          if (d < bestDist) {
+            bestDist = d;
+            bestLeg = i;
+          }
         }
       }
       if (bestLeg >= 0 && bestDist < 500) {
@@ -4171,60 +5666,69 @@
     return result;
   }
 
-
   function formatTime(totalHours) {
-    if (totalHours <= 0 || !isFinite(totalHours)) return '';
+    if (totalHours <= 0 || !isFinite(totalHours)) return "";
     const hours = Math.floor(totalHours);
     const mins = Math.round((totalHours - hours) * 60);
-    if (hours > 0) return hours + 'h ' + mins + 'm';
-    return mins + 'm';
+    if (hours > 0) return hours + "h " + mins + "m";
+    return mins + "m";
   }
 
   function fmtDist(meters) {
-    if (meters == null || !isFinite(meters)) return '';
+    if (meters == null || !isFinite(meters)) return "";
     const cat = unitsConfig.distance;
     const formula = cat && cat.formula;
-    const symbol = cat && cat.symbol ? cat.symbol : 'NM';
+    const symbol = cat && cat.symbol ? cat.symbol : "NM";
     const v = formula ? evalFormula(formula, meters) : meters / 1852;
-    return v.toFixed(1) + ' ' + symbol;
+    return v.toFixed(1) + " " + symbol;
   }
 
   function fmtDepth(m) {
-    if (m == null || !isFinite(m)) return '';
+    if (m == null || !isFinite(m)) return "";
     const cat = unitsConfig.depth;
     if (cat && cat.formula) {
       const v = evalFormula(cat.formula, m);
-      const sym = cat.symbol || cat.targetUnit || 'm';
-      return v.toFixed(1) + ' ' + sym;
+      const sym = cat.symbol || cat.targetUnit || "m";
+      return v.toFixed(1) + " " + sym;
     }
-    return m.toFixed(1) + ' m';
+    return m.toFixed(1) + " m";
   }
 
   function fmtHeight(m) {
-    if (m == null || !isFinite(m)) return '';
+    if (m == null || !isFinite(m)) return "";
     const cat = unitsConfig.length;
     if (cat && cat.formula) {
       const v = evalFormula(cat.formula, m);
-      const sym = cat.symbol || cat.targetUnit || 'm';
-      return v.toFixed(1) + ' ' + sym;
+      const sym = cat.symbol || cat.targetUnit || "m";
+      return v.toFixed(1) + " " + sym;
     }
-    return m.toFixed(1) + ' m';
+    return m.toFixed(1) + " m";
   }
 
   function renderRoutePane(geoJson) {
-    const pane = document.getElementById('route-pane');
-    const emptyEl = document.getElementById('route-pane-empty');
-    const warningsEl = document.getElementById('route-warnings');
-    const nodesEl = document.getElementById('route-nodes');
+    const pane = document.getElementById("route-pane");
+    const emptyEl = document.getElementById("route-pane-empty");
+    const warningsEl = document.getElementById("route-warnings");
+    const nodesEl = document.getElementById("route-nodes");
 
-    if (!geoJson) { clearRoutePane(); return; }
+    if (!geoJson) {
+      clearRoutePane();
+      return;
+    }
 
     const coords = getAllCoords(geoJson);
-    if (coords.length < 2) { clearRoutePane(); return; }
+    if (coords.length < 2) {
+      clearRoutePane();
+      return;
+    }
 
-    const totalDistM = geoJson.totalDistance ||
-        (geoJson.features && geoJson.features[0] && geoJson.features[0].properties &&
-         geoJson.features[0].properties.totalDistance) || 0;
+    const totalDistM =
+      geoJson.totalDistance ||
+      (geoJson.features &&
+        geoJson.features[0] &&
+        geoJson.features[0].properties &&
+        geoJson.features[0].properties.totalDistance) ||
+      0;
 
     let segments = [];
     const firstFeature = geoJson.features && geoJson.features[0];
@@ -4236,8 +5740,10 @@
         segments.push({
           distance: f.properties.distance != null ? f.properties.distance : 0,
           minDepth: f.properties.minDepth != null ? f.properties.minDepth : -1,
-          maxAirDraft: f.properties.maxAirDraft != null ? f.properties.maxAirDraft : -1,
-          isFairway: f.properties.isFairway != null ? f.properties.isFairway : false,
+          maxAirDraft:
+            f.properties.maxAirDraft != null ? f.properties.maxAirDraft : -1,
+          isFairway:
+            f.properties.isFairway != null ? f.properties.isFairway : false,
         });
       }
     }
@@ -4245,20 +5751,24 @@
     // classification, chainage, per-leg aggregates and crossings all come from
     // the exact graph edges). Client-side extraction remains only as a
     // fallback for older servers reached via the API-URL override.
-    const itinerary = (Array.isArray(geoJson.itinerary) && geoJson.itinerary.length >= 2)
-      ? geoJson.itinerary : null;
+    const itinerary =
+      Array.isArray(geoJson.itinerary) && geoJson.itinerary.length >= 2
+        ? geoJson.itinerary
+        : null;
     const nodes = itinerary
-      ? itinerary.map(p => ({
+      ? itinerary.map((p) => ({
           // Local coord index for hover/highlight (webapp indexes the
           // concatenated feature coords, which differs from server indexing)
           index: closestCoordIndex(coords, p.latitude, p.longitude),
-          lat: p.latitude, lng: p.longitude,
+          lat: p.latitude,
+          lng: p.longitude,
           cumDistKm: p.distanceFromStart / 1000,
           heading: p.courseToNext || 0,
           bearingChange: Math.abs(p.turn || 0),
           signedChange: p.turn || 0,
-          isStart: p.kind === 'start', isEnd: p.kind === 'end',
-          _viaIdx: p.kind === 'via' ? (p.viaIndex || 0) : undefined,
+          isStart: p.kind === "start",
+          isEnd: p.kind === "end",
+          _viaIdx: p.kind === "via" ? p.viaIndex || 0 : undefined,
           leg: p.leg || null,
         }))
       : extractMajorNodes(coords);
@@ -4270,74 +5780,111 @@
       let exact = true;
       for (const n of nodes) {
         n.cumSeconds = exact ? cum : null;
-        if (n.leg && typeof n.leg.seconds === 'number') cum += n.leg.seconds;
+        if (n.leg && typeof n.leg.seconds === "number") cum += n.leg.seconds;
         else if (n.leg) exact = false;
       }
     }
     // Pass features only in the multi-feature (format 2) case so the function
     // can walk actual geometry lengths instead of assuming 1 coord per segment.
-    const segFeatures = (geoJson.features && geoJson.features.length > 1) ? geoJson.features : null;
-    const segRanges = itinerary ? null : mapSegmentsToCoordRanges(segments, segFeatures);
+    const segFeatures =
+      geoJson.features && geoJson.features.length > 1 ? geoJson.features : null;
+    const segRanges = itinerary
+      ? null
+      : mapSegmentsToCoordRanges(segments, segFeatures);
 
     // Overall warnings
-    warningsEl.innerHTML = '';
+    warningsEl.innerHTML = "";
     const overallWarnings = geoJson.warnings || [];
     for (const w of overallWarnings) {
-      if (w.type === 'start_connecting' || w.type === 'end_connecting') {
+      if (w.type === "start_connecting" || w.type === "end_connecting") {
         continue;
-      } else if (w.type === 'via_constrained' && !w.distanceMeters) {
+      } else if (w.type === "via_constrained" && !w.distanceMeters) {
         continue;
       } else {
-        const div = document.createElement('div');
-        div.className = 'route-overall-warn';
+        const div = document.createElement("div");
+        div.className = "route-overall-warn";
         // Escaped: a warning message can quote a value straight out of the
         // request body (an ignored vessel dimension), so it is not trusted HTML.
-        div.innerHTML = '<div class="warn-title">' + escapeHtml(w.type.replace(/_/g, ' ')) + '</div>' + escapeHtml(w.message);
+        div.innerHTML =
+          '<div class="warn-title">' +
+          escapeHtml(w.type.replace(/_/g, " ")) +
+          "</div>" +
+          escapeHtml(w.message);
         warningsEl.appendChild(div);
       }
     }
 
     // Total distance summary
-    const summaryEl = document.getElementById('route-summary');
+    const summaryEl = document.getElementById("route-summary");
     if (summaryEl && totalDistM > 0) {
       const totalKm = totalDistM / 1000;
       const totalNm = totalKm / 1.852;
-      const speedKn = parseFloat(document.getElementById('avg-speed').value) || 6;
+      const speedKn =
+        parseFloat(document.getElementById("avg-speed").value) || 6;
       // Tide-corrected total time from the server when available
-      const tideActive = geoJson.tide && geoJson.tide.enabled && typeof geoJson.totalSeconds === 'number';
+      const tideActive =
+        geoJson.tide &&
+        geoJson.tide.enabled &&
+        typeof geoJson.totalSeconds === "number";
       // Use the server's total whenever it has one, tide or not: it is the only
       // figure that counts waiting at locks, and so the only one that agrees
       // with the leg times in the route list.
-      const timeH = typeof geoJson.totalSeconds === 'number'
-        ? geoJson.totalSeconds / 3600
-        : (speedKn > 0 ? totalNm / speedKn : 0);
+      const timeH =
+        typeof geoJson.totalSeconds === "number"
+          ? geoJson.totalSeconds / 3600
+          : speedKn > 0
+            ? totalNm / speedKn
+            : 0;
       const hours = Math.floor(timeH);
       const mins = Math.round((timeH - hours) * 60);
-      let timeStr = '';
-      if (hours > 0) timeStr += hours + 'h ';
-      timeStr += mins + 'm';
+      let timeStr = "";
+      if (hours > 0) timeStr += hours + "h ";
+      timeStr += mins + "m";
 
-      let tideStr = '';
-      if (tideActive && typeof geoJson.totalSecondsNoTide === 'number') {
-        const deltaMin = Math.round((geoJson.totalSeconds - geoJson.totalSecondsNoTide) / 60);
-        const sign = deltaMin > 0 ? '+' : '\u2212';
-        const col = deltaMin > 0 ? '#f59e0b' : '#22c55e';
-        tideStr = '  \u00b7  <span style="color:' + col + '" title="Impact of the estimated tidal current vs. still water">tide ' +
-          sign + Math.abs(deltaMin) + 'm</span>';
+      let tideStr = "";
+      if (tideActive && typeof geoJson.totalSecondsNoTide === "number") {
+        const deltaMin = Math.round(
+          (geoJson.totalSeconds - geoJson.totalSecondsNoTide) / 60,
+        );
+        const sign = deltaMin > 0 ? "+" : "\u2212";
+        const col = deltaMin > 0 ? "#f59e0b" : "#22c55e";
+        tideStr =
+          '  \u00b7  <span style="color:' +
+          col +
+          '" title="Impact of the estimated tidal current vs. still water">tide ' +
+          sign +
+          Math.abs(deltaMin) +
+          "m</span>";
         if (geoJson.arrivalTime) {
           const arr = new Date(geoJson.arrivalTime);
-          if (!isNaN(arr)) tideStr += '  \u00b7  arr ' + String(arr.getHours()).padStart(2, '0') + ':' + String(arr.getMinutes()).padStart(2, '0');
+          if (!isNaN(arr))
+            tideStr +=
+              "  \u00b7  arr " +
+              String(arr.getHours()).padStart(2, "0") +
+              ":" +
+              String(arr.getMinutes()).padStart(2, "0");
         }
       }
 
-      summaryEl.style.display = 'block';
-      const waitStr = geoJson.totalWaitSeconds > 0
-        ? '  \u00b7  <span style="color:#f59e0b" title="Included above: time held at locks and opening bridges">\u23f3 ' +
-          formatTime(geoJson.totalWaitSeconds / 3600) + ' waiting</span>'
-        : '';
-      summaryEl.innerHTML = '\u23f1 ' + fmtDist(totalDistM) + '  \u00b7  ' + timeStr + '  \u00b7  ' + speedKn.toFixed(1) + ' kn' + waitStr + tideStr;
+      summaryEl.style.display = "block";
+      const waitStr =
+        geoJson.totalWaitSeconds > 0
+          ? '  \u00b7  <span style="color:#f59e0b" title="Included above: time held at locks and opening bridges">\u23f3 ' +
+            formatTime(geoJson.totalWaitSeconds / 3600) +
+            " waiting</span>"
+          : "";
+      summaryEl.innerHTML =
+        "\u23f1 " +
+        fmtDist(totalDistM) +
+        "  \u00b7  " +
+        timeStr +
+        "  \u00b7  " +
+        speedKn.toFixed(1) +
+        " kn" +
+        waitStr +
+        tideStr;
     } else if (summaryEl) {
-      summaryEl.style.display = 'none';
+      summaryEl.style.display = "none";
     }
 
     // Via points for labeling
@@ -4350,13 +5897,18 @@
       for (let vi = 0; vi < viaPoints.length; vi++) {
         const vp = viaPoints[vi];
         const idx = closestCoordIndex(coords, vp.lat, vp.lng);
-        const existing = nodes.find(n => Math.abs(n.index - idx) <= 1);
+        const existing = nodes.find((n) => Math.abs(n.index - idx) <= 1);
         if (existing) {
           existing._viaIdx = vi;
         } else {
           let hdg = 0;
           if (idx > 0) {
-            hdg = bearing(coords[idx - 1][1], coords[idx - 1][0], coords[idx][1], coords[idx][0]);
+            hdg = bearing(
+              coords[idx - 1][1],
+              coords[idx - 1][0],
+              coords[idx][1],
+              coords[idx][0],
+            );
           }
           nodes.push({
             index: idx,
@@ -4379,40 +5931,46 @@
     // leg details). With a server itinerary each node carries its own
     // leg.crossings; otherwise approximate the mapping client-side.
     const crossings = geoJson.crossings || [];
-    const crossingLegMap = itinerary ? null : mapCrossingsToLegs(crossings, coords, nodes);
-    const legCrossingsFor = (i) => itinerary
-      ? ((nodes[i].leg && nodes[i].leg.crossings) || [])
-      : (crossingLegMap[i] || []);
+    const crossingLegMap = itinerary
+      ? null
+      : mapCrossingsToLegs(crossings, coords, nodes);
+    const legCrossingsFor = (i) =>
+      itinerary
+        ? (nodes[i].leg && nodes[i].leg.crossings) || []
+        : crossingLegMap[i] || [];
 
     // Nodes + legs
-    nodesEl.innerHTML = '';
-    if (emptyEl) emptyEl.style.display = 'none';
+    nodesEl.innerHTML = "";
+    if (emptyEl) emptyEl.style.display = "none";
 
     for (let i = 0; i < nodes.length; i++) {
       const node = nodes[i];
       const isLast = i === nodes.length - 1;
 
-      const nodeDiv = document.createElement('div');
-      nodeDiv.className = 'route-node';
-      if (node.isStart) nodeDiv.classList.add('start');
-      if (node.isEnd) nodeDiv.classList.add('dest');
+      const nodeDiv = document.createElement("div");
+      nodeDiv.className = "route-node";
+      if (node.isStart) nodeDiv.classList.add("start");
+      if (node.isEnd) nodeDiv.classList.add("dest");
 
-      let label = '';
-      if (node.isStart) label = 'Start';
-      else if (node.isEnd) label = 'Destination';
-      else if (node._viaIdx !== undefined) label = 'Via ' + (node._viaIdx + 1);
-      else label = 'Turn ' + i;
+      let label = "";
+      if (node.isStart) label = "Start";
+      else if (node.isEnd) label = "Destination";
+      else if (node._viaIdx !== undefined) label = "Via " + (node._viaIdx + 1);
+      else label = "Turn " + i;
 
-
-      const speedKn = parseFloat(document.getElementById('avg-speed').value) || 6;
+      const speedKn =
+        parseFloat(document.getElementById("avg-speed").value) || 6;
       const cumDistNm = node.cumDistKm / 1.852;
-      const cumTimeH = typeof node.cumSeconds === 'number'
-        ? node.cumSeconds / 3600
-        : (speedKn > 0 ? cumDistNm / speedKn : 0);
+      const cumTimeH =
+        typeof node.cumSeconds === "number"
+          ? node.cumSeconds / 3600
+          : speedKn > 0
+            ? cumDistNm / speedKn
+            : 0;
       const cumTimeStr = formatTime(cumTimeH);
 
       // Build collapsed crossing icons for the following leg
-      let crossingHtml = '';
+      let crossingHtml = "";
       if (!isLast) {
         const legCrossings = legCrossingsFor(i);
         if (legCrossings.length > 0) {
@@ -4426,34 +5984,51 @@
           const icons = [];
           for (const [, entries] of grouped) {
             const e0 = entries[0];
-            const color = e0.type === 'lock' ? '#f59e0b' : entries.some(e => e.subtype === 'fixed') ? '#ef4444' : '#22c55e';
+            const color =
+              e0.type === "lock"
+                ? "#f59e0b"
+                : entries.some((e) => e.subtype === "fixed")
+                  ? "#ef4444"
+                  : "#22c55e";
             icons.push(
-              '<span class="node-crossing-icon" style="background:' + color + '">' +
-              poiIcon(e0.type, { subtype: e0.subtype }, 14) +
-              '</span>'
+              '<span class="node-crossing-icon" style="background:' +
+                color +
+                '">' +
+                poiIcon(e0.type, { subtype: e0.subtype }, 14) +
+                "</span>",
             );
             // If both fixed and opening exist, show the opening icon too
-            if (entries.some(e => e.subtype === 'fixed') && entries.some(e => e.subtype === 'opening')) {
+            if (
+              entries.some((e) => e.subtype === "fixed") &&
+              entries.some((e) => e.subtype === "opening")
+            ) {
               icons.push(
                 '<span class="node-crossing-icon" style="background:#22c55e">' +
-                poiIcon('bridge', { subtype: 'opening' }, 14) +
-                '</span>'
+                  poiIcon("bridge", { subtype: "opening" }, 14) +
+                  "</span>",
               );
             }
           }
-          crossingHtml = '<div class="node-crossings">' + icons.join('') + '</div>';
+          crossingHtml =
+            '<div class="node-crossings">' + icons.join("") + "</div>";
         }
       }
 
       nodeDiv.innerHTML =
         '<div class="node-label-row">' +
-          '<span class="node-label">' + label + '</span>' +
-          '<span class="node-coords">' + fmtCoord(node.lat, node.lng) + '</span>' +
-        '</div>' +
-        '<div class="node-dist">\u25b8 ' + fmtDist(node.cumDistKm * 1000) +
-          (cumTimeStr ? ' \u23f1 ' + cumTimeStr : '') +
-          (node.heading ? ' \u2192 ' + Math.round(node.heading) + '\u00b0' : '') +
-        '</div>' + crossingHtml;
+        '<span class="node-label">' +
+        label +
+        "</span>" +
+        '<span class="node-coords">' +
+        fmtCoord(node.lat, node.lng) +
+        "</span>" +
+        "</div>" +
+        '<div class="node-dist">\u25b8 ' +
+        fmtDist(node.cumDistKm * 1000) +
+        (cumTimeStr ? " \u23f1 " + cumTimeStr : "") +
+        (node.heading ? " \u2192 " + Math.round(node.heading) + "\u00b0" : "") +
+        "</div>" +
+        crossingHtml;
 
       // For hover highlighting: store the coord range of the following leg
       if (!isLast) {
@@ -4469,8 +6044,8 @@
       // Leg between this node and next
       if (!isLast) {
         const nextNode = nodes[i + 1];
-        const legDiv = document.createElement('div');
-        legDiv.className = 'route-leg';
+        const legDiv = document.createElement("div");
+        legDiv.className = "route-leg";
         legDiv.dataset.coordFrom = node.index;
         legDiv.dataset.coordTo = nextNode.index;
 
@@ -4478,61 +6053,136 @@
 
         // Aggregate leg attributes: from the server itinerary when present,
         // else from the client-side segment→coord-range mapping (legacy).
-        let minDepth = Infinity, minWidth = Infinity, maxAirDraft = Infinity;
-        let legDist = 0, hasLegData = false;
+        let minDepth = Infinity,
+          minWidth = Infinity,
+          maxAirDraft = Infinity;
+        let legDist = 0,
+          hasLegData = false;
         if (itinerary) {
           if (node.leg) {
             hasLegData = true;
             legDist = node.leg.distance || 0;
             if (node.leg.minDepth != null) minDepth = node.leg.minDepth;
             if (node.leg.minWidth != null) minWidth = node.leg.minWidth;
-            if (node.leg.maxAirDraft != null) maxAirDraft = node.leg.maxAirDraft;
+            if (node.leg.maxAirDraft != null)
+              maxAirDraft = node.leg.maxAirDraft;
           }
         } else {
-          const legSegs = getSegmentsForLeg(segRanges, node.index, nextNode.index);
+          const legSegs = getSegmentsForLeg(
+            segRanges,
+            node.index,
+            nextNode.index,
+          );
           hasLegData = legSegs.length > 0;
           for (const s of legSegs) {
-            if (s.minDepth !== null && s.minDepth !== undefined && s.minDepth >= 0) minDepth = Math.min(minDepth, s.minDepth);
-            if (s.minWidth !== null && s.minWidth !== undefined && s.minWidth >= 0) minWidth = Math.min(minWidth, s.minWidth);
-            if (s.maxAirDraft !== null && s.maxAirDraft !== undefined && s.maxAirDraft >= 0) maxAirDraft = Math.min(maxAirDraft, s.maxAirDraft);
+            if (
+              s.minDepth !== null &&
+              s.minDepth !== undefined &&
+              s.minDepth >= 0
+            )
+              minDepth = Math.min(minDepth, s.minDepth);
+            if (
+              s.minWidth !== null &&
+              s.minWidth !== undefined &&
+              s.minWidth >= 0
+            )
+              minWidth = Math.min(minWidth, s.minWidth);
+            if (
+              s.maxAirDraft !== null &&
+              s.maxAirDraft !== undefined &&
+              s.maxAirDraft >= 0
+            )
+              maxAirDraft = Math.min(maxAirDraft, s.maxAirDraft);
             legDist += s.distance;
           }
         }
 
         if (hasLegData) {
           // Only warn if the depth/width is actually constraining for THIS vessel
-          const vesselDraft = (lastBoat && lastBoat.draft != null) ? lastBoat.draft : 2.0;
-          const safetyMargin = (lastBoat && lastBoat.effectiveDraft != null && lastBoat.draft != null)
-            ? lastBoat.effectiveDraft - lastBoat.draft : 0.3;
+          const vesselDraft =
+            lastBoat && lastBoat.draft != null ? lastBoat.draft : 2.0;
+          const safetyMargin =
+            lastBoat &&
+            lastBoat.effectiveDraft != null &&
+            lastBoat.draft != null
+              ? lastBoat.effectiveDraft - lastBoat.draft
+              : 0.3;
           const shallowThreshold = vesselDraft + safetyMargin;
-          if (minDepth !== Infinity && minDepth < shallowThreshold) legWarnings.push('Shallow (' + minDepth.toFixed(1) + 'm)');
-          if (minWidth !== Infinity && minWidth < 6) legWarnings.push('Narrow (' + minWidth.toFixed(1) + 'm)');
+          if (minDepth !== Infinity && minDepth < shallowThreshold)
+            legWarnings.push("Shallow (" + minDepth.toFixed(1) + "m)");
+          if (minWidth !== Infinity && minWidth < 6)
+            legWarnings.push("Narrow (" + minWidth.toFixed(1) + "m)");
 
           const legKm = legDist / 1000;
           const legNm = legKm / 1.852;
           // Prefer the server's tide-corrected leg time over the speed estimate
-          const legSeconds = (itinerary && node.leg && typeof node.leg.seconds === 'number') ? node.leg.seconds : null;
-          const legCurrentKn = (itinerary && node.leg && typeof node.leg.currentKn === 'number') ? node.leg.currentKn : null;
-          const legTimeH = legSeconds !== null ? legSeconds / 3600 : (speedKn > 0 ? legNm / speedKn : 0);
+          const legSeconds =
+            itinerary && node.leg && typeof node.leg.seconds === "number"
+              ? node.leg.seconds
+              : null;
+          const legCurrentKn =
+            itinerary && node.leg && typeof node.leg.currentKn === "number"
+              ? node.leg.currentKn
+              : null;
+          const legTimeH =
+            legSeconds !== null
+              ? legSeconds / 3600
+              : speedKn > 0
+                ? legNm / speedKn
+                : 0;
           const legTimeStr = formatTime(legTimeH);
 
-          let html = '<div class="leg-stat"><span>Distance</span><span class="leg-val">' + fmtDist(legDist) + '</span></div>';
-          if (legTimeStr) html += '<div class="leg-stat"><span>Time</span><span class="leg-val">' + legTimeStr + '</span></div>';
+          let html =
+            '<div class="leg-stat"><span>Distance</span><span class="leg-val">' +
+            fmtDist(legDist) +
+            "</span></div>";
+          if (legTimeStr)
+            html +=
+              '<div class="leg-stat"><span>Time</span><span class="leg-val">' +
+              legTimeStr +
+              "</span></div>";
           // Part of the leg time above, called out so an hour spent at a lock
           // does not look like slow sailing.
-          const legWaitSeconds = (itinerary && node.leg && typeof node.leg.waitSeconds === 'number') ? node.leg.waitSeconds : 0;
+          const legWaitSeconds =
+            itinerary && node.leg && typeof node.leg.waitSeconds === "number"
+              ? node.leg.waitSeconds
+              : 0;
           if (legWaitSeconds > 0) {
-            html += '<div class="leg-stat"><span>Waiting</span><span class="leg-val" style="color:#f59e0b">' +
-              formatTime(legWaitSeconds / 3600) + '</span></div>';
+            html +=
+              '<div class="leg-stat"><span>Waiting</span><span class="leg-val" style="color:#f59e0b">' +
+              formatTime(legWaitSeconds / 3600) +
+              "</span></div>";
           }
           if (legCurrentKn !== null) {
-            const cCol = legCurrentKn >= 0.05 ? '#22c55e' : legCurrentKn <= -0.05 ? '#f59e0b' : '#9bb8da';
-            html += '<div class="leg-stat"><span>Current (est)</span><span class="leg-val" style="color:' + cCol + '">' +
-              (legCurrentKn > 0 ? '+' : '') + legCurrentKn.toFixed(1) + ' kn</span></div>';
+            const cCol =
+              legCurrentKn >= 0.05
+                ? "#22c55e"
+                : legCurrentKn <= -0.05
+                  ? "#f59e0b"
+                  : "#9bb8da";
+            html +=
+              '<div class="leg-stat"><span>Current (est)</span><span class="leg-val" style="color:' +
+              cCol +
+              '">' +
+              (legCurrentKn > 0 ? "+" : "") +
+              legCurrentKn.toFixed(1) +
+              " kn</span></div>";
           }
-          if (minDepth !== Infinity) html += '<div class="leg-stat"><span>Min Depth</span><span class="leg-val">' + fmtDepth(minDepth) + '</span></div>';
-          if (minWidth !== Infinity) html += '<div class="leg-stat"><span>Min Width</span><span class="leg-val">' + minWidth.toFixed(1) + ' m</span></div>';
-          if (maxAirDraft !== Infinity) html += '<div class="leg-stat"><span>Max Air Draft</span><span class="leg-val">' + fmtHeight(maxAirDraft) + '</span></div>';
+          if (minDepth !== Infinity)
+            html +=
+              '<div class="leg-stat"><span>Min Depth</span><span class="leg-val">' +
+              fmtDepth(minDepth) +
+              "</span></div>";
+          if (minWidth !== Infinity)
+            html +=
+              '<div class="leg-stat"><span>Min Width</span><span class="leg-val">' +
+              minWidth.toFixed(1) +
+              " m</span></div>";
+          if (maxAirDraft !== Infinity)
+            html +=
+              '<div class="leg-stat"><span>Max Air Draft</span><span class="leg-val">' +
+              fmtHeight(maxAirDraft) +
+              "</span></div>";
 
           // Crossings on this leg (grouped by name)
           const legCrossings = legCrossingsFor(i);
@@ -4546,87 +6196,120 @@
             for (const [, entries] of grouped) {
               const e0 = entries[0];
               // Color: fixed bridge = red, lock = yellow, opening = green
-              const color = e0.type === 'lock' ? '#f59e0b' : entries.some(e => e.subtype === 'fixed') ? '#ef4444' : '#22c55e';
+              const color =
+                e0.type === "lock"
+                  ? "#f59e0b"
+                  : entries.some((e) => e.subtype === "fixed")
+                    ? "#ef4444"
+                    : "#22c55e";
               // Span info (subtype/height) is baked into c.name by the server
               // when known (e.g. "... (opening span)" / "... (fixed, 18.4m)").
               // Only synthesize a separate badge for older/raw data that lacks it.
-              let info = '';
-              if (e0.type === 'bridge' && !/\((?:opening span|fixed(?:,[^)]*)?)\)/.test(e0.name)) {
-                const fixedEntry = entries.find(e => e.subtype === 'fixed');
-                const hasOpening = entries.some(e => e.subtype === 'opening');
+              let info = "";
+              if (
+                e0.type === "bridge" &&
+                !/\((?:opening span|fixed(?:,[^)]*)?)\)/.test(e0.name)
+              ) {
+                const fixedEntry = entries.find((e) => e.subtype === "fixed");
+                const hasOpening = entries.some((e) => e.subtype === "opening");
                 if (fixedEntry && fixedEntry.height) {
                   info = fmtHeight(fixedEntry.height);
-                  if (hasOpening) info += ' / opening';
+                  if (hasOpening) info += " / opening";
                 } else if (hasOpening) {
-                  info = 'opening';
+                  info = "opening";
                 }
               }
               // The server charges the wait to one crossing per group, so
               // summing the group is safe and names the thing you wait for.
-              const waitS = entries.reduce((t, e) => t + (e.waitSeconds || 0), 0);
-              html += '<div class="leg-crossing">' +
-                '<span class="leg-crossing-icon" style="background:' + color + '">' + poiIcon(e0.type, { subtype: e0.subtype }, 16) + '</span>' +
+              const waitS = entries.reduce(
+                (t, e) => t + (e.waitSeconds || 0),
+                0,
+              );
+              html +=
+                '<div class="leg-crossing">' +
+                '<span class="leg-crossing-icon" style="background:' +
+                color +
+                '">' +
+                poiIcon(e0.type, { subtype: e0.subtype }, 16) +
+                "</span>" +
                 escapeHtml(e0.name) +
-                (info ? '<span class="crossing-type"> ' + info + '</span>' : '') +
-                (waitS > 0 ? '<span class="crossing-wait">\u23f3 ' + formatTime(waitS / 3600) + '</span>' : '') +
-                '</div>';
+                (info
+                  ? '<span class="crossing-type"> ' + info + "</span>"
+                  : "") +
+                (waitS > 0
+                  ? '<span class="crossing-wait">\u23f3 ' +
+                    formatTime(waitS / 3600) +
+                    "</span>"
+                  : "") +
+                "</div>";
             }
           }
 
           const unique = [...new Set(legWarnings)];
-          for (const w of unique) html += '<div class="leg-warn">\u26a0 ' + w + '</div>';
+          for (const w of unique)
+            html += '<div class="leg-warn">\u26a0 ' + w + "</div>";
 
           legDiv.innerHTML = html;
         } else {
-          legDiv.innerHTML = '<div class="leg-stat" style="color:#6d96c0">— no segment data —</div>';
+          legDiv.innerHTML =
+            '<div class="leg-stat" style="color:#6d96c0">— no segment data —</div>';
         }
         nodesEl.appendChild(legDiv);
 
-        if (legWarnings.length > 0) nodeDiv.classList.add('has-warn');
+        if (legWarnings.length > 0) nodeDiv.classList.add("has-warn");
       }
     }
 
     // Expand pane + auto-expand first warned leg
-    pane.classList.remove('collapsed');
-    document.getElementById('route-pane-tab').textContent = '\u25c0';
-    const firstWarnLeg = nodesEl.querySelector('.route-node.has-warn + .route-leg');
-    if (firstWarnLeg) firstWarnLeg.classList.add('expanded');
+    pane.classList.remove("collapsed");
+    document.getElementById("route-pane-tab").textContent = "\u25c0";
+    const firstWarnLeg = nodesEl.querySelector(
+      ".route-node.has-warn + .route-leg",
+    );
+    if (firstWarnLeg) firstWarnLeg.classList.add("expanded");
 
     enrichRoutePaneWithPoiNames(nodes, nodesEl);
     updateRouteTitle();
   }
 
   function updateRouteTitle() {
-    const titleEl = document.querySelector('#route-pane-inner .panel-title');
+    const titleEl = document.querySelector("#route-pane-inner .panel-title");
     if (!titleEl) return;
     const sn = state.startPoiName;
     const dn = state.destPoiName;
     if (sn && dn) {
-      state.routeName = sn + ' → ' + dn;
-      titleEl.textContent = sn + ' → ' + dn;
+      state.routeName = sn + " → " + dn;
+      titleEl.textContent = sn + " → " + dn;
     } else if (dn) {
-      state.routeName = 'Route to ' + dn;
-      titleEl.textContent = 'Route to ' + dn;
+      state.routeName = "Route to " + dn;
+      titleEl.textContent = "Route to " + dn;
     } else if (sn) {
-      state.routeName = 'From ' + sn;
-      titleEl.textContent = 'From ' + sn;
+      state.routeName = "From " + sn;
+      titleEl.textContent = "From " + sn;
     } else {
-      state.routeName = '';
-      titleEl.textContent = 'Route';
+      state.routeName = "";
+      titleEl.textContent = "Route";
     }
   }
 
   function haversineDist(lat1, lng1, lat2, lng2) {
     const R = 6371000;
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLng = (lng2 - lng1) * Math.PI / 180;
-    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLng = ((lng2 - lng1) * Math.PI) / 180;
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos((lat1 * Math.PI) / 180) *
+        Math.cos((lat2 * Math.PI) / 180) *
+        Math.sin(dLng / 2) ** 2;
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
   function enrichRoutePaneWithPoiNames(nodes, nodesEl) {
     if (!nodes || nodes.length < 2 || !nodesEl) return;
-    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+    let minLat = Infinity,
+      maxLat = -Infinity,
+      minLon = Infinity,
+      maxLon = -Infinity;
     for (const n of nodes) {
       if (n.lat < minLat) minLat = n.lat;
       if (n.lat > maxLat) maxLat = n.lat;
@@ -4634,20 +6317,35 @@
       if (n.lng > maxLon) maxLon = n.lng;
     }
     const buf = 0.02;
-    const bboxStr = (minLon - buf).toFixed(4) + ',' + (minLat - buf).toFixed(4) + ',' + (maxLon + buf).toFixed(4) + ',' + (maxLat + buf).toFixed(4);
-    fetch(getApiBase() + '/signalk/v1/api/router/pois?bbox=' + bboxStr + '&limit=500')
-      .then(function (r) { return r.ok ? r.json() : null; })
+    const bboxStr =
+      (minLon - buf).toFixed(4) +
+      "," +
+      (minLat - buf).toFixed(4) +
+      "," +
+      (maxLon + buf).toFixed(4) +
+      "," +
+      (maxLat + buf).toFixed(4);
+    fetch(
+      getApiBase() +
+        "/signalk/v1/api/router/pois?bbox=" +
+        bboxStr +
+        "&limit=500",
+    )
+      .then(function (r) {
+        return r.ok ? r.json() : null;
+      })
       .then(function (data) {
         if (!data || !data.pois) return;
         var pois = data.pois;
-        var nodeEls = nodesEl.querySelectorAll('.route-node');
+        var nodeEls = nodesEl.querySelectorAll(".route-node");
         for (var i = 0; i < nodeEls.length; i++) {
           var el = nodeEls[i];
-          var existing = el.querySelectorAll('.node-poi');
+          var existing = el.querySelectorAll(".node-poi");
           for (var k = 0; k < existing.length; k++) existing[k].remove();
           if (i >= nodes.length) continue;
           var node = nodes[i];
-          var bestDist = Infinity, bestPoi = null;
+          var bestDist = Infinity,
+            bestPoi = null;
           for (var j = 0; j < pois.length; j++) {
             var p = pois[j];
             var d = haversineDist(node.lat, node.lng, p.lat, p.lon);
@@ -4657,16 +6355,16 @@
             }
           }
           if (bestPoi) {
-            var poiLine = document.createElement('div');
-            poiLine.className = 'node-poi';
-            poiLine.textContent = 'near ' + bestPoi.name;
+            var poiLine = document.createElement("div");
+            poiLine.className = "node-poi";
+            poiLine.textContent = "near " + bestPoi.name;
             el.appendChild(poiLine);
-            if (el.classList.contains('start') && !state.startPoiName) {
+            if (el.classList.contains("start") && !state.startPoiName) {
               state.startPoiName = bestPoi.name;
               updateRouteTitle();
               updateInfo();
             }
-            if (el.classList.contains('dest') && !state.destPoiName) {
+            if (el.classList.contains("dest") && !state.destPoiName) {
               state.destPoiName = bestPoi.name;
               updateRouteTitle();
               updateInfo();
@@ -4678,103 +6376,135 @@
   }
 
   function clearRoutePane() {
-    document.getElementById('route-warnings').innerHTML = '';
-    document.getElementById('route-nodes').innerHTML = '';
-    const emptyEl = document.getElementById('route-pane-empty');
-    if (emptyEl) emptyEl.style.display = '';
+    document.getElementById("route-warnings").innerHTML = "";
+    document.getElementById("route-nodes").innerHTML = "";
+    const emptyEl = document.getElementById("route-pane-empty");
+    if (emptyEl) emptyEl.style.display = "";
     state.routeSegments = [];
     updateRouteTitle();
   }
 
   // ---- click node to expand/collapse leg details ----
-  const routeNodesEl = document.getElementById('route-nodes');
-  routeNodesEl.addEventListener('click', function (e) {
-    const nodeEl = e.target.closest('.route-node');
+  const routeNodesEl = document.getElementById("route-nodes");
+  routeNodesEl.addEventListener("click", function (e) {
+    const nodeEl = e.target.closest(".route-node");
     if (!nodeEl) return;
     const nextEl = nodeEl.nextElementSibling;
-    if (nextEl && nextEl.classList.contains('route-leg')) {
-      nextEl.classList.toggle('expanded');
+    if (nextEl && nextEl.classList.contains("route-leg")) {
+      nextEl.classList.toggle("expanded");
     }
   });
 
   // ---- hover: route pane node/leg ↔ map segments ----
-  routeNodesEl.addEventListener('mouseenter', function (e) {
-    const target = e.target.closest('.route-node, .route-leg');
-    if (!target) return;
-    const fromIdx = parseInt(target.dataset.coordFrom, 10);
-    const toIdx = parseInt(target.dataset.coordTo, 10);
-    if (isNaN(fromIdx) || isNaN(toIdx)) return;
-    highlightMapByCoordRange(fromIdx, toIdx);
-    highlightPaneByCoordRange(fromIdx, toIdx);
+  routeNodesEl.addEventListener(
+    "mouseenter",
+    function (e) {
+      const target = e.target.closest(".route-node, .route-leg");
+      if (!target) return;
+      const fromIdx = parseInt(target.dataset.coordFrom, 10);
+      const toIdx = parseInt(target.dataset.coordTo, 10);
+      if (isNaN(fromIdx) || isNaN(toIdx)) return;
+      highlightMapByCoordRange(fromIdx, toIdx);
+      highlightPaneByCoordRange(fromIdx, toIdx);
 
-    // Show junction marker at the hovered node (or start node of the leg)
-    const nodeEl = target.classList.contains('route-node') ? target : target.previousElementSibling;
-    if (nodeEl && nodeEl.classList.contains('route-node')) {
-      const labelEl = nodeEl.querySelector('.node-label');
-      const raw = labelEl ? labelEl.textContent.trim() : '';
-      // Just the number; keep "Start"/"Destination" as-is
-      const label = raw === 'Start' || raw === 'Destination' ? raw : raw.replace(/^Turn\s*/, '');
-      const lat = parseFloat(nodeEl.dataset.lat);
-      const lng = parseFloat(nodeEl.dataset.lng);
-      if (!isNaN(lat) && !isNaN(lng) && label) {
-        showJunctionMarker(L.latLng(lat, lng), label);
+      // Show junction marker at the hovered node (or start node of the leg)
+      const nodeEl = target.classList.contains("route-node")
+        ? target
+        : target.previousElementSibling;
+      if (nodeEl && nodeEl.classList.contains("route-node")) {
+        const labelEl = nodeEl.querySelector(".node-label");
+        const raw = labelEl ? labelEl.textContent.trim() : "";
+        // Just the number; keep "Start"/"Destination" as-is
+        const label =
+          raw === "Start" || raw === "Destination"
+            ? raw
+            : raw.replace(/^Turn\s*/, "");
+        const lat = parseFloat(nodeEl.dataset.lat);
+        const lng = parseFloat(nodeEl.dataset.lng);
+        if (!isNaN(lat) && !isNaN(lng) && label) {
+          showJunctionMarker(L.latLng(lat, lng), label);
+        }
       }
-    }
-  }, true);
+    },
+    true,
+  );
 
-  routeNodesEl.addEventListener('mouseleave', function (e) {
-    const target = e.target.closest('.route-node, .route-leg');
-    if (!target) return;
-    clearBothHighlights();
-  }, true);
+  routeNodesEl.addEventListener(
+    "mouseleave",
+    function (e) {
+      const target = e.target.closest(".route-node, .route-leg");
+      if (!target) return;
+      clearBothHighlights();
+    },
+    true,
+  );
 
   // ---- collapse toggle (route pane) ----
-  document.getElementById('route-pane-tab').addEventListener('click', function () {
-    const pane = document.getElementById('route-pane');
-    pane.classList.toggle('collapsed');
-    this.textContent = pane.classList.contains('collapsed') ? '\u25b6' : '\u25c0';
-  });
+  document
+    .getElementById("route-pane-tab")
+    .addEventListener("click", function () {
+      const pane = document.getElementById("route-pane");
+      pane.classList.toggle("collapsed");
+      this.textContent = pane.classList.contains("collapsed")
+        ? "\u25b6"
+        : "\u25c0";
+    });
 
   // ---- Data Manager (download dialog) ----
-  var dmList = document.getElementById('dm-list');
-  var dmInstalledList = document.getElementById('dm-installed-list');
-  var dmLoading = document.getElementById('dm-loading');
-  var dmInstalledLoading = document.getElementById('dm-installed-loading');
-  var dmError = document.getElementById('dm-error');
-  var dmFilter = document.getElementById('dm-filter');
+  var dmList = document.getElementById("dm-list");
+  var dmInstalledList = document.getElementById("dm-installed-list");
+  var dmLoading = document.getElementById("dm-loading");
+  var dmInstalledLoading = document.getElementById("dm-installed-loading");
+  var dmError = document.getElementById("dm-error");
+  var dmFilter = document.getElementById("dm-filter");
   var dmAvailableRegions = []; // cached catalog regions
   var dmInstalledRegions = []; // cached installed databases
-  var dmNearYouKeys = {};      // country|name -> true, for regions containing the vessel position
+  var dmNearYouKeys = {}; // country|name -> true, for regions containing the vessel position
 
   // Bundled world-countries backdrop (drawn behind region polygons in the minimap).
   // Loaded once from the plugin's own public dir, so it works fully offline.
-  var dmCoastline = null;        // parsed GeoJSON FeatureCollection, or null until loaded
+  var dmCoastline = null; // parsed GeoJSON FeatureCollection, or null until loaded
   var dmCoastlineLoading = false;
   function dmLoadCoastline() {
     if (dmCoastline || dmCoastlineLoading) return;
     dmCoastlineLoading = true;
-    var url = (PLUGIN_PATH || '.') + '/world-countries.json';
+    var url = (PLUGIN_PATH || ".") + "/world-countries.json";
     fetch(url, { signal: AbortSignal.timeout(15000) })
-      .then(function(r) { return r.ok ? r.json() : null; })
-      .then(function(geo) {
+      .then(function (r) {
+        return r.ok ? r.json() : null;
+      })
+      .then(function (geo) {
         dmCoastlineLoading = false;
         if (!geo || !geo.features) return;
         dmCoastline = geo;
         // Re-render the shared map, now with the backdrop
         if (dmAvailableRegions.length > 0) dmRenderMap();
       })
-      .catch(function() { dmCoastlineLoading = false; }); // backdrop is optional; ignore failures
+      .catch(function () {
+        dmCoastlineLoading = false;
+      }); // backdrop is optional; ignore failures
   }
 
   function getCatalogUrl() {
-    return getApiBase() + '/signalk/v1/api/router/databases/available';
+    return getApiBase() + "/signalk/v1/api/router/databases/available";
   }
 
   function getInstalledUrl() {
-    return getApiBase() + '/signalk/v1/api/router/databases';
+    return getApiBase() + "/signalk/v1/api/router/databases";
   }
 
-  var DM_COLORS = ['#3b8fd4','#22c55e','#f59e0b','#ef4444','#8b5cf6','#14b8a6','#ec4899','#f97316','#06b6d4','#a855f7'];
+  var DM_COLORS = [
+    "#3b8fd4",
+    "#22c55e",
+    "#f59e0b",
+    "#ef4444",
+    "#8b5cf6",
+    "#14b8a6",
+    "#ec4899",
+    "#f97316",
+    "#06b6d4",
+    "#a855f7",
+  ];
 
   // Normalize a region/db record to a common { bbox, geom } shape.
   // Catalog (Available) uses snake_case (bounding_box / boundary_geometry);
@@ -4809,7 +6539,8 @@
   }
   function dmPointInRing(ring, lat, lon) {
     if (!ring || ring.length === 0) return false;
-    var minLon = Infinity, maxLon = -Infinity;
+    var minLon = Infinity,
+      maxLon = -Infinity;
     for (var i = 0; i < ring.length; i++) {
       var l = ring[i][0];
       if (l < minLon) minLon = l;
@@ -4822,24 +6553,33 @@
     while (queryLon - ref > 180) queryLon -= 360;
     while (queryLon - ref < -180) queryLon += 360;
     var inside = false;
-    for (var i2 = 0, j = unwrapped.length - 1; i2 < unwrapped.length; j = i2++) {
-      var xi = unwrapped[i2][0], yi = unwrapped[i2][1];
-      var xj = unwrapped[j][0], yj = unwrapped[j][1];
-      var intersect = ((yi > lat) !== (yj > lat)) && (queryLon < (xj - xi) * (lat - yi) / (yj - yi) + xi);
+    for (
+      var i2 = 0, j = unwrapped.length - 1;
+      i2 < unwrapped.length;
+      j = i2++
+    ) {
+      var xi = unwrapped[i2][0],
+        yi = unwrapped[i2][1];
+      var xj = unwrapped[j][0],
+        yj = unwrapped[j][1];
+      var intersect =
+        yi > lat !== yj > lat &&
+        queryLon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi;
       if (intersect) inside = !inside;
     }
     return inside;
   }
   function dmPointInGeometry(geom, lat, lon) {
     if (!geom) return false;
-    if (geom.type === 'Polygon') {
+    if (geom.type === "Polygon") {
       var rings = geom.coordinates;
       return rings.length > 0 && dmPointInRing(rings[0], lat, lon);
     }
-    if (geom.type === 'MultiPolygon') {
+    if (geom.type === "MultiPolygon") {
       for (var i = 0; i < geom.coordinates.length; i++) {
         var rings2 = geom.coordinates[i];
-        if (rings2.length > 0 && dmPointInRing(rings2[0], lat, lon)) return true;
+        if (rings2.length > 0 && dmPointInRing(rings2[0], lat, lon))
+          return true;
       }
       return false;
     }
@@ -4849,7 +6589,8 @@
   function dmBboxContains(bbox, lat, lon) {
     if (!bbox) return false;
     if (lat < bbox.min_lat || lat > bbox.max_lat) return false;
-    if (bbox.min_lon <= bbox.max_lon) return lon >= bbox.min_lon && lon <= bbox.max_lon;
+    if (bbox.min_lon <= bbox.max_lon)
+      return lon >= bbox.min_lon && lon <= bbox.max_lon;
     return lon >= bbox.min_lon || lon <= bbox.max_lon;
   }
   // Best-available containment test for a region record: polygon if present, else bbox.
@@ -4879,11 +6620,11 @@
   // disk, loaded or not). Without this the map always showed the catalog
   // regardless of the active tab, so switching to Installed never changed
   // what was drawn.
-  var dmActiveTab = 'available';
+  var dmActiveTab = "available";
 
   function dmInitMap() {
-    if (dmMap || typeof L === 'undefined') return;
-    var el = document.getElementById('dm-map');
+    if (dmMap || typeof L === "undefined") return;
+    var el = document.getElementById("dm-map");
     if (!el) return;
     dmMap = L.map(el, {
       center: [20, 0],
@@ -4892,28 +6633,51 @@
       worldCopyJump: true,
       attributionControl: false,
     });
-    dmMap.on('click', dmHandleMapClick);
+    dmMap.on("click", dmHandleMapClick);
   }
 
   function dmBuildTooltip(r, installed) {
     var sizeMb = (r.size_bytes / 1048576).toFixed(1);
     var statusText = installed
-      ? (installed.loadState === 'not_loaded' ? 'installed, not loaded' : 'installed')
-      : '';
-    return '<div style="font-weight:600">' + (r.name || r.id) + '</div>' +
-           '<div style="color:#9bb8da">' + (r.country || '') + ' &middot; ' + sizeMb + ' MB' +
-           (statusText ? ' &middot; ' + statusText : '') + '</div>';
+      ? installed.loadState === "not_loaded"
+        ? "installed, not loaded"
+        : "installed"
+      : "";
+    return (
+      '<div style="font-weight:600">' +
+      (r.name || r.id) +
+      "</div>" +
+      '<div style="color:#9bb8da">' +
+      (r.country || "") +
+      " &middot; " +
+      sizeMb +
+      " MB" +
+      (statusText ? " &middot; " + statusText : "") +
+      "</div>"
+    );
   }
 
   // Tooltip for the Installed tab's map, built from an installed record
   // directly (no catalog entry required -- name/country may be missing for
   // a not-yet-loaded database, see dmFetchInstalled, hence the fallbacks).
   function dmBuildInstalledTooltip(ir) {
-    var displayName = ir.name || (ir.filename || '').replace('.sqlite', '') || 'Unknown';
-    var stateLabel = ir.loadState === 'not_loaded' ? 'not loaded'
-      : ir.loadState === 'loading' ? 'loading&hellip;' : 'loaded';
-    return '<div style="font-weight:600">' + displayName + '</div>' +
-           '<div style="color:#9bb8da">' + (ir.country ? ir.country + ' &middot; ' : '') + stateLabel + '</div>';
+    var displayName =
+      ir.name || (ir.filename || "").replace(".sqlite", "") || "Unknown";
+    var stateLabel =
+      ir.loadState === "not_loaded"
+        ? "not loaded"
+        : ir.loadState === "loading"
+          ? "loading&hellip;"
+          : "loaded";
+    return (
+      '<div style="font-weight:600">' +
+      displayName +
+      "</div>" +
+      '<div style="color:#9bb8da">' +
+      (ir.country ? ir.country + " &middot; " : "") +
+      stateLabel +
+      "</div>"
+    );
   }
 
   // (Re)draw the backdrop + region overlays on the Data Manager map, styled
@@ -4921,13 +6685,20 @@
   function dmRenderMap() {
     if (!dmMap) return;
 
-    dmMapRegionLayers.forEach(function(layer) { dmMap.removeLayer(layer); });
+    dmMapRegionLayers.forEach(function (layer) {
+      dmMap.removeLayer(layer);
+    });
     dmMapRegionLayers = [];
 
     if (!dmMapCoastlineLayer && dmCoastline && dmCoastline.features) {
       dmMapCoastlineLayer = L.geoJSON(dmCoastline, {
         interactive: false,
-        style: { color: 'rgba(120,170,210,0.35)', weight: 0.5, fillColor: '#1c3047', fillOpacity: 1 },
+        style: {
+          color: "rgba(120,170,210,0.35)",
+          weight: 0.5,
+          fillColor: "#1c3047",
+          fillOpacity: 1,
+        },
       }).addTo(dmMap);
       dmMapCoastlineLayer.bringToBack();
     }
@@ -4936,7 +6707,7 @@
     var frameBounds = [];
     var hasNearYou = false;
 
-    if (dmActiveTab === 'installed') {
+    if (dmActiveTab === "installed") {
       // Installed tab: draw exactly what's on disk (loaded + not-loaded),
       // from each database's own coverage/boundary data -- independent of
       // whether it still has a matching catalog entry -- styled by load
@@ -4946,13 +6717,37 @@
         var ir = dmInstalledRegions[j];
         var irg = dmRegionGeo(ir);
         if (!irg.geom && !irg.bbox) continue;
-        var irStyle = ir.loadState === 'not_loaded'
-          ? { color: '#94a3b8', weight: 1.5, opacity: 0.75, fillColor: '#94a3b8', fillOpacity: 0.06, dashArray: '6,5' }
-          : { color: '#22c55e', weight: 2, opacity: 0.9, fillColor: '#22c55e', fillOpacity: 0.14 };
+        var irStyle =
+          ir.loadState === "not_loaded"
+            ? {
+                color: "#94a3b8",
+                weight: 1.5,
+                opacity: 0.75,
+                fillColor: "#94a3b8",
+                fillOpacity: 0.06,
+                dashArray: "6,5",
+              }
+            : {
+                color: "#22c55e",
+                weight: 2,
+                opacity: 0.9,
+                fillColor: "#22c55e",
+                fillOpacity: 0.14,
+              };
         var irLayer = irg.geom
           ? L.geoJSON(irg.geom, { style: irStyle })
-          : L.rectangle([[irg.bbox.min_lat, irg.bbox.min_lon], [irg.bbox.max_lat, irg.bbox.max_lon]], irStyle);
-        irLayer.bindTooltip(dmBuildInstalledTooltip(ir), { sticky: true, direction: 'top', className: 'dm-tooltip' });
+          : L.rectangle(
+              [
+                [irg.bbox.min_lat, irg.bbox.min_lon],
+                [irg.bbox.max_lat, irg.bbox.max_lon],
+              ],
+              irStyle,
+            );
+        irLayer.bindTooltip(dmBuildInstalledTooltip(ir), {
+          sticky: true,
+          direction: "top",
+          className: "dm-tooltip",
+        });
         irLayer.addTo(dmMap);
         dmMapRegionLayers.push(irLayer);
         var ib = irLayer.getBounds ? irLayer.getBounds() : null;
@@ -4971,15 +6766,45 @@
         var color = dmRegionColor(r);
         var installed = installedLookup[dmInstalledFilename(r)];
         var style = !installed
-          ? { color: color, weight: 1.5, opacity: 0.65, fillColor: color, fillOpacity: 0.12, dashArray: '4,4' }
-          : installed.loadState === 'not_loaded'
-            ? { color: color, weight: 2, opacity: 0.85, fillColor: color, fillOpacity: 0.22, dashArray: '8,4' }
-            : { color: color, weight: 2, opacity: 0.9, fillColor: color, fillOpacity: 0.35 };
+          ? {
+              color: color,
+              weight: 1.5,
+              opacity: 0.65,
+              fillColor: color,
+              fillOpacity: 0.12,
+              dashArray: "4,4",
+            }
+          : installed.loadState === "not_loaded"
+            ? {
+                color: color,
+                weight: 2,
+                opacity: 0.85,
+                fillColor: color,
+                fillOpacity: 0.22,
+                dashArray: "8,4",
+              }
+            : {
+                color: color,
+                weight: 2,
+                opacity: 0.9,
+                fillColor: color,
+                fillOpacity: 0.35,
+              };
 
         var layer = rg.geom
           ? L.geoJSON(rg.geom, { style: style })
-          : L.rectangle([[rg.bbox.min_lat, rg.bbox.min_lon], [rg.bbox.max_lat, rg.bbox.max_lon]], style);
-        layer.bindTooltip(dmBuildTooltip(r, installed), { sticky: true, direction: 'top', className: 'dm-tooltip' });
+          : L.rectangle(
+              [
+                [rg.bbox.min_lat, rg.bbox.min_lon],
+                [rg.bbox.max_lat, rg.bbox.max_lon],
+              ],
+              style,
+            );
+        layer.bindTooltip(dmBuildTooltip(r, installed), {
+          sticky: true,
+          direction: "top",
+          className: "dm-tooltip",
+        });
         layer.addTo(dmMap);
         dmMapRegionLayers.push(layer);
 
@@ -4994,9 +6819,15 @@
         frameBounds = [];
         for (var k = 0; k < dmAvailableRegions.length; k++) {
           var rk = dmAvailableRegions[k];
-          if (!dmNearYouKeys[rk.country + '|' + rk.name]) continue;
+          if (!dmNearYouKeys[rk.country + "|" + rk.name]) continue;
           var rgk = dmRegionGeo(rk);
-          if (rgk.bbox) frameBounds.push(L.latLngBounds([rgk.bbox.min_lat, rgk.bbox.min_lon], [rgk.bbox.max_lat, rgk.bbox.max_lon]));
+          if (rgk.bbox)
+            frameBounds.push(
+              L.latLngBounds(
+                [rgk.bbox.min_lat, rgk.bbox.min_lon],
+                [rgk.bbox.max_lat, rgk.bbox.max_lon],
+              ),
+            );
         }
       }
     }
@@ -5004,16 +6835,30 @@
     if (lastBoat && lastBoat.lat != null && lastBoat.lng != null) {
       if (dmMapVesselMarker) dmMap.removeLayer(dmMapVesselMarker);
       dmMapVesselMarker = L.circleMarker([lastBoat.lat, lastBoat.lng], {
-        radius: 6, color: '#fff', weight: 2, fillColor: '#3b8fd4', fillOpacity: 1,
-      }).bindTooltip('Vessel position', { direction: 'top' });
+        radius: 6,
+        color: "#fff",
+        weight: 2,
+        fillColor: "#3b8fd4",
+        fillOpacity: 1,
+      }).bindTooltip("Vessel position", { direction: "top" });
       dmMapVesselMarker.addTo(dmMap);
     }
-    if (dmMapVesselMarker) frameBounds.push(L.latLngBounds(dmMapVesselMarker.getLatLng(), dmMapVesselMarker.getLatLng()));
+    if (dmMapVesselMarker)
+      frameBounds.push(
+        L.latLngBounds(
+          dmMapVesselMarker.getLatLng(),
+          dmMapVesselMarker.getLatLng(),
+        ),
+      );
 
     if (frameBounds.length > 0) {
       var combined = frameBounds[0];
-      for (var m = 1; m < frameBounds.length; m++) combined.extend(frameBounds[m]);
-      dmMap.fitBounds(combined, { padding: [20, 20], maxZoom: hasNearYou ? 8 : 5 });
+      for (var m = 1; m < frameBounds.length; m++)
+        combined.extend(frameBounds[m]);
+      dmMap.fitBounds(combined, {
+        padding: [20, 20],
+        maxZoom: hasNearYou ? 8 : 5,
+      });
     } else if (bounds.length > 0) {
       var combinedAll = bounds[0];
       for (var n = 1; n < bounds.length; n++) combinedAll.extend(bounds[n]);
@@ -5030,7 +6875,7 @@
     for (var i = 0; i < dmAvailableRegions.length; i++) {
       var r = dmAvailableRegions[i];
       if (dmRegionContains(r, lastBoat.lat, lastBoat.lng)) {
-        dmNearYouKeys[r.country + '|' + r.name] = true;
+        dmNearYouKeys[r.country + "|" + r.name] = true;
       }
     }
   }
@@ -5038,7 +6883,7 @@
   function dmHandleMapClick(e) {
     // Installed-tab regions aren't wired to the download inspector (they're
     // already installed) -- only the catalog map is clickable for now.
-    if (dmActiveTab !== 'available') return;
+    if (dmActiveTab !== "available") return;
     var matches = [];
     for (var i = 0; i < dmAvailableRegions.length; i++) {
       if (dmRegionContains(dmAvailableRegions[i], e.latlng.lat, e.latlng.lng)) {
@@ -5050,27 +6895,35 @@
   }
 
   function dmOpenInspector(matches, latlng) {
-    var listEl = document.getElementById('dm-inspector-list');
-    var subtitleEl = document.getElementById('dm-inspector-subtitle');
-    listEl.innerHTML = '';
+    var listEl = document.getElementById("dm-inspector-list");
+    var subtitleEl = document.getElementById("dm-inspector-subtitle");
+    listEl.innerHTML = "";
     var installedLookup = dmInstalledLookup();
     for (var i = 0; i < matches.length; i++) {
       listEl.appendChild(dmBuildRegionCard(matches[i], installedLookup));
     }
-    subtitleEl.textContent = matches.length + ' database' + (matches.length === 1 ? '' : 's') +
-      ' cover' + (matches.length === 1 ? 's' : '') + ' ' + latlng.lat.toFixed(2) + ', ' + latlng.lng.toFixed(2);
-    document.getElementById('dm-inspector-modal').style.display = '';
+    subtitleEl.textContent =
+      matches.length +
+      " database" +
+      (matches.length === 1 ? "" : "s") +
+      " cover" +
+      (matches.length === 1 ? "s" : "") +
+      " " +
+      latlng.lat.toFixed(2) +
+      ", " +
+      latlng.lng.toFixed(2);
+    document.getElementById("dm-inspector-modal").style.display = "";
   }
 
   function dmCloseInspector() {
-    document.getElementById('dm-inspector-modal').style.display = 'none';
+    document.getElementById("dm-inspector-modal").style.display = "none";
   }
 
   // Basename of a catalog region's download filename -- passed as-is to the
   // download endpoint, .gz suffix and all, since the server (api.ts
   // handleDownloadDatabase) uses that suffix to decide whether to gunzip.
   function dmCatalogFilename(r) {
-    return r.file ? r.file.split('/').pop() : null;
+    return r.file ? r.file.split("/").pop() : null;
   }
 
   // Filename as it will actually exist on disk once downloaded -- the
@@ -5082,7 +6935,7 @@
   // guaranteed on both sides).
   function dmInstalledFilename(r) {
     var f = dmCatalogFilename(r);
-    return f && f.slice(-3) === '.gz' ? f.slice(0, -3) : f;
+    return f && f.slice(-3) === ".gz" ? f.slice(0, -3) : f;
   }
 
   // Build a lookup of installed regions for update detection: filename -> installed record.
@@ -5126,48 +6979,74 @@
     var color = dmRegionColor(r);
     var dlFilename = dmCatalogFilename(r);
     var installed = installedLookup[dmInstalledFilename(r)];
-    var needsUpdate = installed && installed.lastUpdateDate && r.last_update &&
-                      installed.lastUpdateDate < r.last_update;
+    var needsUpdate =
+      installed &&
+      installed.lastUpdateDate &&
+      r.last_update &&
+      installed.lastUpdateDate < r.last_update;
     // Not-loaded installed records may not carry lastUpdateDate (metadata
     // isn't read until the file is loaded) -- treat "installed, but we
     // can't confirm a newer version exists" as already-installed rather
     // than silently re-offering it for download.
     var isSame = installed && !needsUpdate;
     var sizeMb = (r.size_bytes / 1048576).toFixed(1);
-    var tags = (r.tags || []).map(function(t) { return '<span class="dm-region-tag">' + t + '</span>'; }).join('');
-    var nearYou = dmNearYouKeys[r.country + '|' + r.name];
+    var tags = (r.tags || [])
+      .map(function (t) {
+        return '<span class="dm-region-tag">' + t + "</span>";
+      })
+      .join("");
+    var nearYou = dmNearYouKeys[r.country + "|" + r.name];
 
     // Determine download URL: use the fully-qualified URL from the catalog
     var dlUrl = r.downloadUrl || r.file;
 
-    var card = document.createElement('div');
-    card.className = 'dm-region-card';
+    var card = document.createElement("div");
+    card.className = "dm-region-card";
     card.innerHTML =
-      '<div class="dm-region-color" style="background:' + color + '"></div>' +
+      '<div class="dm-region-color" style="background:' +
+      color +
+      '"></div>' +
       '<div class="dm-region-body">' +
-        '<div><span class="dm-region-name">' + (r.name || r.id) + '</span><span class="dm-region-country">' + (r.country || '') + '</span>' +
-          (nearYou ? ' <span class="dm-near-you-badge">&#128205; Near you</span>' : '') +
-        '</div>' +
-        '<div class="dm-region-desc">' + (r.description || '') + '</div>' +
-        '<div class="dm-region-meta">' +
-          '<span>Updated: ' + (r.last_update ? r.last_update.slice(0,10) : 'unknown') + '</span>' +
-          '<span class="dm-size">' + sizeMb + ' MB' + (r.compression === 'gzip' ? ' (gz)' : '') + '</span>' +
-          (r.stats ? '<span>' + (r.stats.nodes || 0).toLocaleString() + ' nodes</span>' : '') +
-        '</div>' +
-        '<div style="margin-top:4px">' + tags + '</div>' +
-      '</div>' +
+      '<div><span class="dm-region-name">' +
+      (r.name || r.id) +
+      '</span><span class="dm-region-country">' +
+      (r.country || "") +
+      "</span>" +
+      (nearYou
+        ? ' <span class="dm-near-you-badge">&#128205; Near you</span>'
+        : "") +
+      "</div>" +
+      '<div class="dm-region-desc">' +
+      (r.description || "") +
+      "</div>" +
+      '<div class="dm-region-meta">' +
+      "<span>Updated: " +
+      (r.last_update ? r.last_update.slice(0, 10) : "unknown") +
+      "</span>" +
+      '<span class="dm-size">' +
+      sizeMb +
+      " MB" +
+      (r.compression === "gzip" ? " (gz)" : "") +
+      "</span>" +
+      (r.stats
+        ? "<span>" + (r.stats.nodes || 0).toLocaleString() + " nodes</span>"
+        : "") +
+      "</div>" +
+      '<div style="margin-top:4px">' +
+      tags +
+      "</div>" +
+      "</div>" +
       '<div class="dm-region-actions">' +
-        (needsUpdate
-          ? '<button class="dm-btn-update">Update</button><span class="dm-update-badge">Newer</span>'
-          : isSame
-            ? '<button class="dm-btn-dl" disabled>Installed</button>'
-            : '<button class="dm-btn-dl">Download</button>'
-        ) +
-      '</div>';
+      (needsUpdate
+        ? '<button class="dm-btn-update">Update</button><span class="dm-update-badge">Newer</span>'
+        : isSame
+          ? '<button class="dm-btn-dl" disabled>Installed</button>'
+          : '<button class="dm-btn-dl">Download</button>') +
+      "</div>";
 
-    var btn = card.querySelector('.dm-btn-dl:not([disabled]), .dm-btn-update');
+    var btn = card.querySelector(".dm-btn-dl:not([disabled]), .dm-btn-update");
     if (btn) {
-      btn.addEventListener('click', function() {
+      btn.addEventListener("click", function () {
         dmStartDownload(dlUrl, dlFilename, btn);
       });
     }
@@ -5177,38 +7056,43 @@
   function dmRenderAvailable(filterText) {
     var regions = dmAvailableRegions;
     if (!regions || regions.length === 0) {
-      dmLoading.textContent = 'No databases available in the catalog.';
-      dmLoading.style.display = '';
-      dmList.style.display = 'none';
+      dmLoading.textContent = "No databases available in the catalog.";
+      dmLoading.style.display = "";
+      dmList.style.display = "none";
       return;
     }
 
     var filtered = regions;
     if (filterText) {
       var ft = filterText.toLowerCase();
-      filtered = regions.filter(function(r) {
-        return (r.country || '').toLowerCase().indexOf(ft) !== -1 ||
-               (r.name || '').toLowerCase().indexOf(ft) !== -1 ||
-               (r.tags || []).some(function(t) { return t.toLowerCase().indexOf(ft) !== -1; }) ||
-               (r.description || '').toLowerCase().indexOf(ft) !== -1;
+      filtered = regions.filter(function (r) {
+        return (
+          (r.country || "").toLowerCase().indexOf(ft) !== -1 ||
+          (r.name || "").toLowerCase().indexOf(ft) !== -1 ||
+          (r.tags || []).some(function (t) {
+            return t.toLowerCase().indexOf(ft) !== -1;
+          }) ||
+          (r.description || "").toLowerCase().indexOf(ft) !== -1
+        );
       });
     }
 
-    dmLoading.style.display = 'none';
-    dmList.style.display = '';
-    dmList.innerHTML = '';
+    dmLoading.style.display = "none";
+    dmList.style.display = "";
+    dmList.innerHTML = "";
 
     if (filtered.length === 0) {
-      dmList.innerHTML = '<div style="color:#6d96c0;font-size:13px;padding:12px 0;text-align:center">No regions match your filter.</div>';
+      dmList.innerHTML =
+        '<div style="color:#6d96c0;font-size:13px;padding:12px 0;text-align:center">No regions match your filter.</div>';
       return;
     }
 
     // Regions containing the vessel position (if known) sort first — mirrors
     // signalk-tidal-currents' "near you" auto-surfacing, applied to sort order
     // here since this list isn't grouped by provider the way that one is.
-    filtered = filtered.slice().sort(function(a, b) {
-      var an = dmNearYouKeys[a.country + '|' + a.name] ? 0 : 1;
-      var bn = dmNearYouKeys[b.country + '|' + b.name] ? 0 : 1;
+    filtered = filtered.slice().sort(function (a, b) {
+      var an = dmNearYouKeys[a.country + "|" + a.name] ? 0 : 1;
+      var bn = dmNearYouKeys[b.country + "|" + b.name] ? 0 : 1;
       return an - bn;
     });
 
@@ -5218,66 +7102,102 @@
     }
   }
 
-  var dmInstalledNote = document.getElementById('dm-installed-note');
+  var dmInstalledNote = document.getElementById("dm-installed-note");
 
   function dmRenderInstalled() {
     var list = dmInstalledRegions;
-    dmInstalledLoading.style.display = 'none';
-    dmInstalledList.style.display = '';
+    dmInstalledLoading.style.display = "none";
+    dmInstalledList.style.display = "";
 
     if (!list || list.length === 0) {
-      dmInstalledList.innerHTML = '<div style="color:#6d96c0;font-size:13px;padding:12px 0;text-align:center">No routing databases are currently installed.</div>';
-      dmInstalledNote.style.display = 'none';
+      dmInstalledList.innerHTML =
+        '<div style="color:#6d96c0;font-size:13px;padding:12px 0;text-align:center">No routing databases are currently installed.</div>';
+      dmInstalledNote.style.display = "none";
       return;
     }
 
-    dmInstalledNote.style.display = '';
-    dmInstalledList.innerHTML = '';
+    dmInstalledNote.style.display = "";
+    dmInstalledList.innerHTML = "";
     var catalogLookup = dmCatalogLookup();
     for (var i = 0; i < list.length; i++) {
       var r = list[i];
-      var filename = r.filename || '';
+      var filename = r.filename || "";
       // A not-yet-loaded database only carries {filename, state, coverage,
       // stats} of its own (see dmFetchInstalled) -- borrow name/country/
       // description/tags from the matching catalog entry when present, so
       // these cards aren't missing the subtext the Available tab shows for
       // the identical region.
       var catalogMatch = catalogLookup[filename] || null;
-      var displayName = r.name || (catalogMatch && catalogMatch.name) || filename.replace('.sqlite', '') || 'Unknown';
-      var country = r.country || (catalogMatch && catalogMatch.country) || '';
-      var description = r.description || (catalogMatch && catalogMatch.description) || '';
-      var tagList = (r.tags && r.tags.length ? r.tags : (catalogMatch && catalogMatch.tags)) || [];
-      var tags = tagList.map(function(t) { return '<span class="dm-region-tag">' + t + '</span>'; }).join('');
-      var loadBadge = r.loadState === 'not_loaded'
-        ? '<span class="dm-loadstate-badge">Not loaded</span>'
-        : r.loadState === 'loading'
-          ? '<span class="dm-loadstate-badge dm-loadstate-loading">Loading&hellip;</span>'
-          : '';
-      var card = document.createElement('div');
-      card.className = 'dm-installed-card';
+      var displayName =
+        r.name ||
+        (catalogMatch && catalogMatch.name) ||
+        filename.replace(".sqlite", "") ||
+        "Unknown";
+      var country = r.country || (catalogMatch && catalogMatch.country) || "";
+      var description =
+        r.description || (catalogMatch && catalogMatch.description) || "";
+      var tagList =
+        (r.tags && r.tags.length
+          ? r.tags
+          : catalogMatch && catalogMatch.tags) || [];
+      var tags = tagList
+        .map(function (t) {
+          return '<span class="dm-region-tag">' + t + "</span>";
+        })
+        .join("");
+      var loadBadge =
+        r.loadState === "not_loaded"
+          ? '<span class="dm-loadstate-badge">Not loaded</span>'
+          : r.loadState === "loading"
+            ? '<span class="dm-loadstate-badge dm-loadstate-loading">Loading&hellip;</span>'
+            : "";
+      var card = document.createElement("div");
+      card.className = "dm-installed-card";
       card.innerHTML =
         '<div style="display:flex;align-items:flex-start;justify-content:space-between">' +
-          '<div style="flex:1;min-width:0">' +
-            '<div><span class="dm-region-name">' + displayName + '</span><span class="dm-region-country">' + country + '</span>' +
-              (loadBadge ? ' ' + loadBadge : '') +
-            '</div>' +
-            (description ? '<div class="dm-region-desc">' + description + '</div>' : '') +
-            '<div class="dm-region-meta">' +
-              '<span title="Database file">' + filename + '</span>' +
-              '<span>Updated: ' + (r.lastUpdateDate ? r.lastUpdateDate.slice(0,10) : 'unknown') + '</span>' +
-              (r.stats && r.stats.nodes ? '<span>' + r.stats.nodes.toLocaleString() + ' nodes</span>' : '') +
-              (r.stats && r.stats.edges ? '<span>' + r.stats.edges.toLocaleString() + ' edges</span>' : '') +
-              (r.stats && r.stats.pois ? '<span>' + r.stats.pois.toLocaleString() + ' POIs</span>' : '') +
-            '</div>' +
-            '<div style="margin-top:4px">' + tags + '</div>' +
-          '</div>' +
-          '<div class="dm-region-actions">' +
-            '<button class="dm-btn-delete" title="Delete ' + displayName + '" aria-label="Delete ' + displayName + '">&#128465;</button>' +
-          '</div>' +
-        '</div>';
-      (function(fn, name, match) {
-        var delBtn = card.querySelector('.dm-btn-delete');
-        delBtn.addEventListener('click', function() {
+        '<div style="flex:1;min-width:0">' +
+        '<div><span class="dm-region-name">' +
+        displayName +
+        '</span><span class="dm-region-country">' +
+        country +
+        "</span>" +
+        (loadBadge ? " " + loadBadge : "") +
+        "</div>" +
+        (description
+          ? '<div class="dm-region-desc">' + description + "</div>"
+          : "") +
+        '<div class="dm-region-meta">' +
+        '<span title="Database file">' +
+        filename +
+        "</span>" +
+        "<span>Updated: " +
+        (r.lastUpdateDate ? r.lastUpdateDate.slice(0, 10) : "unknown") +
+        "</span>" +
+        (r.stats && r.stats.nodes
+          ? "<span>" + r.stats.nodes.toLocaleString() + " nodes</span>"
+          : "") +
+        (r.stats && r.stats.edges
+          ? "<span>" + r.stats.edges.toLocaleString() + " edges</span>"
+          : "") +
+        (r.stats && r.stats.pois
+          ? "<span>" + r.stats.pois.toLocaleString() + " POIs</span>"
+          : "") +
+        "</div>" +
+        '<div style="margin-top:4px">' +
+        tags +
+        "</div>" +
+        "</div>" +
+        '<div class="dm-region-actions">' +
+        '<button class="dm-btn-delete" title="Delete ' +
+        displayName +
+        '" aria-label="Delete ' +
+        displayName +
+        '">&#128465;</button>' +
+        "</div>" +
+        "</div>";
+      (function (fn, name, match) {
+        var delBtn = card.querySelector(".dm-btn-delete");
+        delBtn.addEventListener("click", function () {
           dmDeleteInstalled(fn, name, match, delBtn);
         });
       })(filename, displayName, catalogMatch);
@@ -5290,165 +7210,190 @@
   // action uses) rather than a bespoke dialog, and the app's showToast()
   // for the result, matching every other destructive action here.
   function dmDeleteInstalled(filename, displayName, catalogMatch, btn) {
-    var sizeText = catalogMatch && catalogMatch.size_bytes
-      ? ' Frees ' + (catalogMatch.size_bytes / 1048576).toFixed(1) + ' MB.'
-      : '';
-    var lastOne = dmInstalledRegions.length <= 1
-      ? ' This is your only installed routing database — routing will be unavailable until you download another.'
-      : '';
+    var sizeText =
+      catalogMatch && catalogMatch.size_bytes
+        ? " Frees " + (catalogMatch.size_bytes / 1048576).toFixed(1) + " MB."
+        : "";
+    var lastOne =
+      dmInstalledRegions.length <= 1
+        ? " This is your only installed routing database — routing will be unavailable until you download another."
+        : "";
     confirmDialog(
-      'Delete database',
-      'Remove "' + displayName + '" from this device?' + sizeText +
-        ' You can download it again from the catalog at any time.' + lastOne,
-      'Delete'
-    ).then(function(confirmed) {
+      "Delete database",
+      'Remove "' +
+        displayName +
+        '" from this device?' +
+        sizeText +
+        " You can download it again from the catalog at any time." +
+        lastOne,
+      "Delete",
+    ).then(function (confirmed) {
       if (!confirmed) return;
       btn.disabled = true;
       var originalHtml = btn.innerHTML;
-      btn.innerHTML = '&hellip;';
-      fetch(getApiBase() + '/signalk/v1/api/router/databases/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      btn.innerHTML = "&hellip;";
+      fetch(getApiBase() + "/signalk/v1/api/router/databases/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ filename: filename }),
       })
-        .then(function(r) {
-          return r.json().then(function(data) {
-            if (!r.ok) throw new Error((data && data.error) || ('Server returned ' + r.status));
+        .then(function (r) {
+          return r.json().then(function (data) {
+            if (!r.ok)
+              throw new Error(
+                (data && data.error) || "Server returned " + r.status,
+              );
             return data;
           });
         })
-        .then(function() {
-          showToast('Deleted ' + displayName, '');
+        .then(function () {
+          showToast("Deleted " + displayName, "");
           dmFetchInstalled();
         })
-        .catch(function(err) {
-          showToast('Delete failed: ' + err.message, 'error');
+        .catch(function (err) {
+          showToast("Delete failed: " + err.message, "error");
           btn.disabled = false;
           btn.innerHTML = originalHtml;
         });
     });
   }
 
-  var dmProgress = document.getElementById('dm-progress');
-  var dmProgressText = document.getElementById('dm-progress-text');
-  var dmProgressBar = document.getElementById('dm-progress-bar');
-  var dmProgressSpinner = document.getElementById('dm-progress-spinner');
+  var dmProgress = document.getElementById("dm-progress");
+  var dmProgressText = document.getElementById("dm-progress-text");
+  var dmProgressBar = document.getElementById("dm-progress-bar");
+  var dmProgressSpinner = document.getElementById("dm-progress-spinner");
 
   function dmShowProgress(show, text, pct) {
-    dmProgress.style.display = show ? '' : 'none';
+    dmProgress.style.display = show ? "" : "none";
     if (text !== undefined) dmProgressText.textContent = text;
-    if (pct !== undefined) dmProgressBar.style.width = pct + '%';
+    if (pct !== undefined) dmProgressBar.style.width = pct + "%";
   }
 
   function dmShowDownloadSuccess(filename, sizeMb) {
     // Animate progress to 100% and show success
-    dmProgressBar.style.width = '100%';
-    dmProgressSpinner.style.borderTopColor = '#22c55e';
-    dmProgressSpinner.style.borderColor = 'rgba(34,197,94,0.3)';
-    dmProgressText.innerHTML = '<span style="color:#22c55e">&#10003;</span> Downloaded ' + filename + ' (' + sizeMb + ' MB)';
-    dmProgressText.style.color = '#22c55e';
-    setTimeout(function() {
+    dmProgressBar.style.width = "100%";
+    dmProgressSpinner.style.borderTopColor = "#22c55e";
+    dmProgressSpinner.style.borderColor = "rgba(34,197,94,0.3)";
+    dmProgressText.innerHTML =
+      '<span style="color:#22c55e">&#10003;</span> Downloaded ' +
+      filename +
+      " (" +
+      sizeMb +
+      " MB)";
+    dmProgressText.style.color = "#22c55e";
+    setTimeout(function () {
       dmShowProgress(false);
-      dmProgressText.style.color = '#e0edf5';
-      dmProgressSpinner.style.borderTopColor = '#3b8fd4';
-      dmProgressSpinner.style.borderColor = 'rgba(59,143,212,0.3)';
+      dmProgressText.style.color = "#e0edf5";
+      dmProgressSpinner.style.borderTopColor = "#3b8fd4";
+      dmProgressSpinner.style.borderColor = "rgba(59,143,212,0.3)";
     }, 4000);
   }
 
   function dmShowDownloadError(msg) {
-    dmProgressSpinner.style.borderTopColor = '#ef4444';
-    dmProgressSpinner.style.borderColor = 'rgba(239,68,68,0.3)';
-    dmProgressBar.style.background = 'linear-gradient(90deg,#ef4444,#e07070)';
-    dmProgressText.innerHTML = '<span style="color:#ef4444">&#10007;</span> ' + msg;
-    dmProgressText.style.color = '#ef4444';
-    setTimeout(function() {
+    dmProgressSpinner.style.borderTopColor = "#ef4444";
+    dmProgressSpinner.style.borderColor = "rgba(239,68,68,0.3)";
+    dmProgressBar.style.background = "linear-gradient(90deg,#ef4444,#e07070)";
+    dmProgressText.innerHTML =
+      '<span style="color:#ef4444">&#10007;</span> ' + msg;
+    dmProgressText.style.color = "#ef4444";
+    setTimeout(function () {
       dmShowProgress(false);
-      dmProgressText.style.color = '#e0edf5';
-      dmProgressSpinner.style.borderTopColor = '#3b8fd4';
-      dmProgressSpinner.style.borderColor = 'rgba(59,143,212,0.3)';
-      dmProgressBar.style.background = 'linear-gradient(90deg,#3b8fd4,#22c55e)';
+      dmProgressText.style.color = "#e0edf5";
+      dmProgressSpinner.style.borderTopColor = "#3b8fd4";
+      dmProgressSpinner.style.borderColor = "rgba(59,143,212,0.3)";
+      dmProgressBar.style.background = "linear-gradient(90deg,#3b8fd4,#22c55e)";
     }, 5000);
   }
 
   function dmStartDownload(url, filename, btn) {
     if (!url || !filename) return;
-    btn.textContent = 'Downloading...';
+    btn.textContent = "Downloading...";
     btn.disabled = true;
 
-    dmShowProgress(true, 'Downloading ' + filename + '...', 5);
-    showToast('Downloading ' + filename + '...', '');
+    dmShowProgress(true, "Downloading " + filename + "...", 5);
+    showToast("Downloading " + filename + "...", "");
 
     // Animate progress while waiting (indeterminate → gradual fill)
-    var progressInterval = setInterval(function() {
+    var progressInterval = setInterval(function () {
       var cur = parseFloat(dmProgressBar.style.width) || 5;
       if (cur < 80) {
-        dmProgressBar.style.width = Math.min(cur + (80 - cur) * 0.08, 80) + '%';
+        dmProgressBar.style.width = Math.min(cur + (80 - cur) * 0.08, 80) + "%";
       }
     }, 500);
 
-    fetch(getApiBase() + '/signalk/v1/api/router/databases/download', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    fetch(getApiBase() + "/signalk/v1/api/router/databases/download", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: url, filename: filename }),
     })
-    .then(function(r) {
-      return r.json().then(function(data) {
-        // If the HTTP response was not OK but body parsed as JSON with error field
-        if (!r.ok) {
-          // trust the error in the JSON body; if not present, synthesize
-          if (!data || !data.error) {
-            throw new Error('Server returned ' + r.status);
+      .then(function (r) {
+        return r.json().then(function (data) {
+          // If the HTTP response was not OK but body parsed as JSON with error field
+          if (!r.ok) {
+            // trust the error in the JSON body; if not present, synthesize
+            if (!data || !data.error) {
+              throw new Error("Server returned " + r.status);
+            }
+            throw new Error(data.error);
           }
-          throw new Error(data.error);
-        }
-        return data;
-      });
-    })
-    .then(function(data) {
-      clearInterval(progressInterval);
-      if (data.success) {
-        btn.textContent = 'Installed';
-        btn.disabled = true;
-        var sizeMb = (data.sizeBytes / 1048576).toFixed(1);
-        dmShowDownloadSuccess(filename, sizeMb);
-        showToast('Downloaded ' + filename + ' (' + sizeMb + ' MB). Ready for routing!', 'success');
+          return data;
+        });
+      })
+      .then(function (data) {
+        clearInterval(progressInterval);
+        if (data.success) {
+          btn.textContent = "Installed";
+          btn.disabled = true;
+          var sizeMb = (data.sizeBytes / 1048576).toFixed(1);
+          dmShowDownloadSuccess(filename, sizeMb);
+          showToast(
+            "Downloaded " +
+              filename +
+              " (" +
+              sizeMb +
+              " MB). Ready for routing!",
+            "success",
+          );
 
-        // Refresh installed list and switch to Installed tab
-        dmFetchInstalled();
-        document.querySelector('.dm-tab[data-tab="installed"]').click();
-        if (coverageVisible) fetchCoverage();
-        // The server hot-reloads the engine during this request, so endpoints
-        // that answer 503 until it is ready work from now on. On a first run
-        // they were all rejected at connect time, leaving the boat panel empty
-        // with nothing to refill it short of a page reload.
-        fetchBoatData();
-      } else {
-        btn.textContent = 'Download';
+          // Refresh installed list and switch to Installed tab
+          dmFetchInstalled();
+          document.querySelector('.dm-tab[data-tab="installed"]').click();
+          if (coverageVisible) fetchCoverage();
+          // The server hot-reloads the engine during this request, so endpoints
+          // that answer 503 until it is ready work from now on. On a first run
+          // they were all rejected at connect time, leaving the boat panel empty
+          // with nothing to refill it short of a page reload.
+          fetchBoatData();
+        } else {
+          btn.textContent = "Download";
+          btn.disabled = false;
+          dmShowDownloadError(data.error || "Unknown error");
+          showToast(
+            "Download failed: " + (data.error || "Unknown error"),
+            "error",
+          );
+        }
+      })
+      .catch(function (err) {
+        clearInterval(progressInterval);
+        btn.textContent = "Download";
         btn.disabled = false;
-        dmShowDownloadError(data.error || 'Unknown error');
-        showToast('Download failed: ' + (data.error || 'Unknown error'), 'error');
-      }
-    })
-    .catch(function(err) {
-      clearInterval(progressInterval);
-      btn.textContent = 'Download';
-      btn.disabled = false;
-      dmShowDownloadError(err.message);
-      showToast('Download failed: ' + err.message, 'error');
-    });
+        dmShowDownloadError(err.message);
+        showToast("Download failed: " + err.message, "error");
+      });
   }
 
   function dmFetchAvailable() {
-    dmLoading.style.display = '';
-    dmList.style.display = 'none';
-    dmError.style.display = 'none';
+    dmLoading.style.display = "";
+    dmList.style.display = "none";
+    dmError.style.display = "none";
 
     fetch(getCatalogUrl(), { signal: AbortSignal.timeout(15000) })
-      .then(function(r) {
-        if (!r.ok) throw new Error('Server returned ' + r.status);
+      .then(function (r) {
+        if (!r.ok) throw new Error("Server returned " + r.status);
         return r.json();
       })
-      .then(function(catalog) {
+      .then(function (catalog) {
         dmAvailableRegions = catalog.regions || [];
         dmComputeNearYou();
         dmRenderMap();
@@ -5458,55 +7403,67 @@
         // description/tags) from a catalog match, see dmRenderInstalled.
         if (dmInstalledRegions.length > 0) dmRenderInstalled();
       })
-      .catch(function(err) {
-        dmLoading.style.display = 'none';
-        dmError.style.display = '';
-        dmError.textContent = 'Failed to fetch database catalog: ' + err.message;
+      .catch(function (err) {
+        dmLoading.style.display = "none";
+        dmError.style.display = "";
+        dmError.textContent =
+          "Failed to fetch database catalog: " + err.message;
       });
   }
 
   function dmFetchInstalled() {
-    dmInstalledLoading.style.display = '';
-    dmInstalledList.style.display = 'none';
+    dmInstalledLoading.style.display = "";
+    dmInstalledList.style.display = "none";
 
     // /databases returns one record per installed database, carrying both
     // its load state (loaded/loading/not_loaded) and its rich metadata
     // (name/country/description/tags/stats) in a single fetch -- no merge
     // needed.
     fetch(getInstalledUrl(), { signal: AbortSignal.timeout(10000) })
-      .then(function(r) { return r.ok ? r.json() : null; }).catch(function() { return null; })
-      .then(function(res) {
-      var list = (res && res.databases) || [];
-      dmInstalledRegions = list.map(function(d) {
-        return Object.assign({}, d, { loadState: d.state, coverage: d.coverage, stats: d.stats });
-      });
+      .then(function (r) {
+        return r.ok ? r.json() : null;
+      })
+      .catch(function () {
+        return null;
+      })
+      .then(function (res) {
+        var list = (res && res.databases) || [];
+        dmInstalledRegions = list.map(function (d) {
+          return Object.assign({}, d, {
+            loadState: d.state,
+            coverage: d.coverage,
+            stats: d.stats,
+          });
+        });
 
-      dmRenderInstalled();
-      // Re-render the available list with install-status info, now that it's
-      // known -- but only once the catalog itself has actually arrived, so
-      // this doesn't flash "No databases available" before dmFetchAvailable
-      // resolves.
-      if (dmAvailableRegions.length > 0) {
-        dmRenderAvailable(dmFilter.value);
-      }
-      // The map always has something to (re-)draw: on the Installed tab it
-      // only needs dmInstalledRegions (ready right now, catalog or not); on
-      // the Available tab an empty catalog just draws nothing yet, which is
-      // fine -- dmFetchAvailable's own dmRenderMap() call fills it in.
-      dmRenderMap();
-    }).catch(function() {
-      dmInstalledLoading.style.display = 'none';
-      dmInstalledList.style.display = '';
-      dmInstalledNote.style.display = 'none';
-      dmInstalledList.innerHTML = '<div style="color:#e07070;font-size:13px;padding:12px;background:rgba(200,70,70,0.1);border-radius:6px">Failed to load installed databases.</div>';
-    });
+        dmRenderInstalled();
+        // Re-render the available list with install-status info, now that it's
+        // known -- but only once the catalog itself has actually arrived, so
+        // this doesn't flash "No databases available" before dmFetchAvailable
+        // resolves.
+        if (dmAvailableRegions.length > 0) {
+          dmRenderAvailable(dmFilter.value);
+        }
+        // The map always has something to (re-)draw: on the Installed tab it
+        // only needs dmInstalledRegions (ready right now, catalog or not); on
+        // the Available tab an empty catalog just draws nothing yet, which is
+        // fine -- dmFetchAvailable's own dmRenderMap() call fills it in.
+        dmRenderMap();
+      })
+      .catch(function () {
+        dmInstalledLoading.style.display = "none";
+        dmInstalledList.style.display = "";
+        dmInstalledNote.style.display = "none";
+        dmInstalledList.innerHTML =
+          '<div style="color:#e07070;font-size:13px;padding:12px;background:rgba(200,70,70,0.1);border-radius:6px">Failed to load installed databases.</div>';
+      });
   }
 
   // Modal open/close
   // Named (and hoisted) so the first-run path in checkDbStatus() can open the
   // Data Manager directly instead of synthesising a click on the menu button.
   function dmOpen(tab) {
-    document.getElementById('data-manager-modal').style.display = '';
+    document.getElementById("data-manager-modal").style.display = "";
     if (tab) {
       // Reuse the tab button's own handler so the active-tab styling, the
       // dmActiveTab bookkeeping and the map re-render all stay in one place.
@@ -5518,42 +7475,50 @@
     dmFetchInstalled();
     // Leaflet needs a visible, sized container to init correctly — the modal
     // was just made visible above, so init/size the map on the next tick.
-    setTimeout(function() {
+    setTimeout(function () {
       dmInitMap();
       if (dmMap) dmMap.invalidateSize();
     }, 0);
   }
 
-  document.getElementById('manage-data-btn').addEventListener('click', function() {
-    dmOpen();
-  });
+  document
+    .getElementById("manage-data-btn")
+    .addEventListener("click", function () {
+      dmOpen();
+    });
 
   function dmClose() {
-    document.getElementById('data-manager-modal').style.display = 'none';
+    document.getElementById("data-manager-modal").style.display = "none";
   }
-  document.getElementById('dm-close').addEventListener('click', dmClose);
-  document.getElementById('dm-backdrop').addEventListener('click', dmClose);
+  document.getElementById("dm-close").addEventListener("click", dmClose);
+  document.getElementById("dm-backdrop").addEventListener("click", dmClose);
 
-  document.getElementById('dm-inspector-close').addEventListener('click', dmCloseInspector);
-  document.getElementById('dm-inspector-backdrop').addEventListener('click', dmCloseInspector);
+  document
+    .getElementById("dm-inspector-close")
+    .addEventListener("click", dmCloseInspector);
+  document
+    .getElementById("dm-inspector-backdrop")
+    .addEventListener("click", dmCloseInspector);
 
   // Tab switching
-  document.querySelectorAll('.dm-tab').forEach(function(tab) {
-    tab.addEventListener('click', function() {
-      document.querySelectorAll('.dm-tab').forEach(function(t) {
-        t.className = 'dm-tab';
-        t.style.borderBottomColor = 'transparent';
-        t.style.color = '#6d96c0';
-        t.style.fontWeight = '500';
+  document.querySelectorAll(".dm-tab").forEach(function (tab) {
+    tab.addEventListener("click", function () {
+      document.querySelectorAll(".dm-tab").forEach(function (t) {
+        t.className = "dm-tab";
+        t.style.borderBottomColor = "transparent";
+        t.style.color = "#6d96c0";
+        t.style.fontWeight = "500";
       });
-      this.className = 'dm-tab dm-tab-active';
-      this.style.borderBottomColor = '#3b8fd4';
-      this.style.color = '#e0edf5';
-      this.style.fontWeight = '600';
+      this.className = "dm-tab dm-tab-active";
+      this.style.borderBottomColor = "#3b8fd4";
+      this.style.color = "#e0edf5";
+      this.style.fontWeight = "600";
 
       var tabName = this.dataset.tab;
-      document.getElementById('dm-tab-available').style.display = tabName === 'available' ? '' : 'none';
-      document.getElementById('dm-tab-installed').style.display = tabName === 'installed' ? '' : 'none';
+      document.getElementById("dm-tab-available").style.display =
+        tabName === "available" ? "" : "none";
+      document.getElementById("dm-tab-installed").style.display =
+        tabName === "installed" ? "" : "none";
       // The map itself (#dm-minimap) is a shared sibling of both dm-tab-*
       // panes, not nested inside either, so it's never hidden/resized by
       // this switch -- but what it DRAWS depends on which tab is active
@@ -5567,22 +7532,30 @@
   // resize/orientation change can change its pixel size without Leaflet
   // noticing on its own; nudge it after the browser settles.
   var dmResizeTimer = null;
-  window.addEventListener('resize', function() {
+  window.addEventListener("resize", function () {
     if (!dmMap) return;
     clearTimeout(dmResizeTimer);
-    dmResizeTimer = setTimeout(function() { dmMap.invalidateSize(); }, 150);
+    dmResizeTimer = setTimeout(function () {
+      dmMap.invalidateSize();
+    }, 150);
   });
 
   // Filter
-  dmFilter.addEventListener('input', function() {
+  dmFilter.addEventListener("input", function () {
     dmRenderAvailable(this.value);
   });
 
   // Keyboard: Escape to close
-  document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape' && document.getElementById('dm-inspector-modal').style.display !== 'none') {
+  document.addEventListener("keydown", function (e) {
+    if (
+      e.key === "Escape" &&
+      document.getElementById("dm-inspector-modal").style.display !== "none"
+    ) {
       dmCloseInspector();
-    } else if (e.key === 'Escape' && document.getElementById('data-manager-modal').style.display !== 'none') {
+    } else if (
+      e.key === "Escape" &&
+      document.getElementById("data-manager-modal").style.display !== "none"
+    ) {
       dmClose();
     }
   });
@@ -5591,5 +7564,14 @@
   pushHistory();
 
   // ---- expose state for debugging / automated UI tests ----
-  window.__marine = { map, routingControl, state, router, history, undoRoute, redoRoute, setManualMode };
+  window.__marine = {
+    map,
+    routingControl,
+    state,
+    router,
+    history,
+    undoRoute,
+    redoRoute,
+    setManualMode,
+  };
 })();
