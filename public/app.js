@@ -756,8 +756,20 @@
   function isRasterChart(c) {
     return /^(tilelayer|tilejson)$/i.test(c.type) && /^(png|jpe?g|webp)$/i.test(c.format);
   }
+  // There were two of these, and the later declaration silently won for every
+  // caller through hoisting. The one that won guarded with `if (!str) return ''`,
+  // so a genuine zero — a zero distance, nothing left to go — rendered as an
+  // empty cell rather than "0". Guard on null/undefined only.
+  //
+  // Quotes are escaped too. No call site interpolates into an attribute value
+  // today, and neither previous version was safe if one ever did.
   function escapeHtml(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    if (s == null) return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
   function makeChartLayer(c) {
@@ -3782,7 +3794,10 @@
 
   function highlightText(text, query) {
     if (!query) return escapeHtml(text);
-    const re = new RegExp('(' + query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+    // Match against the escaped form of the query, since that is what the
+    // escaped text contains: a query with & < > or " never highlighted,
+    // because the haystack held &amp; while the needle still held &.
+    const re = new RegExp('(' + escapeHtml(query).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
     return escapeHtml(text).replace(re, '<mark>$1</mark>');
   }
 
@@ -4149,12 +4164,6 @@
     return result;
   }
 
-  function escapeHtml(str) {
-    if (!str) return '';
-    const div = document.createElement('div');
-    div.appendChild(document.createTextNode(str));
-    return div.innerHTML;
-  }
 
   function formatTime(totalHours) {
     if (totalHours <= 0 || !isFinite(totalHours)) return '';
