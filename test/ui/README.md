@@ -4,7 +4,7 @@ Validates the webapp against a **live SignalK server** with routing data loaded
 (default `http://localhost:3000/signalk-routeiq/`, override with `BASE_URL`).
 
 Covers: page load, settings Routing/View tabs + switch toggles, left-click
-waypoint placement, click-on-route via insertion, undo/redo (buttons and
+waypoint placement, drag-on-route via insertion, undo/redo (buttons and
 Ctrl+Z/Y), right-click context menu, manual draw mode (dashed-orange straight
 legs), clear-route confirmation, and the mobile bottom-sheet/slide-over layout
 with >=44 px tap targets. Screenshots land in `/shots`.
@@ -18,3 +18,22 @@ docker run --rm --network host -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright -e HOM
   mcr.microsoft.com/playwright:v1.54.0-noble \
   sh -c "npm init -y >/dev/null && npm i playwright@1.54.0 --no-audit --no-fund >/dev/null && node ui-e2e.mjs"
 ```
+
+## boot-guard.mjs
+
+Separate, and needs **no SignalK server** — it serves `public/` statically and
+checks the three ways startup fails on an old or offline device: a browser
+without `AbortSignal.timeout`, an uncaught exception during startup, and the
+unpkg.com map libraries being unreachable. In each case the loading overlay must
+say what went wrong instead of spinning forever.
+
+```bash
+docker run --rm -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright -e HOME=/tmp \
+  -v "$PWD/test/ui:/tests" -v "$PWD/public:/public:ro" -w /tests \
+  mcr.microsoft.com/playwright:v1.54.0-noble \
+  sh -c "npm init -y >/dev/null && npm i playwright@1.54.0 --no-audit --no-fund >/dev/null && node boot-guard.mjs"
+```
+
+Point `PUBLIC_DIR` elsewhere to test a different build of the page. Note that
+npm writes `package.json` and `node_modules` into `test/ui` as root; delete them
+afterwards if you care about a clean tree.
