@@ -57,12 +57,12 @@ async function closeSettings(p) {
 // first to guarantee it is on-screen.
 async function clickMapAt(page, lat, lng, button = 'left') {
   await page.evaluate(([la, ln]) => {
-    window.__marine.map.setView([la, ln], window.__marine.map.getZoom(), { animate: false });
+    globalThis.__marine.map.setView([la, ln], globalThis.__marine.map.getZoom(), { animate: false });
   }, [lat, lng]);
   await page.waitForTimeout(150);
   const pt = await page.evaluate(([la, ln]) => {
-    const p = window.__marine.map.latLngToContainerPoint([la, ln]);
-    const r = window.__marine.map.getContainer().getBoundingClientRect();
+    const p = globalThis.__marine.map.latLngToContainerPoint([la, ln]);
+    const r = globalThis.__marine.map.getContainer().getBoundingClientRect();
     return { x: r.left + p.x, y: r.top + p.y };
   }, [lat, lng]);
   await page.mouse.click(pt.x, pt.y, { button });
@@ -75,11 +75,11 @@ async function clickMapAt(page, lat, lng, button = 'left') {
 // firing, so dragging is the only left-button gesture that adds a via.
 async function dragRouteAt(p, lat, lng, dLat = 0.004, dLng = 0) {
   await p.evaluate(([la, ln]) => {
-    window.__marine.map.setView([la, ln], window.__marine.map.getZoom(), { animate: false });
+    globalThis.__marine.map.setView([la, ln], globalThis.__marine.map.getZoom(), { animate: false });
   }, [lat, lng]);
   await p.waitForTimeout(150);
   const pts = await p.evaluate(([la, ln, dla, dln]) => {
-    const m = window.__marine.map;
+    const m = globalThis.__marine.map;
     const r = m.getContainer().getBoundingClientRect();
     const a = m.latLngToContainerPoint([la, ln]);
     const b = m.latLngToContainerPoint([la + dla, ln + dln]);
@@ -97,19 +97,19 @@ page.on('pageerror', (e) => { failures++; console.log('  ✗ PAGE ERROR:', e.mes
 
 console.log('== 1. Load page ==');
 await page.goto(BASE, { waitUntil: 'domcontentloaded' });
-check('map + script booted', await waitState(page, () => window.__marine && window.__marine.map, 15000, 'window.__marine'));
+check('map + script booted', await waitState(page, () => globalThis.__marine && globalThis.__marine.map, 15000, 'window.__marine'));
 check('loading overlay dismissed', await waitState(page, () => {
-  const ov = document.getElementById('loading-overlay');
+  const ov = globalThis.document.getElementById('loading-overlay');
   return ov && (ov.classList.contains('hidden') || ov.style.display === 'none');
 }, 40000, 'loading overlay hidden'));
 // Let the vessel-position auto-start (if any) land, then start clean
 await page.waitForTimeout(3500);
 await page.evaluate(() => {
-  window.__marine.map.setView([51.6615, 4.15], 13);
+  globalThis.__marine.map.setView([51.6615, 4.15], 13);
   // Expand the route pane so its toolbar (clear/undo/manual) is visible —
   // it starts collapsed until the first route is rendered.
-  const pane = document.getElementById('route-pane');
-  if (pane.classList.contains('collapsed')) document.getElementById('route-pane-tab').click();
+  const pane = globalThis.document.getElementById('route-pane');
+  if (pane.classList.contains('collapsed')) globalThis.document.getElementById('route-pane-tab').click();
 });
 await page.screenshot({ path: `${SHOTS}/01-desktop-initial.png` });
 
@@ -117,59 +117,59 @@ console.log('== 2. Settings panel: tabs + switches ==');
 await page.click('#settings-hamburger-btn');
 check('hamburger opens the menu', await page.isVisible('#settings-hamburger-menu.visible'));
 await page.click('#settings-hamburger-menu .hamburger-item[data-tab="routing"]');
-check('settings panel opens', await page.evaluate(() => !document.getElementById('settings-panel').classList.contains('collapsed')));
+check('settings panel opens', await page.evaluate(() => !globalThis.document.getElementById('settings-panel').classList.contains('collapsed')));
 check('menu closes once a tab is chosen', !(await page.isVisible('#settings-hamburger-menu.visible')));
 check('routing tab shown, others hidden', await page.evaluate(() =>
-  document.getElementById('settings-tab-routing').style.display !== 'none' &&
-  document.getElementById('settings-tab-view').style.display === 'none'));
+  globalThis.document.getElementById('settings-tab-routing').style.display !== 'none' &&
+  globalThis.document.getElementById('settings-tab-view').style.display === 'none'));
 // The backend URL is not a routing parameter, so it lives under Advanced.
 await openSettings(page, 'advanced');
 check('backend URL field in advanced tab', await page.isVisible('#settings-tab-advanced #api-url'));
 await openSettings(page, 'view');
 check('view tab shows switches', await page.evaluate(() =>
-  document.getElementById('settings-tab-view').style.display !== 'none'));
+  globalThis.document.getElementById('settings-tab-view').style.display !== 'none'));
 check('graph toggle is styled switch', await page.evaluate(() => {
-  const cb = document.getElementById('graph-cb');
+  const cb = globalThis.document.getElementById('graph-cb');
   return cb.closest('.switch-row') !== null;
 }));
 // toggle one switch on/off to prove interactivity
 await page.click('#settings-tab-view .switch-row:first-child');
-check('switch toggles on', await page.evaluate(() => document.getElementById('graph-cb').checked));
+check('switch toggles on', await page.evaluate(() => globalThis.document.getElementById('graph-cb').checked));
 await page.click('#settings-tab-view .switch-row:first-child');
 await page.screenshot({ path: `${SHOTS}/02-settings-view-tab.png` });
 await closeSettings(page);
 check('close button collapses the panel', await page.evaluate(() =>
-  document.getElementById('settings-panel').classList.contains('collapsed')));
+  globalThis.document.getElementById('settings-panel').classList.contains('collapsed')));
 
 console.log('== 3. Waypoints by left click + auto route ==');
 // Clear anything (e.g. vessel auto-start) first — exercises the confirm dialog
-const hadRoute = await page.evaluate(() => !!(window.__marine.state.startLatLng || window.__marine.state.destLatLng));
+const hadRoute = await page.evaluate(() => !!(globalThis.__marine.state.startLatLng || globalThis.__marine.state.destLatLng));
 if (hadRoute) {
   await page.click('#clear-btn');
   check('confirm dialog appears', await page.isVisible('#confirm-modal .confirm-box'));
   await page.click('#confirm-modal .confirm-yes');
   check('route cleared after confirm', await page.evaluate(() =>
-    !window.__marine.state.startLatLng && !window.__marine.state.destLatLng));
+    !globalThis.__marine.state.startLatLng && !globalThis.__marine.state.destLatLng));
 }
 await clickMapAt(page, 51.6612, 4.1349);
 check('first click sets start', await page.evaluate(() => {
-  const s = window.__marine.state;
+  const s = globalThis.__marine.state;
   return !!s.startLatLng && !s.destLatLng;
 }));
 await clickMapAt(page, 51.6615, 4.1670);
-check('second click sets destination', await page.evaluate(() => !!window.__marine.state.destLatLng));
+check('second click sets destination', await page.evaluate(() => !!globalThis.__marine.state.destLatLng));
 check('route calculated', await waitState(page, () =>
-  window.__marine.state.lastGeoJson && window.__marine.state.routeSegments.length > 0, 30000, 'route result'));
-const autoSegs = await page.evaluate(() => window.__marine.state.routeSegments.length);
+  globalThis.__marine.state.lastGeoJson && globalThis.__marine.state.routeSegments.length > 0, 30000, 'route result'));
+const autoSegs = await page.evaluate(() => globalThis.__marine.state.routeSegments.length);
 check('route polylines rendered', autoSegs > 0, `segments=${autoSegs}`);
 check('no manual segments in auto route', await page.evaluate(() =>
-  window.__marine.state.routeSegments.every(s => !s.isManual)));
+  globalThis.__marine.state.routeSegments.every(s => !s.isManual)));
 await page.screenshot({ path: `${SHOTS}/03-auto-route.png` });
 
 console.log('== 4. Drag on route inserts via ==');
 // pick a point midway along the drawn route and drag it aside
 const mid = await page.evaluate(() => {
-  const segs = window.__marine.state.routeSegments;
+  const segs = globalThis.__marine.state.routeSegments;
   const seg = segs[Math.floor(segs.length / 2)];
   const lls = seg.polyline.getLatLngs();
   const ll = lls[Math.floor(lls.length / 2)];
@@ -177,29 +177,29 @@ const mid = await page.evaluate(() => {
 });
 await clickMapAt(page, mid.lat, mid.lng);
 check('clicking the route alone adds nothing', await page.evaluate(() =>
-  window.__marine.state.viaPoints.length === 0));
+  globalThis.__marine.state.viaPoints.length === 0));
 await dragRouteAt(page, mid.lat, mid.lng);
 check('via inserted by dragging route', await waitState(page, () =>
-  window.__marine.state.viaPoints.length === 1, 10000, 'via added'));
-await waitState(page, () => window.__marine.state.routeSegments.length > 0, 30000, 'route recalc');
+  globalThis.__marine.state.viaPoints.length === 1, 10000, 'via added'));
+await waitState(page, () => globalThis.__marine.state.routeSegments.length > 0, 30000, 'route recalc');
 
 console.log('== 5. Undo / redo ==');
-check('undo button enabled', await page.evaluate(() => !document.getElementById('undo-btn').disabled));
+check('undo button enabled', await page.evaluate(() => !globalThis.document.getElementById('undo-btn').disabled));
 await page.keyboard.press('Control+z');
 check('Ctrl+Z removes via', await waitState(page, () =>
-  window.__marine.state.viaPoints.length === 0 && !!window.__marine.state.destLatLng, 10000, 'undo'));
+  globalThis.__marine.state.viaPoints.length === 0 && !!globalThis.__marine.state.destLatLng, 10000, 'undo'));
 await page.keyboard.press('Control+y');
 check('Ctrl+Y restores via', await waitState(page, () =>
-  window.__marine.state.viaPoints.length === 1, 10000, 'redo'));
+  globalThis.__marine.state.viaPoints.length === 1, 10000, 'redo'));
 await page.click('#undo-btn');
 check('undo button removes via again', await waitState(page, () =>
-  window.__marine.state.viaPoints.length === 0, 10000, 'undo btn'));
+  globalThis.__marine.state.viaPoints.length === 0, 10000, 'undo btn'));
 
 console.log('== 6. Context menu ==');
 await clickMapAt(page, 51.6700, 4.1500, 'right');
 check('context menu opens on right-click', await page.isVisible('#map-context-menu.visible'));
 const items = await page.evaluate(() =>
-  [...document.querySelectorAll('#map-context-menu .ctx-item')].map(el => el.textContent.trim()));
+  [...globalThis.document.querySelectorAll('#map-context-menu .ctx-item')].map(el => el.textContent.trim()));
 check('menu has set start/dest + via + manual + clear', items.some(t => /Set start/i.test(t)) &&
   items.some(t => /Set destination/i.test(t)) && items.some(t => /Add via/i.test(t)) &&
   items.some(t => /manual point/i.test(t)) && items.some(t => /Clear route/i.test(t)), JSON.stringify(items));
@@ -209,74 +209,74 @@ check('Escape closes context menu', !(await page.isVisible('#map-context-menu.vi
 await clickMapAt(page, 51.6660, 4.1690, 'right');
 await page.click('#map-context-menu .ctx-item:has-text("Set destination here")');
 check('context menu sets destination', await waitState(page, () => {
-  const d = window.__marine.state.destLatLng;
+  const d = globalThis.__marine.state.destLatLng;
   return d && Math.abs(d.lat - 51.666) < 0.001;
 }, 10000, 'dest moved'));
-await waitState(page, () => window.__marine.state.routeSegments.length > 0, 30000, 'route recalc after dest move');
+await waitState(page, () => globalThis.__marine.state.routeSegments.length > 0, 30000, 'route recalc after dest move');
 
 console.log('== 7. Manual draw mode ==');
 await page.click('#manual-btn');
 check('manual button gets active state', await page.evaluate(() =>
-  document.getElementById('manual-btn').classList.contains('active')));
+  globalThis.document.getElementById('manual-btn').classList.contains('active')));
 check('manual banner shown', await page.isVisible('#manual-banner.visible'));
 await clickMapAt(page, 51.6760, 4.1760); // adds a manual via
 check('click adds manual via', await waitState(page, () => {
-  const s = window.__marine.state;
+  const s = globalThis.__marine.state;
   return s.viaPoints.length === 1 && s.viaModes[0] === 'manual';
 }, 10000, 'manual via'));
 check('route with manual leg calculated', await waitState(page, () => {
-  const g = window.__marine.state.lastGeoJson;
+  const g = globalThis.__marine.state.lastGeoJson;
   return g && g.features && g.features.some(f => f.properties && f.properties.mode === 'manual');
 }, 30000, 'manual feature in result'));
 // Manual legs are dashed magenta (#d946ef); orange is the warning colour.
 check('manual segment drawn dashed magenta', await page.evaluate(() => {
-  const seg = window.__marine.state.routeSegments.find(s => s.isManual);
+  const seg = globalThis.__marine.state.routeSegments.find(s => s.isManual);
   return !!seg && seg.originalStyle.color === '#d946ef' && !!seg.originalStyle.dashArray;
 }));
 check('auto segments still solid blue', await page.evaluate(() =>
-  window.__marine.state.routeSegments.some(s => !s.isManual && s.originalStyle.color === '#3b8fd4')));
+  globalThis.__marine.state.routeSegments.some(s => !s.isManual && s.originalStyle.color === '#3b8fd4')));
 await page.click('#manual-btn'); // off again
 check('manual mode toggles off', await page.evaluate(() =>
-  !document.getElementById('manual-btn').classList.contains('active')));
+  !globalThis.document.getElementById('manual-btn').classList.contains('active')));
 await page.screenshot({ path: `${SHOTS}/04-manual-route.png` });
 
 console.log('== 8. Clear route: cancel + confirm ==');
 await page.click('#clear-btn');
 check('confirm dialog shows', await page.isVisible('#confirm-modal.visible'));
 await page.click('#confirm-modal .confirm-no');
-check('cancel keeps the route', await page.evaluate(() => !!window.__marine.state.startLatLng));
+check('cancel keeps the route', await page.evaluate(() => !!globalThis.__marine.state.startLatLng));
 await page.click('#clear-btn');
 await page.click('#confirm-modal .confirm-yes');
 check('confirm clears the route', await page.evaluate(() =>
-  !window.__marine.state.startLatLng && !window.__marine.state.destLatLng &&
-  window.__marine.state.viaPoints.length === 0));
+  !globalThis.__marine.state.startLatLng && !globalThis.__marine.state.destLatLng &&
+  globalThis.__marine.state.viaPoints.length === 0));
 await page.keyboard.press('Control+z');
 check('clear is undoable', await waitState(page, () =>
-  !!window.__marine.state.startLatLng && !!window.__marine.state.destLatLng, 15000, 'undo clear'));
+  !!globalThis.__marine.state.startLatLng && !!globalThis.__marine.state.destLatLng, 15000, 'undo clear'));
 
 console.log('== 9. Mobile viewport ==');
 const mob = await browser.newPage({ viewport: { width: 420, height: 800 }, hasTouch: true });
 mob.on('pageerror', (e) => { failures++; console.log('  ✗ MOBILE PAGE ERROR:', e.message); });
 await mob.goto(BASE, { waitUntil: 'domcontentloaded' });
-await waitState(mob, () => window.__marine && window.__marine.map, 15000, 'mobile boot');
+await waitState(mob, () => globalThis.__marine && globalThis.__marine.map, 15000, 'mobile boot');
 await waitState(mob, () => {
-  const ov = document.getElementById('loading-overlay');
+  const ov = globalThis.document.getElementById('loading-overlay');
   return ov && (ov.classList.contains('hidden') || ov.style.display === 'none');
 }, 40000, 'mobile overlay');
 await mob.waitForTimeout(2500);
-await mob.evaluate(() => window.__marine.map.setView([51.6615, 4.15], 13));
+await mob.evaluate(() => globalThis.__marine.map.setView([51.6615, 4.15], 13));
 // open the route pane (tab button) and check it's a bottom sheet
 await mob.click('#route-pane-tab');
 await mob.waitForTimeout(450); // let the open transition finish
 const paneBox = await mob.evaluate(() => {
-  const r = document.getElementById('route-pane').getBoundingClientRect();
-  return { top: r.top, left: r.left, width: r.width, bottom: r.bottom, vw: window.innerWidth, vh: window.innerHeight };
+  const r = globalThis.document.getElementById('route-pane').getBoundingClientRect();
+  return { top: r.top, left: r.left, width: r.width, bottom: r.bottom, vw: globalThis.innerWidth, vh: globalThis.innerHeight };
 });
 check('route pane is a full-width bottom sheet on mobile',
   paneBox.width >= paneBox.vw - 2 && Math.abs(paneBox.bottom - paneBox.vh) < 2, JSON.stringify(paneBox));
 // tap target sizes
 const tapOk = await mob.evaluate(() => {
-  return [...document.querySelectorAll('.route-toolbar .toolbar-btn')].every(b => {
+  return [...globalThis.document.querySelectorAll('.route-toolbar .toolbar-btn')].every(b => {
     const r = b.getBoundingClientRect();
     return r.height >= 44 && r.width >= 40;
   });
@@ -286,8 +286,8 @@ await mob.click('#route-pane-tab'); // close sheet
 // settings slide-over
 await openSettings(mob, 'routing');
 const setBox = await mob.evaluate(() => {
-  const r = document.getElementById('settings-panel').getBoundingClientRect();
-  return { top: r.top, right: r.right, height: r.height, vw: window.innerWidth, vh: window.innerHeight };
+  const r = globalThis.document.getElementById('settings-panel').getBoundingClientRect();
+  return { top: r.top, right: r.right, height: r.height, vw: globalThis.innerWidth, vh: globalThis.innerHeight };
 });
 check('settings is a full-height slide-over on mobile',
   Math.abs(setBox.right - setBox.vw) < 2 && setBox.height >= setBox.vh - 2, JSON.stringify(setBox));
@@ -299,7 +299,7 @@ async function switchRowsAtLeast44(p, tab) {
   await openSettings(p, tab);
   await p.waitForTimeout(250);
   return p.evaluate((t) => {
-    const rows = [...document.querySelectorAll('#settings-tab-' + t + ' .switch-row')];
+    const rows = [...globalThis.document.querySelectorAll('#settings-tab-' + t + ' .switch-row')];
     const short = rows.filter((r) => r.getBoundingClientRect().height < 44);
     return {
       count: rows.length,
