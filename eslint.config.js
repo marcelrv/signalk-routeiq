@@ -1,6 +1,7 @@
 import eslint from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import compat from 'eslint-plugin-compat';
+import * as espree from 'espree';
 
 export default tseslint.config(
   eslint.configs.recommended,
@@ -61,6 +62,23 @@ export default tseslint.config(
     // Leaflet, loaded from vendor/ by a separate tag before this one.
     files: ['public/app.js'],
     languageOptions: {
+      // The browserslist floor above is Chrome 66 et al, and commit 112b706
+      // hand-lowered app.js from ES2020 to ES2019 syntax to match (dropping
+      // optional chaining, nullish coalescing, numeric separators and
+      // Promise.allSettled) — but nothing then enforced it, because flat
+      // config defaults ecmaVersion to "latest" when it is left unset. Pinning
+      // it here makes above-floor syntax a parse error again. This is the
+      // syntax half of the floor; compat/compat below is the API half, and the
+      // two do not overlap — compat notably does not flag AbortSignal.timeout,
+      // which is what made this app.js rewrite necessary in the first place.
+      //
+      // The parser also has to be reset to espree: tseslint.configs.recommended
+      // above installs typescript-eslint/parser for every file with no `files`
+      // filter of its own, and that parser accepts any syntax regardless of
+      // ecmaVersion — it parses the whole language rather than enforcing a
+      // target — so ecmaVersion alone silently did nothing until this override.
+      parser: espree,
+      ecmaVersion: 2019,
       globals: {
         document: 'readonly',
         window: 'readonly',
