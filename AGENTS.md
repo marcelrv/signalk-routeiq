@@ -9,6 +9,7 @@
 - **Graph editor endpoints** (`/signalk/v1/api/router/graph/nodes/*`, `/signalk/v1/api/router/graph/edges/*`) expose CRUD for the routing graph for debugging and manual corrections, but all actual routing decisions remain server-side.
 - **Vessel dimensions** (draft, beam, airDraft) are fetched from the SignalK delta stream on the server and injected into the routing engine. The frontend may display them but does not enforce constraints.
 - When modifying the frontend, ensure no routing logic leaks into it. The frontend should only: collect waypoint coordinates, POST them to the API, render the returned GeoJSON, and display warnings/metadata.
+- **Browser floor**: the webapp runs on old chart plotters, so it targets `browserslist` in `package.json` (currently Chrome/WebView 66). `npm run lint` checks `public/app.js` against it, but that check has gaps — **ask before introducing anything that raises the minimum**.
 - **Chart sources** (webapp, "chart sources" section in `public/index.html`): the Charts tab lets users pick map layers — built-in OSM/OpenSeaMap plus charts from the SK server's `resources/charts` API (fetched from the *server root*, not the plugin router mount). Raster `tilelayer` charts render via `L.tileLayer`; S-57 `pbf` charts via Leaflet.VectorGrid with a **simplified** S-52 day-palette style. That normalisation + styling is adapted from Freeboard-SK (Apache-2.0) — keep the attribution comments there and in README when touching it. Selection persists in `localStorage['routeiq-charts']`.
 
 ## Freeboard-SK Plotter Extension (plotterext/)
