@@ -37,6 +37,11 @@ export default tseslint.config(
     // Node environment here being asked to pretend a DOM exists. It ships in
     // the npm package (see "files" in package.json) and was never linted,
     // because the lint script only ever covered src/.
+    //
+    // Deliberately not covered by compat/compat, unlike public/app.js. This
+    // panel only ever runs inside Freeboard-SK, so Freeboard's baseline governs
+    // it, not the plotter floor in browserslist. Holding it to Chrome 66 would
+    // report ~25 findings for optional chaining that no real host cares about.
     files: ['plotterext/**/*.js'],
     languageOptions: {
       globals: {

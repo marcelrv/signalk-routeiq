@@ -99,6 +99,15 @@ at all. Avoid `?.`, `??` (Chrome 80) and `Promise.allSettled` (Chrome 76) in
 `public/app.js` — they were removed deliberately, and `browserslist` in
 `package.json` records the target.
 
+`npm run lint` enforces this on `public/app.js` via `eslint-plugin-compat`. Note
+that it is a net with holes rather than a guarantee: it catches `structuredClone`
+and `navigator.clipboard`, but not `AbortSignal.timeout` — the very API that
+caused this. The boot guard is still the thing that tells a user what went wrong.
+
+This floor applies to the **web app only**. `plotterext/panel.js` runs inside
+Freeboard-SK and follows Freeboard's baseline instead, so it is not held to
+Chrome 66 and is not compat-checked.
+
 ## Configuration
 
 These settings are available under Server → Plugin Config → RouteIQ:
