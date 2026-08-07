@@ -200,9 +200,64 @@ describe('crossing wait time', () => {
   });
 
   it('does not charge a lock twice when both the edges and a POI name it', () => {
-    const crossings = [lock({ distanceFromStart: 30 })];
+    // Zandkreeksluis: the edges carry lock_id and the POI index carries the
+    // same lock under its own name. Left unreconciled, the edge-derived span
+    // always sorts first in groupCrossings — its start is the earliest point
+    // in the group — so it always wins the "who owns the wait" contest,
+    // leaving "A lock" empty in the itinerary and a bare synthetic "Lock"
+    // carrying the hour instead. The total was always right; it was the LIST
+    // that was wrong, so this asserts its shape too, not just the sum.
+    const crossings: Array<Record<string, unknown>> = [lock({ distanceFromStart: 30 })];
     const segments = [{ distance: 20, lockIds: [9] }, { distance: 900 }];
     assert.strictEqual(waitSeconds(crossings, {}, segments), 3600);
+    assert.strictEqual(crossings.length, 1, 'no synthetic "Lock" was added alongside the named POI');
+    assert.strictEqual(crossings[0].name, 'A lock');
+    assert.deepStrictEqual(crossings[0].lockSpan, [0, 20], 'the POI carries the span the edges found');
+    assert.strictEqual(crossings[0].waitSeconds, 3600, 'the POI carries the wait, not a duplicate');
+  });
+
+  it('attaches a span to one POI chamber of a parallel lock, leaving the other with no wait', () => {
+    // Hansweert: Oostsluis and Westsluis are two POIs at the same chainage,
+    // both sitting inside the one span the edges found — the vessel only
+    // locks through one chamber. The span attaches to one of the two; the
+    // other groups alongside it exactly as it always has, carrying no wait
+    // and no synthetic duplicate on top of two already-real entries.
+    const crossings: Array<Record<string, unknown>> = [
+      lock({ name: 'Oostsluis', distanceFromStart: 30 }),
+      lock({ name: 'Westsluis', distanceFromStart: 30 }),
+    ];
+    const segments = [{ distance: 20, lockIds: [9] }, { distance: 900 }];
+    assert.strictEqual(waitSeconds(crossings, {}, segments), 3600);
+    assert.strictEqual(crossings.length, 2, 'both charted chambers stay in the list');
+    assert.strictEqual(
+      crossings.filter((c) => c.name === 'Lock').length,
+      0,
+      'no synthetic duplicate is added alongside the real chambers',
+    );
+    assert.strictEqual(
+      crossings.filter((c) => c.waitSeconds === 3600).length,
+      1,
+      'exactly one chamber carries the wait',
+    );
+  });
+
+  it('leaves a staircase lock\'s unclaimed span to add its own synthetic entry', () => {
+    // Two distinct lock ids sharing a head — the edge data has already said
+    // these are two lockings — and only one POI is anywhere near them. A POI
+    // can satisfy at most one span, the same way a span can claim at most one
+    // POI, so the other locking still needs its bare "Lock" placeholder and
+    // still costs its own hour.
+    const crossings: Array<Record<string, unknown>> = [lock({ distanceFromStart: 30 })];
+    const segments = [{ distance: 300, lockIds: [1] }, { distance: 300, lockIds: [2] }];
+    assert.strictEqual(waitSeconds(crossings, {}, segments), 2 * 3600);
+    const lockCrossings = crossings.filter((c) => c.type === 'lock');
+    assert.strictEqual(lockCrossings.length, 2, 'the POI plus the synthetic entry for the unclaimed span');
+    assert.strictEqual(
+      crossings.filter((c) => c.name === 'Lock').length,
+      1,
+      'exactly one span went unclaimed and needed the placeholder',
+    );
+    assert.deepStrictEqual(crossings[0].lockSpan, [0, 300], 'the POI took the span it sits inside');
   });
 
   it('still charges a bridge that is nowhere near the lock', () => {

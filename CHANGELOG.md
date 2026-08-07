@@ -2,6 +2,10 @@
 
 ## 0.1.0-alpha.6 — 2026-08-07
 
+- Fixed: a lock could appear twice in the itinerary — once under its own name
+  with no waiting time against it, and once as a nameless "Lock" carrying the
+  hour. The name and the wait now sit on the same entry. The route's estimated
+  duration was always right; it was the list that did not add up on screen.
 - Fixed: the planner could hang on "Loading Routing Data" forever on older
   tablets and chart plotters, without ever showing a connection retry. It now
   connects and retries normally on those devices too.
