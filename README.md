@@ -87,7 +87,7 @@ Android version suggests:
 Read the third column as a ceiling, not a promise. Only Android 10 and later
 still receive new WebView builds; for 5 through 9 the updates stopped, so a
 device sits at whatever version it happened to reach before then and **cannot be
-brought up to date any more**. Telling a user to update WebView only helps on
+brought up to date anymore**. Telling a user to update WebView only helps on
 Android 10+.
 
 In practice:
