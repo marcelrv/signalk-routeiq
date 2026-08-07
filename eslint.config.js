@@ -1,5 +1,6 @@
 import eslint from '@eslint/js';
 import tseslint from 'typescript-eslint';
+import compat from 'eslint-plugin-compat';
 
 export default tseslint.config(
   eslint.configs.recommended,
@@ -85,7 +86,13 @@ export default tseslint.config(
         L: 'readonly',
       },
     },
+    plugins: { compat },
     rules: {
+      // Enforce the browser floor in package.json's browserslist instead of
+      // leaving it to review. This is the rule that would have caught
+      // AbortSignal.timeout() — a valid global that simply does not exist
+      // before Chrome 103 — which shipped and froze the app on older tablets.
+      'compat/compat': 'error',
       // Every one of these is `try { localStorage… } catch {}`. Storage throws
       // in private mode and when it is disabled, and there is nothing useful to
       // do about it, so the empty block is the intent rather than an omission.
