@@ -2781,7 +2781,16 @@ export class RoutingEngine {
 
     const schedule: Array<{ atMetres: number; seconds: number }> = [];
     for (const group of RoutingEngine.groupCrossings(crossings)) {
-      const at = Math.min(...group.map((c) => c.distanceFromStart ?? 0));
+      // Where the group is first met, and so where its wait is spent. A lock
+      // whose extent came from the edges begins at its span, not at the point
+      // of interest marking it: you wait at the gate, not part-way into the
+      // chamber. annotateSegmentTimes only spends a wait at a segment boundary
+      // at or past this point, so taking it from the POI charges the hour
+      // somewhere inside the lock — or, where the segments are coarse, not
+      // until the end of the route.
+      const at = Math.min(
+        ...group.map((c) => c.lockSpan?.[0] ?? c.distanceFromStart ?? 0),
+      );
       // A lock complex is a lock. Whichever chamber you take you lock through
       // once, and the spans carried over its heads open with it — so the
       // bridges in this group cost nothing on top, however the lock was found.
