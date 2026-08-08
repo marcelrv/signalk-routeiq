@@ -968,15 +968,15 @@ export class ApiHandler {
       const cfg = this.routingEngine!.config;
       const effectiveDraft =
         Math.round(
-          ((vessel.draft || 2.0) + (cfg.safetyMarginDraft || 0.3)) * 10,
+          ((vessel.draft ?? 2.0) + (cfg.safetyMarginDraft ?? 0.3)) * 10,
         ) / 10;
       const effectiveBeam =
         Math.round(
-          ((vessel.beam || 4.0) + (cfg.safetyMarginBeam || 2.0)) * 10,
+          ((vessel.beam ?? 4.0) + (cfg.safetyMarginBeam ?? 2.0)) * 10,
         ) / 10;
       const effectiveAirDraft =
         Math.round(
-          ((vessel.airDraft || 0) + (cfg.safetyMarginAirDraft || 1.5)) * 10,
+          ((vessel.airDraft ?? 0) + (cfg.safetyMarginAirDraft ?? 1.5)) * 10,
         ) / 10;
       res.json({ ...vessel, effectiveDraft, effectiveBeam, effectiveAirDraft });
     } catch (error) {
