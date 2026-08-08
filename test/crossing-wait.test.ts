@@ -209,11 +209,18 @@ describe('crossing wait time', () => {
     // that was wrong, so this asserts its shape too, not just the sum.
     const crossings: Array<Record<string, unknown>> = [lock({ distanceFromStart: 30 })];
     const segments = [{ distance: 20, lockIds: [9] }, { distance: 900 }];
-    assert.strictEqual(waitSeconds(crossings, {}, segments), 3600);
+    const sched = schedule(crossings, {}, segments);
+    assert.strictEqual(sched.reduce((t, w) => t + w.seconds, 0), 3600);
     assert.strictEqual(crossings.length, 1, 'no synthetic "Lock" was added alongside the named POI');
     assert.strictEqual(crossings[0].name, 'A lock');
     assert.deepStrictEqual(crossings[0].lockSpan, [0, 20], 'the POI carries the span the edges found');
     assert.strictEqual(crossings[0].waitSeconds, 3600, 'the POI carries the wait, not a duplicate');
+    // And the hour is spent at the lock's gate — where the edges say the lock
+    // begins — not at the POI 30 m inside it. annotateSegmentTimes spends a
+    // wait at the first segment boundary at or past this figure, so a position
+    // taken from the POI would push it beyond the 20 m segment and, with only
+    // these two coarse segments, charge the lock at the end of the route.
+    assert.deepStrictEqual(sched, [{ atMetres: 0, seconds: 3600 }]);
   });
 
   it('attaches a span to one POI chamber of a parallel lock, leaving the other with no wait', () => {
