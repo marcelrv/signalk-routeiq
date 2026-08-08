@@ -465,8 +465,12 @@ export class RoutingEngine {
     let bestResult: RouteResult | null = null;
     let bestCost = Infinity;
     let bestViolatingMeters = Infinity;
-    let previousAttempt: { violatingMeters: number; cost: number } | null =
-      null;
+    let bestDistance = 0;
+    let previousAttempt: {
+      violatingMeters: number;
+      cost: number;
+      distance: number;
+    } | null = null;
     let retriedForPenalty = false;
 
     while (currentMargin <= maxMargin) {
@@ -493,11 +497,14 @@ export class RoutingEngine {
             cost,
             bestViolatingMeters,
             bestCost,
+            distance,
+            bestDistance,
           )
         ) {
           bestResult = result;
           bestCost = cost;
           bestViolatingMeters = violatingMeters;
+          bestDistance = distance;
         }
 
         const penalized = violatingMeters > 0;
@@ -508,6 +515,8 @@ export class RoutingEngine {
             cost,
             previousAttempt.violatingMeters,
             previousAttempt.cost,
+            distance,
+            previousAttempt.distance,
           );
 
         if (!penalized) {
@@ -525,7 +534,7 @@ export class RoutingEngine {
           `Route search found a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`,
         );
         retriedForPenalty = true;
-        previousAttempt = { violatingMeters, cost };
+        previousAttempt = { violatingMeters, cost, distance };
         currentMargin = newMargin;
       } catch {
         // Expand bounding box and retry
@@ -1064,8 +1073,12 @@ export class RoutingEngine {
     let bestResult: RouteResult | null = null;
     let bestCost = Infinity;
     let bestViolatingMeters = Infinity;
-    let previousAttempt: { violatingMeters: number; cost: number } | null =
-      null;
+    let bestDistance = 0;
+    let previousAttempt: {
+      violatingMeters: number;
+      cost: number;
+      distance: number;
+    } | null = null;
     let retriedForPenalty = false;
 
     while (currentMargin <= segmentMaxMargin) {
@@ -1091,11 +1104,14 @@ export class RoutingEngine {
             cost,
             bestViolatingMeters,
             bestCost,
+            distance,
+            bestDistance,
           )
         ) {
           bestResult = result;
           bestCost = cost;
           bestViolatingMeters = violatingMeters;
+          bestDistance = distance;
         }
 
         const penalized = violatingMeters > 0;
@@ -1106,6 +1122,8 @@ export class RoutingEngine {
             cost,
             previousAttempt.violatingMeters,
             previousAttempt.cost,
+            distance,
+            previousAttempt.distance,
           );
 
         if (!penalized) break;
@@ -1122,7 +1140,7 @@ export class RoutingEngine {
           `Route search for ${label} found a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`,
         );
         retriedForPenalty = true;
-        previousAttempt = { violatingMeters, cost };
+        previousAttempt = { violatingMeters, cost, distance };
         currentMargin = newMargin;
       } catch {
         bbox = undefined;
@@ -1948,7 +1966,7 @@ export class RoutingEngine {
       throw new Error("Could not find routing nodes near end point");
     }
 
-    const minDepth = (dims.draft || 2.0) + this.config.safetyMarginDraft;
+    const minDepth = (dims.draft ?? 2.0) + this.config.safetyMarginDraft;
 
     const improveNode = async (
       node: number,
@@ -2435,9 +2453,9 @@ export class RoutingEngine {
   ): number {
     const segments = result.features[0]?.properties.segments;
     if (!segments) return 0;
-    const minDepth = (dims.draft || 2.0) + this.config.safetyMarginDraft;
-    const minAirDraft = (dims.airDraft || 0) + this.config.safetyMarginAirDraft;
-    const minBeam = (dims.beam || 4.0) + this.config.safetyMarginBeam;
+    const minDepth = (dims.draft ?? 2.0) + this.config.safetyMarginDraft;
+    const minAirDraft = (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft;
+    const minBeam = (dims.beam ?? 4.0) + this.config.safetyMarginBeam;
 
     let meters = 0;
     for (const seg of segments) {
@@ -2457,22 +2475,42 @@ export class RoutingEngine {
 
   /**
    * Ordering used to pick the "best" result across bbox-expansion retries
-   * (see pathViolationMeters): fewer constraint-violating meters always
-   * wins first, regardless of cost — the whole point of retrying with a
-   * wider box is to escape one that's hiding a clean route, so a clean
-   * result must beat a penalized one even if the penalized one happens to
-   * be cheaper on paper. Cost only breaks ties between two results at the
-   * same violation level (typically two clean routes, or two routes
-   * forced through the same amount of violation).
+   * (see pathViolationMeters): fewer constraint-violating meters wins first,
+   * regardless of cost — the whole point of retrying with a wider box is to
+   * escape one that's hiding a clean route, so a clean result must beat a
+   * penalized one even if the penalized one happens to be cheaper on paper.
+   * Cost only breaks ties between two results at the same violation level.
+   *
+   * That preference is now BOUNDED by `maxPenaltyDetourRatio`: clearing a
+   * violation is worth a detour, but not an unbounded one. Unbounded, this
+   * ordering answered an 18km cross-seam request with a 242km fully-compliant
+   * route in preference to a 36km one carrying 3.6km of "shallow" water — much
+   * of which is a coarse DEPARE band (DRVAL1=0, DRVAL2=18.2m) rather than a
+   * survey. Past the ratio the shorter route wins and its violations surface as
+   * warnings, which the helm can act on; a 6.7x detour cannot be acted on.
    */
   private isBetterCandidate(
     violatingMetersA: number,
     costA: number,
     violatingMetersB: number,
     costB: number,
+    distanceA = 0,
+    distanceB = 0,
   ): boolean {
-    if (violatingMetersA !== violatingMetersB)
-      return violatingMetersA < violatingMetersB;
+    if (violatingMetersA !== violatingMetersB) {
+      const aIsCleaner = violatingMetersA < violatingMetersB;
+      const cleanerDistance = aIsCleaner ? distanceA : distanceB;
+      const dirtierDistance = aIsCleaner ? distanceB : distanceA;
+      const ratio = this.config.maxPenaltyDetourRatio ?? 0;
+      if (
+        ratio > 0 &&
+        dirtierDistance > 0 &&
+        cleanerDistance > dirtierDistance * ratio
+      ) {
+        return !aIsCleaner;
+      }
+      return aIsCleaner;
+    }
     return costA < costB;
   }
 
@@ -2519,13 +2557,13 @@ export class RoutingEngine {
       typeof edge.max_air_draft === "number" &&
       edge.max_air_draft >= 0 &&
       edge.max_air_draft <
-        (dims.airDraft || 0) + this.config.safetyMarginAirDraft
+        (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft
     ) {
       penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
       if (skipReasons) skipReasons.airDraft++;
     }
 
-    const minDepth = (dims.draft || 2.0) + this.config.safetyMarginDraft;
+    const minDepth = (dims.draft ?? 2.0) + this.config.safetyMarginDraft;
     if (
       typeof edge.min_depth === "number" &&
       edge.min_depth >= 0 &&
@@ -2537,7 +2575,7 @@ export class RoutingEngine {
     if (
       typeof edge.min_width === "number" &&
       edge.min_width >= 0 &&
-      edge.min_width < (dims.beam || 4.0) + this.config.safetyMarginBeam
+      edge.min_width < (dims.beam ?? 4.0) + this.config.safetyMarginBeam
     ) {
       penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
       if (skipReasons) skipReasons.beam++;
@@ -3413,8 +3451,8 @@ export class RoutingEngine {
     if (!result.features[0] || !result.features[0].properties.segments) return;
     const coords = result.features[0].geometry.coordinates;
     const segments = result.features[0].properties.segments!;
-    const minDepth = (dims.draft || 2.0) + this.config.safetyMarginDraft;
-    const airDraft = (dims.airDraft || 0) + this.config.safetyMarginAirDraft;
+    const minDepth = (dims.draft ?? 2.0) + this.config.safetyMarginDraft;
+    const airDraft = (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft;
 
     let totalViolationSegments = 0;
     let totalViolationDist = 0;

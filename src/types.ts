@@ -247,6 +247,12 @@ export interface PluginConfig {
   wrongWayPenalty: number;
   routingBBoxMargin: number; // degrees, default 1.0 (~111km) — internal search tuning, not in the settings schema
   routingBBoxMaxExtent: number; // degrees, default 10.0 — internal, not in the settings schema
+  // How much longer a fully-compliant route may be before the search stops
+  // preferring it over a shorter one that carries constraint violations. 0
+  // disables the bound (the old behaviour: fewer violating meters always won,
+  // which answered an 18km request with a 242km route). Violations on the kept
+  // route are still reported as warnings.
+  maxPenaltyDetourRatio: number;
   lineOfSightSampleInterval: number; // meters, default 500
   lineOfSightSearchRadius: number; // meters, default 800
   averageSpeedKnots: number; // knots, default 6.0
@@ -306,6 +312,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   wrongWayPenalty: 5.0,
   routingBBoxMargin: 1.0,
   routingBBoxMaxExtent: 10.0,
+  maxPenaltyDetourRatio: 3.0,
   lineOfSightSampleInterval: 500,
   lineOfSightSearchRadius: 0,
   averageSpeedKnots: 6.0,
