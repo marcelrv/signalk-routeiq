@@ -38,7 +38,12 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
+      # persist-credentials defaults to true, which leaves GITHUB_TOKEN in the
+      # checkout's git config for every later step. Both jobs here install npm
+      # packages and then run them; neither needs to talk back to git.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # Not engines' 22.5.0. npm 10.8.2, which ships with that exact release,
       # dies with "Exit handler never called!" while installing the current dev
@@ -77,6 +82,8 @@ jobs:
       PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # npm init -y first, deliberately: test/ui has no package.json of its
       # own (see README.md), and without one to anchor it `npm install` walks
