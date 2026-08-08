@@ -14,11 +14,27 @@ repos' file lists — and open editor tabs — aren't identically named; now
 
 ## Committed next milestone — US East Coast multi-region routing (Round 25)
 
-> **STITCHING MECHANISM: see [`signalk-router-pipeline/STITCHING_DESIGN.md`](../signalk-router-pipeline/STITCHING_DESIGN.md)**
-> (design note, for review). Two experiments (2026-07-20) ruled out
-> build-time seam-ID coincidence; the recommended mechanism is a routeiq
-> **runtime proximity matcher** (overlap band + closest-node-first
-> connectors), paused pending user review before implementation.
+> **STITCHING MECHANISM — SETTLED, see [`signalk-router-pipeline/STITCHING_DESIGN.md`](../signalk-router-pipeline/STITCHING_DESIGN.md)
+> §8–§10.8.** The old framing here (2026-07-20: "two experiments ruled out
+> build-time coincidence; the recommended mechanism is a routeiq **runtime
+> proximity matcher**, paused pending review") is **superseded and wrong** —
+> keep reading only for history. What the 2026-07-30/08-08 measurements showed:
+>
+> - **Build-time coincidence works**, just not the way Chunk 1 measured it.
+>   `clip_pilot_data.py` cuts adjacent files on the same meridian, so both get
+>   identical boundary vertices; connectivity needs **one** shared node per water
+>   body, not a high coincidence fraction. A narrow channel self-stitches on a
+>   single node.
+> - **The shared seam registry is load-bearing in sparse open water** — the case
+>   a state-boundary meridian hits offshore. Without it: 0 shared ids, 0%
+>   far-side reachability. With it: 86.3% reachable. It shipped
+>   (`signalk-router-pipeline` `0cd3467` + fixes), and requires
+>   `--overlap-deg ≥ stitch_band_m`.
+> - **No runtime proximity matcher was ever needed** and none was built. The
+>   committed node-ID merge does the whole job.
+> - All 9 US East Coast regions are rebuilt against one registry; all six
+>   geographically adjacent pairs are crossable and return genuinely routed
+>   cross-state routes.
 >
 > **STATUS CORRECTION (2026-07-20, verified against committed code, not
 > docs):** Phase 4a / WS2 **runtime core is already implemented and
@@ -31,15 +47,35 @@ repos' file lists — and open editor tabs — aren't identically named; now
 > `false→true` in the working tree (uncommitted), because loading ~527MB of
 > US East Coast files unconditionally already hit a V8 heap OOM. **The WS2
 > task list below was written before this was known and reads as if
-> unstarted — treat it as reference/spec, not a to-do.** Genuinely
-> remaining work: (1) **pipeline** build-phase overlap + seam-node
-> coincidence (`signalk-router-pipeline`, see its NEXT_PHASES "Next
-> milestone" — the real stitching work); (2) a routeiq **coincident-node
-> merge + edge-dedupe test** (the merge path exists but is untested for
-> shared IDs and has no explicit identical-edge dedupe); (3) optional
-> **position-triggered** auto-load/evict + `loadRadiusNm`/`unloadAfterIdleNm`/
-> `maxLoadedRegions` (not implemented; on-demand route loading already
-> covers correctness).
+> unstarted — treat it as reference/spec, not a to-do.** Remaining work,
+> updated 2026-08-08: (1) **pipeline** seam stitching — **DONE**, shipped and
+> measured (see STITCHING_DESIGN §8–§10.8); (2) coincident-node merge —
+> **the union half is DONE and verified, the dedupe half is still open**, see
+> below; (3) optional **position-triggered** auto-load/evict +
+> `loadRadiusNm`/`unloadAfterIdleNm`/`maxLoadedRegions` (not implemented;
+> on-demand route loading already covers correctness).
+
+### Coincident-node merge: union verified, de-duplication still missing
+
+Measured across both the Zeeland fixtures and all 12 real US East Coast region
+pairs (`signalk-router-pipeline/local_only/local_scripts/round25_seamroute/`
+— `run_seam_route_test.mjs`, `verify_region_seams.mjs`):
+
+- **Union is correct.** For every node id present in both files, the merged
+  in-memory adjacency contains both files' edges: `missing = 0` and
+  `syntheticExtra = 0` on every pair. This half of the old to-do is closed.
+- **No de-duplication.** Where both files hold the *same* edge out of a shared
+  node, the merged adjacency carries it twice. Measured duplicate adjacency
+  entries: **CT↔RI 24,506**, DE↔NJ 1,820, NJ↔NY 67, DE↔MD 26, CT↔NJ 18, and
+  62 of 211 shared nodes on the Zeeland pair (118 entries). Not a correctness
+  bug — A* just re-evaluates a neighbour it has already seen — but it inflates
+  the adjacency of exactly the nodes every cross-region route must traverse,
+  and CT↔RI shows it is not a rounding-error quantity.
+- **Fix shape:** dedupe on `(source, target)` when splicing a second
+  contributor's edges into an existing node's adjacency, keeping the first
+  contributor's attributes (or the more constrained ones — worth deciding
+  explicitly rather than by insertion order). A regression test wants a fixture
+  where both files hold one identical edge plus one edge unique to each side.
 
 ### Dynamic-loading UX follow-ups (surfaced 2026-07-21, live testing)
 
@@ -1093,3 +1129,45 @@ finalize flag (leg call passes false; via pipeline finalizes once on
 the merged result; leg fallback now also receives the tidal env).
 Regression test test/via-disconnected-leg.test.ts reproduces the exact
 error pre-fix; 46/46 post-fix. Deployed.
+
+## 2026-08-08 — Bounded penalty retry, falsy-zero vessel dimensions (`285bb3a`)
+
+Found while investigating a cross-database route that returned **242,299 m for
+an 18,406 m straight line with no warnings at all**. The merged graph held a
+clean 27.4 km path the whole time — this was never a stitching problem.
+
+**1. `isBetterCandidate` traded distance for compliance without bound.** It
+ordered candidates strictly by violating metres, so a fully-compliant route beat
+a shorter one carrying any violation, at any length. For that request it
+preferred a 242 km clean route over a 36 km one with 3.6 km of "shallow" water
+— most of which was a coarse DEPARE band (`DRVAL1=0, DRVAL2=18.2`: 0 is the
+band floor, not a survey) rather than real shoal. New config
+**`maxPenaltyDetourRatio`** (default **3.0**) bounds it: past the ratio the
+shorter route wins and its violations surface as `via_constrained` warnings the
+helm can act on. Set it to 0 for the old unbounded behaviour. Result on that
+request: 242,299 m → 41,643 m, with the 2,980 m of shallow water now *reported*
+instead of silently avoided. Paired with the pipeline's depth-band fix
+(`signalk-router-pipeline` `5931458`): **25,589 m, ×1.39, zero violating metres.**
+
+**2. `(dims.draft || 2.0)` treated a draft of 0 as 2.0 m.** Nine call sites in
+`routing.ts`, including `pathViolationMeters`; same falsy-zero on beam
+(`|| 4.0`), and in `api.ts` an explicitly configured safety margin of 0 was
+overridden by the default. All switched to `??`. Consequence worth knowing: every
+"unconstrained vessel" measurement in STITCHING_DESIGN §8–§10 was really taken
+at 2.3 m required depth. Connectivity conclusions are unaffected (graph
+reachability never consults vessel dimensions); the route-parity ratios there
+carry that implicit constraint.
+
+131/131 tests pass.
+
+### Related finding, not yet addressed: an unstitched seam fails silently
+
+When no graph path crosses a seam, `calculateRoute` does not fail — it projects
+the start onto the nearest reachable waterway, which may be **on the far side of
+the seam**, and joins it with a straight line: measured legs of **3,485–4,597 m**
+carrying `minDepth: -1` (so constraint checks are bypassed), flagged only as
+`start_connecting`. One such route came back *shorter* than the single-file
+baseline (×0.89) by cutting the corner. Route distance alone is therefore a
+useless stitching metric — graph reachability is the instrument. routeiq should
+distinguish "routed across a seam" from "teleported over a gap"; a multi-km
+connector leg is a data-coverage failure, not a connection.
