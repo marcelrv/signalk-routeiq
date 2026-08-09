@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Added: an autoload/disabled switch for each installed routing database, in
+  Manage Routing Data. Disabling keeps the file on the device but stops the
+  plugin loading it, so you can swap which regions are in play without
+  deleting and re-downloading hundreds of megabytes. Switching takes effect
+  immediately — no server restart — and a disabled region is dropped from the
+  routing graph straight away rather than lingering until the next reboot.
+  Databases you had already disabled by hand, by renaming them to
+  `<name>.sqlite.disabled`, now show up in the list with a Disabled badge
+  instead of vanishing from it.
+
 ## 0.1.0-alpha.6 — 2026-08-07
 
 - Fixed: a lock could appear twice in the itinerary — once under its own name

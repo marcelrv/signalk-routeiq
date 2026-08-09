@@ -919,6 +919,20 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   background: rgba(148,163,184,0.15); color: #94a3b8;
 }
 .dm-loadstate-loading { background: rgba(245,158,11,0.15); color: #f0b74a; }
+.dm-loadstate-disabled { background: rgba(224,112,112,0.15); color: #e07070; }
+/* Autoload/disabled switch on an installed card. Sits beside .dm-btn-delete
+   in .dm-region-actions and matches its quiet, icon-button weight. */
+.dm-btn-toggle {
+  background: none; border: 1px solid rgba(79,148,212,0.35); border-radius: 6px;
+  padding: 3px 9px; color: #9bb8da; cursor: pointer; font-size: 11px;
+  font-weight: 600; line-height: 1.5; white-space: nowrap;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.dm-btn-toggle:hover { background: rgba(79,148,212,0.12); color: #e0edf5; }
+.dm-btn-toggle:disabled { color: #444; border-color: #333; cursor: default; background: none; }
+/* A switched-off region stays legible but visibly inactive. */
+.dm-installed-card.dm-card-disabled { opacity: 0.55; }
+.dm-installed-card.dm-card-disabled:hover { opacity: 0.8; }
 #dm-map .leaflet-tooltip.dm-tooltip {
   background: #0f1f30; border: 1px solid rgba(79,148,212,0.4); color: #e0edf5;
   font-size: 11px; padding: 5px 8px; border-radius: 6px;

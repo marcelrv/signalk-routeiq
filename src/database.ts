@@ -30,6 +30,36 @@ export const TRAFFIC_TWO_WAY = 0;
 export const TRAFFIC_ONE_WAY_FWD = 1;
 export const TRAFFIC_ONE_WAY_REV = 2;
 
+/** Suffix marking an installed database the user has switched off. The file
+ *  stays on disk and stays listed by the Data Manager, but nothing ever loads
+ *  it into the graph. Renaming (rather than a config list) keeps the state
+ *  self-evident on disk and matches the convention that predates the UI
+ *  switch — data/ already carried hand-renamed *.sqlite.disabled files. */
+export const DISABLED_SUFFIX = ".disabled";
+
+/** True for `<name>.sqlite.disabled`. */
+export function isDisabledFile(filename: string): boolean {
+  return filename.endsWith(".sqlite" + DISABLED_SUFFIX);
+}
+
+/** The plain `<name>.sqlite` identity of a file in either state. Every
+ *  coverageIndex key, API filename, and catalog match uses this form, so
+ *  toggling a database never changes how it is referred to. */
+export function baseFilename(filename: string): string {
+  return isDisabledFile(filename)
+    ? filename.slice(0, -DISABLED_SUFFIX.length)
+    : filename;
+}
+
+/** Both scan sites (init, reloadMetadata) accept a database file in either
+ *  state; user-edits.sqlite is the overlay store, never a routing region. */
+function isRoutingDatabaseFile(filename: string): boolean {
+  return (
+    (filename.endsWith(".sqlite") || isDisabledFile(filename)) &&
+    baseFilename(filename) !== "user-edits.sqlite"
+  );
+}
+
 // Edge kind: 0=centerline (default), 1=navmesh boundary (fallback/funnel-augmented),
 // 2=lane, 3=macro (spec §2.5)
 export const EDGE_KIND_CENTERLINE = 0;
@@ -118,9 +148,15 @@ export interface DatabaseCoverageEntry {
     max_lon: number;
   } | null;
   boundary: GeoJSON.Polygon | GeoJSON.MultiPolygon | null;
-  state: "not_loaded" | "loading" | "loaded";
-  /** Worker-side handle index once loaded; null while not_loaded. */
+  /** 'disabled' is a user-set on-disk state (the .disabled suffix), not a
+   *  transient one: nothing ever promotes a disabled entry to 'loading'
+   *  without an explicit enable, so every region-selection path must skip it. */
+  state: "not_loaded" | "loading" | "loaded" | "disabled";
+  /** Worker-side handle index once loaded; null while not_loaded/disabled. */
   dbIndex: number | null;
+  /** True while the on-disk file carries the .disabled suffix. Kept alongside
+   *  `state` because `path` must point at the real file for peekMetadata. */
+  disabled: boolean;
   meta: {
     id: number;
     country: string;
@@ -231,6 +267,12 @@ export class RoutingDatabase {
    *  respectively) derives its answer from this map alone, so they can
    *  never drift out of sync with each other. */
   private coverageIndex: Map<string, DatabaseCoverageEntry> = new Map();
+
+  /** Peeked *.sqlite.disabled entries, kept aside in non-dynamic mode so the
+   *  bulk load's coverageIndex rebuild can re-merge them — the bulk path only
+   *  ever knows about files it actually opened. Empty in dynamic mode, where
+   *  the single peekMetadata pass already covers both states. */
+  private disabledEntries: DatabaseCoverageEntry[] = [];
 
   /** dbIndex -> node ids that database contributed to `nodes`, so
    *  unloadDatabaseGraph knows which ids to consider removing. Only
@@ -349,21 +391,26 @@ export class RoutingDatabase {
   }
 
   async init(): Promise<void> {
-    let files: string[];
+    let allFiles: string[];
     try {
-      files = readdirSync(this.dbDir).filter(
-        (f) => f.endsWith(".sqlite") && f !== "user-edits.sqlite",
-      );
+      allFiles = readdirSync(this.dbDir).filter(isRoutingDatabaseFile);
     } catch (err: any) {
       throw new Error(
         `Cannot read routing data directory "${this.dbDir}": ${err.message}`,
       );
     }
-    if (files.length === 0) {
+    // Only a directory with no routing database at all is fatal. A directory
+    // holding nothing but *.sqlite.disabled initialises fine with an empty
+    // graph: GET /databases answers 503 while `db` is null, so throwing here
+    // would leave the Data Manager unable to list — and therefore unable to
+    // re-enable — the very files the user just switched off.
+    if (allFiles.length === 0) {
       throw new Error(
         `No .sqlite files found in routing data directory: ${this.dbDir}`,
       );
     }
+    const files = allFiles.filter((f) => !isDisabledFile(f));
+    const disabledFiles = allFiles.filter(isDisabledFile);
 
     const workerPath = join(
       dirname(fileURLToPath(import.meta.url)),
@@ -430,6 +477,7 @@ export class RoutingDatabase {
     });
 
     const dbPaths = files.map((f) => join(this.dbDir, f));
+    const disabledPaths = disabledFiles.map((f) => join(this.dbDir, f));
 
     if (!this.dynamicLoading) {
       // Legacy path (dynamicLoading explicitly set to false): open every
@@ -447,6 +495,10 @@ export class RoutingDatabase {
         filename: filenames[i] || p.split("/").pop() || "",
         path: p,
       }));
+      // Bulk mode never opens disabled files, but the Data Manager still has
+      // to list them (and offer the switch back on), so peek them separately
+      // and keep the result for rebuildCoverageIndexAfterBulkLoad to merge.
+      this.disabledEntries = await this.peekDisabled(disabledPaths);
     } else {
       // Dynamic loading: peek every file's metadata/coverage/schema-flags
       // without opening a lasting handle for any of them (§4a task 1). Real
@@ -468,22 +520,34 @@ export class RoutingDatabase {
           hasEdgeKind: boolean;
         };
         stats: DatabaseCoverageEntry["stats"];
-      }> = await this.sendMessage("peekMetadata", { dbPaths });
+      }> = await this.sendMessage("peekMetadata", {
+        // Disabled files are peeked too — a short-lived read-only handle, so
+        // their cards keep name/coverage/stats and the coverage map can still
+        // draw them. Only their `state` keeps them out of the graph.
+        dbPaths: [...dbPaths, ...disabledPaths],
+      });
 
       this.coverageIndex.clear();
       for (const p of peeked) {
-        this.hasCrossesLand = this.hasCrossesLand || p.flags.hasCrossesLand;
-        this.hasCrossesObstacle =
-          this.hasCrossesObstacle || p.flags.hasCrossesObstacle;
-        this.hasNodeDepth = this.hasNodeDepth || p.flags.hasNodeDepth;
-        this.hasRegionId = this.hasRegionId || p.flags.hasRegionId;
-        this.coverageIndex.set(p.filename, {
-          filename: p.filename,
+        const disabled = isDisabledFile(p.filename);
+        // A disabled file's schema flags must not widen the engine's
+        // capabilities — nothing from it ever enters the graph.
+        if (!disabled) {
+          this.hasCrossesLand = this.hasCrossesLand || p.flags.hasCrossesLand;
+          this.hasCrossesObstacle =
+            this.hasCrossesObstacle || p.flags.hasCrossesObstacle;
+          this.hasNodeDepth = this.hasNodeDepth || p.flags.hasNodeDepth;
+          this.hasRegionId = this.hasRegionId || p.flags.hasRegionId;
+        }
+        const key = baseFilename(p.filename);
+        this.coverageIndex.set(key, {
+          filename: key,
           path: p.path,
           bbox: p.coverage.boundingBox ?? null,
           boundary: p.coverage.boundaryGeometry ?? null,
-          state: "not_loaded",
+          state: disabled ? "disabled" : "not_loaded",
           dbIndex: null,
+          disabled,
           meta: p.meta,
           stats: p.stats ?? null,
         });
@@ -541,7 +605,7 @@ export class RoutingDatabase {
   async getDatabaseCatalog(): Promise<
     Array<{
       filename: string;
-      state: "not_loaded" | "loading" | "loaded";
+      state: DatabaseCoverageEntry["state"];
       coverage: DatabaseCoverageEntry["bbox"];
       dbIndex: number | null;
       stats: DatabaseCoverageEntry["stats"];
@@ -565,7 +629,7 @@ export class RoutingDatabase {
   > {
     const result: Array<{
       filename: string;
-      state: "not_loaded" | "loading" | "loaded";
+      state: DatabaseCoverageEntry["state"];
       coverage: DatabaseCoverageEntry["bbox"];
       dbIndex: number | null;
       stats: DatabaseCoverageEntry["stats"];
@@ -619,12 +683,61 @@ export class RoutingDatabase {
     loaded: boolean;
     filenames: string[];
     available: number;
+    disabled: number;
   } {
+    let disabled = 0;
+    for (const entry of this.coverageIndex.values()) {
+      if (entry.state === "disabled") disabled++;
+    }
     return {
       loaded: this.graphLoaded,
       filenames: this.loadedFilenames(),
-      available: this.coverageIndex.size,
+      // `available` stays the count of databases that can actually route.
+      // The webapp's first-run check keys off it, so counting disabled files
+      // here would make an all-disabled install look like a fresh one.
+      available: this.coverageIndex.size - disabled,
+      disabled,
     };
+  }
+
+  /** Peek *.sqlite.disabled files into ready-made coverage entries. Shared by
+   *  init()'s non-dynamic branch and reloadMetadata(); returns [] for an empty
+   *  list without troubling the worker. */
+  private async peekDisabled(
+    disabledPaths: string[],
+  ): Promise<DatabaseCoverageEntry[]> {
+    if (disabledPaths.length === 0) return [];
+    try {
+      const peeked: Array<{
+        path: string;
+        filename: string;
+        coverage: {
+          boundingBox: DatabaseCoverageEntry["bbox"];
+          boundaryGeometry: DatabaseCoverageEntry["boundary"];
+        };
+        meta: DatabaseCoverageEntry["meta"];
+        stats: DatabaseCoverageEntry["stats"];
+      }> = await this.sendMessage("peekMetadata", { dbPaths: disabledPaths });
+      return peeked.map((p) => {
+        const key = baseFilename(p.filename);
+        return {
+          filename: key,
+          path: p.path,
+          bbox: p.coverage.boundingBox ?? null,
+          boundary: p.coverage.boundaryGeometry ?? null,
+          state: "disabled" as const,
+          dbIndex: null,
+          disabled: true,
+          meta: p.meta,
+          stats: p.stats ?? null,
+        };
+      });
+    } catch (e) {
+      // A corrupt or unreadable disabled file must not break startup — it is
+      // by definition not participating in routing.
+      console.warn(`[routeiq] Could not peek disabled database(s): ${e}`);
+      return [];
+    }
   }
 
   /**
@@ -640,9 +753,7 @@ export class RoutingDatabase {
   async reloadMetadata(): Promise<void> {
     let files: string[];
     try {
-      files = readdirSync(this.dbDir).filter(
-        (f) => f.endsWith(".sqlite") && f !== "user-edits.sqlite",
-      );
+      files = readdirSync(this.dbDir).filter(isRoutingDatabaseFile);
     } catch {
       return;
     }
@@ -651,6 +762,9 @@ export class RoutingDatabase {
       return;
     }
 
+    // Both states go through the same peek — mergeMetadataIntoCoverageIndex
+    // reads the .disabled suffix off each peeked filename to decide the state,
+    // which is what makes an enable/disable visible without a restart.
     const dbPaths = files.map((f) => join(this.dbDir, f));
 
     try {
@@ -702,21 +816,37 @@ export class RoutingDatabase {
   ): void {
     const seen = new Set<string>();
     for (const p of peeked) {
-      seen.add(p.filename);
-      const existing = this.coverageIndex.get(p.filename);
-      this.coverageIndex.set(p.filename, {
-        filename: p.filename,
+      // Key on the plain .sqlite identity so a database keeps the same name
+      // across a toggle — the suffix is a state, not a new database.
+      const key = baseFilename(p.filename);
+      const disabled = isDisabledFile(p.filename);
+      seen.add(key);
+      const existing = this.coverageIndex.get(key);
+      // The on-disk suffix wins over the remembered state: that is precisely
+      // how an enable/disable becomes visible without a restart. Callers
+      // unload a database's graph data before disabling it, so dropping
+      // dbIndex here cannot orphan loaded nodes.
+      let state: DatabaseCoverageEntry["state"];
+      if (disabled) state = "disabled";
+      else if (!existing || existing.state === "disabled") state = "not_loaded";
+      else state = existing.state;
+      this.coverageIndex.set(key, {
+        filename: key,
         path: p.path,
         bbox: p.coverage.boundingBox ?? null,
         boundary: p.coverage.boundaryGeometry ?? null,
-        state: existing?.state ?? "not_loaded",
-        dbIndex: existing?.dbIndex ?? null,
+        state,
+        dbIndex: disabled ? null : (existing?.dbIndex ?? null),
+        disabled,
         meta: p.meta,
         stats: p.stats ?? null,
       });
     }
     for (const [filename, entry] of this.coverageIndex) {
-      if (!seen.has(filename) && entry.state === "not_loaded") {
+      if (
+        !seen.has(filename) &&
+        (entry.state === "not_loaded" || entry.state === "disabled")
+      ) {
         this.coverageIndex.delete(filename);
       }
     }
@@ -878,10 +1008,17 @@ export class RoutingDatabase {
         boundary,
         state: "loaded",
         dbIndex: index,
+        disabled: false,
         meta,
         stats: meta?.stats ?? null,
       });
     });
+    // The bulk load only ever sees files it opened, so the disabled ones have
+    // to be put back or they would vanish from the Data Manager (and with
+    // them any way to switch them on again).
+    for (const entry of this.disabledEntries) {
+      this.coverageIndex.set(entry.filename, entry);
+    }
   }
 
   /**
@@ -1103,14 +1240,14 @@ export class RoutingDatabase {
    *  inspector. */
   getCoverageStatus(): Array<{
     filename: string;
-    state: "not_loaded" | "loading" | "loaded";
+    state: DatabaseCoverageEntry["state"];
     coverage: DatabaseCoverageEntry["bbox"];
     nodes?: number;
     stats: DatabaseCoverageEntry["stats"];
   }> {
     const result: Array<{
       filename: string;
-      state: "not_loaded" | "loading" | "loaded";
+      state: DatabaseCoverageEntry["state"];
       coverage: DatabaseCoverageEntry["bbox"];
       nodes?: number;
       stats: DatabaseCoverageEntry["stats"];
@@ -1157,6 +1294,7 @@ export class RoutingDatabase {
     const toLoad = new Set<string>();
     for (const p of points) {
       for (const entry of this.coverageIndex.values()) {
+        if (entry.state === "disabled") continue;
         if (!entry.bbox) continue;
         if (
           p.latitude >= entry.bbox.min_lat &&
@@ -1200,6 +1338,7 @@ export class RoutingDatabase {
     if (!this.dynamicLoading) return;
     const toLoad = new Set<string>();
     for (const entry of this.coverageIndex.values()) {
+      if (entry.state === "disabled") continue;
       if (!entry.bbox) continue;
       const intersects =
         entry.bbox.min_lat <= bbox.maxLat &&
@@ -1245,6 +1384,7 @@ export class RoutingDatabase {
     const dLon = radiusNm / 60 / Math.max(0.1, Math.cos((lat * Math.PI) / 180));
     const toLoad = new Set<string>();
     for (const entry of this.coverageIndex.values()) {
+      if (entry.state === "disabled") continue;
       if (!entry.bbox) continue;
       if (
         lat >= entry.bbox.min_lat - dLat &&
@@ -1283,8 +1423,15 @@ export class RoutingDatabase {
    *  triggers the sole region. No-op in non-dynamic mode. */
   async eagerLoadIfSingle(): Promise<void> {
     if (!this.dynamicLoading) return;
-    if (this.coverageIndex.size !== 1) return;
-    const [only] = this.coverageIndex.values();
+    // Count only databases that can actually route: with one enabled region
+    // and any number of disabled ones there is still nothing to choose
+    // between, and a raw coverageIndex.size check would silently stop
+    // eager-loading the moment a second region was installed-then-disabled.
+    const enabled = Array.from(this.coverageIndex.values()).filter(
+      (e) => e.state !== "disabled",
+    );
+    if (enabled.length !== 1) return;
+    const [only] = enabled;
     if (!only || only.state === "loaded") return;
     console.log(
       `[routeiq] Single installed database ${only.filename} — eager-loading at startup`,
@@ -1310,6 +1457,14 @@ export class RoutingDatabase {
   async loadDatabaseGraph(filename: string): Promise<void> {
     const entry = this.coverageIndex.get(filename);
     if (!entry) throw new Error(`Unknown database: ${filename}`);
+    // Belt-and-braces: every selection path already skips disabled entries,
+    // so reaching here means an explicit /databases/load for a switched-off
+    // region. Refuse rather than silently loading what the user turned off.
+    if (entry.state === "disabled") {
+      throw new Error(
+        `Database ${filename} is disabled — enable it before loading`,
+      );
+    }
     if (entry.state === "loaded") return;
 
     const inflight = this.loadingPromises.get(filename);
