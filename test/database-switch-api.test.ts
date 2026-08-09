@@ -12,7 +12,7 @@ import { DEFAULT_CONFIG } from '../dist/types.js';
 // path in the API has to consider the .disabled form too — the delete handler
 // originally did not, and answered 404 for anything switched off.
 describe('installed-database autoload/disabled API', () => {
-  function makeHandler(dataDir: string): Router {
+  function makeHandler(dataDir: string, reloads?: string[]): Router {
     const app = {
       debug: () => {},
       error: () => {},
@@ -24,7 +24,13 @@ describe('installed-database autoload/disabled API', () => {
       app,
     );
     // No RoutingDatabase: these endpoints are filesystem-level, and leaving
-    // `db` unset also proves they don't depend on a loaded engine.
+    // `db` unset also proves they don't depend on a loaded engine. The plugin
+    // always registers a reload hook (see index.ts), so record its calls
+    // rather than leaving it null and quietly testing a path production
+    // never takes.
+    handler.onReloadRequested = async (dir: string) => {
+      reloads?.push(dir);
+    };
     return handler.getRouter();
   }
 
@@ -143,8 +149,9 @@ describe('installed-database autoload/disabled API', () => {
     const active = path.join(dir, 'region.sqlite');
     const disabled = active + '.disabled';
     fs.writeFileSync(active, 'not a real database, never opened');
+    const reloads: string[] = [];
     try {
-      const router = makeHandler(dir);
+      const router = makeHandler(dir, reloads);
 
       const off = await post(router, '/databases/enabled', {
         filename: 'region.sqlite',
@@ -169,6 +176,15 @@ describe('installed-database autoload/disabled API', () => {
       });
       assert.equal(again.status, 200);
       assert.equal(again.body.unchanged, true);
+
+      // With no RoutingDatabase there is nothing to unload per-file, so each
+      // real switch must fall back to the engine reload rather than reporting
+      // success while leaving the engine on its old view of the directory.
+      assert.deepEqual(
+        reloads,
+        [dir, dir],
+        'both switches should have reloaded the engine',
+      );
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
