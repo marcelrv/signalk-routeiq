@@ -2044,14 +2044,29 @@ export class ApiHandler {
           .json({ error: "Invalid filename: path escapes data directory" });
         return;
       }
-      try {
-        await fs.promises.unlink(targetPath);
-      } catch (e: any) {
-        if (e && e.code === "ENOENT") {
-          res.status(404).json({ error: `Database not found: ${filename}` });
-          return;
+      // A database is addressed by its plain .sqlite name in both states, so
+      // the file actually on disk may carry the .disabled suffix — delete
+      // whichever form(s) exist. Removing both when both are present is the
+      // unambiguous reading of "delete this database" (unlike the autoload
+      // switch, which has to ask which one the user meant to keep).
+      let removedActive = false;
+      let removedDisabled = false;
+      for (const [candidate, wasActive] of [
+        [targetPath, true],
+        [targetPath + DISABLED_SUFFIX, false],
+      ] as Array<[string, boolean]>) {
+        try {
+          await fs.promises.unlink(candidate);
+          if (wasActive) removedActive = true;
+          else removedDisabled = true;
+        } catch (e: any) {
+          if (e && e.code === "ENOENT") continue;
+          throw e;
         }
-        throw e;
+      }
+      if (!removedActive && !removedDisabled) {
+        res.status(404).json({ error: `Database not found: ${filename}` });
+        return;
       }
       console.log(`[routeiq] Database deleted: ${filename}`);
 
@@ -2060,7 +2075,12 @@ export class ApiHandler {
       } catch (e) {
         console.warn(`[routeiq] Metadata refresh failed after delete: ${e}`);
       }
-      if (this.onReloadRequested) {
+      // Deleting a file that was only ever disabled cannot have changed the
+      // graph, so the full close+reinit is pure cost — on a large installed
+      // region that is tens of seconds of stall to remove something the
+      // engine never had in memory. The metadata refresh above is enough to
+      // drop it from the catalog.
+      if (removedActive && this.onReloadRequested) {
         try {
           await this.onReloadRequested(dataDir);
           console.log("[routeiq] Routing engine hot-reloaded after delete");
