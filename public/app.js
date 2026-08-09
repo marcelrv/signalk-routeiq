@@ -4160,9 +4160,12 @@
           } else if (
             !status.loaded &&
             loadedCount === 0 &&
-            availableCount === 0
+            availableCount === 0 &&
+            !allDisabled
           ) {
-            // No databases at all — not an error, just an empty install
+            // No databases at all — not an error, just an empty install.
+            // An install whose regions are merely switched off is not empty,
+            // and must not be sent off to download data it already has.
             jumpToDownloadManager();
           } else {
             if (subtitleEl) subtitleEl.textContent = "Loading routing graph...";
