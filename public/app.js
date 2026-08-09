@@ -2194,6 +2194,10 @@
       .then(function (res) {
         const list = (res && res.databases) || [];
         list.forEach(function (db) {
+          // A disabled database is never going to load, so showing its
+          // coverage here would promise routing the engine cannot deliver.
+          // The Data Manager is where switched-off regions belong.
+          if (db.state === "disabled") return;
           const loaded = db.state === "loaded";
           const style = loaded
             ? {
@@ -4117,6 +4121,11 @@
           }
           var loadedCount = (status.filenames && status.filenames.length) || 0;
           var availableCount = status.available || 0;
+          // Everything installed but switched off is a state the user chose,
+          // not an empty install — say so, or the only hint is a bare
+          // "No databases found" that reads like the data went missing.
+          var disabledCount = status.disabled || 0;
+          var allDisabled = availableCount === 0 && disabledCount > 0;
           if (dbsEl) {
             dbsEl.textContent =
               loadedCount > 0
@@ -4124,7 +4133,10 @@
                 : availableCount > 0
                   ? availableCount +
                     " region(s) available — none loaded yet (dynamic loading)"
-                  : "No databases found";
+                  : allDisabled
+                    ? disabledCount +
+                      " region(s) installed, all disabled — enable one in Manage Routing Data"
+                    : "No databases found";
           }
           if (status.loaded) {
             if (subtitleEl)
@@ -4134,7 +4146,9 @@
                   : availableCount > 0
                     ? availableCount +
                       " region(s) available — loading on demand"
-                    : "No databases installed";
+                    : allDisabled
+                      ? "All installed regions are disabled"
+                      : "No databases installed";
             setTimeout(function () {
               if (overlay) overlay.classList.add("hidden");
               stop();
@@ -6641,7 +6655,9 @@
     var statusText = installed
       ? installed.loadState === "not_loaded"
         ? "installed, not loaded"
-        : "installed"
+        : installed.loadState === "disabled"
+          ? "installed, disabled"
+          : "installed"
       : "";
     return (
       '<div style="font-weight:600">' +
@@ -6668,7 +6684,9 @@
         ? "not loaded"
         : ir.loadState === "loading"
           ? "loading&hellip;"
-          : "loaded";
+          : ir.loadState === "disabled"
+            ? "disabled"
+            : "loaded";
     return (
       '<div style="font-weight:600">' +
       displayName +
@@ -6718,22 +6736,34 @@
         var irg = dmRegionGeo(ir);
         if (!irg.geom && !irg.bbox) continue;
         var irStyle =
-          ir.loadState === "not_loaded"
+          ir.loadState === "disabled"
             ? {
-                color: "#94a3b8",
+                // Switched off: same dashed treatment as not-loaded but in the
+                // delete/warning red, so "won't load" reads differently from
+                // "hasn't loaded yet".
+                color: "#e07070",
                 weight: 1.5,
-                opacity: 0.75,
-                fillColor: "#94a3b8",
-                fillOpacity: 0.06,
-                dashArray: "6,5",
+                opacity: 0.6,
+                fillColor: "#e07070",
+                fillOpacity: 0.05,
+                dashArray: "3,6",
               }
-            : {
-                color: "#22c55e",
-                weight: 2,
-                opacity: 0.9,
-                fillColor: "#22c55e",
-                fillOpacity: 0.14,
-              };
+            : ir.loadState === "not_loaded"
+              ? {
+                  color: "#94a3b8",
+                  weight: 1.5,
+                  opacity: 0.75,
+                  fillColor: "#94a3b8",
+                  fillOpacity: 0.06,
+                  dashArray: "6,5",
+                }
+              : {
+                  color: "#22c55e",
+                  weight: 2,
+                  opacity: 0.9,
+                  fillColor: "#22c55e",
+                  fillOpacity: 0.14,
+                };
         var irLayer = irg.geom
           ? L.geoJSON(irg.geom, { style: irStyle })
           : L.rectangle(
@@ -6774,14 +6804,15 @@
               fillOpacity: 0.12,
               dashArray: "4,4",
             }
-          : installed.loadState === "not_loaded"
+          : installed.loadState === "not_loaded" ||
+              installed.loadState === "disabled"
             ? {
                 color: color,
                 weight: 2,
                 opacity: 0.85,
                 fillColor: color,
                 fillOpacity: 0.22,
-                dashArray: "8,4",
+                dashArray: installed.loadState === "disabled" ? "3,6" : "8,4",
               }
             : {
                 color: color,
@@ -7145,14 +7176,18 @@
           return '<span class="dm-region-tag">' + t + "</span>";
         })
         .join("");
+      var isDisabled = r.loadState === "disabled";
       var loadBadge =
         r.loadState === "not_loaded"
           ? '<span class="dm-loadstate-badge">Not loaded</span>'
           : r.loadState === "loading"
             ? '<span class="dm-loadstate-badge dm-loadstate-loading">Loading&hellip;</span>'
-            : "";
+            : isDisabled
+              ? '<span class="dm-loadstate-badge dm-loadstate-disabled">Disabled</span>'
+              : "";
       var card = document.createElement("div");
-      card.className = "dm-installed-card";
+      card.className =
+        "dm-installed-card" + (isDisabled ? " dm-card-disabled" : "");
       card.innerHTML =
         '<div style="display:flex;align-items:flex-start;justify-content:space-between">' +
         '<div style="flex:1;min-width:0">' +
@@ -7188,6 +7223,13 @@
         "</div>" +
         "</div>" +
         '<div class="dm-region-actions">' +
+        '<button class="dm-btn-toggle" title="' +
+        (isDisabled
+          ? "Enable " + displayName + " for automatic loading"
+          : "Disable " + displayName + " — keeps the file, stops loading it") +
+        '">' +
+        (isDisabled ? "Enable" : "Disable") +
+        "</button>" +
         '<button class="dm-btn-delete" title="Delete ' +
         displayName +
         '" aria-label="Delete ' +
@@ -7195,12 +7237,22 @@
         '">&#128465;</button>' +
         "</div>" +
         "</div>";
-      (function (fn, name, match) {
+      (function (fn, name, match, disabledNow, loadState) {
         var delBtn = card.querySelector(".dm-btn-delete");
         delBtn.addEventListener("click", function () {
           dmDeleteInstalled(fn, name, match, delBtn);
         });
-      })(filename, displayName, catalogMatch);
+        var toggleBtn = card.querySelector(".dm-btn-toggle");
+        toggleBtn.addEventListener("click", function () {
+          dmSetEnabled(
+            fn,
+            name,
+            disabledNow,
+            loadState === "loaded",
+            toggleBtn,
+          );
+        });
+      })(filename, displayName, catalogMatch, isDisabled, r.loadState);
       dmInstalledList.appendChild(card);
     }
   }
@@ -7252,6 +7304,57 @@
         })
         .catch(function (err) {
           showToast("Delete failed: " + err.message, "error");
+          btn.disabled = false;
+          btn.innerHTML = originalHtml;
+        });
+    });
+  }
+
+  // Switch an installed database between autoload and disabled. The file stays
+  // on disk either way, so this is not destructive and only confirms when it
+  // would pull a region out of the live graph. Same POST-then-refresh shape as
+  // dmDeleteInstalled above.
+  function dmSetEnabled(filename, displayName, isDisabled, isLoaded, btn) {
+    var enable = isDisabled;
+    var confirmFirst = !enable && isLoaded;
+    var ask = confirmFirst
+      ? confirmDialog(
+          "Disable database",
+          'Stop loading "' +
+            displayName +
+            '"? It is currently loaded and will be dropped from the routing graph. The file stays on this device and you can switch it back on at any time.',
+          "Disable",
+        )
+      : Promise.resolve(true);
+
+    ask.then(function (confirmed) {
+      if (!confirmed) return;
+      btn.disabled = true;
+      var originalHtml = btn.innerHTML;
+      btn.innerHTML = "&hellip;";
+      fetch(getApiBase() + "/signalk/v1/api/router/databases/enabled", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: filename, enabled: enable }),
+      })
+        .then(function (r) {
+          return r.json().then(function (data) {
+            if (!r.ok)
+              throw new Error(
+                (data && data.error) || "Server returned " + r.status,
+              );
+            return data;
+          });
+        })
+        .then(function () {
+          showToast((enable ? "Enabled " : "Disabled ") + displayName, "");
+          dmFetchInstalled();
+        })
+        .catch(function (err) {
+          showToast(
+            (enable ? "Enable" : "Disable") + " failed: " + err.message,
+            "error",
+          );
           btn.disabled = false;
           btn.innerHTML = originalHtml;
         });

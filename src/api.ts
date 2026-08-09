@@ -11,7 +11,7 @@ import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { ServerAPI } from "@signalk/server-api";
 import { NextFunction, Request, Response, Router } from "express";
-import { RoutingDatabase } from "./database.js";
+import { DISABLED_SUFFIX, RoutingDatabase } from "./database.js";
 import { GpxExporter } from "./gpx-export.js";
 import { RoutingEngine } from "./routing.js";
 import {
@@ -424,6 +424,12 @@ export class ApiHandler {
 
     // POST /signalk/v1/api/router/databases/delete — remove an installed database file
     this.router.post("/databases/delete", this.handleDeleteDatabase.bind(this));
+
+    // POST /signalk/v1/api/router/databases/enabled — autoload/disabled switch
+    this.router.post(
+      "/databases/enabled",
+      this.handleSetDatabaseEnabled.bind(this),
+    );
   }
 
   /**
@@ -2072,6 +2078,169 @@ export class ApiHandler {
       const message = error instanceof Error ? error.message : "Unknown error";
       console.error("[routeiq] Database delete error:", error);
       res.status(500).json({ error: `Delete failed: ${message}` });
+      next(error);
+    }
+  }
+
+  /**
+   * Switch an installed database between autoload and disabled by renaming it
+   * to/from `<name>.sqlite.disabled` — the same on-disk convention the data
+   * directory already used by hand, now driven from the Data Manager.
+   *
+   * Disabling drops the region from the in-memory graph first, preferring
+   * RoutingDatabase.unloadDatabaseGraph (cheap, no re-init) and falling back
+   * to a full hot reload only when that path refuses. The rename happens
+   * after the unload so a failure leaves the file where the engine still
+   * expects it.
+   *
+   * POST /signalk/v1/api/router/databases/enabled  body: { filename, enabled }
+   */
+  private async handleSetDatabaseEnabled(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    if (!this.requireAuth(req, res)) return;
+    try {
+      const { filename, enabled } = req.body ?? {};
+      if (!filename || typeof filename !== "string") {
+        res.status(400).json({ error: "Missing required field: filename" });
+        return;
+      }
+      if (typeof enabled !== "boolean") {
+        res
+          .status(400)
+          .json({ error: "Missing required boolean field: enabled" });
+        return;
+      }
+      // Always addressed by the plain .sqlite identity, in either state — the
+      // suffix is derived here, never accepted from the caller. Same guard as
+      // handleDeleteDatabase/handleDownloadDatabase.
+      if (!/^[\w\-.]+\.sqlite$/.test(filename) || filename.includes("..")) {
+        res.status(400).json({
+          error:
+            "Invalid filename: must be a plain .sqlite filename with no path components",
+        });
+        return;
+      }
+      const dataDir = this.config.routingDataDir;
+      if (!dataDir) {
+        res.status(400).json({ error: "routingDataDir is not configured" });
+        return;
+      }
+      const resolvedDataDir = path.resolve(dataDir);
+      const activePath = path.resolve(dataDir, filename);
+      const disabledPath = activePath + DISABLED_SUFFIX;
+      if (
+        !activePath.startsWith(resolvedDataDir + path.sep) &&
+        activePath !== resolvedDataDir
+      ) {
+        res
+          .status(400)
+          .json({ error: "Invalid filename: path escapes data directory" });
+        return;
+      }
+
+      const hasActive = fs.existsSync(activePath);
+      const hasDisabled = fs.existsSync(disabledPath);
+      if (!hasActive && !hasDisabled) {
+        res.status(404).json({ error: `Database not found: ${filename}` });
+        return;
+      }
+      // Reachable in practice: handleDownloadDatabase writes <name>.sqlite
+      // unconditionally, so re-downloading a disabled region leaves both. Ask
+      // rather than guess which one the user meant to keep.
+      if (hasActive && hasDisabled) {
+        res.status(409).json({
+          error:
+            `Both ${filename} and ${filename}${DISABLED_SUFFIX} exist — ` +
+            `remove one before switching this database`,
+        });
+        return;
+      }
+      if (enabled === hasActive) {
+        res.json({
+          success: true,
+          filename,
+          enabled,
+          unchanged: true,
+          databases: this.db ? this.db.getCoverageStatus() : [],
+        });
+        return;
+      }
+
+      // Free the graph data before the file moves out from under it.
+      let needsHotReload = !this.db || !this.db.isDynamicLoadingEnabled();
+      if (!enabled && this.db && this.db.isDynamicLoadingEnabled()) {
+        const loaded = this.db
+          .getCoverageStatus()
+          .some((d) => d.filename === filename && d.state === "loaded");
+        if (loaded) {
+          try {
+            await this.db.unloadDatabaseGraph(filename);
+          } catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            // A route mid-flight is a genuine conflict — the caller should
+            // retry. "Only loaded database" is not: disabling the last region
+            // is exactly what a user swapping coverage does, so fall through
+            // to the full reload, which ends with an empty graph.
+            if (/route calculation is in progress/i.test(message)) {
+              res.status(409).json({ error: message });
+              return;
+            }
+            needsHotReload = true;
+          }
+        }
+      }
+
+      try {
+        await fs.promises.rename(
+          enabled ? disabledPath : activePath,
+          enabled ? activePath : disabledPath,
+        );
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        res
+          .status(500)
+          .json({ error: `Could not switch ${filename}: ${message}` });
+        return;
+      }
+      console.log(
+        `[routeiq] Database ${enabled ? "enabled" : "disabled"}: ${filename}`,
+      );
+
+      try {
+        if (this.db) await this.db.reloadMetadata();
+      } catch (e) {
+        console.warn(`[routeiq] Metadata refresh failed after switch: ${e}`);
+      }
+
+      // Dynamic mode needs nothing further on enable: eager-load-at-position
+      // and route-time selection pick the region up on their own, and a
+      // blanket re-init would re-peek every installed database for nothing.
+      if (needsHotReload && this.onReloadRequested) {
+        try {
+          await this.onReloadRequested(dataDir);
+          console.log("[routeiq] Routing engine hot-reloaded after switch");
+        } catch (e) {
+          console.error(`[routeiq] Hot-reload failed after switch: ${e}`);
+          res.status(500).json({
+            error: `Database ${enabled ? "enabled" : "disabled"} but hot-reload failed: ${e}`,
+          });
+          return;
+        }
+      }
+
+      res.json({
+        success: true,
+        filename,
+        enabled,
+        databases: this.db ? this.db.getCoverageStatus() : [],
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      console.error("[routeiq] Database enable/disable error:", error);
+      res.status(500).json({ error: `Switch failed: ${message}` });
       next(error);
     }
   }

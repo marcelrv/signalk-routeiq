@@ -791,6 +791,152 @@ describe('§4a dynamic database loading', () => {
     });
   });
 
+  // Autoload/disabled switch: a database renamed to <name>.sqlite.disabled
+  // stays installed and listed, but nothing may ever load it. The identity
+  // stays the plain .sqlite name in every API — the suffix is a state, not a
+  // different database.
+  describe('autoload/disabled switch', () => {
+    const disabledB = regionBPath + '.disabled';
+
+    function buildWithDisabledB(): void {
+      buildFixtures();
+      fs.renameSync(regionBPath, disabledB);
+    }
+
+    function cleanupDisabled(): void {
+      if (fs.existsSync(disabledB)) fs.unlinkSync(disabledB);
+      cleanupFixtures();
+    }
+
+    it('lists a disabled database, keeps its .sqlite identity, and excludes it from `available`', async () => {
+      buildWithDisabledB();
+      const db = new RoutingDatabase(fixturesDir, true);
+      try {
+        await db.init();
+        const catalog = await db.getDatabaseCatalog();
+        const b = catalog.find((d: any) => d.filename === 'region-b.sqlite');
+        assert.ok(b, 'disabled database must still be listed, under its plain .sqlite name');
+        assert.equal(b.state, 'disabled');
+        // Peeked despite being off, so the card keeps its coverage/metadata.
+        assert.ok(b.coverage, 'disabled database should still report coverage');
+
+        const status = db.getLoadingStatus();
+        assert.equal(status.available, 1, '`available` counts only routable databases');
+        assert.equal(status.disabled, 1);
+      } finally {
+        await db.close();
+        cleanupDisabled();
+      }
+    });
+
+    it('never loads a disabled region from a route request or a vessel position', async () => {
+      buildWithDisabledB();
+      const db = new RoutingDatabase(fixturesDir, true);
+      try {
+        await db.init();
+        const insideB = { latitude: 50.0, longitude: 50.0 };
+        await db.ensureRegionsLoaded([insideB]);
+        await db.ensureRegionsForBbox({ minLat: 49.9, minLon: 49.9, maxLat: 50.1, maxLon: 50.1 });
+        await db.eagerLoadForPosition(50.0, 50.0, 100);
+        assert.deepEqual(
+          db.getLoadingStatus().filenames,
+          [],
+          'a disabled region must not be loaded by any selection path',
+        );
+        const b = db
+          .getCoverageStatus()
+          .find((d: any) => d.filename === 'region-b.sqlite');
+        assert.equal(b?.state, 'disabled', 'state must survive the selection attempts');
+      } finally {
+        await db.close();
+        cleanupDisabled();
+      }
+    });
+
+    it('still eager-loads the sole enabled region when other regions are disabled', async () => {
+      // Regression guard: a raw coverageIndex.size !== 1 check would see two
+      // entries here and silently skip the single-region eager load.
+      buildWithDisabledB();
+      const db = new RoutingDatabase(fixturesDir, true);
+      try {
+        await db.init();
+        await db.eagerLoadIfSingle();
+        assert.deepEqual(db.getLoadingStatus().filenames, ['region-a.sqlite']);
+      } finally {
+        await db.close();
+        cleanupDisabled();
+      }
+    });
+
+    it('refuses an explicit load of a disabled database', async () => {
+      buildWithDisabledB();
+      const db = new RoutingDatabase(fixturesDir, true);
+      try {
+        await db.init();
+        await assert.rejects(
+          () => db.loadDatabaseGraph('region-b.sqlite'),
+          /disabled/i,
+        );
+      } finally {
+        await db.close();
+        cleanupDisabled();
+      }
+    });
+
+    it('initialises with an empty graph — not an error — when every database is disabled', async () => {
+      // The anti-lockout case: GET /databases answers 503 while `db` is null,
+      // so throwing here would leave the Data Manager unable to list, and
+      // therefore unable to re-enable, the files the user just switched off.
+      buildFixtures();
+      const disabledA = regionAPath + '.disabled';
+      fs.renameSync(regionAPath, disabledA);
+      fs.renameSync(regionBPath, disabledB);
+      const db = new RoutingDatabase(fixturesDir, true);
+      try {
+        await db.init();
+        await db.loadGraph();
+        const catalog = await db.getDatabaseCatalog();
+        assert.equal(catalog.length, 2, 'both disabled databases must remain listed');
+        assert.ok(catalog.every((d: any) => d.state === 'disabled'));
+        const status = db.getLoadingStatus();
+        assert.equal(status.available, 0);
+        assert.equal(status.disabled, 2);
+      } finally {
+        await db.close();
+        if (fs.existsSync(disabledA)) fs.unlinkSync(disabledA);
+        cleanupDisabled();
+      }
+    });
+
+    it('picks up an enable/disable performed on disk, without a restart', async () => {
+      buildFixtures();
+      const db = new RoutingDatabase(fixturesDir, true);
+      try {
+        await db.init();
+        const stateOf = (fn: string) =>
+          db.getCoverageStatus().find((d: any) => d.filename === fn)?.state;
+        assert.equal(stateOf('region-b.sqlite'), 'not_loaded');
+
+        fs.renameSync(regionBPath, disabledB);
+        await db.reloadMetadata();
+        assert.equal(stateOf('region-b.sqlite'), 'disabled', 'disable must be visible after a metadata refresh');
+        assert.equal(db.getLoadingStatus().available, 1);
+
+        fs.renameSync(disabledB, regionBPath);
+        await db.reloadMetadata();
+        assert.equal(stateOf('region-b.sqlite'), 'not_loaded', 'enable must restore the routable state');
+        assert.equal(db.getLoadingStatus().available, 2);
+
+        // And it is genuinely routable again, not merely relabelled.
+        await db.loadDatabaseGraph('region-b.sqlite');
+        assert.ok(db.getLoadingStatus().filenames.includes('region-b.sqlite'));
+      } finally {
+        await db.close();
+        cleanupDisabled();
+      }
+    });
+  });
+
   describe('§4a.1 task 4 — transit-region on-demand loading', () => {
     // Three plain (non-navmesh) regions in a west-to-east line:
     // TRANSIT-START -- TRANSIT-MID -- TRANSIT-END. A route request from a
