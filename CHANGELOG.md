@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Added: when a route has to wait for a region's routing data to be read in
+  first, the planner now says which region it is waiting on instead of looking
+  frozen. With dynamic loading, the first route into an area loads that area's
+  data before it can answer, which takes seconds to the best part of a minute
+  on a large region — until now with nothing on screen to say why.
+- Fixed: such a route could also be given up on as failed while the server was
+  still working. The planner waited 30 seconds regardless; a full-country
+  region can take longer than that to load. It now allows a request that is
+  demonstrably waiting on routing data considerably longer, and if it does
+  time out, says so in those terms rather than as a routing failure.
+
 - Added: a route whose start or destination sits far from any charted waterway
   now says so. The planner joins such a point to the nearest waterway with a
   straight line, which is fine for the last few meters to a quay but is not a

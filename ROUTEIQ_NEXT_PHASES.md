@@ -184,13 +184,32 @@ straight chord over them. 57/57 tests; verified live (route START 4.21 → DEST
    request* — a very wide route (up to `routingBBoxMaxExtent`, 10°) over a
    densely-tiled area loads every intersecting region before the LRU trims
    back. Fine at current dataset size.
-2. **Loading indicator for on-demand region loads.** Route- and
-   position-triggered loads are inline/blocking today, so a request that
-   triggers a new region load just takes longer with no UI feedback (tens of
-   seconds at full-country scale). Surface it — at minimum a "Loading
-   <region>…" spinner/toast while the load runs, ideally the non-blocking
-   `202`/status-poll pattern from §4a task 5 (designed but never built; the
-   shipped 4a does inline loads instead).
+2. ~~**Loading indicator for on-demand region loads.**~~ — **done 2026-08-10**
+   (branch `feat/region-loading-indicator`), by the poll route, not the `202`
+   one. `getLoadingStatus()` now reports the regions in `state: "loading"`, and
+   the webapp polls `/databases/status` while a route request is outstanding.
+   Deliberately that endpoint and not `GET /databases`: the latter makes a
+   worker round-trip, and during a load the worker is precisely what is busy,
+   so the poll would queue behind the load it is asking about.
+
+   **Measured first, because the design depended on it** (56 MB Maryland
+   region, `us_east_md_stitched`): the server's event loop is free for the
+   first ~2.5s of a 6.3s load — a 100 ms poll is answered on time — and then
+   **blocked solid for the last 3.8s** while rows are merged into the graph.
+   So the first poll lands and names the region; later ones may not be answered
+   at all until the load finishes. The message is written to stay true while
+   stale, and the toast carrying it animates in the browser, where nothing is
+   blocked. Effective poll rate through a whole load: 3.3/s of 10/s attempted.
+
+   Found and fixed alongside: the webapp aborted any route request at 30s, so a
+   request waiting on a large region load was reported as a failure while the
+   server was still working. Now on an extendable `AbortController` — which
+   also drops `AbortSignal.timeout` (Chrome 103+) from a file whose floor is
+   Chrome 66.
+
+   The non-blocking `202`/status-handle pattern from §4a task 5 remains
+   unbuilt, and is now the only thing left here: it would stop the request
+   blocking at all, rather than explaining why it does.
 
 **Decided 2026-07-20** (priority review of `PHASE_3_DESIGN.md` /
 `PHASE_4_DESIGN.md`). Scale-out (3e) is the de-facto active track (PR
