@@ -1,5 +1,6 @@
 import { parentPort } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
+import { OVERLAY_EDITABLE_COLUMNS } from "./types.js";
 
 interface NodeRow {
   id: number;
@@ -79,17 +80,6 @@ const filenames: string[] = [];
  *  rather than any real per-file handle — never matches a real dbIndex, so
  *  overlay rows are never touched by a per-file unload. */
 const OVERLAY_DB_INDEX = -1;
-/** Edge columns a user can set through the graph editor, and therefore the
- *  ones an overlay row can claim in `edited_fields`. Everything else on an
- *  overlay row is a placeholder from the INSERT that created it. */
-const OVERLAY_EDITABLE_COLUMNS = [
-  "cost_factor",
-  "distance",
-  "max_air_draft",
-  "min_depth",
-  "min_width",
-  "traffic_mode",
-];
 let hasCrossesLand = false;
 let hasCrossesObstacle = false;
 let hasNodeDepth = false;
