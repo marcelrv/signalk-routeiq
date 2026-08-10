@@ -1212,9 +1212,23 @@ carry that implicit constraint.
 
 `coverage_gap`, a distinct `RouteWarning` type raised in place of
 `start_connecting`/`end_connecting` once the connector exceeds
-`coverageGapMeters` (new config, default **1500 m**, 0 = off). Threshold sits
-in the empty band between the measurements below: healthy connectors ran
-4–893 m (§10.2's real cross-state routes), teleports 3,485–4,597 m.
+`coverageGapMeters` (default **1500 m**, 0 = off). Threshold sits in the empty
+band between the measurements below: healthy connectors ran 4–893 m (§10.2's
+real cross-state routes), teleports 3,485–4,597 m. **Internal, not in the
+settings schema** — same treatment as `routingBBoxMargin`. The default needs no
+per-deployment tuning, since the two populations are three-and-a-half times
+apart, and the plugin config is already a candidate for *fewer* knobs
+(`todo.md`, "Open — smaller/unscoped notes").
+
+Ruled out as an alternative: pricing the leg through the cost function instead
+of thresholding it. A land-crossing edge is already rejected outright
+(`getEdgePenalty` returns -1 on `crosses_land`), so that lever is at maximum
+already; and the connector is not an edge at all. `connectUserPoint` runs
+*after* the search, prepending a synthetic `from: -1, to: -1` segment for a
+requested point that is not on the graph, so there is nothing for A* to price.
+`markOverland` does test the leg with `isLineCrossingLand` and marks it, but
+these teleports are over open sea between two regions' coverage, where the
+land test correctly finds nothing. The failure is uncharted water, not land.
 
 Why a new type rather than a flag on the old one: **this repo's own webapp
 drops `start_connecting`/`end_connecting` from the warnings pane outright**

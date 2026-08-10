@@ -3,8 +3,9 @@ set -euo pipefail
 
 # deploy.sh — Build the plugin and restart the Signal K server.
 #
-# The dev directory is bind-mounted at /home/node/.signalk/routeiq-dev
-# via docker-compose.yml. npm manages a file: symlink:
+# The dev directory is bind-mounted at /home/node/.signalk/routeiq-dev by the
+# server's compose file (/home/node/.signalk/docker-compose.yml, host infra —
+# deliberately not in this repo). npm manages a file: symlink:
 #   node_modules/signalk-routeiq → ../routeiq-dev
 # so build output in dist/ is instantly visible to the container.
 # No copy step needed.

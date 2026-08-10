@@ -4,16 +4,15 @@
 
 - Added: a route whose start or destination sits far from any charted waterway
   now says so. The planner joins such a point to the nearest waterway with a
-  straight line, which is fine for the last few metres to a quay but is not a
-  navigable answer over kilometres — and that leg is not depth-checked, because
-  there is no charted water under it to check. Beyond 1.5 km (adjustable under
-  Plugin Config, 0 to switch off) it is reported as a coverage gap, usually
-  meaning the routing data does not cover that stretch. Shorter connections
-  are unchanged and stay out of the way. Previously both were reported the same
-  way and the web app hid them entirely, so a route could quietly cross four
-  kilometres of water nobody had charted.
+  straight line, which is fine for the last few meters to a quay but is not a
+  navigable answer over kilometers — and that leg is not depth-checked, because
+  there is no charted water under it to check. Beyond 1.5 km it is reported as
+  a coverage gap, usually meaning the routing data does not cover that stretch.
+  Shorter connections are unchanged and stay out of the way. Previously both
+  were reported the same way and the web app hid them entirely, so a route
+  could quietly cross four kilometers of water nobody had charted.
 
-- Fixed: where two neighbouring routing databases overlap, every waterway they
+- Fixed: where two neighboring routing databases overlap, every waterway they
   both describe was held twice in memory — 24,506 duplicated connections on the
   Connecticut/Rhode Island pair alone, concentrated on exactly the crossings a
   route between the two regions has to use. They are now merged into one, and
