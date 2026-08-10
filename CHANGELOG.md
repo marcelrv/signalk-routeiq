@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Fixed: where two neighbouring routing databases overlap, every waterway they
+  both describe was held twice in memory — 24,506 duplicated connections on the
+  Connecticut/Rhode Island pair alone, concentrated on exactly the crossings a
+  route between the two regions has to use. They are now merged into one, and
+  where the two disagree about depth, headroom or width, the more cautious
+  figure is kept. Nothing about which route you get changes; the planner just
+  stops doing the same work twice at every regional boundary, and loading a
+  second overlapping region is slightly faster than before.
+
 - Added: an autoload/disabled switch for each installed routing database, in
   Manage Routing Data. Disabling keeps the file on the device but stops the
   plugin loading it, so you can swap which regions are in play without
