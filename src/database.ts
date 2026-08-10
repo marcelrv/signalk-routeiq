@@ -120,6 +120,14 @@ export interface EdgeRow {
    *  cut seam edges on eviction — the duplicate copies used to be what kept
    *  them alive. */
   extraDbIndexes?: number[];
+  /** On a user-edits overlay row: the columns the user actually set, parsed
+   *  from the overlay's `edited_fields`. Those columns outrank whatever the
+   *  region file says for the same edge; the rest of the row is placeholders
+   *  and must be ignored. Absent on rows written before the column existed —
+   *  their intent is unrecoverable, so they keep the conservative merge.
+   *  Carried onto the merged entry so a file loaded later cannot quietly
+   *  overwrite an edit that is already in force. */
+  editedFields?: string[];
 }
 
 interface PoiRow {
@@ -932,6 +940,50 @@ export class RoutingDatabase {
    *  Overlay rows always pass true; they duplicate by intent, not by seam.
    *
    *  Returns true if a new adjacency entry was created. */
+  /** Settle the user-edited columns between an entry already in the graph and
+   *  a row being merged into it, and return the set of columns now spoken for
+   *  by an edit — which the caller must then leave out of the conservative
+   *  fold, since an edit is an instruction, not another opinion to average.
+   *
+   *  Only `editedFields` columns move: an overlay row's other columns are
+   *  placeholders written by updateEdge for values the edit never mentioned
+   *  (`distance` 0, the limits -1), and letting those through would hand the
+   *  graph a zero-length or unconstrained edge. Rows from before that column
+   *  existed carry no `editedFields` and are folded conservatively, as they
+   *  were before this — their intent cannot be recovered after the fact. */
+  /** Parse an overlay row's `edited_fields` JSON into `editedFields`, in
+   *  place. Tolerant by design: a marker that will not parse leaves the row
+   *  unmarked, which costs the edit its precedence but never corrupts the
+   *  graph — the same trade the rest of this file's JSON columns make. */
+  private static parseEditedFields(
+    edge: EdgeRow & { edited_fields?: string | null },
+  ): void {
+    if (!edge.edited_fields) return;
+    try {
+      const parsed = JSON.parse(edge.edited_fields);
+      if (Array.isArray(parsed) && parsed.every((f) => typeof f === "string")) {
+        edge.editedFields = parsed;
+      }
+    } catch {
+      // Leave unmarked.
+    }
+  }
+
+  private static applyEdit(existing: EdgeRow, incoming: EdgeRow): Set<string> {
+    const claimed = new Set<string>(existing.editedFields ?? []);
+    for (const field of incoming.editedFields ?? []) {
+      // An edit landing on a column an *earlier* edit already claimed is just
+      // the newer of two edits; last write wins, same as editing twice in one
+      // session.
+      (existing as unknown as Record<string, unknown>)[field] = (
+        incoming as unknown as Record<string, unknown>
+      )[field];
+      claimed.add(field);
+    }
+    if (claimed.size > 0) existing.editedFields = [...claimed].sort();
+    return claimed;
+  }
+
   private spliceEdge(edge: EdgeRow, mayDuplicate: boolean): boolean {
     let bucket = this.edgesBySource.get(edge.source);
     if (!bucket) {
@@ -946,20 +998,30 @@ export class RoutingDatabase {
       return true;
     }
 
-    existing.min_depth = RoutingDatabase.tighterLimit(
-      existing.min_depth,
-      edge.min_depth,
-    );
-    existing.max_air_draft = RoutingDatabase.tighterLimit(
-      existing.max_air_draft,
-      edge.max_air_draft,
-    );
-    existing.min_width = RoutingDatabase.tighterLimit(
-      existing.min_width,
-      edge.min_width,
-    );
+    // A user's edit outranks any file, but only for the columns the user
+    // actually set — the rest of an overlay row is placeholders. Applied
+    // whichever order the two arrive in: an overlay row landing on a file's
+    // entry overwrites those columns and stakes its claim on the merged
+    // entry, and a file row landing afterwards must respect that claim.
+    const claimed = RoutingDatabase.applyEdit(existing, edge);
+
+    if (!claimed.has("min_depth"))
+      existing.min_depth = RoutingDatabase.tighterLimit(
+        existing.min_depth,
+        edge.min_depth,
+      );
+    if (!claimed.has("max_air_draft"))
+      existing.max_air_draft = RoutingDatabase.tighterLimit(
+        existing.max_air_draft,
+        edge.max_air_draft,
+      );
+    if (!claimed.has("min_width"))
+      existing.min_width = RoutingDatabase.tighterLimit(
+        existing.min_width,
+        edge.min_width,
+      );
     // Higher cost_factor = more penalised = the conservative reading.
-    if (typeof edge.cost_factor === "number") {
+    if (!claimed.has("cost_factor") && typeof edge.cost_factor === "number") {
       existing.cost_factor =
         typeof existing.cost_factor === "number"
           ? Math.max(existing.cost_factor, edge.cost_factor)
@@ -1027,7 +1089,8 @@ export class RoutingDatabase {
       deletedEdges.map((d) => `${d.source}:${d.target}`),
     );
 
-    const allEdges: Array<EdgeRow> = await this.sendMessage("loadEdges");
+    const allEdges: Array<EdgeRow & { db_index?: number }> =
+      await this.sendMessage("loadEdges");
     for (const edge of allEdges) {
       // Skip if source or target was deleted
       if (deletedNodeSet.has(edge.source) || deletedNodeSet.has(edge.target))
@@ -1040,11 +1103,18 @@ export class RoutingDatabase {
       if (!this.nodes.has(edge.source) || !this.nodes.has(edge.target))
         continue;
       // Overlapping regions' shared seam edges arrive in this same batch and
-      // need the same de-duplication the per-file path does. This path never
-      // tags rows with a dbIndex (bulk mode has no per-file eviction), so an
-      // overlay row is indistinguishable from a file row here and the two
-      // rank equally — first stored wins, as it always has.
-      this.spliceEdge(edge, sharedSources.has(edge.source));
+      // need the same de-duplication the per-file path does. File rows are
+      // deliberately left untagged here — bulk mode has no per-file eviction,
+      // and tagging them would give unloadDatabaseGraph's by-dbIndex filter
+      // something to match. Overlay rows are tagged, because -1 is not a file
+      // handle and so can never match that filter: it only marks the row as
+      // the user's, which is what decides whether its edit outranks a file's.
+      const isOverlay = edge.db_index === OVERLAY_DB_INDEX;
+      if (isOverlay) {
+        edge.dbIndex = OVERLAY_DB_INDEX;
+        RoutingDatabase.parseEditedFields(edge);
+      }
+      this.spliceEdge(edge, isOverlay || sharedSources.has(edge.source));
     }
 
     this.buildSpatialIndex();
@@ -1725,6 +1795,8 @@ export class RoutingDatabase {
         if (!this.nodes.has(edge.source) || !this.nodes.has(edge.target))
           continue;
         edge.dbIndex = edge.db_index;
+        if (edge.dbIndex === OVERLAY_DB_INDEX)
+          RoutingDatabase.parseEditedFields(edge);
         // Merges into an already-loaded neighbour's copy at a seam instead of
         // storing this file's duplicate of it — the edge-level counterpart of
         // the node-ID merge above.
@@ -3205,6 +3277,16 @@ export class RoutingDatabase {
       edge.traffic_mode = updates.traffic_mode;
     if (updates.cost_factor !== undefined)
       edge.cost_factor = updates.cost_factor;
+
+    // Mark the same columns the worker just marked in the overlay, so the
+    // live entry already behaves the way it will after the next load — a
+    // region loading later in this session must not fold over an edit the
+    // user has already made.
+    const claimed = new Set<string>(edge.editedFields ?? []);
+    for (const [field, value] of Object.entries(updates)) {
+      if (value !== undefined) claimed.add(field);
+    }
+    if (claimed.size > 0) edge.editedFields = [...claimed].sort();
   }
 
   async deleteNode(dbIndex: number, nodeId: number): Promise<void> {

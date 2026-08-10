@@ -79,6 +79,17 @@ const filenames: string[] = [];
  *  rather than any real per-file handle — never matches a real dbIndex, so
  *  overlay rows are never touched by a per-file unload. */
 const OVERLAY_DB_INDEX = -1;
+/** Edge columns a user can set through the graph editor, and therefore the
+ *  ones an overlay row can claim in `edited_fields`. Everything else on an
+ *  overlay row is a placeholder from the INSERT that created it. */
+const OVERLAY_EDITABLE_COLUMNS = [
+  "cost_factor",
+  "distance",
+  "max_air_draft",
+  "min_depth",
+  "min_width",
+  "traffic_mode",
+];
 let hasCrossesLand = false;
 let hasCrossesObstacle = false;
 let hasNodeDepth = false;
@@ -448,6 +459,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             max_air_draft REAL DEFAULT -1, min_width REAL DEFAULT -1,
             cost_factor REAL DEFAULT 1.2, distance_to_land REAL DEFAULT 0,
             edge_type_id INTEGER DEFAULT 0, traffic_mode INTEGER DEFAULT 0,
+            edited_fields TEXT,
             PRIMARY KEY (source, target)
           )`,
           ).run();
@@ -476,11 +488,22 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
               "[db-worker] Migrated overlay edges: is_fairway → cost_factor",
             );
           }
+          // Which columns of an overlay row the user actually set. Without it
+          // a row cannot say whether `distance = 0` is a measurement or the
+          // placeholder updateEdge writes for a column the edit never
+          // mentioned — which is why an edit could not simply outrank the
+          // region file's own row. Rows written before this column existed
+          // stay NULL and keep the old conservative merge; there is no way to
+          // recover after the fact which of their columns were meant.
+          if (!colNames.includes("edited_fields")) {
+            db.prepare("ALTER TABLE edges ADD COLUMN edited_fields TEXT").run();
+            console.log("[db-worker] Migrated overlay edges: + edited_fields");
+          }
           // Backfill reverse edges for bidirectional (traffic_mode=0) overlay edges that are missing their reverse.
           // Skip any reverse that the user explicitly deleted.
           const fwdEdges = db
             .prepare(
-              "SELECT source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode FROM edges WHERE traffic_mode = 0",
+              "SELECT source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edited_fields FROM edges WHERE traffic_mode = 0",
             )
             .all() as Array<{
             source: number;
@@ -493,9 +516,14 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             distance_to_land: number;
             edge_type_id: number;
             traffic_mode: number;
+            edited_fields: string | null;
           }>;
+          // The reverse carries the same edited_fields: an edit to a
+          // two-way edge is an edit to the waterway, not to one direction of
+          // travel, and a reverse that forgot which columns were meant would
+          // fall back to the conservative merge and disagree with its twin.
           const insertRev = db.prepare(
-            "INSERT OR IGNORE INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edited_fields) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
           );
           // Prepared once: node:sqlite compiles a fresh statement per
           // prepare() call, so leaving these in the loop recompiles both on
@@ -523,6 +551,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
               e.distance_to_land,
               e.edge_type_id,
               e.traffic_mode,
+              e.edited_fields,
             );
             backfilled++;
           }
@@ -716,7 +745,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             .prepare(
               `SELECT source, target, distance, min_depth, max_air_draft, min_width,
                     cost_factor, distance_to_land, edge_type_id, traffic_mode,
-                    0 AS edge_kind_id, NULL AS lock_id
+                    0 AS edge_kind_id, NULL AS lock_id, edited_fields
              FROM edges`,
             )
             .all() as unknown as EdgeRow[];
@@ -907,32 +936,43 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             edge_type_id ?? 0,
             traffic_mode ?? 0,
           );
-        // Then UPDATE only the fields that were actually provided
+        // Then UPDATE only the fields that were actually provided, and record
+        // which those are. Everything else in the row is a placeholder from
+        // the INSERT above, indistinguishable by value from a real reading —
+        // `cost_factor = 1.2` and `traffic_mode = 0` especially — so the
+        // loader has no way to tell an edit from a default without being told.
         const cols: string[] = [];
         const vals: any[] = [];
+        const edited: string[] = [];
         if (distance !== undefined) {
           cols.push("distance = ?");
           vals.push(distance);
+          edited.push("distance");
         }
         if (min_depth !== undefined) {
           cols.push("min_depth = ?");
           vals.push(min_depth);
+          edited.push("min_depth");
         }
         if (max_air_draft !== undefined) {
           cols.push("max_air_draft = ?");
           vals.push(max_air_draft);
+          edited.push("max_air_draft");
         }
         if (min_width !== undefined) {
           cols.push("min_width = ?");
           vals.push(min_width);
+          edited.push("min_width");
         }
         if (traffic_mode !== undefined) {
           cols.push("traffic_mode = ?");
           vals.push(traffic_mode);
+          edited.push("traffic_mode");
         }
         if (cost_factor !== undefined) {
           cols.push("cost_factor = ?");
           vals.push(cost_factor);
+          edited.push("cost_factor");
         }
         if (cols.length > 0) {
           vals.push(source, target);
@@ -941,6 +981,33 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
               `UPDATE edges SET ${cols.join(", ")} WHERE source = ? AND target = ?`,
             )
             .run(...vals);
+
+          // Union with whatever earlier edits set, so editing the depth today
+          // and the width tomorrow leaves both marked rather than the second
+          // edit disowning the first.
+          const prior = overlayHandle.db
+            .prepare(
+              "SELECT edited_fields FROM edges WHERE source = ? AND target = ?",
+            )
+            .get(source, target) as
+            | { edited_fields: string | null }
+            | undefined;
+          const merged = new Set<string>(edited);
+          if (prior?.edited_fields) {
+            try {
+              for (const f of JSON.parse(prior.edited_fields) as string[])
+                merged.add(f);
+            } catch {
+              // Unparseable marker: treat as unmarked rather than losing this
+              // edit's own fields — worst case the row falls back to the
+              // conservative merge for the columns we cannot account for.
+            }
+          }
+          overlayHandle.db
+            .prepare(
+              "UPDATE edges SET edited_fields = ? WHERE source = ? AND target = ?",
+            )
+            .run(JSON.stringify([...merged].sort()), source, target);
         }
         parentPort!.postMessage({ id, type, result: { success: true } });
         break;
@@ -1023,10 +1090,15 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
           edge_type_id: insEt,
           traffic_mode: insTm,
         } = payload!;
+        // A drawn edge is authored outright, not a correction to a file's row,
+        // so every column is the user's — marked as such in case a region
+        // file later turns out to describe the same pair (a re-download, or a
+        // neighbouring region overlapping this water), which must not then
+        // override what was drawn here.
         overlayHandle.db
           .prepare(
-            `INSERT OR REPLACE INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT OR REPLACE INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edited_fields)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             insSource,
@@ -1039,6 +1111,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             insDtl ?? 0,
             insEt ?? 0,
             insTm ?? 0,
+            JSON.stringify(OVERLAY_EDITABLE_COLUMNS),
           );
         parentPort!.postMessage({ id, type, result: { success: true } });
         break;

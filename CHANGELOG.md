@@ -12,6 +12,19 @@
   region can take longer than that to load. It now allows a request that is
   demonstrably waiting on routing data considerably longer, and if it does
   time out, says so in those terms rather than as a routing failure.
+- Fixed: a correction you made to an edge in the graph editor was lost the next
+  time the routing data loaded. Changing a depth, width, headroom, cost or
+  direction was saved to disk and applied straight away, but the region file's
+  own figures came back on top of it at the next restart. Corrections now
+  stick, including ones that make an edge *less* restrictive than the chart
+  says — the case you would be correcting for after sounding a channel
+  yourself. Only the fields you actually changed are held; everything else on
+  that edge still follows the routing data, so re-downloading a region still
+  brings you its updated figures for the rest. Corrections saved before this
+  version are kept but stay cautious: nothing recorded which of their values
+  you had set, so they are only applied where they are stricter than the
+  region file. Edits to a node's depth were never affected, and added and
+  deleted edges were always kept correctly.
 
 - Added: a route whose start or destination sits far from any charted waterway
   now says so. The planner joins such a point to the nearest waterway with a
