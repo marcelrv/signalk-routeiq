@@ -209,7 +209,10 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
 
   function buildFixtures(): void {
     if (!fs.existsSync(fixturesDir)) fs.mkdirSync(fixturesDir, { recursive: true });
-    for (const p of [westPath, eastPath]) if (fs.existsSync(p)) fs.unlinkSync(p);
+    // The overlay goes too: a run that died before its cleanup would otherwise
+    // leave user-edit rows behind for the next run's merge to pick up, which
+    // is exactly the contamination the cleanup below exists to prevent.
+    for (const p of [westPath, eastPath, overlayPath]) if (fs.existsSync(p)) fs.unlinkSync(p);
     buildFile(westPath, 'SEAMW', 'Seam Fixture West', 1, WEST_BBOX, WEST_NODES, WEST_EDGES);
     buildFile(eastPath, 'SEAME', 'Seam Fixture East', 2, EAST_BBOX, EAST_NODES, EAST_EDGES);
   }
