@@ -220,6 +220,13 @@
   // step. Steps arrive coarse-to-fine, not in clock order, which is why every
   // result carries its index and the rows are laid out from the `meta` line
   // before any of them have a time in them.
+  // Deadline for a route request that is waiting on a region being read into
+  // the graph, rather than the ordinary 30s. A full-country region took ~76s
+  // to load before the pipeline started tiling them, so the ordinary deadline
+  // would abort a request the server was still working on — the one case where
+  // giving up is certainly wrong.
+  const LOAD_TIMEOUT_MS = 180000;
+
   const DEP_SCAN_HOURS = 24;
   const DEP_STEP_MINUTES = 60;
   const DEP_STEPS = (DEP_SCAN_HOURS * 60) / DEP_STEP_MINUTES + 1; // ends included
@@ -4229,6 +4236,74 @@
     }, 3500);
   }
 
+  // ---- region-load watch ----
+  //
+  // A route request can trigger a region to be read into the graph before it
+  // can be answered, and that read is inline: the request simply takes tens of
+  // seconds with nothing to show for it. This watches for that and says which
+  // region is being loaded, so the wait reads as work rather than as a hang.
+  //
+  // Poll timings come from measuring a real 56 MB region load: the server's
+  // event loop is free for the first couple of seconds (a 100 ms poll is
+  // answered on time) and then blocked solid for the last ~3.8s while the rows
+  // are merged into the graph. So the first poll lands and tells us the region;
+  // later ones may not be answered at all until the load finishes. The message
+  // is therefore written to stay true while stale, and the spinner that carries
+  // it animates in the browser, where nothing is blocked.
+  let loadWatchTimer = null;
+  let loadWatchPollTimer = null;
+
+  /** Re-assert the toast periodically: showToast self-dismisses after 3.5s and
+   *  a load outlasts that several times over. */
+  function holdLoadToast(name) {
+    showToast("Loading " + name + " — this can take a while", "");
+  }
+
+  function pollLoadStatus(onLoading) {
+    fetch(getApiBase() + "/signalk/v1/api/router/databases/status", {
+      headers: { Accept: "application/json" },
+    })
+      .then(function (r) {
+        return r.ok ? r.json() : null;
+      })
+      .then(function (status) {
+        if (status && status.loading && status.loading.length > 0) {
+          onLoading(status.loading[0].name);
+        }
+      })
+      .catch(function () {
+        // A poll that cannot be answered tells us nothing new — the route
+        // request is still outstanding, and its own failure path reports it.
+      });
+  }
+
+  /** Start watching after a grace period, so a route that answers promptly —
+   *  every route into an already-loaded region — shows nothing extra. */
+  function startLoadWatch(onLoadDetected) {
+    stopLoadWatch();
+    let name = null;
+    const seen = function (n) {
+      const first = name === null;
+      name = n;
+      holdLoadToast(n);
+      if (first && onLoadDetected) onLoadDetected();
+    };
+    loadWatchTimer = setTimeout(function () {
+      pollLoadStatus(seen);
+      loadWatchPollTimer = setInterval(function () {
+        if (name) holdLoadToast(name);
+        pollLoadStatus(seen);
+      }, 3000);
+    }, 1200);
+  }
+
+  function stopLoadWatch() {
+    if (loadWatchTimer) clearTimeout(loadWatchTimer);
+    if (loadWatchPollTimer) clearInterval(loadWatchPollTimer);
+    loadWatchTimer = null;
+    loadWatchPollTimer = null;
+  }
+
   // ---- custom router ----
   const MarineRouter = L.Class.extend({
     options: {
@@ -4294,12 +4369,32 @@
       state.routing = true;
       showToast("Routing…", "");
       logDebug("ROUTE", routeUrl(), payload);
+      // A manual controller rather than AbortSignal.timeout, for two reasons:
+      // the deadline has to be extendable — a request waiting on a region load
+      // is not a stuck request, and giving up on it at 30s is exactly wrong
+      // when the server is demonstrably working — and AbortSignal.timeout
+      // needs a far newer browser than the chart plotters this runs on
+      // (browserslist in package.json), which AbortController does not.
+      const controller = new AbortController();
+      let abortTimer = setTimeout(function () {
+        controller.abort();
+      }, this.options.timeout);
+      const extendForLoad = function () {
+        clearTimeout(abortTimer);
+        abortTimer = setTimeout(function () {
+          controller.abort();
+        }, LOAD_TIMEOUT_MS);
+      };
+      const clearAbort = function () {
+        clearTimeout(abortTimer);
+      };
+      startLoadWatch(extendForLoad);
 
       fetch(routeUrl(), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(this.options.timeout),
+        signal: controller.signal,
       })
         .then((r) => {
           logDebug("ROUTE", routeUrl(), payload, r);
@@ -4318,6 +4413,8 @@
           return r.json();
         })
         .then((geoJson) => {
+          stopLoadWatch();
+          clearAbort();
           if (isDebug())
             console.log(
               "[routeiq] Route response:",
@@ -4355,8 +4452,15 @@
           );
         })
         .catch((err) => {
+          stopLoadWatch();
+          clearAbort();
           state.routing = false;
-          showToast("Routing failed: " + err.message, "error");
+          showToast(
+            err.name === "AbortError"
+              ? "Routing timed out — the server may still be loading routing data"
+              : "Routing failed: " + err.message,
+            "error",
+          );
           callback.call(context, { status: -1, message: err.message });
         });
     },

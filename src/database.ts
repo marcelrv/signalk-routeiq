@@ -698,10 +698,24 @@ export class RoutingDatabase {
     filenames: string[];
     available: number;
     disabled: number;
+    loading: Array<{ filename: string; name: string }>;
   } {
     let disabled = 0;
+    const loading: Array<{ filename: string; name: string }> = [];
     for (const entry of this.coverageIndex.values()) {
       if (entry.state === "disabled") disabled++;
+      // Regions being read into the graph right now. A route or a position
+      // update can trigger a load inline, and the request that triggered it
+      // simply takes tens of seconds longer with nothing to show for it —
+      // this is what lets a client say which region it is waiting on. The
+      // human-readable name if the file has one, since "Loading
+      // us_east_md.sqlite" is not what a helm wants to read.
+      if (entry.state === "loading") {
+        loading.push({
+          filename: entry.filename,
+          name: entry.meta?.name || entry.filename,
+        });
+      }
     }
     return {
       loaded: this.graphLoaded,
@@ -711,6 +725,7 @@ export class RoutingDatabase {
       // here would make an all-disabled install look like a fresh one.
       available: this.coverageIndex.size - disabled,
       disabled,
+      loading,
     };
   }
 

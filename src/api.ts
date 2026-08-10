@@ -1601,6 +1601,7 @@ export class ApiHandler {
         loaded: false,
         filenames: [],
         available: 0,
+        loading: [],
         initError: this.initError,
       });
       return;
