@@ -379,6 +379,71 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
       assert.ok(route.totalDistance! < straight * 1.5,
         `expected a routed cross-seam distance near ${Math.round(straight)} m, got ${Math.round(route.totalDistance!)} m`);
     });
+
+    it('a route that starts on the graph raises no coverage-gap warning', async () => {
+      // The no-false-alarm half of the check below: endpoints sitting on the
+      // charted graph produce short connectors or none at all.
+      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
+      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const route = await engine.calculateRoute({
+        start: { latitude: W0.lat, longitude: W0.lon },
+        end: { latitude: E1.lat, longitude: E1.lon },
+        minCoastDistance: 0,
+      });
+      assert.deepStrictEqual(
+        (route.warnings ?? []).filter(w => w.type === 'coverage_gap'), [],
+        'a fully routed leg must not be reported as a coverage gap',
+      );
+    });
+
+    // §9.3: an unstitched seam does not fail loudly. The start is projected
+    // onto the nearest *reachable* waterway — possibly across the hole — and
+    // joined with a straight line carrying minDepth -1, which every constraint
+    // check then skips. Measured legs of 3,485-4,597 m, reported only as
+    // start_connecting, which this repo's own webapp filters out of the
+    // warnings pane as noise. Route distance says nothing either: one such
+    // route came back *shorter* than its single-file baseline (x0.89) by
+    // cutting the corner.
+    it('a start far from any charted waterway is reported as a coverage gap, not a connection', async () => {
+      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
+      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+
+      // ~4.4 km south of W0 — inside the measured gap band (3,485-4,597 m) and
+      // well clear of the largest healthy connector seen on real data (893 m).
+      const strandedStart = { latitude: W0.lat - 0.04, longitude: W0.lon };
+      const route = await engine.calculateRoute({
+        start: strandedStart,
+        end: { latitude: E1.lat, longitude: E1.lon },
+        minCoastDistance: 0,
+      });
+
+      const gaps = (route.warnings ?? []).filter(w => w.type === 'coverage_gap');
+      assert.strictEqual(gaps.length, 1, `expected exactly one coverage_gap warning, got ${JSON.stringify(route.warnings)}`);
+      assert.ok(gaps[0].distanceMeters! > DEFAULT_CONFIG.coverageGapMeters,
+        'the reported distance should be what tripped the threshold');
+      assert.match(gaps[0].message, /not a routed path/);
+      // The ordinary connecting warning is replaced, not accompanied — one
+      // leg, one warning, so a client filtering the routine type by name
+      // cannot hide this one along with it.
+      assert.deepStrictEqual(
+        (route.warnings ?? []).filter(w => w.type === 'start_connecting'), [],
+        'the long connector should not also be reported as a routine connection',
+      );
+    });
+
+    it('coverageGapMeters = 0 turns the check off', async () => {
+      const engine = new RoutingEngine(db, { ...DEFAULT_CONFIG, coverageGapMeters: 0 });
+      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const route = await engine.calculateRoute({
+        start: { latitude: W0.lat - 0.04, longitude: W0.lon },
+        end: { latitude: E1.lat, longitude: E1.lon },
+        minCoastDistance: 0,
+      });
+      const warnings = route.warnings ?? [];
+      assert.deepStrictEqual(warnings.filter(w => w.type === 'coverage_gap'), []);
+      assert.ok(warnings.some(w => w.type === 'start_connecting'),
+        'with the check off, the same leg falls back to the routine warning');
+    });
   });
 
   describe('unloading one half keeps what the other half still contributes', () => {

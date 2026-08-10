@@ -74,6 +74,7 @@ These settings are available under Server → Plugin Config → RouteIQ:
 | Beam Safety Margin (m) | 2.0 | Width clearance added to the vessel's design beam |
 | Default Min Coast Distance (NM) | 0.5 | Default minimum distance to keep from the coastline |
 | Average Speed (kn) | 6.0 | Cruising speed used to estimate route duration / ETA |
+| Coverage Gap Warning (m) | 1500 | A start or destination further than this from any charted waterway is reported as a coverage gap: that leg is a straight line, not a routed path, and is not depth-checked. 0 turns the warning off |
 | Typical Lock Wait (min) | 60 | Time allowed for each lock on the route, counted towards duration and ETA. Adjustable per route under ☰ → Routing |
 | Typical Opening Bridge Wait (min) | 30 | Time allowed for each opening bridge. Fixed spans cost nothing |
 | Consider Tides by Default | off | Factor in tidal currents when calculating routes (needs `signalk-tidal-currents` and/or `signalk-tides`); can be overridden per request |

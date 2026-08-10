@@ -130,6 +130,13 @@ export interface RouteWarning {
     | "bbox_expanded"
     | "start_connecting"
     | "end_connecting"
+    // A start_connecting/end_connecting leg long enough to be a hole in the
+    // routing data rather than the last few metres to the quay. The leg is a
+    // straight line carrying minDepth -1, so it is excluded from every
+    // constraint check — reported separately because clients (this repo's own
+    // webapp included) hide the ordinary connecting warnings as noise, which
+    // is right for 45 m and badly wrong for 4 km. See coverageGapMeters.
+    | "coverage_gap"
     | "manual_segment"
     // A supplied draft/beam/airDraft was unusable and was dropped; the route
     // was planned against the server's configured dimensions instead.
@@ -253,6 +260,15 @@ export interface PluginConfig {
   // which answered an 18km request with a 242km route). Violations on the kept
   // route are still reported as warnings.
   maxPenaltyDetourRatio: number;
+  // How long the straight line joining a start/destination to the charted
+  // graph may be before it is called a coverage gap rather than an ordinary
+  // connection. That leg is never routed and never depth-checked, so a long
+  // one means the vessel is being asked to cross water the data does not
+  // describe — most often a hole between two regional databases, where the
+  // route is projected onto a waterway on the *far* side of the gap and joined
+  // with a straight line. Measured separation on the US East Coast builds:
+  // healthy connectors 4-893 m, gaps 3,485-4,597 m. 0 disables the check.
+  coverageGapMeters: number; // meters, default 1500
   lineOfSightSampleInterval: number; // meters, default 500
   lineOfSightSearchRadius: number; // meters, default 800
   averageSpeedKnots: number; // knots, default 6.0
@@ -313,6 +329,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   routingBBoxMargin: 1.0,
   routingBBoxMaxExtent: 10.0,
   maxPenaltyDetourRatio: 3.0,
+  coverageGapMeters: 1500,
   lineOfSightSampleInterval: 500,
   lineOfSightSearchRadius: 0,
   averageSpeedKnots: 6.0,

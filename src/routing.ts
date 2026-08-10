@@ -1292,6 +1292,56 @@ export class RoutingEngine {
   }
 
   /**
+   * The warning for one connector leg — the straight line joining a requested
+   * start/destination to the charted graph.
+   *
+   * Short ones are ordinary and are reported as `start_connecting`/
+   * `end_connecting`, which clients are entitled to treat as noise (this
+   * repo's own webapp drops them from the warnings pane outright). Long ones
+   * are not ordinary: the leg is not a routed path, and it carries
+   * `minDepth: -1`, so every constraint check skips it. That is how an
+   * un-stitched seam between two regional databases fails today — silently.
+   * The start is projected onto the nearest *reachable* waterway, which can
+   * be on the far side of the hole, and joined with a straight line; one such
+   * route came back shorter than its single-file baseline by cutting the
+   * corner (STITCHING_DESIGN.md §9.3). Route distance alone therefore says
+   * nothing about whether the water was ever charted.
+   *
+   * Above `coverageGapMeters` the same leg is reported as a `coverage_gap`
+   * instead, so it reaches the helm rather than being filtered out with the
+   * routine ones. The route is still returned: a straight line across an
+   * uncharted stretch may be perfectly navigable, and refusing to answer
+   * would help nobody. It just has to say so.
+   */
+  private connectorWarning(
+    position: "start" | "end",
+    meters: number,
+    from: { latitude: number; longitude: number },
+    to: { latitude: number; longitude: number },
+  ): RouteWarning {
+    const m = Math.round(meters);
+    const gap =
+      this.config.coverageGapMeters > 0 && m > this.config.coverageGapMeters;
+    const where =
+      position === "start"
+        ? "from the start position to the nearest charted waterway"
+        : "from the nearest charted waterway to the destination";
+    return {
+      type: gap
+        ? "coverage_gap"
+        : position === "start"
+          ? "start_connecting"
+          : "end_connecting",
+      message: gap
+        ? `${m}m ${where} — a straight line, not a routed path, and not depth-checked. Likely a gap in the routing data covering this area.`
+        : `${m}m ${where}.`,
+      from,
+      to,
+      distanceMeters: m,
+    };
+  }
+
+  /**
    * Connect a user-requested point to the nearest route coordinate.
    * Prepends/appends the user point and adds a connecting segment + warning.
    */
@@ -1392,16 +1442,17 @@ export class RoutingEngine {
           );
 
           if (!route.warnings) route.warnings = [];
-          route.warnings.push({
-            type: "start_connecting",
-            message: `${Math.round(proj.distance)}m from start to the nearest waterway edge.`,
-            from: {
-              latitude: userPoint.latitude,
-              longitude: userPoint.longitude,
-            },
-            to: { latitude: secondCoord[1], longitude: secondCoord[0] },
-            distanceMeters: Math.round(proj.distance),
-          });
+          route.warnings.push(
+            this.connectorWarning(
+              "start",
+              proj.distance,
+              {
+                latitude: userPoint.latitude,
+                longitude: userPoint.longitude,
+              },
+              { latitude: secondCoord[1], longitude: secondCoord[0] },
+            ),
+          );
 
           didSplit = true;
         }
@@ -1428,16 +1479,14 @@ export class RoutingEngine {
         );
         route.features[0].properties.totalDistance! += Math.round(directDist);
         if (!route.warnings) route.warnings = [];
-        route.warnings.push({
-          type: "start_connecting",
-          message: `${Math.round(directDist)}m from start position to the nearest charted waterway.`,
-          from: {
-            latitude: userPoint.latitude,
-            longitude: userPoint.longitude,
-          },
-          to: { latitude: firstCoord[1], longitude: firstCoord[0] },
-          distanceMeters: Math.round(directDist),
-        });
+        route.warnings.push(
+          this.connectorWarning(
+            "start",
+            directDist,
+            { latitude: userPoint.latitude, longitude: userPoint.longitude },
+            { latitude: firstCoord[1], longitude: firstCoord[0] },
+          ),
+        );
       }
     } else {
       const lastCoord = coords[coords.length - 1];
@@ -1515,16 +1564,17 @@ export class RoutingEngine {
               );
 
               if (!route.warnings) route.warnings = [];
-              route.warnings.push({
-                type: "end_connecting",
-                message: `${Math.round(proj.distance)}m from nearest waterway edge to destination.`,
-                from: { latitude: proj.point.lat, longitude: proj.point.lon },
-                to: {
-                  latitude: userPoint.latitude,
-                  longitude: userPoint.longitude,
-                },
-                distanceMeters: Math.round(proj.distance),
-              });
+              route.warnings.push(
+                this.connectorWarning(
+                  "end",
+                  proj.distance,
+                  { latitude: proj.point.lat, longitude: proj.point.lon },
+                  {
+                    latitude: userPoint.latitude,
+                    longitude: userPoint.longitude,
+                  },
+                ),
+              );
               didTruncate = true;
             }
           }
@@ -1596,13 +1646,21 @@ export class RoutingEngine {
           edgeSnap.distance + nodeToSnap,
         );
         if (!route.warnings) route.warnings = [];
-        route.warnings.push({
-          type: "end_connecting",
-          message: `${Math.round(edgeSnap.distance)}m from nearest waterway edge to destination (via edge projection).`,
-          from: { latitude: lastCoord[1], longitude: lastCoord[0] },
-          to: { latitude: userPoint.latitude, longitude: userPoint.longitude },
-          distanceMeters: Math.round(nodeToSnap),
-        });
+        // edgeSnap.distance, not nodeToSnap: the unverified straight line is
+        // the snap point → user leg pushed above (minDepth -1). nodeToSnap is
+        // travel along the last real edge to reach the snap point, and
+        // reporting it here disagreed with this warning's own message.
+        route.warnings.push(
+          this.connectorWarning(
+            "end",
+            edgeSnap.distance,
+            { latitude: edgeSnap.point.lat, longitude: edgeSnap.point.lon },
+            {
+              latitude: userPoint.latitude,
+              longitude: userPoint.longitude,
+            },
+          ),
+        );
       } else if (!didTruncate) {
         // Fall back to straight line
         coords.push([userPoint.longitude, userPoint.latitude]);
@@ -1624,13 +1682,14 @@ export class RoutingEngine {
         );
         route.features[0].properties.totalDistance! += Math.round(directDist);
         if (!route.warnings) route.warnings = [];
-        route.warnings.push({
-          type: "end_connecting",
-          message: `${Math.round(directDist)}m from nearest charted waterway to the destination.`,
-          from: { latitude: lastCoord[1], longitude: lastCoord[0] },
-          to: { latitude: userPoint.latitude, longitude: userPoint.longitude },
-          distanceMeters: Math.round(directDist),
-        });
+        route.warnings.push(
+          this.connectorWarning(
+            "end",
+            directDist,
+            { latitude: lastCoord[1], longitude: lastCoord[0] },
+            { latitude: userPoint.latitude, longitude: userPoint.longitude },
+          ),
+        );
       }
     }
   }
