@@ -1442,6 +1442,12 @@ export class RoutingEngine {
           );
 
           if (!route.warnings) route.warnings = [];
+          // to = the projection point, not secondCoord: the leg this warning
+          // is about is user → P, which is what proj.distance measures, what
+          // the prepended segment covers and what markOverland just checked.
+          // secondCoord is the far end of the edge P sits on. Same mismatch as
+          // the append path's nodeToSnap, and it matters more now that from/to
+          // may be locating a coverage gap for someone.
           route.warnings.push(
             this.connectorWarning(
               "start",
@@ -1450,7 +1456,7 @@ export class RoutingEngine {
                 latitude: userPoint.latitude,
                 longitude: userPoint.longitude,
               },
-              { latitude: secondCoord[1], longitude: secondCoord[0] },
+              { latitude: proj.point.lat, longitude: proj.point.lon },
             ),
           );
 
