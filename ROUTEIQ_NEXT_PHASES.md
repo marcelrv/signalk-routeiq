@@ -1208,7 +1208,29 @@ carry that implicit constraint.
 
 131/131 tests pass.
 
-### Related finding, not yet addressed: an unstitched seam fails silently
+### Related finding — ADDRESSED 2026-08-10: an unstitched seam fails silently
+
+`coverage_gap`, a distinct `RouteWarning` type raised in place of
+`start_connecting`/`end_connecting` once the connector exceeds
+`coverageGapMeters` (new config, default **1500 m**, 0 = off). Threshold sits
+in the empty band between the measurements below: healthy connectors ran
+4–893 m (§10.2's real cross-state routes), teleports 3,485–4,597 m.
+
+Why a new type rather than a flag on the old one: **this repo's own webapp
+drops `start_connecting`/`end_connecting` from the warnings pane outright**
+(`public/app.js`, the `continue` at the top of the warnings loop) — right for
+45 m, badly wrong for 4 km, and it meant a teleport was invisible to the helm.
+A distinct type falls through to the generic renderer with no webapp change.
+One warning per leg, not two, so a client filtering the routine type by name
+cannot hide this one with it. The route is still returned — a straight line
+over uncharted water may be perfectly navigable; it just has to say so.
+
+Fixed in passing: the append-path `end_connecting` reported `nodeToSnap` as
+its `distanceMeters` (travel along the last real edge) while its message
+quoted `edgeSnap.distance` (the unverified straight line). The straight line
+is the leg the warning is about, and now the one it reports.
+
+Original finding, kept for the measurements:
 
 When no graph path crosses a seam, `calculateRoute` does not fail — it projects
 the start onto the nearest reachable waterway, which may be **on the far side of
