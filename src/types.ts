@@ -267,8 +267,10 @@ export interface PluginConfig {
   // describe — most often a hole between two regional databases, where the
   // route is projected onto a waterway on the *far* side of the gap and joined
   // with a straight line. Measured separation on the US East Coast builds:
-  // healthy connectors 4-893 m, gaps 3,485-4,597 m. 0 disables the check.
-  coverageGapMeters: number; // meters, default 1500
+  // healthy connectors 4-893 m, gaps 3,485-4,597 m, so the default sits in the
+  // empty band between them and needs no tuning per deployment. Internal, like
+  // routingBBoxMargin — deliberately not in the settings schema. 0 disables.
+  coverageGapMeters: number; // meters, default 1500 — internal, not user-facing
   lineOfSightSampleInterval: number; // meters, default 500
   lineOfSightSearchRadius: number; // meters, default 800
   averageSpeedKnots: number; // knots, default 6.0

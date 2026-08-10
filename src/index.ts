@@ -233,14 +233,6 @@ export function pluginConstructor(app: ServerAPI) {
             minimum: 0.5,
             multipleOf: 0.1,
           },
-          coverageGapMeters: {
-            type: "number",
-            title: "Coverage Gap Warning (m)",
-            description:
-              "A start or destination further than this from any charted waterway is reported as a coverage gap rather than an ordinary connection. That leg is a straight line, not a routed path, and is not depth-checked — usually it means the routing data does not cover the water there. 0 turns the warning off.",
-            default: DEFAULT_CONFIG.coverageGapMeters,
-            minimum: 0,
-          },
           lockWaitMinutes: {
             type: "number",
             title: "Typical Lock Wait (min)",
