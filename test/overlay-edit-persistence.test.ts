@@ -85,8 +85,46 @@ describe('user edits survive a reload (overlay edited_fields)', () => {
     db.close();
   }
 
+  /** A second region covering the same water, which does describe A—C — the
+   *  neighbour that arrives after an edge has been drawn by hand. */
+  function buildOverlapRegion(): void {
+    const p = path.join(fixturesDir, 'overlap.sqlite');
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+    const db = new DatabaseSync(p, { open: true });
+    const run = (sql: string, params: unknown[] = []) => db.prepare(sql).run(...(params as any[]));
+    run(`CREATE TABLE metadata (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, country TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL, description TEXT, last_update_date TEXT NOT NULL,
+      bounding_box TEXT
+    )`);
+    run(`INSERT INTO metadata (country, name, description, last_update_date, bounding_box)
+         VALUES ('EDIT2', 'Overlapping Neighbour', '', '2026-01-01T00:00:00Z', ?)`,
+      [JSON.stringify({ min_lat: 52.9, min_lon: 5.9, max_lat: 53.1, max_lon: 6.2 })]);
+    run(`CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL, lon REAL, resolution REAL DEFAULT 0.0, node_depth REAL DEFAULT -1, region_id INTEGER)`);
+    for (const pt of [A, B, C]) {
+      run(`INSERT INTO nodes (id, lat, lon, region_id) VALUES (?, ?, ?, 2)`, [nodeIdFor(pt.lat, pt.lon), pt.lat, pt.lon]);
+    }
+    run(`CREATE TABLE edges (
+      source INTEGER, target INTEGER, distance REAL,
+      min_depth REAL, max_air_draft REAL, min_width REAL,
+      cost_factor REAL DEFAULT 1.0, distance_to_land REAL,
+      edge_type_id INTEGER DEFAULT 0, traffic_mode INTEGER DEFAULT 0,
+      edge_kind_id INTEGER DEFAULT 0
+    )`);
+    // Deliberately more constrained than the drawn edge on every column, so a
+    // conservative fold would visibly win if the drawn row were not marked.
+    for (const [from, to] of [[A, C], [C, A]]) {
+      run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id)
+           VALUES (?, ?, 6700, 2.0, 6.0, 5.0, 1.0, 500, 0, 0, 0)`,
+        [nodeIdFor(from.lat, from.lon), nodeIdFor(to.lat, to.lon)]);
+    }
+    run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
+    db.close();
+  }
+
   function cleanup(): void {
-    for (const p of [regionPath, overlayPath]) if (fs.existsSync(p)) fs.unlinkSync(p);
+    const overlap = path.join(fixturesDir, 'overlap.sqlite');
+    for (const p of [regionPath, overlayPath, overlap]) if (fs.existsSync(p)) fs.unlinkSync(p);
   }
 
   /** Open the fixture directory fresh — the overlay on disk is all that
@@ -243,6 +281,61 @@ describe('user edits survive a reload (overlay edited_fields)', () => {
       assert.strictEqual(edge.max_air_draft, FILE_AIR_DRAFT);
       assert.strictEqual(edge.min_width, FILE_WIDTH);
       assert.strictEqual(edge.distance, FILE_DISTANCE);
+    });
+  });
+
+  describe('an edge drawn in this session, before any restart', () => {
+    let db: RoutingDatabase;
+
+    before(async () => {
+      buildFixture();
+      buildOverlapRegion();
+      db = new RoutingDatabase(fixturesDir, true);
+      await db.init();
+      await db.loadGraph();
+      await db.loadDatabaseGraph('region.sqlite');
+      // A—C is a shortcut no region file describes yet, drawn by hand.
+      await db.addEdge(0, {
+        source: ID.A,
+        target: ID.C,
+        distance: 1234,
+        min_depth: 15.0,
+        max_air_draft: 99.0,
+        min_width: 88.0,
+      });
+      // A second region covering the same water arrives afterwards, and it
+      // does describe A—C. This is the ordering that catches an in-memory row
+      // not yet marked as the user's: before a restart nothing had re-read it
+      // from the overlay, so it looked like an ordinary unmarked edge.
+      await db.loadDatabaseGraph('overlap.sqlite');
+    });
+
+    after(async () => {
+      await db.close();
+      cleanup();
+    });
+
+    it('is not folded over by a region loaded afterwards', () => {
+      // Authored outright, not corrected, so the file's figures must not win
+      // any column — including the ones where the file is the more
+      // conservative reading, which is exactly what the fold would prefer.
+      const edge = db.getEdgeSync(ID.A, ID.C)!;
+      assert.strictEqual(edge.min_depth, 15.0, 'the drawn depth should stand, though the file says 2');
+      assert.strictEqual(edge.max_air_draft, 99.0, 'the drawn air draft should stand, though the file says 6');
+      assert.strictEqual(edge.min_width, 88.0, 'the drawn width should stand, though the file says 5');
+    });
+
+    it('behaves the same after a restart as it did before one', async () => {
+      await db.close();
+      db = new RoutingDatabase(fixturesDir, true);
+      await db.init();
+      await db.loadGraph();
+      await db.loadDatabaseGraph('region.sqlite');
+      await db.loadDatabaseGraph('overlap.sqlite');
+      const edge = db.getEdgeSync(ID.A, ID.C)!;
+      assert.strictEqual(edge.min_depth, 15.0);
+      assert.strictEqual(edge.max_air_draft, 99.0);
+      assert.strictEqual(edge.min_width, 88.0);
     });
   });
 

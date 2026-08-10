@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
-import { BBox, PoiResult } from "./types.js";
+import { BBox, PoiResult, OVERLAY_EDITABLE_COLUMNS } from "./types.js";
 import * as Navmesh from "./navmesh.js";
 
 // Node type constants (encoded in the node ID via coordinate hashing)
@@ -3380,6 +3380,13 @@ export class RoutingDatabase {
       distance_to_land: edge.distance_to_land ?? 0,
       edge_type_id: edge.edge_type_id ?? 0,
       traffic_mode: edge.traffic_mode ?? 0,
+      // Claims every column, matching the row insertEdge just wrote to the
+      // overlay. A drawn edge is authored outright rather than corrected, so
+      // if a region loaded later in this session turns out to describe the
+      // same pair, it must not fold over what the user drew. Without this the
+      // in-memory row would be unmarked until the next restart re-read it
+      // from the overlay, and behave differently before and after.
+      editedFields: [...OVERLAY_EDITABLE_COLUMNS],
     };
     if (!this.edgesBySource.has(edge.source)) {
       this.edgesBySource.set(edge.source, []);

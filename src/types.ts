@@ -2,6 +2,24 @@
  * Type definitions for the SignalK RouteIQ Nautical Route Planner Plugin
  */
 
+/** Edge columns the graph editor can set, and therefore the ones a user-edits
+ *  overlay row can claim in `edited_fields`. Everything else on such a row is
+ *  a placeholder written for a value the edit never mentioned, which is why
+ *  the distinction has to be recorded rather than inferred from the values.
+ *
+ *  Lives here because both sides of the worker boundary need the same list —
+ *  db-worker.ts writes it when an edge is drawn, database.ts stamps the
+ *  matching in-memory row — and this module imports nothing, so the worker
+ *  can take it without dragging anything else across. */
+export const OVERLAY_EDITABLE_COLUMNS = [
+  "cost_factor",
+  "distance",
+  "max_air_draft",
+  "min_depth",
+  "min_width",
+  "traffic_mode",
+];
+
 // Vessel dimensions from SignalK delta tree
 export interface VesselDimensions {
   draft?: number;
