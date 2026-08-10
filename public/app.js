@@ -4250,9 +4250,6 @@
   // later ones may not be answered at all until the load finishes. The message
   // is therefore written to stay true while stale, and the spinner that carries
   // it animates in the browser, where nothing is blocked.
-  let loadWatchTimer = null;
-  let loadWatchPollTimer = null;
-
   /** Re-assert the toast periodically: showToast self-dismisses after 3.5s and
    *  a load outlasts that several times over. */
   function holdLoadToast(name) {
@@ -4278,30 +4275,41 @@
   }
 
   /** Start watching after a grace period, so a route that answers promptly —
-   *  every route into an already-loaded region — shows nothing extra. */
+   *  every route into an already-loaded region — shows nothing extra.
+   *
+   *  Each call owns its own timers and returns the function that stops them.
+   *  Nothing stops route requests overlapping (`state.routing` is set but
+   *  never read as a guard, and dragging a waypoint re-routes), and with a
+   *  single shared watcher a second request would silence the first one's
+   *  timers, then have its own silenced when the first request returned —
+   *  losing both the message and the extended deadline for the request that
+   *  was still running. */
   function startLoadWatch(onLoadDetected) {
-    stopLoadWatch();
     let name = null;
+    let stopped = false;
     const seen = function (n) {
+      if (stopped) return;
       const first = name === null;
       name = n;
       holdLoadToast(n);
       if (first && onLoadDetected) onLoadDetected();
     };
-    loadWatchTimer = setTimeout(function () {
+    let pollTimer = null;
+    const graceTimer = setTimeout(function () {
       pollLoadStatus(seen);
-      loadWatchPollTimer = setInterval(function () {
+      pollTimer = setInterval(function () {
         if (name) holdLoadToast(name);
         pollLoadStatus(seen);
       }, 3000);
     }, 1200);
-  }
 
-  function stopLoadWatch() {
-    if (loadWatchTimer) clearTimeout(loadWatchTimer);
-    if (loadWatchPollTimer) clearInterval(loadWatchPollTimer);
-    loadWatchTimer = null;
-    loadWatchPollTimer = null;
+    return function stop() {
+      // `stopped` as well as the clears: a poll already in flight resolves
+      // after this and must not reinstate the message for a finished request.
+      stopped = true;
+      clearTimeout(graceTimer);
+      if (pollTimer) clearInterval(pollTimer);
+    };
   }
 
   // ---- custom router ----
@@ -4388,7 +4396,7 @@
       const clearAbort = function () {
         clearTimeout(abortTimer);
       };
-      startLoadWatch(extendForLoad);
+      const stopLoadWatch = startLoadWatch(extendForLoad);
 
       fetch(routeUrl(), {
         method: "POST",
@@ -4455,13 +4463,15 @@
           stopLoadWatch();
           clearAbort();
           state.routing = false;
-          showToast(
+          // One text for both: a routing control that renders the callback's
+          // message would otherwise show the browser's bare "aborted" string
+          // for the one failure that has a real explanation.
+          const detail =
             err.name === "AbortError"
               ? "Routing timed out — the server may still be loading routing data"
-              : "Routing failed: " + err.message,
-            "error",
-          );
-          callback.call(context, { status: -1, message: err.message });
+              : "Routing failed: " + err.message;
+          showToast(detail, "error");
+          callback.call(context, { status: -1, message: detail });
         });
     },
   });
