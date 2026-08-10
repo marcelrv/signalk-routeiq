@@ -60,6 +60,11 @@ function isRoutingDatabaseFile(filename: string): boolean {
   );
 }
 
+/** dbIndex reserved for the user-edits overlay, mirroring db-worker.ts's own
+ *  OVERLAY_DB_INDEX — an overlay row is authored by the user, not by any
+ *  routing database file, and outranks a file row it duplicates. */
+const OVERLAY_DB_INDEX = -1;
+
 // Edge kind: 0=centerline (default), 1=navmesh boundary (fallback/funnel-augmented),
 // 2=lane, 3=macro (spec §2.5)
 export const EDGE_KIND_CENTERLINE = 0;
@@ -106,6 +111,15 @@ export interface EdgeRow {
    *  to remove exactly one database's edges (real and synthetic) without
    *  touching any other loaded database's. */
   dbIndex?: number;
+  /** Other dbIndexes that also author this same (source,target) edge, set
+   *  only at a seam where overlapping files both carry it (see spliceEdge).
+   *  Absent on the overwhelming majority of edges, which have one
+   *  contributor. Read by unloadDatabaseGraph: evicting the file in `dbIndex`
+   *  promotes the first of these to primary and keeps the edge, because a
+   *  still-loaded file authors it too. Without this the de-duplication would
+   *  cut seam edges on eviction — the duplicate copies used to be what kept
+   *  them alive. */
+  extraDbIndexes?: number[];
 }
 
 interface PoiRow {
@@ -856,6 +870,100 @@ export class RoutingDatabase {
     return this.hasCrossesLand ? ", e.crosses_land" : "";
   }
 
+  /** Fold two files' values for one physical limit (depth, air draft, width)
+   *  into the more constrained one. A negative value is the UNKNOWN
+   *  convention — consumers exclude it from constraint checks (see
+   *  routing.ts's `min_depth < 0` / `max_air_draft >= 0` guards) — so it is
+   *  the *least* constrained reading there is, and a known value always beats
+   *  it. Between two known values the smaller wins. Real builds give both
+   *  sides of a seam the same numbers; this only decides the case where a
+   *  rebuild left them disagreeing, and it decides it by failing safe. */
+  private static tighterLimit(a: number, b: number): number {
+    if (typeof a !== "number" || a < 0) return b;
+    if (typeof b !== "number" || b < 0) return a;
+    return Math.min(a, b);
+  }
+
+  /** Add one edge row to `edgesBySource`, merging into an existing
+   *  (source,target) rather than appending a second copy of it.
+   *
+   *  Overlapping region files both author the edges in their overlap band, so
+   *  at a seam the same edge arrives once per file. Union of the two files'
+   *  edges is what makes the merged graph connected and must be kept; a
+   *  second *copy* of an edge both files hold is pure inflation of exactly
+   *  the adjacency every cross-region route traverses (measured 24,506
+   *  duplicate entries on the CT<->RI pair alone). A* only re-relaxes a
+   *  neighbour it has already settled, so this was never wrong, just wasteful.
+   *
+   *  Attribute conflicts resolve to the more constrained value rather than by
+   *  insertion order — the same rule whoever wrote the row. That deliberately
+   *  gives a user's overlay edit no special precedence here: an overlay row
+   *  written by updateEdge fills every column the edit did not mention with a
+   *  placeholder (distance 0, the limits -1, cost_factor 1.2), so letting it
+   *  overwrite wholesale would hand the graph a zero-length edge. Which of an
+   *  edit and a file's own values should win is a real question, but it is
+   *  the pre-existing one this de-duplication has no business answering: only
+   *  the *duplicate entry* goes away here, not the precedence.
+   *
+   *  Only the three physical limits and cost_factor are folded. `distance` is
+   *  geometry — both sides derive it from the same two node coordinates — and
+   *  the identity/kind columns are descriptive, so the first row's stand.
+   *
+   *  `mayDuplicate` says whether this row can possibly collide with one
+   *  already stored, and exists to keep the scan off the hot path: a second
+   *  contributor's edge out of node S requires S itself to be shared, so
+   *  callers pass false for the overwhelming majority of rows — those whose
+   *  source node this same load introduced — and skip straight to the append.
+   *  Overlay rows always pass true; they duplicate by intent, not by seam.
+   *
+   *  Returns true if a new adjacency entry was created. */
+  private spliceEdge(edge: EdgeRow, mayDuplicate: boolean): boolean {
+    let bucket = this.edgesBySource.get(edge.source);
+    if (!bucket) {
+      bucket = [];
+      this.edgesBySource.set(edge.source, bucket);
+    }
+    const existing = mayDuplicate
+      ? bucket.find((e) => e.target === edge.target)
+      : undefined;
+    if (!existing) {
+      bucket.push(edge);
+      return true;
+    }
+
+    existing.min_depth = RoutingDatabase.tighterLimit(
+      existing.min_depth,
+      edge.min_depth,
+    );
+    existing.max_air_draft = RoutingDatabase.tighterLimit(
+      existing.max_air_draft,
+      edge.max_air_draft,
+    );
+    existing.min_width = RoutingDatabase.tighterLimit(
+      existing.min_width,
+      edge.min_width,
+    );
+    // Higher cost_factor = more penalised = the conservative reading.
+    if (typeof edge.cost_factor === "number") {
+      existing.cost_factor =
+        typeof existing.cost_factor === "number"
+          ? Math.max(existing.cost_factor, edge.cost_factor)
+          : edge.cost_factor;
+    }
+
+    // Contributor bookkeeping, so eviction knows the edge outlives the file
+    // in `dbIndex`. Only tracked when the incoming row names a file — the
+    // bulk loadGraph path leaves dbIndex undefined and never evicts.
+    if (
+      edge.dbIndex !== undefined &&
+      edge.dbIndex !== existing.dbIndex &&
+      !existing.extraDbIndexes?.includes(edge.dbIndex)
+    ) {
+      (existing.extraDbIndexes ??= []).push(edge.dbIndex);
+    }
+    return false;
+  }
+
   async loadGraph(): Promise<void> {
     if (this.dynamicLoading) {
       // Dynamic mode never bulk-loads at startup — init()'s peekMetadata
@@ -875,7 +983,12 @@ export class RoutingDatabase {
       node_depth: number;
       region_id?: number;
     }> = await this.sendMessage("loadNodes");
+    // Bulk mode opens every file at once, so a node two overlapping files both
+    // author arrives twice and the Map silently collapses it. Those ids are
+    // exactly the ones whose edges can arrive twice as well — see spliceEdge.
+    const sharedSources = new Set<number>();
     for (const n of allNodes) {
+      if (this.nodes.has(n.id)) sharedSources.add(n.id);
       this.nodes.set(n.id, {
         lat: n.lat,
         lon: n.lon,
@@ -911,10 +1024,12 @@ export class RoutingDatabase {
       // endpoint has no usable geometry and is dropped here.
       if (!this.nodes.has(edge.source) || !this.nodes.has(edge.target))
         continue;
-      if (!this.edgesBySource.has(edge.source)) {
-        this.edgesBySource.set(edge.source, []);
-      }
-      this.edgesBySource.get(edge.source)!.push(edge);
+      // Overlapping regions' shared seam edges arrive in this same batch and
+      // need the same de-duplication the per-file path does. This path never
+      // tags rows with a dbIndex (bulk mode has no per-file eviction), so an
+      // overlay row is indistinguishable from a file row here and the two
+      // rank equally — first stored wins, as it always has.
+      this.spliceEdge(edge, sharedSources.has(edge.source));
     }
 
     this.buildSpatialIndex();
@@ -1525,6 +1640,10 @@ export class RoutingDatabase {
       });
 
       const nodeIdSet = this.nodesByDbIndex.get(dbIndex) ?? new Set<number>();
+      // Nodes an already-loaded database (or the overlay) also contributed —
+      // the seam. Only edges out of these can duplicate one already stored,
+      // which is what keeps spliceEdge's scan off the bulk of this load.
+      const sharedSources = new Set<number>();
       for (const n of nodes) {
         // Only ids not already in `this.nodes` are genuinely new to the
         // in-memory grid — a shared-id/refcount collision (region-seam
@@ -1532,6 +1651,7 @@ export class RoutingDatabase {
         // another database) must NOT be re-inserted, or the id would appear
         // twice in its grid cell and corrupt every grid-backed query (M6).
         const isNewNode = !this.nodes.has(n.id);
+        if (!isNewNode) sharedSources.add(n.id);
         this.nodes.set(n.id, {
           lat: n.lat,
           lon: n.lon,
@@ -1590,10 +1710,16 @@ export class RoutingDatabase {
         if (!this.nodes.has(edge.source) || !this.nodes.has(edge.target))
           continue;
         edge.dbIndex = edge.db_index;
-        if (!this.edgesBySource.has(edge.source))
-          this.edgesBySource.set(edge.source, []);
-        this.edgesBySource.get(edge.source)!.push(edge);
-        edgeCount++;
+        // Merges into an already-loaded neighbour's copy at a seam instead of
+        // storing this file's duplicate of it — the edge-level counterpart of
+        // the node-ID merge above.
+        if (
+          this.spliceEdge(
+            edge,
+            sharedSources.has(edge.source) || edge.dbIndex === OVERLAY_DB_INDEX,
+          )
+        )
+          edgeCount++;
       }
 
       // spatialGrid is maintained incrementally above (gridInsertNode on new
@@ -1694,13 +1820,34 @@ export class RoutingDatabase {
 
     const dbIndex = entry.dbIndex;
 
+    // Drop this database's edges — except a seam edge a still-loaded file
+    // also authors. Since spliceEdge stores such an edge once rather than
+    // once per file, "does anyone else author it" is a question only
+    // extraDbIndexes can answer: hand the edge over to one of the remaining
+    // contributors instead of removing it. (Before de-duplication this fell
+    // out of the duplication itself — each file had its own copy, so
+    // filtering by dbIndex left the other file's behind.)
     let edgesRemoved = 0;
     for (const [src, edges] of this.edgesBySource) {
-      const filtered = edges.filter((e) => e.dbIndex !== dbIndex);
-      edgesRemoved += edges.length - filtered.length;
-      if (filtered.length === 0) this.edgesBySource.delete(src);
-      else if (filtered.length !== edges.length)
-        this.edgesBySource.set(src, filtered);
+      const kept: Array<EdgeRow> = [];
+      for (const e of edges) {
+        if (e.dbIndex === dbIndex) {
+          const heir = e.extraDbIndexes?.shift();
+          if (heir === undefined) {
+            edgesRemoved++;
+            continue;
+          }
+          e.dbIndex = heir;
+          if (e.extraDbIndexes!.length === 0) delete e.extraDbIndexes;
+        } else if (e.extraDbIndexes) {
+          const at = e.extraDbIndexes.indexOf(dbIndex);
+          if (at >= 0) e.extraDbIndexes.splice(at, 1);
+          if (e.extraDbIndexes.length === 0) delete e.extraDbIndexes;
+        }
+        kept.push(e);
+      }
+      if (kept.length === 0) this.edgesBySource.delete(src);
+      else if (kept.length !== edges.length) this.edgesBySource.set(src, kept);
     }
 
     const nodeIds = this.nodesByDbIndex.get(dbIndex) ?? new Set<number>();

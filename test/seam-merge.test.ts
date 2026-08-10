@@ -79,11 +79,30 @@ const ID = {
 const WEST_NODES: Array<[string, Pt]> = [['W0', W0], ['W1', W1], ['WS', WS], ['S0', S0], ['S1', S1]];
 const EAST_NODES: Array<[string, Pt]> = [['S0', S0], ['S1', S1], ['ES', ES], ['E0', E0], ['E1', E1]];
 
+/** Per-edge attribute overrides, for the one edge both files author. */
+type EdgeAttrs = { min_depth?: number; max_air_draft?: number };
+type EdgeSpec = [Pt, Pt] | [Pt, Pt, EdgeAttrs];
+
 // Undirected pairs; the builder writes both directions of each. S0<->S1 is
-// the one edge both files hold, written into each identically — everything
-// else is exclusive to its side.
-const WEST_EDGES: Array<[Pt, Pt]> = [[W0, W1], [W1, S0], [S0, WS], [S0, S1]];
-const EAST_EDGES: Array<[Pt, Pt]> = [[S0, S1], [S0, ES], [S1, E0], [E0, E1]];
+// the one edge both files hold — everything else is exclusive to its side.
+//
+// The two files deliberately disagree on the shared edge, which a real
+// rebuild can leave behind: west says 12 m of depth and a 40 m air draft,
+// east says 7.5 m of depth and does not know the air draft (-1, the UNKNOWN
+// convention consumers exclude from constraint checks). The merge has to fail
+// safe on both counts, and the pair is chosen so that neither "first wins"
+// nor "last wins" can produce the expected answer by accident.
+const SHARED_DEPTH_WEST = 12.0;
+const SHARED_DEPTH_EAST = 7.5;
+const SHARED_AIR_DRAFT_WEST = 40.0;
+const WEST_EDGES: Array<EdgeSpec> = [
+  [W0, W1], [W1, S0], [S0, WS],
+  [S0, S1, { min_depth: SHARED_DEPTH_WEST, max_air_draft: SHARED_AIR_DRAFT_WEST }],
+];
+const EAST_EDGES: Array<EdgeSpec> = [
+  [S0, S1, { min_depth: SHARED_DEPTH_EAST, max_air_draft: -1 }],
+  [S0, ES], [S1, E0], [E0, E1],
+];
 
 const WEST_BBOX = { min_lat: 51.98, min_lon: 4.88, max_lat: 52.02, max_lon: 5.07 };
 const EAST_BBOX = { min_lat: 51.98, min_lon: 4.98, max_lat: 52.02, max_lon: 5.17 };
@@ -148,7 +167,7 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
 
   function buildFile(
     dbPath: string, country: string, name: string, regionId: number,
-    bbox: typeof WEST_BBOX, nodes: Array<[string, Pt]>, edges: Array<[Pt, Pt]>,
+    bbox: typeof WEST_BBOX, nodes: Array<[string, Pt]>, edges: Array<EdgeSpec>,
   ): void {
     const db = new DatabaseSync(dbPath, { open: true });
     const run = (sql: string, params: unknown[] = []) => db.prepare(sql).run(...(params as any[]));
@@ -172,15 +191,16 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
       edge_type_id INTEGER DEFAULT 0, traffic_mode INTEGER DEFAULT 0,
       edge_kind_id INTEGER DEFAULT 0
     )`);
-    // Both directions, identical attributes on both sides of the seam — a
-    // real build gives the two files the same values for a shared edge, which
-    // is what makes "keep one copy" a safe fix rather than a lossy one.
-    for (const [a, b] of edges) {
+    // Both directions of each pair, so the fold is exercised on the shared
+    // edge in each direction independently.
+    for (const [a, b, attrs] of edges as Array<[Pt, Pt, EdgeAttrs | undefined]>) {
       const d = Math.round(haversine(a.lat, a.lon, b.lat, b.lon));
+      const minDepth = attrs?.min_depth ?? 12.0;
+      const airDraft = attrs?.max_air_draft ?? 40.0;
       for (const [from, to] of [[a, b], [b, a]]) {
         run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id)
-             VALUES (?, ?, ?, 12.0, 40.0, 50.0, 1.0, 500, 0, 0, 0)`,
-          [nodeIdFor(from.lat, from.lon), nodeIdFor(to.lat, to.lon), d]);
+             VALUES (?, ?, ?, ?, ?, 50.0, 1.0, 500, 0, 0, 0)`,
+          [nodeIdFor(from.lat, from.lon), nodeIdFor(to.lat, to.lon), d, minDepth, airDraft]);
       }
     }
     run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
@@ -266,14 +286,11 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
       assert.deepStrictEqual(unexpected, [], 'merged graph holds an edge neither file authored');
     });
 
-    // KNOWN OPEN DEFECT — the merge unions but never de-duplicates, so an
-    // edge both files author is stored twice out of the shared node. Not a
-    // correctness bug (A* just re-relaxes a neighbour it has already settled)
-    // but it inflates the adjacency of precisely the nodes every cross-region
-    // route must traverse, and CT<->RI's 24,506 duplicate entries show it is
-    // not a rounding-error quantity. Remove the `todo` flag with the dedupe
-    // fix in database.ts's loadDatabaseGraphInner.
-    it('de-duplication: an edge both files author is stored once', { todo: 'dedupe on (source,target) is not implemented yet' }, async () => {
+    // The half that was missing until the dedupe landed: the union stored an
+    // edge both files author once per file, inflating the adjacency of
+    // precisely the nodes every cross-region route must traverse (24,506
+    // duplicate entries on the CT<->RI pair alone).
+    it('de-duplication: an edge both files author is stored once', async () => {
       const targets = await adjacencyTargets(db, ID.S0);
       assert.strictEqual(countOf(targets, ID.S1), 1, 'S0->S1 is authored by both files and should be stored once');
       assert.strictEqual(targets.length, 4, 'S0 should have exactly 4 outgoing edges: W1, WS, ES, S1');
@@ -283,14 +300,25 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
       assert.strictEqual(s1Targets.length, 2, 'S1 should have exactly 2 outgoing edges: S0, E0');
     });
 
-    it('documents the duplication that is there today, so the fix has to update this test', async () => {
-      // Deliberately asserts the *current* behaviour, paired with the todo
-      // above: whichever way the dedupe fix lands, one of these two tests
-      // fails until both are updated together — the duplication cannot be
-      // changed silently, in either direction.
-      const targets = await adjacencyTargets(db, ID.S0);
-      assert.strictEqual(countOf(targets, ID.S1), 2, 'expected the known duplicate S0->S1 (one per file)');
-      assert.strictEqual(targets.length, 5, 'expected 4 distinct targets with S1 duplicated');
+    it('the merged graph holds 14 edges, not the 16 rows the two files carry', async () => {
+      // 8 directed rows per file; the shared edge contributes 2 of each
+      // file's rows and collapses to 2 entries rather than 4.
+      const stats = await db.getStats();
+      assert.strictEqual(stats.edges, 14);
+    });
+
+    it('where the two files disagree, the more constrained value wins', async () => {
+      // Neither insertion order can produce this pair by accident: west loads
+      // first and yet loses the depth, east loads second and yet loses the
+      // air draft.
+      for (const [from, to] of [[ID.S0, ID.S1], [ID.S1, ID.S0]]) {
+        const edge = db.getEdgeSync(from, to);
+        assert.ok(edge, 'the shared seam edge should be present in both directions');
+        assert.strictEqual(edge!.min_depth, SHARED_DEPTH_EAST,
+          'the shallower of the two files\' depths should win');
+        assert.strictEqual(edge!.max_air_draft, SHARED_AIR_DRAFT_WEST,
+          'a known air draft should beat the other file\'s -1 (unknown, excluded from constraint checks)');
+      }
     });
   });
 
@@ -389,22 +417,23 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
 
     // THE GUARD THIS FIXTURE EXISTS FOR, alongside the dedupe itself.
     //
-    // unloadDatabaseGraph drops edges by `e.dbIndex !== dbIndex`. Today the
-    // S0<->S1 edge is stored twice — once tagged west, once east — so evicting
-    // west leaves the east copy and the seam survives by accident of the very
-    // duplication the dedupe fix removes. Dedupe on (source,target) that keeps
-    // only the first contributor's row therefore silently breaks this: the
-    // surviving row would still be tagged west and get filtered out here,
-    // cutting the seam edge while a file that authors it is still loaded.
-    //
-    // So the fix needs per-edge contributor ref-counting (the edge-level
-    // analogue of nodeDbCount), not just a de-duplicating splice. This test
-    // passes today and must keep passing after the fix.
+    // unloadDatabaseGraph drops edges by dbIndex. Before de-duplication the
+    // S0<->S1 edge was stored twice — once tagged west, once east — so
+    // evicting west left the east copy behind and the seam survived by
+    // accident of the very duplication the dedupe removes. Storing it once
+    // means the surviving row can be tagged with the file being evicted, and
+    // a plain filter would cut a seam edge that a still-loaded file authors:
+    // no failed route, just a silent hole where the two regions used to join.
+    // spliceEdge's extraDbIndexes is what closes that, by handing the edge to
+    // a remaining contributor instead.
     it('an edge both files authored survives eviction of one of them', async () => {
       const edge = db.getEdgeSync(ID.S0, ID.S1);
       assert.ok(edge, 'S0->S1 is still authored by the loaded east file and must survive the west eviction');
       const back = db.getEdgeSync(ID.S1, ID.S0);
       assert.ok(back, 'S1->S0 is still authored by the loaded east file and must survive the west eviction');
+      // Handed over, not merely left behind: the surviving row must no longer
+      // claim the evicted file, or a second eviction would mis-target it.
+      assert.notStrictEqual(edge!.dbIndex, 0, 'the surviving edge should have been handed to the east file');
     });
 
     it('the east half is intact and still connected across the old seam', async () => {
@@ -414,6 +443,83 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
         [ID.S0, ID.S1, ID.ES, ID.E0, ID.E1].sort((a, b) => a - b),
         'expected exactly the east file\'s 5 nodes to remain, still one component',
       );
+    });
+
+    // Runs last: it puts the west half back, which the assertions above
+    // depend on being gone.
+    it('reloading the evicted half restores its edges without re-duplicating the shared one', async () => {
+      await db.loadDatabaseGraph('region-west.sqlite');
+
+      const targets = await adjacencyTargets(db, ID.S0);
+      assert.strictEqual(countOf(targets, ID.S1), 1, 'the shared edge should still be stored once after a reload');
+      assert.strictEqual(targets.length, 4, 'S0 should be back to W1, WS, ES, S1');
+      const stats = await db.getStats();
+      assert.strictEqual(stats.edges, 14, 'a load -> unload -> load cycle should not leak edges');
+      assert.strictEqual(stats.nodes, 8);
+    });
+  });
+
+  describe('a user edit at the seam is folded in, not stored as a second edge', () => {
+    // updateEdge writes a row into the user-edits overlay, which the loader
+    // then merges alongside the file rows for the same (source,target) — a
+    // third contributor to the same seam edge, and a duplicate entry before
+    // this change. It is folded by the same more-constrained rule the two
+    // files get, deliberately: the overlay row fills every column the edit did
+    // not mention with a placeholder, so `distance` there is 0. A rule that
+    // let the edit overwrite wholesale would put a zero-length edge at the
+    // seam, which is why these tests pin the distance as well as the depth.
+    const EDITED_DEPTH = 3.25;
+    let first: RoutingDatabase;
+    let reopened: RoutingDatabase;
+
+    before(async () => {
+      buildFixtures();
+      first = new RoutingDatabase(fixturesDir, true);
+      await first.init();
+      await first.loadGraph();
+      await first.loadDatabaseGraph('region-west.sqlite');
+      await first.loadDatabaseGraph('region-east.sqlite');
+      await first.updateEdge(0, ID.S0, ID.S1, { min_depth: EDITED_DEPTH });
+      await first.close();
+
+      // A second instance over the same directory: the two region files are
+      // untouched on disk, the edit exists only as an overlay row.
+      reopened = new RoutingDatabase(fixturesDir, true);
+      await reopened.init();
+      await reopened.loadGraph();
+      await reopened.loadDatabaseGraph('region-west.sqlite');
+      await reopened.loadDatabaseGraph('region-east.sqlite');
+    });
+
+    after(async () => {
+      await reopened.close();
+      cleanupFixtures();
+    });
+
+    it('the edit lands in both directions, stored once each', async () => {
+      // updateEdge writes the one direction it was given; opening the overlay
+      // backfills the reverse of every bidirectional overlay edge, so both
+      // directions carry the edit by the time the graph is rebuilt.
+      for (const [from, to] of [[ID.S0, ID.S1], [ID.S1, ID.S0]]) {
+        const edge = reopened.getEdgeSync(from, to);
+        assert.ok(edge, 'the edited seam edge should be present after the reload');
+        assert.strictEqual(edge!.min_depth, EDITED_DEPTH,
+          'the edit is shallower than either file and should win the fold');
+      }
+      const targets = await adjacencyTargets(reopened, ID.S0);
+      assert.strictEqual(countOf(targets, ID.S1), 1, 'the edit should not add a second copy of the edge');
+      assert.strictEqual(targets.length, 4);
+    });
+
+    it('the edit does not drag the overlay row\'s placeholder columns in with it', async () => {
+      // The regression this pins: an overlay row the edit left unspecified
+      // carries distance 0 and -1 limits. Folding must not let those through,
+      // or the seam edge becomes free to traverse and unconstrained.
+      const edge = reopened.getEdgeSync(ID.S0, ID.S1)!;
+      assert.ok(edge.distance > 0, `seam edge distance should stay real, got ${edge.distance}`);
+      assert.strictEqual(edge.max_air_draft, SHARED_AIR_DRAFT_WEST,
+        'the west file\'s known air draft should still win over -1');
+      assert.strictEqual(edge.min_width, 50.0, 'the files\' width should survive the overlay placeholder');
     });
   });
 });

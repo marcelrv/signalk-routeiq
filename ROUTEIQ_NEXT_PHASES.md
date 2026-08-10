@@ -48,14 +48,60 @@ repos' file lists — and open editor tabs — aren't identically named; now
 > US East Coast files unconditionally already hit a V8 heap OOM. **The WS2
 > task list below was written before this was known and reads as if
 > unstarted — treat it as reference/spec, not a to-do.** Remaining work,
-> updated 2026-08-08: (1) **pipeline** seam stitching — **DONE**, shipped and
-> measured (see STITCHING_DESIGN §8–§10.8); (2) coincident-node merge —
-> **the union half is DONE and verified, the dedupe half is still open**, see
-> below; (3) optional **position-triggered** auto-load/evict +
-> `loadRadiusNm`/`unloadAfterIdleNm`/`maxLoadedRegions` (not implemented;
-> on-demand route loading already covers correctness).
+> updated 2026-08-10: (1) **pipeline** seam stitching — **DONE**, shipped and
+> measured (see STITCHING_DESIGN §8–§10.8); (2) coincident-node merge — **DONE**,
+> union and de-duplication both, see below; (3) **position-triggered**
+> auto-load — also **DONE**, contrary to what this line said until 2026-08-10:
+> `eagerLoadAtPosition` (default on), `loadRadiusNm` and `maxLoadedRegions`
+> (default 6) are all in `types.ts`, with a real `navigation.position`
+> subscription in `index.ts` and an LRU cap in `database.ts`. What remains of
+> §4a is the **loading indicator** for inline loads (below) and
+> `unloadAfterIdleNm`-style distance eviction, which the LRU cap covers in
+> practice.
 
-### Coincident-node merge: union verified, de-duplication still missing
+### Coincident-node merge: union verified, de-duplication now done (2026-08-10)
+
+**CLOSED.** `spliceEdge` in `src/database.ts` folds a second contributor's copy
+of an already-stored `(source,target)` into the existing entry instead of
+appending it, on both the per-file and the bulk load path. Verified against the
+real stitched builds and matching the measurements below exactly: **CT↔RI
+24,506** rows merged rather than appended (115,442 on disk → 90,936 added), and
+**DE↔MD 26** (267,704 → 267,678). Committed fixture: `test/seam-merge.test.ts`.
+
+Three things worth knowing, none of which were in the original plan:
+
+- **Attribute conflicts fold to the more constrained value**, not to the first
+  contributor. Between two files: known beats `-1` (the UNKNOWN convention
+  consumers exclude from constraint checks, so it is the *least* constrained
+  reading there is), then smaller wins; `cost_factor` takes the max. Only the
+  three physical limits and `cost_factor` fold — `distance` is geometry both
+  sides derive from the same coordinates.
+- **De-duplication would have broken eviction**, silently. `unloadDatabaseGraph`
+  drops edges by `dbIndex`, and a shared seam edge used to survive eviction of
+  one contributor only because it was stored twice — once tagged per file. With
+  one copy, a plain filter cuts a seam edge a still-loaded file authors: no
+  failed route, just a hole where the regions joined. `EdgeRow.extraDbIndexes`
+  is the per-edge contributor list that closes it, handing the edge to a
+  remaining contributor on eviction.
+- **The scan is gated on shared sources**, or it costs ~8% of load time. A
+  second contributor's edge out of node S requires S itself to be shared, so
+  both load paths collect the shared node ids and only those sources pay the
+  adjacency scan. Re-measured on CT↔RI: within noise of the pre-change build
+  (and the second file now loads slightly faster, having 24,506 fewer rows to
+  append).
+
+Also found here, **not addressed** — a user's edge edit does not survive a
+reload on its own merits. `updateEdge` writes a row into the overlay whose
+unmentioned columns are placeholders (`distance` 0, limits `-1`,
+`cost_factor` 1.2); before this change the file's row was simply stored first
+and every reader's `.find()` returned it, so the edit reverted. The
+de-duplication deliberately does *not* settle that precedence question — it
+folds the overlay row by the same conservative rule as any other, so an edit
+that tightens a limit takes effect and one that relaxes it still does not.
+Deciding what an overlay row should outrank, and how to tell a placeholder
+from an intended value, is its own piece of work.
+
+### Original finding (2026-08-08), kept for the measurements
 
 Measured across both the Zeeland fixtures and all 12 real US East Coast region
 pairs (`signalk-router-pipeline/local_only/local_scripts/round25_seamroute/`
@@ -130,12 +176,14 @@ straight chord over them. 57/57 tests; verified live (route START 4.21 → DEST
 
 **Non-urgent follow-ups (2026-07-21):**
 
-1. **Cap on regions loaded per request.** `ensureRegionsForBbox` loads *every*
-   not-loaded region intersecting the search bbox, uncapped — a very wide
-   route (up to `routingBBoxMaxExtent`, 10°) over a densely-tiled area could
-   load many regions in one request. Fine at current dataset size; add the
-   `maxLoadedRegions` cap (the §4a config knob, still unimplemented) if
-   regions get smaller/denser.
+1. ~~**Cap on regions loaded per request.**~~ — **done, and this note was
+   already out of date when written.** `maxLoadedRegions` exists
+   (`types.ts`, default **6**) and `enforceRegionCap()` evicts
+   least-recently-used regions once no route is in flight. What is still
+   uncapped is the number of regions `ensureRegionsForBbox` loads *within one
+   request* — a very wide route (up to `routingBBoxMaxExtent`, 10°) over a
+   densely-tiled area loads every intersecting region before the LRU trims
+   back. Fine at current dataset size.
 2. **Loading indicator for on-demand region loads.** Route- and
    position-triggered loads are inline/blocking today, so a request that
    triggers a new region load just takes longer with no UI feedback (tens of
