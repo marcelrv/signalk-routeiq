@@ -107,6 +107,16 @@ function bboxFromPoints(
 // purpose — see its doc comment). The retry triggers whenever that sum is
 // nonzero, i.e. the route touches even one hard-constraint-violating edge.
 
+/** One completed bounding-box attempt, kept until the expansion loop ends so
+ *  the winner can be picked across the whole set at once — see
+ *  RoutingEngine.selectBestCandidate for why folding them pairwise is wrong. */
+interface RouteCandidate {
+  result: RouteResult;
+  violatingMeters: number;
+  cost: number;
+  distance: number;
+}
+
 // A* search state
 interface SearchState {
   nodeId: number;
@@ -462,10 +472,7 @@ export class RoutingEngine {
     // what the search could actually examine.
     await this.db.ensureRegionsForBbox(bboxFromPoints(start, end, maxMargin));
 
-    let bestResult: RouteResult | null = null;
-    let bestCost = Infinity;
-    let bestViolatingMeters = Infinity;
-    let bestDistance = 0;
+    const candidates: RouteCandidate[] = [];
     let previousAttempt: {
       violatingMeters: number;
       cost: number;
@@ -491,21 +498,7 @@ export class RoutingEngine {
         const cost = result.features[0].properties.totalCost ?? 0;
         const distance = result.features[0].properties.totalDistance ?? 0;
         const violatingMeters = this.pathViolationMeters(result, effectiveDims);
-        if (
-          this.isBetterCandidate(
-            violatingMeters,
-            cost,
-            bestViolatingMeters,
-            bestCost,
-            distance,
-            bestDistance,
-          )
-        ) {
-          bestResult = result;
-          bestCost = cost;
-          bestViolatingMeters = violatingMeters;
-          bestDistance = distance;
-        }
+        candidates.push({ result, violatingMeters, cost, distance });
 
         const penalized = violatingMeters > 0;
         const stalled =
@@ -552,11 +545,12 @@ export class RoutingEngine {
       }
     }
 
-    if (bestResult) {
-      const result = bestResult;
+    const best = this.selectBestCandidate(candidates);
+    if (best) {
+      const result = best.result;
       if (retriedForPenalty) {
         console.log(
-          `Route search penalized-result retry ${bestViolatingMeters > 0 ? "did not clear the penalty" : "won"} (final cost ${bestCost.toFixed(0)}, ${bestViolatingMeters.toFixed(0)}m constraint-violating)`,
+          `Route search penalized-result retry ${best.violatingMeters > 0 ? "did not clear the penalty" : "won"} (final cost ${best.cost.toFixed(0)}, ${best.violatingMeters.toFixed(0)}m constraint-violating)`,
         );
       }
 
@@ -1070,10 +1064,7 @@ export class RoutingEngine {
       bboxFromPoints(startPt, endPt, segmentMaxMargin),
     );
 
-    let bestResult: RouteResult | null = null;
-    let bestCost = Infinity;
-    let bestViolatingMeters = Infinity;
-    let bestDistance = 0;
+    const candidates: RouteCandidate[] = [];
     let previousAttempt: {
       violatingMeters: number;
       cost: number;
@@ -1098,21 +1089,7 @@ export class RoutingEngine {
         const cost = result.features[0].properties.totalCost ?? 0;
         const distance = result.features[0].properties.totalDistance ?? 0;
         const violatingMeters = this.pathViolationMeters(result, dims);
-        if (
-          this.isBetterCandidate(
-            violatingMeters,
-            cost,
-            bestViolatingMeters,
-            bestCost,
-            distance,
-            bestDistance,
-          )
-        ) {
-          bestResult = result;
-          bestCost = cost;
-          bestViolatingMeters = violatingMeters;
-          bestDistance = distance;
-        }
+        candidates.push({ result, violatingMeters, cost, distance });
 
         const penalized = violatingMeters > 0;
         const stalled =
@@ -1155,21 +1132,22 @@ export class RoutingEngine {
       }
     }
 
-    if (bestResult) {
+    const best = this.selectBestCandidate(candidates);
+    if (best) {
       if (retriedForPenalty) {
         console.log(
-          `Route search for ${label} penalized-result retry ${bestViolatingMeters > 0 ? "did not clear the penalty" : "won"} (final cost ${bestCost.toFixed(0)}, ${bestViolatingMeters.toFixed(0)}m constraint-violating)`,
+          `Route search for ${label} penalized-result retry ${best.violatingMeters > 0 ? "did not clear the penalty" : "won"} (final cost ${best.cost.toFixed(0)}, ${best.violatingMeters.toFixed(0)}m constraint-violating)`,
         );
       }
       this.addViolationWarnings(
-        bestResult,
+        best.result,
         warnings,
         label,
         startPt,
         endPt,
         dims,
       );
-      return bestResult;
+      return best.result;
     }
 
     // A* failed entirely — graph is physically disconnected. Bridge the gap.
@@ -2481,14 +2459,64 @@ export class RoutingEngine {
    * penalized one even if the penalized one happens to be cheaper on paper.
    * Cost only breaks ties between two results at the same violation level.
    *
-   * That preference is now BOUNDED by `maxPenaltyDetourRatio`: clearing a
+   * That preference is BOUNDED by `maxPenaltyDetourRatio`: clearing a
    * violation is worth a detour, but not an unbounded one. Unbounded, this
    * ordering answered an 18km cross-seam request with a 242km fully-compliant
    * route in preference to a 36km one carrying 3.6km of "shallow" water — much
    * of which is a coarse DEPARE band (DRVAL1=0, DRVAL2=18.2m) rather than a
    * survey. Past the ratio the shorter route wins and its violations surface as
    * warnings, which the helm can act on; a 6.7x detour cannot be acted on.
+   *
+   * Only used now to ask whether one attempt improved on the one before it,
+   * for deciding when to stop expanding the box — a genuinely pairwise
+   * question between consecutive attempts. Picking the winner across all
+   * attempts is selectBestCandidate's job, because this relation is not
+   * transitive once the ratio bound applies.
    */
+  /**
+   * Choose among every attempt at once, rather than folding them pairwise
+   * into a running best.
+   *
+   * The ratio bound makes the pairwise relation NON-TRANSITIVE, so folding it
+   * let an over-long route win by arriving in the right order. With a ratio of
+   * 3 and attempts of (10m violating, 10km), (5m, 25km), (0m, 70km), each
+   * consecutive step is inside the bound (25 <= 30, 70 <= 75) so the bound
+   * never fires, and the 70km route is kept — even though head-to-head it
+   * loses to the 10km one at 7x. Laundering a 7x detour through an
+   * intermediate is exactly what the bound exists to prevent.
+   *
+   * Measuring every candidate against one fixed yardstick — the shortest
+   * route anybody found — removes the order dependence: the answer is a
+   * property of the set, not of the sequence.
+   */
+  private selectBestCandidate(
+    candidates: RouteCandidate[],
+  ): RouteCandidate | null {
+    if (candidates.length === 0) return null;
+    const ratio = this.config.maxPenaltyDetourRatio ?? 0;
+
+    // A route with no measured distance can't be judged as a detour; it stays
+    // eligible rather than being silently dropped.
+    const measured = candidates.filter((c) => c.distance > 0);
+    const baseline = measured.length
+      ? Math.min(...measured.map((c) => c.distance))
+      : 0;
+    const limit = ratio > 0 && baseline > 0 ? baseline * ratio : Infinity;
+    const eligible = candidates.filter(
+      (c) => c.distance <= 0 || c.distance <= limit,
+    );
+    // A ratio below 1 would exclude even the shortest route; never return
+    // nothing when an attempt did succeed.
+    const pool = eligible.length > 0 ? eligible : candidates;
+
+    return pool.reduce((best, c) => {
+      if (c.violatingMeters !== best.violatingMeters) {
+        return c.violatingMeters < best.violatingMeters ? c : best;
+      }
+      return c.cost < best.cost ? c : best;
+    });
+  }
+
   private isBetterCandidate(
     violatingMetersA: number,
     costA: number,
@@ -3453,11 +3481,17 @@ export class RoutingEngine {
     const segments = result.features[0].properties.segments!;
     const minDepth = (dims.draft ?? 2.0) + this.config.safetyMarginDraft;
     const airDraft = (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft;
+    // Beam is tested exactly as pathViolationMeters tests it. The two must
+    // agree: that function decides a route is violating and may now be KEPT
+    // anyway once maxPenaltyDetourRatio bounds the detour, so anything it
+    // counts and this does not is a violation the helm is never told about.
+    const minBeam = (dims.beam ?? 4.0) + this.config.safetyMarginBeam;
 
     let totalViolationSegments = 0;
     let totalViolationDist = 0;
     let worstDepth = Infinity;
     let worstAirDraft = Infinity;
+    let worstBeam = Infinity;
     let firstFromCoord: number[] | null = null;
     let lastToCoord: number[] | null = null;
 
@@ -3466,8 +3500,12 @@ export class RoutingEngine {
       const depthViolation = seg.minDepth >= 0 && seg.minDepth < minDepth;
       const airDraftViolation =
         seg.maxAirDraft >= 0 && seg.maxAirDraft < airDraft;
+      const beamViolation =
+        typeof seg.minWidth === "number" &&
+        seg.minWidth >= 0 &&
+        seg.minWidth < minBeam;
 
-      if (depthViolation || airDraftViolation) {
+      if (depthViolation || airDraftViolation || beamViolation) {
         const fromCoord = coords[i];
         const toCoord = coords[i + 1];
         if (!fromCoord || !toCoord) continue;
@@ -3478,6 +3516,8 @@ export class RoutingEngine {
           worstDepth = seg.minDepth;
         if (airDraftViolation && seg.maxAirDraft < worstAirDraft)
           worstAirDraft = seg.maxAirDraft;
+        if (beamViolation && seg.minWidth! < worstBeam)
+          worstBeam = seg.minWidth!;
         if (!firstFromCoord) firstFromCoord = fromCoord;
         lastToCoord = toCoord;
       }
@@ -3490,6 +3530,10 @@ export class RoutingEngine {
       if (worstAirDraft < Infinity)
         reasons.push(
           `air draft ${worstAirDraft.toFixed(1)}m < required ${airDraft}m`,
+        );
+      if (worstBeam < Infinity)
+        reasons.push(
+          `width ${worstBeam.toFixed(1)}m < required beam ${minBeam}m`,
         );
       const distNm = totalViolationDist / 1852;
       warnings.push({

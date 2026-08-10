@@ -344,3 +344,98 @@ describe('violation-rate tradeoff is bounded, not all-or-nothing (Round 19)', ()
     }
   });
 });
+
+
+// maxPenaltyDetourRatio bounds how far a route may detour to clear a
+// violation. The comparison that applied it used to be folded pairwise into a
+// running best, and because that relation is NOT transitive the winner
+// depended on the order the bbox retries happened to produce candidates: a
+// route far past the ratio could win by being compared against an
+// intermediate rather than against the shortest route. selectBestCandidate
+// measures every candidate against one fixed yardstick instead, so these
+// assert the same set gives the same answer in any order.
+describe('maxPenaltyDetourRatio selects independently of attempt order', () => {
+  const RATIO = 3;
+
+  function engineWithRatio(): any {
+    return new RoutingEngine({} as never, {
+      ...DEFAULT_CONFIG,
+      maxPenaltyDetourRatio: RATIO,
+    });
+  }
+
+  // (violating meters, cost, distance)
+  const SHORT_DIRTY = { result: 'short-dirty', violatingMeters: 10, cost: 1, distance: 10_000 };
+  const MID = { result: 'mid', violatingMeters: 5, cost: 1, distance: 25_000 };
+  const LONG_CLEAN = { result: 'long-clean', violatingMeters: 0, cost: 1, distance: 70_000 };
+
+  function permutations<T>(items: T[]): T[][] {
+    if (items.length <= 1) return [items];
+    const out: T[][] = [];
+    items.forEach((item, i) => {
+      const rest = [...items.slice(0, i), ...items.slice(i + 1)];
+      for (const p of permutations(rest)) out.push([item, ...p]);
+    });
+    return out;
+  }
+
+  it('rejects a 7x detour however the attempts are ordered', () => {
+    // 70km is 7x the shortest route, past the ratio, so it must never win —
+    // not even by way of the 25km candidate, which sits inside the bound
+    // relative to 10km and previously laundered it through.
+    //
+    // 25km is the right answer: at 2.5x it is within the bound, and it halves
+    // the violating meters. Bounding the trade must not disable it.
+    const engine = engineWithRatio();
+    for (const order of permutations([SHORT_DIRTY, MID, LONG_CLEAN])) {
+      const picked = engine.selectBestCandidate(order);
+      const where = order.map((c: any) => c.result).join(' -> ');
+      assert.notEqual(
+        picked.result,
+        'long-clean',
+        `order ${where} kept a 7x detour`,
+      );
+      assert.equal(picked.result, 'mid', `order ${where} picked ${picked.result}`);
+    }
+  });
+
+  it('still prefers the cleaner route when the detour is within the ratio', () => {
+    const engine = engineWithRatio();
+    // 25km is 2.5x the 10km route — inside the bound, so clearing 10 violating
+    // meters is worth it. Bounding the trade must not disable it.
+    const withinBound = { result: 'clean-enough', violatingMeters: 0, cost: 1, distance: 25_000 };
+    for (const order of permutations([SHORT_DIRTY, withinBound])) {
+      assert.equal(engine.selectBestCandidate(order).result, 'clean-enough');
+    }
+  });
+
+  it('is unbounded again at ratio 0, the documented escape hatch', () => {
+    const engine: any = new RoutingEngine({} as never, {
+      ...DEFAULT_CONFIG,
+      maxPenaltyDetourRatio: 0,
+    });
+    for (const order of permutations([SHORT_DIRTY, MID, LONG_CLEAN])) {
+      assert.equal(engine.selectBestCandidate(order).result, 'long-clean');
+    }
+  });
+
+  it('returns null when every attempt failed', () => {
+    assert.equal(engineWithRatio().selectBestCandidate([]), null);
+  });
+
+  it('breaks ties on cost, and keeps a candidate whose distance is unknown', () => {
+    const engine = engineWithRatio();
+    const dear = { result: 'dear', violatingMeters: 0, cost: 900, distance: 10_000 };
+    const cheap = { result: 'cheap', violatingMeters: 0, cost: 100, distance: 10_000 };
+    for (const order of permutations([dear, cheap])) {
+      assert.equal(engine.selectBestCandidate(order).result, 'cheap');
+    }
+    // distance 0 means "not measured" — it must not be read as a 0m route that
+    // makes every other candidate an infinite detour.
+    const unmeasured = { result: 'unmeasured', violatingMeters: 0, cost: 1, distance: 0 };
+    assert.equal(
+      engine.selectBestCandidate([SHORT_DIRTY, unmeasured]).result,
+      'unmeasured',
+    );
+  });
+});

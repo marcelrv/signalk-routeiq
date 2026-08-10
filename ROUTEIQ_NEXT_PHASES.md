@@ -1137,17 +1137,17 @@ an 18,406 m straight line with no warnings at all**. The merged graph held a
 clean 27.4 km path the whole time — this was never a stitching problem.
 
 **1. `isBetterCandidate` traded distance for compliance without bound.** It
-ordered candidates strictly by violating metres, so a fully-compliant route beat
+ordered candidates strictly by violating meters, so a fully-compliant route beat
 a shorter one carrying any violation, at any length. For that request it
 preferred a 242 km clean route over a 36 km one with 3.6 km of "shallow" water
 — most of which was a coarse DEPARE band (`DRVAL1=0, DRVAL2=18.2`: 0 is the
 band floor, not a survey) rather than real shoal. New config
 **`maxPenaltyDetourRatio`** (default **3.0**) bounds it: past the ratio the
 shorter route wins and its violations surface as `via_constrained` warnings the
-helm can act on. Set it to 0 for the old unbounded behaviour. Result on that
+helm can act on. Set it to 0 for the old unbounded behavior. Result on that
 request: 242,299 m → 41,643 m, with the 2,980 m of shallow water now *reported*
 instead of silently avoided. Paired with the pipeline's depth-band fix
-(`signalk-router-pipeline` `5931458`): **25,589 m, ×1.39, zero violating metres.**
+(`signalk-router-pipeline` `5931458`): **25,589 m, ×1.39, zero violating meters.**
 
 **2. `(dims.draft || 2.0)` treated a draft of 0 as 2.0 m.** Nine call sites in
 `routing.ts`, including `pathViolationMeters`; same falsy-zero on beam
