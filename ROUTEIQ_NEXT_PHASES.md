@@ -90,8 +90,20 @@ Three things worth knowing, none of which were in the original plan:
   (and the second file now loads slightly faster, having 24,506 fewer rows to
   append).
 
-Also found here, **not addressed** — a user's edge edit does not survive a
-reload on its own merits. `updateEdge` writes a row into the overlay whose
+**FIXED 2026-08-10** (branch `fix/durable-edge-edits`): the overlay now records
+which columns an edit actually set (`edited_fields`, a JSON array on the
+overlay `edges` row, added by migration), and `spliceEdge` lets exactly those
+outrank the region file while everything else on the row stays the file's. The
+per-field choice is deliberate over storing a full snapshot: a correction is
+per-field by nature, so re-downloading a region still delivers fresh values for
+the columns the user never touched. Rows written before the column existed have
+no marker — their intent is unrecoverable — and keep the conservative fold.
+Worth knowing: node edits were never broken, because nodes merge into a Map
+where the overlay's row overwrites, while edges merge into an array where
+readers take the first match. Original writeup:
+
+Also found here, **not addressed at the time** — a user's edge edit does not
+survive a reload on its own merits. `updateEdge` writes a row into the overlay whose
 unmentioned columns are placeholders (`distance` 0, limits `-1`,
 `cost_factor` 1.2); before this change the file's row was simply stored first
 and every reader's `.find()` returned it, so the edit reverted. The
