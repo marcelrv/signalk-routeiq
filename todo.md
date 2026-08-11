@@ -185,10 +185,11 @@ before adding to the lists above, or dropping if no longer relevant:
 - Plugin config: candidate for simplification — re-review which settings in
   the table in `README.md` actually need to be user-facing vs. could be
   fixed/auto-detected.
-- **Position/route-aware dynamic database loading** — replacing
-  `RoutingDatabase.init()`'s "open every `.sqlite` in the directory" with
-  peek-then-lazy-load. This *is* real routeiq work, but it's already
-  properly scoped as Phase 4 §4a in
-  `signalk-router-pipeline/PHASE_4_DESIGN.md` — follow that design doc rather
-  than this note when picked up. Not started; most valuable once more than
-  one region's database exists locally at once.
+- ~~**Position/route-aware dynamic database loading**~~ — **shipped.**
+  `RoutingDatabase.init()` peeks rather than opening every `.sqlite`, with
+  route- and position-triggered loads and an LRU cap. One piece of §4a is
+  still open: a route that triggers a load still blocks for the length of it
+  (the client now says which region, and waits rather than failing, but the
+  request stays open). Scoped and deliberately deferred — see "Non-blocking
+  `202` for route requests that trigger a load" in `ROUTEIQ_NEXT_PHASES.md`,
+  which places it behind item 1 above.

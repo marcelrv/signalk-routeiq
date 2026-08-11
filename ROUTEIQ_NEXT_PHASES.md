@@ -220,8 +220,61 @@ straight chord over them. 57/57 tests; verified live (route START 4.21 → DEST
    Chrome 66.
 
    The non-blocking `202`/status-handle pattern from §4a task 5 remains
-   unbuilt, and is now the only thing left here: it would stop the request
-   blocking at all, rather than explaining why it does.
+   unbuilt, and is now the only thing left here — see the next section.
+
+### Non-blocking `202` for route requests that trigger a load (§4a task 5) — OPEN, not urgent
+
+Scoped 2026-08-11, after the polling indicator shipped. Recorded rather than
+built, because the reason to defer is as useful as the design.
+
+**Today.** A route needing an unloaded region loads it inline:
+`RoutingEngine.calculateRoute` → `ensureRegionsForBbox` → `await
+loadDatabaseGraph`, with the HTTP request open throughout — 6.3s for a 56 MB
+region, ~76s for a full country before the pipeline started tiling. Everything
+above makes that wait *legible* (the client says which region, and no longer
+gives up at 30s). It does not make it stop.
+
+**The change.** Instead of awaiting, the handler returns immediately:
+
+```
+HTTP 202 Accepted
+{ "status": "loading", "regions": [{ "filename": "us_east_md.sqlite", "name": "Maryland" }] }
+```
+
+The client polls until the region is `loaded`, then re-issues the original
+request, which then answers in the usual milliseconds. `api.ts` already has the
+precedent the design points at — `isReady()` → `503` while the graph is coming
+up. Most of the groundwork now exists: the `not_loaded → loading → loaded`
+state machine, `/databases/status` reporting in-progress regions, and the
+client-side poll loop. Missing: the early return, and the client re-issue.
+
+**Why it is worth something.**
+
+- The blocked event loop stops mattering. The measurement above found **3.8s of
+  hard block** in a 6.3s load, during which the server answers *nothing* — not
+  just that route. A `202` means no request is waiting on that stretch.
+- The 180s client deadline becomes unnecessary; it is a workaround for a
+  request that should never have been open that long.
+- Connections are not held. Chart plotters are not generous with concurrent
+  connections, and a minute-long POST is a real cost on one.
+
+**Why it is not urgent, and what it would cost.** It changes the `/route`
+contract for *every* client, not just this repo's — `AGENTS.md` is explicit
+that the API is designed for any frontend. A client that does not know `202`
+would try to parse the body as a `FeatureCollection` and fail, and would fail
+**only on the first route into a new region**, which is about the worst failure
+distribution there is for diagnosis. So it wants to be opt-in — a request flag
+(`"async": true`) or `Accept` negotiation — with the blocking path remaining
+the default. That roughly doubles the work: two code paths, both tested, and
+**two** first-party clients to update (`public/app.js` and
+`plotterext/panel.js`).
+
+**Priority call.** Worth doing, behind the tide-informed depth work in
+`todo.md`, which is a feature users would actually feel. The polling indicator
+removed the sharp edge — no unexplained freeze, no spurious failure — so what
+is left is architectural correctness rather than a user-visible fix.
+Reprioritise immediately if regions get materially larger, or if anyone reports
+the server going unresponsive during a load: that symptom is this cause.
 
 **Decided 2026-07-20** (priority review of `PHASE_3_DESIGN.md` /
 `PHASE_4_DESIGN.md`). Scale-out (3e) is the de-facto active track (PR
