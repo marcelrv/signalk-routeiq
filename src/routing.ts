@@ -3264,6 +3264,14 @@ export class RoutingEngine {
         estimated: env.flow.estimated,
         source: env.flow.source,
         stations: env.flow.stations.map((s) => s.name),
+        // Whether the tide was actually counted towards depth anywhere on
+        // this route, not merely whether a height source existed: it needs
+        // enough stations in range to answer, and needs to have made a
+        // difference somewhere. A client can tell "deeper than charted
+        // because of the tide" from "charted, tide had nothing to add".
+        depthAware: (route.features[0]?.properties.segments ?? []).some(
+          (seg) => seg.minDepthAtPassage !== undefined,
+        ),
       };
     }
 
@@ -3317,6 +3325,21 @@ export class RoutingEngine {
           seg.sogKn = Math.round((sog / KNOTS_TO_MS) * 100) / 100;
         }
       }
+      // This is the first point at which a segment knows the real time it is
+      // crossed — waits included, which the search's own clock does not have.
+      // Report the depth against that clock, so what the helm reads is at
+      // least as good as what the search decided on.
+      if (env?.heights && from && to) {
+        const atPassage = this.segmentDepthAtPassage(
+          seg,
+          env.departureMs + cum * 1000,
+          env,
+        );
+        if (atPassage > seg.minDepth) {
+          seg.minDepthAtPassage = Math.round(atPassage * 100) / 100;
+          seg.tideRiseM = Math.round((atPassage - seg.minDepth) * 100) / 100;
+        }
+      }
       const sec = (seg.distance || 0) / sog;
       seg.seconds = Math.round(sec * 10) / 10;
       cum += sec;
@@ -3364,6 +3387,12 @@ export class RoutingEngine {
         ...(seg.seconds !== undefined ? { seconds: seg.seconds } : {}),
         ...(seg.currentKn !== undefined
           ? { currentKn: seg.currentKn, sogKn: seg.sogKn }
+          : {}),
+        ...(seg.minDepthAtPassage !== undefined
+          ? {
+              minDepthAtPassage: seg.minDepthAtPassage,
+              tideRiseM: seg.tideRiseM,
+            }
           : {}),
       };
 
