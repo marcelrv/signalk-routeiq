@@ -11,9 +11,11 @@ this spec. Since the original write-up, a companion plugin
 (`signalk-tidal-currents`) was built and now supplies real harmonic current
 stations — see "signalk-tidal-currents plugin" below, which supersedes the
 "Recommendation: separate plugin" section as the as-built description.
-Phasing item 4 (ENC/RWS providers, wind, tide-aware depth constraints,
+Phasing item 4 (ENC/RWS providers, wind,
 `environment.current` calibration) and item 5 (stations baked into the
-routing DB) remain open — no code for either exists yet.
+routing DB) remain open — no code for either exists yet. **Tide-aware depth,
+also from item 4, was designed and built on 2026-08-11 — see "Tide-aware
+depth" at the end of this document.**
 
 ## Data source investigation (2026-07-02)
 
@@ -169,10 +171,11 @@ Kept visually consistent between both:
    **Shipped**, plus the station-marker/GRIB-grid/scrubber overlay described
    above (not originally planned for this phase).
 3. **Plotter panel** — same features, compact layout. **Shipped.**
-4. **Later — still open**, except GRIB currents (see note): ENC `TS_PAD`/RWS
+4. **Later — still open**, except GRIB currents (see note) and tide-aware
+   depth (**designed and built 2026-08-11 — see "Tide-aware depth" below,
+   which supersedes its mention here**): ENC `TS_PAD`/RWS
    current providers; wind provider (same `FlowField` interface) with
-   polar-based STW; tide-height-aware depth constraints (open shallow edges
-   near HW — heights are exact, unlike currents); calibration against
+   polar-based STW; calibration against
    measured `environment.current`. None of these have code in `src/` — only
    an aspirational comment in `tides.ts` naming them as future `FlowField`
    implementers. GRIB currents are the exception: they arrived, but as GRIB2
@@ -262,3 +265,91 @@ back to runtime proximity for databases without it. **Not implemented** —
 no `tide_stations`/`area_geojson`/`nodes.tide_station` references exist in
 either `signalk-routeiq/src/database.ts` or the `signalk-tidal-currents`
 plugin.
+
+---
+
+## Tide-aware depth (2026-08-11)
+
+Supersedes the one-line mention in Phasing item 4. Charted `min_depth` is
+referenced to LAT, so it is already the worst-case low-water figure: an edge
+that is genuinely safe two hours before HW is rejected all day. Actual depth at
+the time of passage = charted + tide rise.
+
+**This can only ever relax a constraint.** The charted value is the conservative
+one, so every error this feature can make is in the permissive direction — the
+direction that runs a boat aground rather than round the long way. The design is
+shaped by that asymmetry.
+
+### Decisions
+
+**1. The rise is self-calibrated per station, not read off a datum.** Nothing in
+this repo converts datums, and signalk-tides' `level` may be MSL- or
+LAT-referenced — the current model never had to care, because it only uses
+height *differences*. Depending on an unverified datum here would be a
+systematic, always-permissive error: if levels are MSL-referenced, every depth
+would be over-stated by roughly half the tidal range, forever.
+
+So the rise at a station is `level(t) − min(level over the fetched window)`.
+Any window minimum is ≥ LAT (LAT being the lowest astronomical tide over ~19
+years), so the computed rise is always **≤** the true height above LAT, whatever
+datum the source uses. The plane fit interpolates rise rather than level, so a
+per-station datum offset cancels station by station — the stations need not even
+agree with each other.
+
+The cost is that the rise reads low at neaps and on short (6 h) windows, where
+the window minimum sits well above LAT. That is the safe direction, and it is
+preferred to being right on average.
+
+**2. Search and reporting change together.** `getEdgePenalty` (the search
+decision), `pathViolationMeters` (the retry/candidate logic) and
+`addViolationWarnings` (what the helm reads) all use the same passage depth. The
+comment at `routing.ts:3549-3552` already required the audit and the warning to
+agree; the search now joins them. A route pane that contradicted the router
+would be worse than no feature.
+
+**3. No rise without corroboration.** ≥3 stations within 60 km, reusing the
+thresholds the gradient field already applies. Below that, `riseAt` returns
+`null` and the edge is judged on its charted depth exactly as before — the
+feature switches itself off rather than guessing. This matters more here than it
+does for currents: the doc's own warning about straight-line station assignment
+picking a station across a peninsula (see "stations baked into the routing DB")
+is, for a permissive depth decision, the difference between a detour and a
+grounding.
+
+`improveNode` deliberately stays charted-only. It runs before the search with no
+arrival time available, and being conservative there only means it may pick a
+deeper start or end node.
+
+### Known limitations
+
+- **The passage clock is approximate.** `pathViolationMeters` and
+  `addViolationWarnings` run before `finalizeRoute`, so `seg.seconds` does not
+  exist yet and they walk the segments at STW instead. The search's own `tSec`
+  has the same shape of bias — lock and bridge waits are applied only in
+  `finalizeRoute`, so search-time samples are early by the waits ahead of them.
+  Moving `annotateSegmentTimes` ahead of the audit would fix both and is the
+  obvious follow-up.
+- **The rise under-reads**, by construction — see decision 1.
+- **Station assignment is still straight-line.** The ≥3-station rule mitigates a
+  wrong-side station; it does not remove it. The Voronoi-by-water-distance
+  `tide_stations` table proposed below remains the real fix.
+
+### Shape
+
+- `TideHeightField { riseAt(lat, lon, timeMs): number | null; maxRiseM }` in
+  `src/tides.ts`, implemented by `HeightGradientFlowField` — the same station
+  set and least-squares plane already fitted for the current gradient, with the
+  intercept recovered instead of discarded.
+- Carried on `RouteEnv.heights`, taken from the `gradient` local that
+  `prepareEnv` already builds and previously threw away at `stationField ??
+  gradient`. Real current stations therefore no longer cost you heights.
+- `depthAtPassage(charted, lat, lon, atMs, env)` returns `charted` untouched
+  when it is `-1` (unknown), when there is no height field, or when `riseAt`
+  declines to answer.
+- The lookup is skipped unless the edge would otherwise violate *and* the tide
+  could plausibly save it (`charted + maxRiseM >= required`), so edges that
+  already clear — most of them, most of the time — cost nothing.
+- Segments carry `minDepthAtPassage` and `tideRiseM` alongside the unchanged
+  charted `minDepth`; `route.tide.depthAware` says whether any rise was applied.
+- No new user-facing setting: it rides on `useTides` / `considerTides` /
+  `departureTime`. With tides off, results stay bit-identical.
