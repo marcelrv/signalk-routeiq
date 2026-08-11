@@ -41,7 +41,18 @@ Kept as one-line pointers only — see git history / source for detail:
 
 ## Open — Routing features
 
-### 1. Tide-Informed Depth Calculation in Routing
+### 1. ~~Tide-Informed Depth Calculation in Routing~~ — DONE 2026-08-11
+Shipped on branch `feat/tide-aware-depth`. Design and decisions:
+`feature-tidal-routing.md`, "Tide-aware depth". The original note follows.
+
+The one thing that changed from the plan below: the rise is measured from the
+fetched window's own low water, not from LAT, because nothing here can verify
+what datum signalk-tides' `level` uses and assuming would overstate the water
+by half the tidal range in the direction that runs a boat aground. Also note
+the framing in the last sentence is half wrong — a charted depth is *already*
+the low-water case, so there is no "vice versa" to catch: this can only ever
+open water up, which is why every safeguard points the same way.
+
 Chart depths are referenced to LAT; actual depth = charted depth + tide
 height above LAT at the time the vessel is there. Currently only *speed*
 (tidal current) is tide-aware — *depth* constraints still use the static
