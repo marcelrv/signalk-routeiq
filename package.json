@@ -37,7 +37,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc && tsc test/routing.test.ts test/navmesh.test.ts test/navmesh-integration.test.ts test/zeelandbrug.test.ts test/bbox-penalty-retry.test.ts test/via-disconnected-leg.test.ts test/dynamic-loading.test.ts test/seam-merge.test.ts test/overlay-edit-persistence.test.ts test/region-loading-status.test.ts test/database-switch-api.test.ts test/vessel-validation.test.ts test/plugin-registration.test.ts test/plugin-lifecycle.test.ts test/first-run-contract.test.ts test/departure-stream.test.ts test/route-resource.test.ts test/crossing-wait.test.ts --outDir dist-test --moduleResolution node --module es2022 --target es2022 --declaration --declarationMap --sourceMap --esModuleInterop --strict --skipLibCheck",
+    "build": "tsc && tsc test/routing.test.ts test/navmesh.test.ts test/navmesh-integration.test.ts test/zeelandbrug.test.ts test/bbox-penalty-retry.test.ts test/via-disconnected-leg.test.ts test/dynamic-loading.test.ts test/seam-merge.test.ts test/overlay-edit-persistence.test.ts test/region-loading-status.test.ts test/database-switch-api.test.ts test/vessel-validation.test.ts test/plugin-registration.test.ts test/plugin-lifecycle.test.ts test/first-run-contract.test.ts test/departure-stream.test.ts test/route-resource.test.ts test/crossing-wait.test.ts test/tide-depth.test.ts --outDir dist-test --moduleResolution node --module es2022 --target es2022 --declaration --declarationMap --sourceMap --esModuleInterop --strict --skipLibCheck",
     "build:watch": "tsc --watch",
     "start": "node dist/index.js",
     "dev": "ts-node --esm src/index.ts",
@@ -45,7 +45,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"src/**/*.ts\" public/app.js plotterext/panel.js",
     "format:check": "prettier --check \"src/**/*.ts\" public/app.js plotterext/panel.js",
-    "test": "node --test --experimental-sqlite --test-force-exit dist-test/routing.test.js dist-test/navmesh.test.js dist-test/navmesh-integration.test.js dist-test/zeelandbrug.test.js dist-test/bbox-penalty-retry.test.js dist-test/via-disconnected-leg.test.js dist-test/dynamic-loading.test.js dist-test/seam-merge.test.js dist-test/overlay-edit-persistence.test.js dist-test/region-loading-status.test.js dist-test/database-switch-api.test.js dist-test/vessel-validation.test.js dist-test/plugin-registration.test.js dist-test/plugin-lifecycle.test.js dist-test/first-run-contract.test.js dist-test/departure-stream.test.js dist-test/route-resource.test.js dist-test/crossing-wait.test.js",
+    "test": "node --test --experimental-sqlite --test-force-exit dist-test/routing.test.js dist-test/navmesh.test.js dist-test/navmesh-integration.test.js dist-test/zeelandbrug.test.js dist-test/bbox-penalty-retry.test.js dist-test/via-disconnected-leg.test.js dist-test/dynamic-loading.test.js dist-test/seam-merge.test.js dist-test/overlay-edit-persistence.test.js dist-test/region-loading-status.test.js dist-test/database-switch-api.test.js dist-test/vessel-validation.test.js dist-test/plugin-registration.test.js dist-test/plugin-lifecycle.test.js dist-test/first-run-contract.test.js dist-test/departure-stream.test.js dist-test/route-resource.test.js dist-test/crossing-wait.test.js dist-test/tide-depth.test.js",
     "test:unit": "node --test --test-force-exit dist-test/unit/*.test.js",
     "test:integration": "node --test --test-force-exit dist-test/integration/*.test.js",
     "deploy": "bash deploy.sh",
