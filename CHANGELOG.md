@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Added: routes can now use water that is only deep enough for part of the day.
+  Charted depths are referenced to the lowest astronomical tide, so the planner
+  was treating every hour as low water and refusing channels that carry plenty
+  under the keel an hour either side of high water. With tides switched on and a
+  departure time set, each stretch is judged on the depth there when you would
+  actually reach it, and the route pane shows both figures — the charted depth
+  and the depth at passage — so a number that differs from the chart explains
+  itself. Nothing changes with tides off.
+  The tide counted is deliberately cautious. It is measured as a rise above the
+  lowest water in the forecast window rather than trusting the height data to
+  share the charts' reference level, which cannot be checked from here and would
+  overstate the depth everywhere if it were wrong; and no tide is counted at all
+  unless at least three stations within range agree. So the planner will
+  sometimes decline water that is genuinely deep enough. It should not do the
+  reverse — but this is estimated tidal data over charted soundings, not a
+  survey, and the usual rule stands: verify against the chart before you rely
+  on it.
+
 - Added: when a route has to wait for a region's routing data to be read in
   first, the planner now says which region it is waiting on instead of looking
   frozen. With dynamic loading, the first route into an area loads that area's
