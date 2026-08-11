@@ -2009,7 +2009,7 @@ export class RoutingEngine {
       throw new Error("Could not find routing nodes near end point");
     }
 
-    const minDepth = (dims.draft ?? 2.0) + this.config.safetyMarginDraft;
+    const minDepth = this.requiredDepth(dims);
 
     const improveNode = async (
       node: number,
@@ -2496,7 +2496,7 @@ export class RoutingEngine {
   ): number {
     const segments = result.features[0]?.properties.segments;
     if (!segments) return 0;
-    const minDepth = (dims.draft ?? 2.0) + this.config.safetyMarginDraft;
+    const minDepth = this.requiredDepth(dims);
     const minAirDraft = (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft;
     const minBeam = (dims.beam ?? 4.0) + this.config.safetyMarginBeam;
 
@@ -2629,6 +2629,19 @@ export class RoutingEngine {
   // it did at the old flat +50,000.
   private static readonly VIOLATION_RATE_COAST = 50;
 
+  /** Water the vessel needs under it: design draft plus the configured
+   *  under-keel margin. Four places used to compute this independently — the
+   *  start/end node improvement, the A* edge penalty, the post-search audit
+   *  and the warning text — and they have to agree, because a route the
+   *  search accepted and the audit then counted as violating is a route the
+   *  helm is told about but was never offered an alternative to.
+   *
+   *  `??`, not `||`: a draft of 0 is a real answer (an unknown draft is
+   *  `undefined`), and treating it as 2 m was a bug once already. */
+  private requiredDepth(dims: VesselDimensions): number {
+    return (dims.draft ?? 2.0) + this.config.safetyMarginDraft;
+  }
+
   private getEdgePenalty(
     edge: EdgeRow,
     minCoastDistanceMeters: number,
@@ -2656,7 +2669,7 @@ export class RoutingEngine {
       if (skipReasons) skipReasons.airDraft++;
     }
 
-    const minDepth = (dims.draft ?? 2.0) + this.config.safetyMarginDraft;
+    const minDepth = this.requiredDepth(dims);
     if (
       typeof edge.min_depth === "number" &&
       edge.min_depth >= 0 &&
@@ -3544,7 +3557,7 @@ export class RoutingEngine {
     if (!result.features[0] || !result.features[0].properties.segments) return;
     const coords = result.features[0].geometry.coordinates;
     const segments = result.features[0].properties.segments!;
-    const minDepth = (dims.draft ?? 2.0) + this.config.safetyMarginDraft;
+    const minDepth = this.requiredDepth(dims);
     const airDraft = (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft;
     // Beam is tested exactly as pathViolationMeters tests it. The two must
     // agree: that function decides a route is violating and may now be KEPT
