@@ -38,7 +38,37 @@ export interface FlowField {
   readonly source: "stations" | "height-estimate";
 }
 
+/**
+ * Tide height, for turning a charted depth into the depth actually under the
+ * keel at the time of passage.
+ *
+ * The value is a *rise above the fetched window's low water*, not a height
+ * above any declared datum. That is deliberate: nothing here knows whether the
+ * upstream `level` is referenced to LAT, MSL or something else — the current
+ * model never had to care, because it only ever uses differences — and a
+ * charted depth is referenced to LAT. Guessing wrong would overstate the water
+ * by about half the tidal range, permanently, in the direction that runs a boat
+ * aground. Any window minimum is at or above LAT, so a rise measured from it is
+ * at or below the true height above LAT, whatever the source datum is. It reads
+ * low at neaps and on short windows; that is the safe way to be wrong.
+ */
+export interface TideHeightField {
+  /** Metres of tide above low water at (lat, lon, timeMs), or null when it
+   *  cannot be answered — too few stations, a degenerate fit, or a time
+   *  outside the fetched window. Never negative, and never 0 as a stand-in
+   *  for "don't know": callers must be able to tell those apart. */
+  riseAt(lat: number, lon: number, timeMs: number): number | null;
+  /** Largest rise any station sees in the window. Lets a caller skip the
+   *  lookup for an edge too shallow for any tide to rescue. */
+  readonly maxRiseM: number;
+}
+
 export const KNOTS_TO_MS = 0.514444;
+
+/** How far a height station may be from a sample point and still describe it.
+ *  Shared by the gradient and the height fit so they always agree on which
+ *  stations apply. */
+const MAX_STATION_DIST_M = 60_000;
 
 interface StationTimeline {
   station: TideStationInfo;
@@ -46,6 +76,10 @@ interface StationTimeline {
   stepMs: number;
   levels: number[];
   maxAbsDhDt: number; // m/s over the fetched window, for phase normalization
+  /** Lowest level in the window — this station's own low-water reference.
+   *  Per station, so stations need not share a datum (or even be consistent
+   *  with each other) for the rise to come out right. */
+  minLevel: number;
 }
 
 interface TimelineResponse {
@@ -183,20 +217,128 @@ const EARTH_M_PER_DEG_LAT = 111_320;
  * fewer than 3 stations the direction is indeterminate → zero flow
  * (conservative: never invents a favorable current).
  */
-class HeightGradientFlowField implements FlowField {
+class HeightGradientFlowField implements FlowField, TideHeightField {
   readonly maxSpeedMs: number;
+  readonly maxRiseM: number;
   readonly stations: TideStationInfo[];
   readonly estimated = true;
   readonly source = "height-estimate" as const;
 
   private timelines: StationTimeline[];
   private sampleCache = new Map<string, FlowVector>();
+  private riseCache = new Map<string, number | null>();
   private static CACHE_MAX = 200_000;
 
   constructor(timelines: StationTimeline[], maxCurrentKnots: number) {
     this.timelines = timelines;
     this.maxSpeedMs = maxCurrentKnots * KNOTS_TO_MS;
     this.stations = timelines.map((t) => t.station);
+    let maxRise = 0;
+    for (const tl of timelines) {
+      for (const l of tl.levels) maxRise = Math.max(maxRise, l - tl.minLevel);
+    }
+    this.maxRiseM = maxRise;
+  }
+
+  /** True when timeMs sits inside the fetched series. levelAt clamps to the
+   *  ends rather than failing, which is harmless for a gradient (the shape is
+   *  still roughly right) but not for a height: outside the window it would
+   *  quietly report the first or last level as though it were current. */
+  private inWindow(tl: StationTimeline, timeMs: number): boolean {
+    const endMs = tl.startMs + (tl.levels.length - 1) * tl.stepMs;
+    return timeMs >= tl.startMs && timeMs <= endMs;
+  }
+
+  /** The stations this sample point should be interpolated from: nearest
+   *  first, within MAX_STATION_DIST_M, at most 6. Shared by the gradient and
+   *  the height so the two can never disagree about which stations apply. */
+  private nearStations(
+    lat: number,
+    lon: number,
+  ): Array<{ tl: StationTimeline; dx: number; dy: number; d2: number }> {
+    const mPerDegLon = EARTH_M_PER_DEG_LAT * Math.cos((lat * Math.PI) / 180);
+    return this.timelines
+      .map((tl) => {
+        const dx = (tl.station.longitude - lon) * mPerDegLon;
+        const dy = (tl.station.latitude - lat) * EARTH_M_PER_DEG_LAT;
+        return { tl, dx, dy, d2: dx * dx + dy * dy };
+      })
+      .sort((a, b) => a.d2 - b.d2)
+      .filter((w) => w.d2 < MAX_STATION_DIST_M * MAX_STATION_DIST_M)
+      .slice(0, 6);
+  }
+
+  /**
+   * Rise above low water at a point, by fitting the same least-squares plane
+   * the gradient uses — but through each station's rise rather than its raw
+   * level, and keeping the intercept instead of throwing it away. With x and y
+   * measured from the sample point, the intercept *is* the interpolated rise
+   * there.
+   *
+   * Fitting rises rather than levels is what makes the datum question go away:
+   * a constant offset in one station's series cancels against its own minimum
+   * before it ever reaches the fit.
+   */
+  riseAt(lat: number, lon: number, timeMs: number): number | null {
+    if (this.timelines.length < 3) return null;
+
+    const key = `${Math.round(lat * 50)},${Math.round(lon * 50)},${Math.round(timeMs / 600_000)}`;
+    const cached = this.riseCache.get(key);
+    if (cached !== undefined) return cached;
+
+    const near = this.nearStations(lat, lon);
+    // Same three-station rule the gradient applies. It matters more here: a
+    // permissive depth answer from one distant or wrong-side station is the
+    // difference between a detour and a grounding.
+    const answer =
+      near.length >= 3 && near.every((w) => this.inWindow(w.tl, timeMs))
+        ? this.fitRise(near, timeMs)
+        : null;
+
+    if (this.riseCache.size > HeightGradientFlowField.CACHE_MAX)
+      this.riseCache.clear();
+    this.riseCache.set(key, answer);
+    return answer;
+  }
+
+  private fitRise(
+    near: Array<{ tl: StationTimeline; dx: number; dy: number }>,
+    timeMs: number,
+  ): number | null {
+    let sx = 0,
+      sy = 0,
+      sxx = 0,
+      syy = 0,
+      sxy = 0,
+      sh = 0,
+      shx = 0,
+      shy = 0;
+    for (const w of near) {
+      const h = this.levelAt(w.tl, timeMs) - w.tl.minLevel;
+      sx += w.dx;
+      sy += w.dy;
+      sxx += w.dx * w.dx;
+      syy += w.dy * w.dy;
+      sxy += w.dx * w.dy;
+      sh += h;
+      shx += h * w.dx;
+      shy += h * w.dy;
+    }
+    const n = near.length;
+    const det =
+      n * (sxx * syy - sxy * sxy) -
+      sx * (sx * syy - sxy * sy) +
+      sy * (sx * sxy - sxx * sy);
+    if (Math.abs(det) <= 1e-9) return null;
+    // Cramer again, replacing the first column: the intercept of h = a + bx + cy.
+    const a =
+      (sh * (sxx * syy - sxy * sxy) -
+        sx * (shx * syy - sxy * shy) +
+        sy * (shx * sxy - sxx * shy)) /
+      det;
+    // A plane through scattered points can overshoot; the answer cannot be
+    // below low water or above the biggest rise anyone in the set sees.
+    return Math.max(0, Math.min(this.maxRiseM, a));
   }
 
   private levelAt(tl: StationTimeline, timeMs: number): number {
@@ -221,21 +363,7 @@ class HeightGradientFlowField implements FlowField {
     const cached = this.sampleCache.get(key);
     if (cached) return cached;
 
-    const mPerDegLon = EARTH_M_PER_DEG_LAT * Math.cos((lat * Math.PI) / 180);
-
-    // Nearest stations to this sample point (they are few — linear scan).
-    const withDist = this.timelines
-      .map((tl) => {
-        const dx = (tl.station.longitude - lon) * mPerDegLon;
-        const dy = (tl.station.latitude - lat) * EARTH_M_PER_DEG_LAT;
-        return { tl, dx, dy, d2: dx * dx + dy * dy };
-      })
-      .sort((a, b) => a.d2 - b.d2);
-
-    const MAX_STATION_DIST_M = 60_000;
-    const near = withDist
-      .filter((w) => w.d2 < MAX_STATION_DIST_M * MAX_STATION_DIST_M)
-      .slice(0, 6);
+    const near = this.nearStations(lat, lon);
     const result: FlowVector = { u: 0, v: 0 };
 
     if (near.length >= 3) {
@@ -549,7 +677,7 @@ export async function prepareTidalFlowField(
   startMs: number,
   endMs: number,
   maxCurrentKnots: number,
-): Promise<FlowField | null> {
+): Promise<(FlowField & TideHeightField) | null> {
   try {
     // Union of nearest stations at each anchor point (start / via / end).
     const byId = new Map<string, TideStationInfo>();
@@ -575,6 +703,7 @@ export async function prepareTidalFlowField(
         const t0 = Date.parse(tl[0].time);
         const stepMs = Date.parse(tl[1].time) - t0;
         const levels = tl.map((e) => e.level);
+        const minLevel = Math.min(...levels);
         let maxAbsDhDt = 0;
         for (let i = 1; i < levels.length; i++) {
           maxAbsDhDt = Math.max(
@@ -588,6 +717,7 @@ export async function prepareTidalFlowField(
           stepMs,
           levels,
           maxAbsDhDt,
+          minLevel,
         } as StationTimeline;
       }),
     );
