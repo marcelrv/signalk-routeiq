@@ -21,6 +21,7 @@ import { ItineraryPoint, RouteCrossing, RouteWaypoint } from "./types.js";
 export interface PathSegment {
   distance: number;
   minDepth?: number;
+  minDepthAtPassage?: number;
   maxAirDraft?: number;
   minWidth?: number;
   seconds?: number; // tide-corrected traversal time
@@ -302,6 +303,11 @@ export function buildItinerary(
 
       // Aggregate the exact graph edges of this leg.
       let minDepth = Infinity;
+      // Worst depth at the time this leg is actually crossed. Tracked
+      // separately from the charted minimum because they can pick different
+      // segments: the shallowest bit of chart is not always the tightest
+      // moment once the tide is counted.
+      let minDepthAtPassage = Infinity;
       let minWidth = Infinity;
       let maxAirDraft = Infinity;
       let legDistance = 0;
@@ -313,8 +319,13 @@ export function buildItinerary(
         const seg = segments[s];
         if (!seg) continue;
         legDistance += seg.distance ?? 0;
-        if (typeof seg.minDepth === "number" && seg.minDepth >= 0)
+        if (typeof seg.minDepth === "number" && seg.minDepth >= 0) {
           minDepth = Math.min(minDepth, seg.minDepth);
+          minDepthAtPassage = Math.min(
+            minDepthAtPassage,
+            seg.minDepthAtPassage ?? seg.minDepth,
+          );
+        }
         if (typeof seg.minWidth === "number" && seg.minWidth >= 0)
           minWidth = Math.min(minWidth, seg.minWidth);
         if (typeof seg.maxAirDraft === "number" && seg.maxAirDraft >= 0)
@@ -350,6 +361,11 @@ export function buildItinerary(
         distance: Math.round(legDistance > 0 ? legDistance : legEnd - legStart),
         ...(legWaitSeconds > 0 ? { waitSeconds: legWaitSeconds } : {}),
         ...(minDepth < Infinity ? { minDepth } : {}),
+        // Only when the tide actually added something — otherwise it would
+        // just repeat minDepth and imply a tide that was never consulted.
+        ...(minDepthAtPassage < Infinity && minDepthAtPassage > minDepth
+          ? { minDepthAtPassage: Math.round(minDepthAtPassage * 100) / 100 }
+          : {}),
         ...(minWidth < Infinity ? { minWidth } : {}),
         ...(maxAirDraft < Infinity ? { maxAirDraft } : {}),
         ...(hasSeconds ? { seconds: Math.round(legSeconds) } : {}),

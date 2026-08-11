@@ -128,6 +128,7 @@ export interface ItineraryPoint {
   leg?: {
     distance: number; // meters, sum of graph edges to the next itinerary point
     minDepth?: number; // m, only when known (>= 0 in the graph)
+    minDepthAtPassage?: number; // m, charted + tide, when a tide source covered it
     minWidth?: number; // m
     maxAirDraft?: number; // m
     seconds?: number; // tide-corrected sailing time for this leg, waits included
@@ -180,6 +181,9 @@ export interface RouteResult {
     estimated: boolean; // true = model/community-data predictions, not measurements
     source?: "stations" | "height-estimate"; // real current stations vs height-derived estimate
     stations: string[]; // station names used for the flow field
+    // True when the tide was counted towards depth somewhere on this route —
+    // see the segment-level minDepthAtPassage.
+    depthAware?: boolean;
   };
   crossings?: RouteCrossing[];
   waypoints?: RouteWaypoint[];
@@ -195,6 +199,8 @@ export interface RouteResult {
       totalCost?: number;
       distance?: number; // segment distance (only per-segment features)
       minDepth?: number; // meters (only per-segment features)
+      minDepthAtPassage?: number; // meters, charted + tide risen by then
+      tideRiseM?: number; // meters of tide included in minDepthAtPassage
       maxAirDraft?: number; // meters (only per-segment features)
       costFactor?: number;
       trafficMode?: number;
@@ -218,6 +224,14 @@ export interface RouteResult {
         seconds?: number; // traversal time, tide-corrected when tides active
         currentKn?: number; // estimated along-track current, + = fair (with tide)
         sogKn?: number; // speed over ground used for this segment
+        // Depth at the time this segment is actually crossed: `minDepth` (which
+        // stays the charted, LAT-referenced figure) plus the tide risen by
+        // then. Present only where a tide source covered the segment and the
+        // rise was worth something, so its absence means "charted only", never
+        // "no tide". `tideRiseM` is the difference, broken out so a UI can say
+        // where the extra water came from.
+        minDepthAtPassage?: number; // meters
+        tideRiseM?: number; // meters
       }>;
     };
   }>;
