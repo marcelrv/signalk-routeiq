@@ -72,13 +72,17 @@ describe('user edits survive a reload (overlay edited_fields)', () => {
       min_depth REAL, max_air_draft REAL, min_width REAL,
       cost_factor REAL DEFAULT 1.0, distance_to_land REAL,
       edge_type_id INTEGER DEFAULT 0, traffic_mode INTEGER DEFAULT 0,
-      edge_kind_id INTEGER DEFAULT 0
+      edge_kind_id INTEGER DEFAULT 0, crosses_land INTEGER DEFAULT 0
     )`);
     for (const [x, y] of [[A, B], [B, C]]) {
+      // B—C is flagged as crossing land, which getEdgePenalty rejects
+      // outright. Overlay rows carry no crosses_land column at all, so this is
+      // what a row claiming that column would be able to clear.
+      const crossesLand = x === B ? 1 : 0;
       for (const [from, to] of [[x, y], [y, x]]) {
-        run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id)
-             VALUES (?, ?, ?, ?, ?, ?, 1.0, 500, 0, 0, 0)`,
-          [nodeIdFor(from.lat, from.lon), nodeIdFor(to.lat, to.lon), FILE_DISTANCE, FILE_DEPTH, FILE_AIR_DRAFT, FILE_WIDTH]);
+        run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id, crosses_land)
+             VALUES (?, ?, ?, ?, ?, ?, 1.0, 500, 0, 0, 0, ?)`,
+          [nodeIdFor(from.lat, from.lon), nodeIdFor(to.lat, to.lon), FILE_DISTANCE, FILE_DEPTH, FILE_AIR_DRAFT, FILE_WIDTH, crossesLand]);
       }
     }
     run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
@@ -336,6 +340,49 @@ describe('user edits survive a reload (overlay edited_fields)', () => {
       assert.strictEqual(edge.min_depth, 15.0);
       assert.strictEqual(edge.max_air_draft, 99.0);
       assert.strictEqual(edge.min_width, 88.0);
+    });
+  });
+
+  describe('an overlay row claiming columns that are not the editor\'s to set', () => {
+    let reopened: RoutingDatabase;
+
+    before(async () => {
+      buildFixture();
+      const first = await open();
+      await first.close();
+      // Hand-altered, or carried over from some other version: edited_fields
+      // names structural columns alongside a legitimate one. The merge turns
+      // each name into an assignment, so `source`/`target` would rewrite the
+      // endpoints of an edge that lives in a bucket keyed by its source, and
+      // `editedFields` would replace the claim list mid-iteration.
+      const ov = new DatabaseSync(overlayPath, { open: true });
+      ov.prepare(
+        `INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edited_fields)
+         VALUES (?, ?, 0, 4.5, -1, -1, 1.2, 500, 0, 0, ?)`,
+      ).run(ID.B, ID.C, JSON.stringify(['min_depth', 'crosses_land', 'dbIndex']));
+      ov.close();
+      reopened = await open();
+    });
+
+    after(async () => {
+      await reopened.close();
+      cleanup();
+    });
+
+    it('honours the legitimate column and ignores the rest', () => {
+      const edge = reopened.getEdgeSync(ID.B, ID.C)!;
+      assert.strictEqual(edge.min_depth, 4.5, 'the one real edited column should still apply');
+
+      // The one that matters: an overlay row has no crosses_land column, so
+      // claiming it assigns undefined over the file's 1 — quietly turning an
+      // edge the router rejects outright into one it will happily use.
+      assert.strictEqual(edge.crosses_land, 1,
+        'a land-crossing flag must not be cleared by a row claiming a column it does not carry');
+
+      // And dbIndex belongs to the loader's bookkeeping, not to any edit:
+      // taking the overlay's -1 would leave the edge behind when its own
+      // region is evicted.
+      assert.notStrictEqual(edge.dbIndex, -1, 'the file\'s dbIndex must survive');
     });
   });
 

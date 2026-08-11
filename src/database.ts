@@ -65,6 +65,10 @@ function isRoutingDatabaseFile(filename: string): boolean {
  *  routing database file, and outranks a file row it duplicates. */
 const OVERLAY_DB_INDEX = -1;
 
+/** OVERLAY_EDITABLE_COLUMNS as a set, for the membership checks on the merge
+ *  path — the shared array is the contract, this is just how it is asked. */
+const EDITABLE_COLUMN_SET = new Set<string>(OVERLAY_EDITABLE_COLUMNS);
+
 // Edge kind: 0=centerline (default), 1=navmesh boundary (fallback/funnel-augmented),
 // 2=lane, 3=macro (spec §2.5)
 export const EDGE_KIND_CENTERLINE = 0;
@@ -961,8 +965,19 @@ export class RoutingDatabase {
     if (!edge.edited_fields) return;
     try {
       const parsed = JSON.parse(edge.edited_fields);
-      if (Array.isArray(parsed) && parsed.every((f) => typeof f === "string")) {
-        edge.editedFields = parsed;
+      if (Array.isArray(parsed)) {
+        // Allowlisted, not merely type-checked. applyEdit copies each named
+        // field across by computed property, so a row naming `source` or
+        // `target` would rewrite the endpoints of an edge that lives in a
+        // bucket keyed by its source — silent adjacency corruption, from a
+        // file this plugin writes but a user can also hand-edit or carry
+        // across versions. Only the columns the editor can actually set are
+        // ever meant to appear here.
+        edge.editedFields = parsed.filter(
+          (f: unknown): f is string =>
+            typeof f === "string" && EDITABLE_COLUMN_SET.has(f),
+        );
+        if (edge.editedFields.length === 0) delete edge.editedFields;
       }
     } catch {
       // Leave unmarked.
@@ -972,6 +987,10 @@ export class RoutingDatabase {
   private static applyEdit(existing: EdgeRow, incoming: EdgeRow): Set<string> {
     const claimed = new Set<string>(existing.editedFields ?? []);
     for (const field of incoming.editedFields ?? []) {
+      // Belt and braces with parseEditedFields' allowlist: this is the line
+      // that turns a field name into an assignment, so it checks for itself
+      // rather than trusting every future caller to have filtered first.
+      if (!EDITABLE_COLUMN_SET.has(field)) continue;
       // An edit landing on a column an *earlier* edit already claimed is just
       // the newer of two edits; last write wins, same as editing twice in one
       // session.
