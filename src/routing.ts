@@ -25,6 +25,7 @@ import {
   CurrentsClient,
   FlowField,
   KNOTS_TO_MS,
+  TideHeightField,
   TidesClient,
   prepareStationFlowField,
   prepareTidalFlowField,
@@ -63,9 +64,25 @@ type WaitOverrides = Pick<
 
 interface RouteEnv {
   flow: FlowField;
+  /** Tide heights, when a height source covers the route. Separate from
+   *  `flow` because the two need not come from the same place: when real
+   *  current stations are available they win the flow, and they carry no
+   *  heights at all. Absent means depth stays charted-only. */
+  heights?: TideHeightField;
   departureMs: number; // departure time of the overall route
   offsetSec: number; // elapsed seconds before this sub-search (via legs)
   speedMs: number; // vessel speed through water
+}
+
+/** What the edge penalty needs in order to ask the tide about one edge:
+ *  where the edge is, when the search expects to be there, and the height
+ *  field to ask. Only built when a height field actually exists. */
+interface EdgeTideContext {
+  env: RouteEnv;
+  heights: TideHeightField;
+  atMs: number | undefined;
+  lat: number;
+  lon: number;
 }
 
 function bboxFromPoints(
@@ -330,7 +347,16 @@ export class RoutingEngine {
 
     const flow = stationField ?? gradient;
     if (!flow) return undefined;
-    return { flow, departureMs, offsetSec: 0, speedMs };
+    // `gradient`, not `flow`: real current stations are preferred for the flow
+    // and carry no heights, so reading depths off the chosen field would lose
+    // them exactly where the data is best.
+    return {
+      flow,
+      heights: gradient ?? undefined,
+      departureMs,
+      offsetSec: 0,
+      speedMs,
+    };
   }
 
   /**
@@ -401,6 +427,9 @@ export class RoutingEngine {
         effectiveDims,
       );
       if (navmeshRoute) {
+        // Prepared before the warnings, not after: they now read depths at the
+        // time of passage and need the tide to do it.
+        const sameRegionEnv = await this.prepareEnv(request, [start, end]);
         const violationWarnings: RouteWarning[] = [];
         this.addViolationWarnings(
           navmeshRoute,
@@ -409,9 +438,9 @@ export class RoutingEngine {
           start,
           end,
           effectiveDims,
+          sameRegionEnv,
         );
         if (violationWarnings.length) navmeshRoute.warnings = violationWarnings;
-        const sameRegionEnv = await this.prepareEnv(request, [start, end]);
         await this.finalizeRoute(navmeshRoute, [], sameRegionEnv, request);
         return navmeshRoute;
       }
@@ -497,7 +526,11 @@ export class RoutingEngine {
 
         const cost = result.features[0].properties.totalCost ?? 0;
         const distance = result.features[0].properties.totalDistance ?? 0;
-        const violatingMeters = this.pathViolationMeters(result, effectiveDims);
+        const violatingMeters = this.pathViolationMeters(
+          result,
+          effectiveDims,
+          env,
+        );
         candidates.push({ result, violatingMeters, cost, distance });
 
         const penalized = violatingMeters > 0;
@@ -567,6 +600,7 @@ export class RoutingEngine {
         start,
         end,
         effectiveDims,
+        env,
       );
 
       // Attach any warning types
@@ -1088,7 +1122,7 @@ export class RoutingEngine {
 
         const cost = result.features[0].properties.totalCost ?? 0;
         const distance = result.features[0].properties.totalDistance ?? 0;
-        const violatingMeters = this.pathViolationMeters(result, dims);
+        const violatingMeters = this.pathViolationMeters(result, dims, env);
         candidates.push({ result, violatingMeters, cost, distance });
 
         const penalized = violatingMeters > 0;
@@ -1146,6 +1180,7 @@ export class RoutingEngine {
         startPt,
         endPt,
         dims,
+        env,
       );
       return best.result;
     }
@@ -2312,12 +2347,31 @@ export class RoutingEngine {
           continue;
         }
 
+        // Where and when this edge is crossed. Hoisted above the penalty
+        // because the depth check needs it too, and computed only when tides
+        // are on — with env undefined none of this runs and the search stays
+        // bit-identical to the untimed one.
+        const fromNode = env ? this.db.getNodeSync(current.nodeId) : null;
+        const elapsed = env ? (tSec.get(current.nodeId) ?? 0) : 0;
+        const atMs = this.passageMsAt(env, elapsed);
+        const midLat = fromNode ? (fromNode.lat + toPos.lat) / 2 : toPos.lat;
+        const midLon = fromNode ? (fromNode.lon + toPos.lon) / 2 : toPos.lon;
+
         // Apply soft safety constraints
         const penalty = this.getEdgePenalty(
           edge,
           minCoastDistanceMeters,
           dims,
           skipReasons,
+          env?.heights
+            ? {
+                env,
+                heights: env.heights,
+                atMs,
+                lat: midLat,
+                lon: midLon,
+              }
+            : undefined,
         );
         if (penalty === -1) {
           continue;
@@ -2330,15 +2384,9 @@ export class RoutingEngine {
         let effDistance = edge.distance;
         let edgeSeconds = 0;
         if (env) {
-          const fromNode = this.db.getNodeSync(current.nodeId);
-          const elapsed = tSec.get(current.nodeId) ?? 0;
           let sog = env.speedMs;
           if (fromNode) {
-            const flow = env.flow.sample(
-              (fromNode.lat + toPos.lat) / 2,
-              (fromNode.lon + toPos.lon) / 2,
-              env.departureMs + (env.offsetSec + elapsed) * 1000,
-            );
+            const flow = env.flow.sample(midLat, midLon, atMs!);
             if (flow.u !== 0 || flow.v !== 0) {
               const brg = this.toRadians(
                 bearingDeg(fromNode.lat, fromNode.lon, toPos.lat, toPos.lon),
@@ -2493,6 +2541,7 @@ export class RoutingEngine {
   private pathViolationMeters(
     result: RouteResult,
     dims: VesselDimensions,
+    env?: RouteEnv,
   ): number {
     const segments = result.features[0]?.properties.segments;
     if (!segments) return 0;
@@ -2500,9 +2549,12 @@ export class RoutingEngine {
     const minAirDraft = (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft;
     const minBeam = (dims.beam ?? 4.0) + this.config.safetyMarginBeam;
 
+    const times = this.passageTimes(segments, env);
     let meters = 0;
-    for (const seg of segments) {
-      const depthViolation = seg.minDepth >= 0 && seg.minDepth < minDepth;
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const depth = this.segmentDepthAtPassage(seg, times[i], env);
+      const depthViolation = depth >= 0 && depth < minDepth;
       const airDraftViolation =
         seg.maxAirDraft >= 0 && seg.maxAirDraft < minAirDraft;
       const beamViolation =
@@ -2642,11 +2694,101 @@ export class RoutingEngine {
     return (dims.draft ?? 2.0) + this.config.safetyMarginDraft;
   }
 
+  /**
+   * The depth under the keel at the moment the vessel is actually there:
+   * charted depth plus however far the tide has risen. A charted depth is
+   * referenced to LAT, so it is the low-water case and this can only ever add
+   * water — which is also why every mistake it can make is the dangerous kind,
+   * and why the rise itself is deliberately conservative (see TideHeightField).
+   *
+   * Falls back to the charted value, unchanged, whenever the tide cannot be
+   * spoken for: an unknown depth (-1) must stay unknown rather than become a
+   * number, and a height field that declines to answer must leave the route
+   * judged exactly as it is today.
+   */
+  private depthAtPassage(
+    chartedDepth: number,
+    lat: number,
+    lon: number,
+    atMs: number | undefined,
+    env: RouteEnv | undefined,
+  ): number {
+    if (chartedDepth < 0) return chartedDepth;
+    if (!env?.heights || atMs === undefined) return chartedDepth;
+    const rise = env.heights.riseAt(lat, lon, atMs);
+    return rise === null ? chartedDepth : chartedDepth + rise;
+  }
+
+  /**
+   * Clock time at the start of each segment, walked at speed through the
+   * water. The post-search audit and the warning text both run before
+   * finalizeRoute has worked out real per-segment times, so they need their
+   * own reckoning.
+   *
+   * It is approximate in the same direction the search's own clock is: it
+   * ignores tidal current and the time spent waiting at locks and opening
+   * bridges, so it runs early. Both consumers sharing one walk matters more
+   * than either being exact — a route the audit counts as violating but the
+   * warning stays quiet about is one the helm is never told about.
+   */
+  private passageTimes(
+    segments: Array<{ distance: number }>,
+    env: RouteEnv | undefined,
+  ): Array<number | undefined> {
+    if (!env) return segments.map(() => undefined);
+    const times: Array<number | undefined> = [];
+    let elapsed = 0;
+    for (const seg of segments) {
+      times.push(env.departureMs + (env.offsetSec + elapsed) * 1000);
+      elapsed += (seg.distance || 0) / env.speedMs;
+    }
+    return times;
+  }
+
+  /**
+   * A segment's depth at the time of passage. Only segments that are real
+   * graph edges get the tide: connector and manual legs carry -1, and
+   * markOverland writes 0 to mean "this crosses land" rather than "charted
+   * 0 m" — adding tide to that would quietly clear a land warning. Requiring
+   * two real node ids excludes all of them.
+   */
+  private segmentDepthAtPassage(
+    seg: { from: number; to: number; minDepth: number },
+    atMs: number | undefined,
+    env: RouteEnv | undefined,
+  ): number {
+    if (seg.minDepth < 0 || !env?.heights || atMs === undefined) {
+      return seg.minDepth;
+    }
+    if (seg.from < 0 || seg.to < 0) return seg.minDepth;
+    const a = this.db.getNodeSync(seg.from);
+    const b = this.db.getNodeSync(seg.to);
+    if (!a || !b) return seg.minDepth;
+    return this.depthAtPassage(
+      seg.minDepth,
+      (a.lat + b.lat) / 2,
+      (a.lon + b.lon) / 2,
+      atMs,
+      env,
+    );
+  }
+
+  /** Absolute clock time at which the search expects to be leaving `nodeId`. */
+  private passageMsAt(
+    env: RouteEnv | undefined,
+    elapsedSec: number,
+  ): number | undefined {
+    return env
+      ? env.departureMs + (env.offsetSec + elapsedSec) * 1000
+      : undefined;
+  }
+
   private getEdgePenalty(
     edge: EdgeRow,
     minCoastDistanceMeters: number,
     dims: VesselDimensions,
     skipReasons?: SearchSkipReasons,
+    tide?: EdgeTideContext,
   ): number {
     if (edge.crosses_land === 1) {
       if (skipReasons) skipReasons.land++;
@@ -2675,8 +2817,25 @@ export class RoutingEngine {
       edge.min_depth >= 0 &&
       edge.min_depth < minDepth
     ) {
-      penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
-      if (skipReasons) skipReasons.draft++;
+      // Charted depth is the low-water case, so before calling this a
+      // violation, ask whether the tide covers it at the time we would be
+      // here. Only worth asking when the tide could plausibly settle it: an
+      // edge that no rise in the whole window can rescue is a violation
+      // either way, and skipping the lookup keeps the common case free.
+      const depth =
+        tide && edge.min_depth + tide.heights.maxRiseM >= minDepth
+          ? this.depthAtPassage(
+              edge.min_depth,
+              tide.lat,
+              tide.lon,
+              tide.atMs,
+              tide.env,
+            )
+          : edge.min_depth;
+      if (depth < minDepth) {
+        penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
+        if (skipReasons) skipReasons.draft++;
+      }
     }
     if (
       typeof edge.min_width === "number" &&
@@ -3553,6 +3712,7 @@ export class RoutingEngine {
     startPt: { latitude: number; longitude: number },
     endPt: { latitude: number; longitude: number },
     dims: VesselDimensions,
+    env?: RouteEnv,
   ) {
     if (!result.features[0] || !result.features[0].properties.segments) return;
     const coords = result.features[0].geometry.coordinates;
@@ -3567,7 +3727,11 @@ export class RoutingEngine {
 
     let totalViolationSegments = 0;
     let totalViolationDist = 0;
+    const times = this.passageTimes(segments, env);
     let worstDepth = Infinity;
+    // The charted figure behind the worst passage depth, so the message can
+    // show both when the tide is what makes the difference.
+    let worstCharted = Infinity;
     let worstAirDraft = Infinity;
     let worstBeam = Infinity;
     let firstFromCoord: number[] | null = null;
@@ -3575,7 +3739,10 @@ export class RoutingEngine {
 
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
-      const depthViolation = seg.minDepth >= 0 && seg.minDepth < minDepth;
+      // Same passage depth the audit and the search used — see
+      // pathViolationMeters; the three have to agree.
+      const depth = this.segmentDepthAtPassage(seg, times[i], env);
+      const depthViolation = depth >= 0 && depth < minDepth;
       const airDraftViolation =
         seg.maxAirDraft >= 0 && seg.maxAirDraft < airDraft;
       const beamViolation =
@@ -3590,8 +3757,10 @@ export class RoutingEngine {
 
         totalViolationSegments++;
         totalViolationDist += seg.distance || 0;
-        if (depthViolation && seg.minDepth < worstDepth)
-          worstDepth = seg.minDepth;
+        if (depthViolation && depth < worstDepth) {
+          worstDepth = depth;
+          worstCharted = seg.minDepth;
+        }
         if (airDraftViolation && seg.maxAirDraft < worstAirDraft)
           worstAirDraft = seg.maxAirDraft;
         if (beamViolation && seg.minWidth! < worstBeam)
@@ -3603,8 +3772,16 @@ export class RoutingEngine {
 
     if (totalViolationSegments > 0 && firstFromCoord && lastToCoord) {
       const reasons: string[] = [];
-      if (worstDepth < Infinity)
-        reasons.push(`depth ${worstDepth.toFixed(1)}m < required ${minDepth}m`);
+      if (worstDepth < Infinity) {
+        // Only mention the tide where it actually moved the figure — with
+        // tides off, or where the rise made no difference, the message reads
+        // exactly as it always has rather than acquiring unexplained wording.
+        reasons.push(
+          worstCharted < worstDepth - 0.05
+            ? `depth ${worstDepth.toFixed(1)}m at passage (${worstCharted.toFixed(1)}m charted) < required ${minDepth}m`
+            : `depth ${worstDepth.toFixed(1)}m < required ${minDepth}m`,
+        );
+      }
       if (worstAirDraft < Infinity)
         reasons.push(
           `air draft ${worstAirDraft.toFixed(1)}m < required ${airDraft}m`,
