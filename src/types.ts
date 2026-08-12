@@ -232,6 +232,10 @@ export interface RouteResult {
         // where the extra water came from.
         minDepthAtPassage?: number; // meters
         tideRiseM?: number; // meters
+        // Set where the router had to draw this leg across dry land, which is
+        // also why minDepth reads 0 there. Distinguishes that from a charted
+        // drying height of 0, which the two would otherwise look identical as.
+        crossesLand?: boolean;
       }>;
     };
   }>;

@@ -1400,6 +1400,10 @@ export class RoutingEngine {
       if (!seg) return;
       if (this.db.isLineCrossingLand(fromLat, fromLon, toLat, toLon, 5)) {
         seg.minDepth = 0;
+        // Flagged, not left to be inferred from the 0: that value is
+        // indistinguishable from a charted drying height, and something has to
+        // stop the tide being added to a leg that crosses dry land.
+        seg.crossesLand = true;
       }
     };
     if (coords.length === 0) return;
@@ -2046,6 +2050,22 @@ export class RoutingEngine {
 
     const minDepth = this.requiredDepth(dims);
 
+    // When the endpoints are judged, in the tide's terms. The start is judged
+    // at departure; the end at a rough transit estimate away, since the real
+    // arrival time is not known until the search that this runs before has
+    // happened. A crude estimate beats assuming low water all day, which is
+    // what relocating an endpoint on charted depth alone amounts to — and it
+    // relocates it *away* from the shallows the tide was going to open, which
+    // is exactly the approach to a berth the helm wanted.
+    const directSec = env
+      ? this.haversineDistance(startLat, startLon, endLat, endLon) / env.speedMs
+      : 0;
+    const improveAtMs = (label: string): number | undefined =>
+      env
+        ? env.departureMs +
+          (env.offsetSec + (label === "Start" ? 0 : directSec)) * 1000
+        : undefined;
+
     const improveNode = async (
       node: number,
       nodeLat: number,
@@ -2054,6 +2074,10 @@ export class RoutingEngine {
     ): Promise<number> => {
       const nodePos = this.db.getNodeSync(node);
       if (!nodePos) return node;
+      const atMs = improveAtMs(label);
+      /** This edge's depth where and when the vessel would meet it. */
+      const depthOf = (e: EdgeRow, lat: number, lon: number): number =>
+        this.depthAtPassage(e.min_depth, lat, lon, atMs, env);
       const edges = await this.db.getOutgoingEdges(node);
       // For end nodes with no outgoing edges, the node is still valid as a destination.
       // For start nodes with no outgoing edges, we must find an alternative.
@@ -2081,7 +2105,8 @@ export class RoutingEngine {
           );
           const bearingDiff = Math.abs(edgeBearing - destBearing);
           const towardDest = Math.min(bearingDiff, 360 - bearingDiff) < 90;
-          const isDeep = e.min_depth < 0 || e.min_depth >= minDepth;
+          const d = depthOf(e, nodePos.lat, nodePos.lon);
+          const isDeep = d < 0 || d >= minDepth;
           if (towardDest && isDeep) {
             anyTowardDeep = true;
             break;
@@ -2094,7 +2119,7 @@ export class RoutingEngine {
           (e) =>
             typeof e.min_depth === "number" &&
             e.min_depth >= 0 &&
-            e.min_depth < minDepth,
+            depthOf(e, nodePos.lat, nodePos.lon) < minDepth,
         );
         if (!allShallow) return node;
       }
@@ -2112,9 +2137,10 @@ export class RoutingEngine {
         if (c.id === node) continue;
         const cEdges = await this.db.getOutgoingEdges(c.id);
         if (cEdges.length === 0) continue; // skip dead-end candidates for start node
-        const hasDeep = cEdges.some(
-          (e) => e.min_depth < 0 || e.min_depth >= minDepth,
-        );
+        const hasDeep = cEdges.some((e) => {
+          const d = depthOf(e, c.lat, c.lon);
+          return d < 0 || d >= minDepth;
+        });
         if (hasDeep && c.distance < bestDist) {
           bestDist = c.distance;
           best = c.id;
@@ -2549,11 +2575,18 @@ export class RoutingEngine {
     const minAirDraft = (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft;
     const minBeam = (dims.beam ?? 4.0) + this.config.safetyMarginBeam;
 
+    const coords = result.features[0]?.geometry.coordinates ?? [];
     const times = this.passageTimes(segments, env);
     let meters = 0;
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
-      const depth = this.segmentDepthAtPassage(seg, times[i], env);
+      const depth = this.segmentDepthAtPassage(
+        seg,
+        coords[i],
+        coords[i + 1],
+        times[i],
+        env,
+      );
       const depthViolation = depth >= 0 && depth < minDepth;
       const airDraftViolation =
         seg.maxAirDraft >= 0 && seg.maxAirDraft < minAirDraft;
@@ -2753,21 +2786,23 @@ export class RoutingEngine {
    * two real node ids excludes all of them.
    */
   private segmentDepthAtPassage(
-    seg: { from: number; to: number; minDepth: number },
+    seg: { minDepth: number; crossesLand?: boolean },
+    fromCoord: number[] | undefined,
+    toCoord: number[] | undefined,
     atMs: number | undefined,
     env: RouteEnv | undefined,
   ): number {
     if (seg.minDepth < 0 || !env?.heights || atMs === undefined) {
       return seg.minDepth;
     }
-    if (seg.from < 0 || seg.to < 0) return seg.minDepth;
-    const a = this.db.getNodeSync(seg.from);
-    const b = this.db.getNodeSync(seg.to);
-    if (!a || !b) return seg.minDepth;
+    // The only exclusion: a leg the router had to draw across land. Its 0 is a
+    // statement about land, not a sounding, and no amount of tide answers it.
+    if (seg.crossesLand) return seg.minDepth;
+    if (!fromCoord || !toCoord) return seg.minDepth;
     return this.depthAtPassage(
       seg.minDepth,
-      (a.lat + b.lat) / 2,
-      (a.lon + b.lon) / 2,
+      (fromCoord[1] + toCoord[1]) / 2,
+      (fromCoord[0] + toCoord[0]) / 2,
       atMs,
       env,
     );
@@ -3332,6 +3367,8 @@ export class RoutingEngine {
       if (env?.heights && from && to) {
         const atPassage = this.segmentDepthAtPassage(
           seg,
+          from,
+          to,
           env.departureMs + cum * 1000,
           env,
         );
@@ -3770,7 +3807,13 @@ export class RoutingEngine {
       const seg = segments[i];
       // Same passage depth the audit and the search used — see
       // pathViolationMeters; the three have to agree.
-      const depth = this.segmentDepthAtPassage(seg, times[i], env);
+      const depth = this.segmentDepthAtPassage(
+        seg,
+        coords[i],
+        coords[i + 1],
+        times[i],
+        env,
+      );
       const depthViolation = depth >= 0 && depth < minDepth;
       const airDraftViolation =
         seg.maxAirDraft >= 0 && seg.maxAirDraft < airDraft;
