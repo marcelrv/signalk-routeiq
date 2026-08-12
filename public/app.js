@@ -5982,10 +5982,10 @@
         tideStr =
           '  \u00b7  <span style="color:' +
           col +
-          '" title="Impact of the estimated tidal current vs. still water">tide ' +
+          '" title="Time the estimated tidal current costs or saves versus still water — minutes, not metres of tide">tide ' +
           sign +
           Math.abs(deltaMin) +
-          "m</span>";
+          " min</span>";
         if (geoJson.arrivalTime) {
           const arr = new Date(geoJson.arrivalTime);
           if (!isNaN(arr))
@@ -6185,6 +6185,7 @@
         // Aggregate leg attributes: from the server itinerary when present,
         // else from the client-side segment→coord-range mapping (legacy).
         let minDepth = Infinity,
+          minDepthAtPassage = Infinity,
           minWidth = Infinity,
           maxAirDraft = Infinity;
         let legDist = 0,
@@ -6194,6 +6195,8 @@
             hasLegData = true;
             legDist = node.leg.distance || 0;
             if (node.leg.minDepth != null) minDepth = node.leg.minDepth;
+            if (node.leg.minDepthAtPassage != null)
+              minDepthAtPassage = node.leg.minDepthAtPassage;
             if (node.leg.minWidth != null) minWidth = node.leg.minWidth;
             if (node.leg.maxAirDraft != null)
               maxAirDraft = node.leg.maxAirDraft;
@@ -6212,6 +6215,14 @@
               s.minDepth >= 0
             )
               minDepth = Math.min(minDepth, s.minDepth);
+            if (
+              s.minDepthAtPassage !== null &&
+              s.minDepthAtPassage !== undefined
+            )
+              minDepthAtPassage = Math.min(
+                minDepthAtPassage,
+                s.minDepthAtPassage,
+              );
             if (
               s.minWidth !== null &&
               s.minWidth !== undefined &&
@@ -6239,8 +6250,20 @@
               ? lastBoat.effectiveDraft - lastBoat.draft
               : 0.3;
           const shallowThreshold = vesselDraft + safetyMargin;
-          if (minDepth !== Infinity && minDepth < shallowThreshold)
-            legWarnings.push("Shallow (" + minDepth.toFixed(1) + "m)");
+          if (minDepth !== Infinity && minDepth < shallowThreshold) {
+            // Keep flagging shallow chart — that is what the survey says — but
+            // if the tide covers it at the time you are there, say so on the
+            // same line rather than leaving a bare 0.0 m to be alarmed at.
+            legWarnings.push(
+              minDepthAtPassage !== Infinity && minDepthAtPassage > minDepth
+                ? "Shallow (" +
+                    minDepth.toFixed(1) +
+                    "m charted, " +
+                    minDepthAtPassage.toFixed(1) +
+                    "m at passage)"
+                : "Shallow (" + minDepth.toFixed(1) + "m)",
+            );
+          }
           if (minWidth !== Infinity && minWidth < 6)
             legWarnings.push("Narrow (" + minWidth.toFixed(1) + "m)");
 
@@ -6304,6 +6327,15 @@
               '<div class="leg-stat"><span>Min Depth</span><span class="leg-val">' +
               fmtDepth(minDepth) +
               "</span></div>";
+          if (minDepthAtPassage !== Infinity && minDepthAtPassage > minDepth) {
+            const rise = minDepthAtPassage - minDepth;
+            html +=
+              '<div class="leg-stat"><span title="Charted depth plus the tide risen by the time you are here">Depth at passage</span><span class="leg-val" style="color:#22c55e">' +
+              fmtDepth(minDepthAtPassage) +
+              " (tide +" +
+              rise.toFixed(1) +
+              " m)</span></div>";
+          }
           if (minWidth !== Infinity)
             html +=
               '<div class="leg-stat"><span>Min Width</span><span class="leg-val">' +
