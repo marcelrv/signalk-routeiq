@@ -1238,6 +1238,55 @@ charted-shallow warnings that are now correctly priced and correctly
 drawn. Next real work is Phase 3 (PHASE_3_DESIGN.md) / Phase 4
 (PHASE_4_DESIGN.md).
 
+## Negative charted depths are read as "unknown" — OPEN, cross-repo, safety-relevant
+
+Found 2026-08-12 while testing tide-aware depth against the live server.
+
+`min_depth < 0` means "unknown, exempt from every constraint check" throughout
+`routing.ts` (the sites are listed in the tide-depth work). But DEPARE depths
+are legitimately negative: a bank that dries 2 m above chart datum is -2.0, and
+that is a real, useful survey value — it is exactly the water a tide opens.
+
+**Both meanings are already in shipped data.** Measured over `data/us_east_ct.sqlite`
+(108,445 edges): `min_depth = -1` on **4** edges, and `min_depth < 0 AND <> -1`
+on **94**, down to **-6.0 m**. So 94 edges that dry as much as six metres above
+datum are currently treated as unknown and are freely routable at any state of
+tide. That is a permissive hole that exists today, with or without tide-aware
+depth. (`data/zeeland.sqlite`, schema_version 1, is worse in a different way:
+137,350 edges, no negatives at all and a floor of exactly 0.0 — the sign was
+discarded upstream, so nothing downstream can recover it.)
+
+**The fix is a distinct unknown sentinel — `-999`** (Marcel's suggestion), so
+negatives can mean what they say. Sequencing matters, because it cannot be done
+from this repo alone:
+
+1. **Pipeline** emits `-999` for unknown and preserves real drying heights,
+   and bumps `metadata.schema_version`.
+2. **routeiq** gates on that version: at or above it, unknown is `-999` and any
+   other negative is a drying height; below it, `< 0` stays unknown as today.
+
+**Do not reinterpret `-1` unilaterally.** It is the pipeline's current
+`UNKNOWN_DEPTH` and newer regional builds lean on it heavily — STITCHING_DESIGN
+§10.8 records unknown fractions of 73.9% (NH), 42.2% (RI), 32.8% (CT) after the
+depth-band fix. Reading those as "dries 1 m" would make most of a region
+impassable overnight.
+
+**Interim step available now, and safe on every existing build:** treat
+`min_depth < 0 && min_depth !== -1` as a real drying height, leaving exactly
+`-1` as unknown. That constrains the 94 CT edges correctly without touching the
+`-1` population, needs no schema change, and composes with tide-aware depth —
+a -2.0 m bank becomes passable once the tide clears 2.0 m + draft + margin,
+which is the "open shallow edges near HW" case the design was written for. The
+residual collision is a bank drying exactly 1.0 m, which stays unknown; that is
+today's behaviour for it either way. Drop the special case once the pipeline
+moves to `-999`.
+
+**Consequence for the tide feature meanwhile:** on data whose depths are
+floored at 0 (schema_version 1, e.g. `zeeland.sqlite`), a reported passage
+depth can overstate the real water by the drying height — 0.0 + 4.3 m of tide
+reads as 4.3 m where a bank drying 1.5 m really carries 2.8 m. The arithmetic
+is right; the input has already lost the sign.
+
 ## Round 23 — deployed: tiled ocean regions + real edge geometry
 
 Pipeline tiling (sibling 7aa98d9) killed the PR giant-region cost:
