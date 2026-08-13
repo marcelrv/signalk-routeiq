@@ -5875,6 +5875,11 @@
             f.properties.maxAirDraft != null ? f.properties.maxAirDraft : -1,
           isFairway:
             f.properties.isFairway != null ? f.properties.isFairway : false,
+          // Carried through, or the passage depth never reaches the leg
+          // aggregation below — and this is the branch that actually runs,
+          // since the server splits the route into one feature per segment.
+          minDepthAtPassage: f.properties.minDepthAtPassage,
+          tideRiseM: f.properties.tideRiseM,
         });
       }
     }
@@ -6333,8 +6338,8 @@
               '<div class="leg-stat"><span title="Charted depth plus the tide risen by the time you are here">Depth at passage</span><span class="leg-val" style="color:#22c55e">' +
               fmtDepth(minDepthAtPassage) +
               " (tide +" +
-              rise.toFixed(1) +
-              " m)</span></div>";
+              fmtDepth(rise) +
+              ")</span></div>";
           }
           if (minWidth !== Infinity)
             html +=

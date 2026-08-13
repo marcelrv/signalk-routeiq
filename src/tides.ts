@@ -282,7 +282,14 @@ class HeightGradientFlowField implements FlowField, TideHeightField {
   riseAt(lat: number, lon: number, timeMs: number): number | null {
     if (this.timelines.length < 3) return null;
 
-    const key = `${Math.round(lat * 50)},${Math.round(lon * 50)},${Math.round(timeMs / 600_000)}`;
+    // Quantize once, then answer for that instant. Keying the cache on a
+    // 10-minute bucket while evaluating the raw time means two callers in the
+    // same bucket share whichever answer arrived first — including a non-null
+    // rise handed to a caller whose time is outside the window, and an answer
+    // describing an instant minutes off the one asked about. On a rising tide
+    // that lands permissive, which is the one direction this must not drift.
+    const bucketMs = Math.round(timeMs / 600_000) * 600_000;
+    const key = `${Math.round(lat * 50)},${Math.round(lon * 50)},${bucketMs}`;
     const cached = this.riseCache.get(key);
     if (cached !== undefined) return cached;
 
@@ -291,8 +298,8 @@ class HeightGradientFlowField implements FlowField, TideHeightField {
     // permissive depth answer from one distant or wrong-side station is the
     // difference between a detour and a grounding.
     const answer =
-      near.length >= 3 && near.every((w) => this.inWindow(w.tl, timeMs))
-        ? this.fitRise(near, timeMs)
+      near.length >= 3 && near.every((w) => this.inWindow(w.tl, bucketMs))
+        ? this.fitRise(near, bucketMs)
         : null;
 
     if (this.riseCache.size > HeightGradientFlowField.CACHE_MAX)

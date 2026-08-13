@@ -1249,7 +1249,7 @@ that is a real, useful survey value — it is exactly the water a tide opens.
 
 **Both meanings are already in shipped data.** Measured over `data/us_east_ct.sqlite`
 (108,445 edges): `min_depth = -1` on **4** edges, and `min_depth < 0 AND <> -1`
-on **94**, down to **-6.0 m**. So 94 edges that dry as much as six metres above
+on **94**, down to **-6.0 m**. So 94 edges that dry as much as six meters above
 datum are currently treated as unknown and are freely routable at any state of
 tide. That is a permissive hole that exists today, with or without tide-aware
 depth. (`data/zeeland.sqlite`, schema_version 1, is worse in a different way:
@@ -1278,7 +1278,7 @@ impassable overnight.
 a -2.0 m bank becomes passable once the tide clears 2.0 m + draft + margin,
 which is the "open shallow edges near HW" case the design was written for. The
 residual collision is a bank drying exactly 1.0 m, which stays unknown; that is
-today's behaviour for it either way. Drop the special case once the pipeline
+today's behavior for it either way. Drop the special case once the pipeline
 moves to `-999`.
 
 **Consequence for the tide feature meanwhile:** on data whose depths are

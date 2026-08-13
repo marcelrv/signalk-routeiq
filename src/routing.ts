@@ -2714,6 +2714,12 @@ export class RoutingEngine {
   // it did at the old flat +50,000.
   private static readonly VIOLATION_RATE_COAST = 50;
 
+  /** Rise below which the tide is not worth reporting as having changed
+   *  anything. Shared by the per-segment passage depth and the warning text so
+   *  they cannot disagree about whether a tide applied — a few millimetres
+   *  would otherwise set depthAware and render as "tide +0.0 m". */
+  private static readonly TIDE_REPORT_MIN_RISE_M = 0.05;
+
   /** Water the vessel needs under it: design draft plus the configured
    *  under-keel margin. Four places used to compute this independently — the
    *  start/end node improvement, the A* edge penalty, the post-search audit
@@ -3372,7 +3378,7 @@ export class RoutingEngine {
           env.departureMs + cum * 1000,
           env,
         );
-        if (atPassage > seg.minDepth) {
+        if (atPassage - seg.minDepth >= RoutingEngine.TIDE_REPORT_MIN_RISE_M) {
           seg.minDepthAtPassage = Math.round(atPassage * 100) / 100;
           seg.tideRiseM = Math.round((atPassage - seg.minDepth) * 100) / 100;
         }
@@ -3849,7 +3855,7 @@ export class RoutingEngine {
         // tides off, or where the rise made no difference, the message reads
         // exactly as it always has rather than acquiring unexplained wording.
         reasons.push(
-          worstCharted < worstDepth - 0.05
+          worstDepth - worstCharted >= RoutingEngine.TIDE_REPORT_MIN_RISE_M
             ? `depth ${worstDepth.toFixed(1)}m at passage (${worstCharted.toFixed(1)}m charted) < required ${minDepth}m`
             : `depth ${worstDepth.toFixed(1)}m < required ${minDepth}m`,
         );
