@@ -241,7 +241,13 @@ export class RoutingDatabase {
   private dbDir: string;
   private nodes: Map<
     number,
-    { lat: number; lon: number; regionId: number; nodeDepth: number; nodeDepthKnown: boolean }
+    {
+      lat: number;
+      lon: number;
+      regionId: number;
+      nodeDepth: number;
+      nodeDepthKnown: boolean;
+    }
   > = new Map();
   private edgesBySource: Map<number, Array<EdgeRow>> = new Map();
   private pois: PoiRow[] = [];
@@ -2143,9 +2149,13 @@ export class RoutingDatabase {
     return null;
   }
 
-  getNodeSync(
-    id: number,
-  ): { lat: number; lon: number; regionId: number; nodeDepth: number; nodeDepthKnown: boolean } | null {
+  getNodeSync(id: number): {
+    lat: number;
+    lon: number;
+    regionId: number;
+    nodeDepth: number;
+    nodeDepthKnown: boolean;
+  } | null {
     if (!this.graphLoaded) {
       throw new Error("Graph must be loaded for synchronous node lookup");
     }
@@ -2160,7 +2170,13 @@ export class RoutingDatabase {
    *  caller's whole loop. Callers must treat it as read-only. */
   getNodeMap(): ReadonlyMap<
     number,
-    { lat: number; lon: number; regionId: number; nodeDepth: number; nodeDepthKnown: boolean }
+    {
+      lat: number;
+      lon: number;
+      regionId: number;
+      nodeDepth: number;
+      nodeDepthKnown: boolean;
+    }
   > {
     return this.nodes;
   }
