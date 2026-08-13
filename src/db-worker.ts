@@ -97,7 +97,10 @@ const DEPTH_SENTINEL_SCHEMA_VERSION = 2;
  *  the legacy convention where any negative means unknown -- do not
  *  reinterpret those, some regions are 30-70% UNKNOWN_DEPTH by design. */
 function isDepthKnown(value: number, schemaVersion: number | null): boolean {
-  if (schemaVersion !== null && schemaVersion >= DEPTH_SENTINEL_SCHEMA_VERSION) {
+  if (
+    schemaVersion !== null &&
+    schemaVersion >= DEPTH_SENTINEL_SCHEMA_VERSION
+  ) {
     return value !== UNKNOWN_DEPTH;
   }
   return value >= 0;
@@ -716,7 +719,10 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             allNodes.push({
               ...r,
               db_index: i,
-              node_depth_known: isDepthKnown(r.node_depth, h.depthSchemaVersion),
+              node_depth_known: isDepthKnown(
+                r.node_depth,
+                h.depthSchemaVersion,
+              ),
             });
         }
         // Merge in overlay-added nodes (region_id = 0). User-entered, not
