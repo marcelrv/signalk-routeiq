@@ -1059,6 +1059,14 @@ export class RoutingDatabase {
       );
       existing.min_depth = merged.value;
       existing.min_depth_known = merged.known;
+    } else {
+      // applyEdit just copied min_depth from whichever side claimed it
+      // (a user's overlay edit), bypassing tighterDepth entirely -- so
+      // min_depth_known has to be recomputed here too, or it keeps
+      // reporting the pre-edit file's known-ness. Overlay edits are
+      // user-entered, not pipeline output: always the legacy convention,
+      // same as addNode/updateNode.
+      existing.min_depth_known = existing.min_depth >= 0;
     }
     if (!claimed.has("max_air_draft"))
       existing.max_air_draft = RoutingDatabase.tighterLimit(
@@ -3290,6 +3298,11 @@ export class RoutingDatabase {
       node_depth,
     });
     cur.nodeDepth = node_depth;
+    // User-entered edit, not pipeline output -- legacy convention (negative =
+    // unknown), same as addNode. Left stale before this, so a node edited
+    // from a known depth to -1 (or back) kept reporting the pre-edit
+    // known-ness through getNodeById()/getNodeMap().
+    cur.nodeDepthKnown = node_depth >= 0;
   }
 
   async updateEdge(

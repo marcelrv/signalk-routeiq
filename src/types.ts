@@ -199,6 +199,11 @@ export interface RouteResult {
       totalCost?: number;
       distance?: number; // segment distance (only per-segment features)
       minDepth?: number; // meters (only per-segment features)
+      // Whether minDepth is a real reading rather than "no data" -- see
+      // segments[].minDepthKnown below. splitToSegmentFeatures copies it up
+      // onto each finalized per-feature properties object (only per-segment
+      // features, same as minDepth itself).
+      minDepthKnown?: boolean;
       minDepthAtPassage?: number; // meters, charted + tide risen by then
       tideRiseM?: number; // meters of tide included in minDepthAtPassage
       maxAirDraft?: number; // meters (only per-segment features)
