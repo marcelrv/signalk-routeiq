@@ -316,9 +316,18 @@ picking a station across a peninsula (see "stations baked into the routing DB")
 is, for a permissive depth decision, the difference between a detour and a
 grounding.
 
-`improveNode` deliberately stays charted-only. It runs before the search with no
-arrival time available, and being conservative there only means it may pick a
-deeper start or end node.
+`improveNode` was originally left charted-only, on the reasoning that it runs
+before the search with no arrival time available and that being conservative
+there only means picking a deeper start or end node. **That was wrong, and live
+testing showed why:** it relocates the endpoints *away* from shallow water
+before the search runs, so the water the tide was about to open is never
+offered — it was observed moving a destination 677 m. Being pessimistic there
+is safe and self-defeating at the same time.
+
+It now judges endpoint edges at the tide too: the start at departure, the end
+at a straight-line transit estimate away, since the true arrival time is not
+known until the search this precedes has happened. A crude estimate is far
+closer than assuming low water all day.
 
 ### Known limitations
 
