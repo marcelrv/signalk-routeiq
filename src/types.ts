@@ -211,6 +211,14 @@ export interface RouteResult {
         to: number; // node id
         distance: number; // meters
         minDepth: number; // meters
+        // Whether minDepth is a real reading (possibly negative -- a charted
+        // drying height, on schema_version >= 2) rather than "no data" (manual/
+        // connector legs, or an edge whose source file predates the depth
+        // sentinel fix). Every depth constraint check must gate on this
+        // instead of `minDepth < 0` / `>= 0` (ROUTEIQ_NEXT_PHASES.md,
+        // "Negative charted depths are read as unknown"). Required, not
+        // optional, so every segment-construction site has to set it.
+        minDepthKnown: boolean;
         maxAirDraft: number; // meters
         minWidth?: number; // meters
         costFactor: number;

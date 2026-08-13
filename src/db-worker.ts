@@ -8,6 +8,9 @@ interface NodeRow {
   lon: number;
   node_depth: number;
   region_id?: number;
+  /** Whether node_depth is a real reading (possibly negative -- a charted
+   *  drying height) rather than "no data". See isDepthKnown below. */
+  node_depth_known?: boolean;
 }
 
 interface EdgeRow {
@@ -24,6 +27,9 @@ interface EdgeRow {
   edge_kind_id: number;
   crosses_land?: number;
   crosses_obstacle?: number;
+  /** Whether min_depth is a real reading (possibly negative -- a charted
+   *  drying height) rather than "no data". See isDepthKnown below. */
+  min_depth_known?: boolean;
 }
 
 interface NavmeshRegionRow {
@@ -65,6 +71,36 @@ interface DbHandle {
    * one that predates the column fails the whole load.
    */
   flags: SchemaFlags;
+  /** This file's `metadata.schema_version`, read once at open time (null if
+   *  the file predates that column, or has no metadata row at all). Decides
+   *  how min_depth/node_depth negatives are interpreted -- see
+   *  DEPTH_SENTINEL_SCHEMA_VERSION below. */
+  depthSchemaVersion: number | null;
+}
+
+// A distinct "unknown depth" sentinel (ROUTEIQ_NEXT_PHASES.md, "Negative
+// charted depths are read as unknown"), and the metadata.schema_version a
+// file must carry for -999/other-negative to mean that instead of the
+// legacy "any negative is unknown" convention. Must match the pipeline's
+// UNKNOWN_DEPTH / DEPTH_SENTINEL_SCHEMA_VERSION (nautical_routing_pipeline.py).
+const UNKNOWN_DEPTH = -999;
+const DEPTH_SENTINEL_SCHEMA_VERSION = 2;
+
+/** Whether a raw min_depth/node_depth value represents a real (possibly
+ *  negative, e.g. a charted drying height) reading rather than "no data".
+ *  Computed once per row here, in the one place that knows which file --
+ *  and therefore which schema convention -- the row came from, so every
+ *  downstream consumer on the main thread can trust a plain boolean instead
+ *  of re-deriving schema-version logic at each depth check. Files at or
+ *  above DEPTH_SENTINEL_SCHEMA_VERSION use the distinct -999 sentinel and
+ *  leave real negatives alone; older files (schemaVersion null or < 2) keep
+ *  the legacy convention where any negative means unknown -- do not
+ *  reinterpret those, some regions are 30-70% UNKNOWN_DEPTH by design. */
+function isDepthKnown(value: number, schemaVersion: number | null): boolean {
+  if (schemaVersion !== null && schemaVersion >= DEPTH_SENTINEL_SCHEMA_VERSION) {
+    return value !== UNKNOWN_DEPTH;
+  }
+  return value >= 0;
 }
 
 // `handles` is tombstoned, not spliced, on a per-file close (closeDb): a
@@ -261,7 +297,9 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             hasNodeDepth = hasNodeDepth || flags.hasNodeDepth;
             hasRegionId = hasRegionId || flags.hasRegionId;
             const filename = filenameOf(dbPath);
-            handles.push({ db, path: dbPath, flags });
+            const depthSchemaVersion =
+              readMetadataRow(db, filename)?.schemaVersion ?? null;
+            handles.push({ db, path: dbPath, flags, depthSchemaVersion });
             filenames.push(filename);
             console.log(`[db-worker] Loaded database: ${dbPath}`);
           } catch (err: any) {
@@ -403,7 +441,9 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
 
         const filename = filenameOf(dbPath);
         const dbIndex = handles.length;
-        handles.push({ db, path: dbPath, flags });
+        const depthSchemaVersion =
+          readMetadataRow(db, filename)?.schemaVersion ?? null;
+        handles.push({ db, path: dbPath, flags, depthSchemaVersion });
         filenames.push(filename);
         console.log(
           `[db-worker] Opened database on demand: ${dbPath} (dbIndex=${dbIndex})`,
@@ -556,6 +596,9 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             db,
             path: overlayPath,
             flags: detectSchemaFlags(db),
+            // User-entered edits, not pipeline output -- always legacy
+            // semantics (isDepthKnown's null branch: negative = unknown).
+            depthSchemaVersion: null,
           };
           console.log(`[db-worker] Overlay opened: ${overlayPath}`);
           parentPort!.postMessage({ id, type, result: { success: true } });
@@ -669,9 +712,15 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
               `SELECT id, lat, lon, node_depth, ${regionIdCol} FROM nodes`,
             )
             .all() as unknown as NodeRow[];
-          for (const r of rows) allNodes.push({ ...r, db_index: i });
+          for (const r of rows)
+            allNodes.push({
+              ...r,
+              db_index: i,
+              node_depth_known: isDepthKnown(r.node_depth, h.depthSchemaVersion),
+            });
         }
-        // Merge in overlay-added nodes (region_id = 0)
+        // Merge in overlay-added nodes (region_id = 0). User-entered, not
+        // pipeline output -- always the legacy convention (negative = unknown).
         if (wantOverlay && overlayHandle) {
           const overlayNodes = overlayHandle.db
             .prepare("SELECT id, lat, lon, node_depth FROM nodes")
@@ -682,7 +731,12 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             node_depth: number;
           }>;
           for (const n of overlayNodes) {
-            allNodes.push({ ...n, region_id: 0, db_index: OVERLAY_DB_INDEX });
+            allNodes.push({
+              ...n,
+              region_id: 0,
+              db_index: OVERLAY_DB_INDEX,
+              node_depth_known: isDepthKnown(n.node_depth, null),
+            });
           }
         }
         parentPort!.postMessage({ id, type, result: allNodes });
@@ -727,9 +781,16 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
              FROM edges`,
             )
             .all() as unknown as EdgeRow[];
-          allEdges = allEdges.concat(edges.map((e) => ({ ...e, db_index: i })));
+          allEdges = allEdges.concat(
+            edges.map((e) => ({
+              ...e,
+              db_index: i,
+              min_depth_known: isDepthKnown(e.min_depth, h.depthSchemaVersion),
+            })),
+          );
         }
-        // Merge in overlay-added edges
+        // Merge in overlay-added edges. User-entered, not pipeline output --
+        // always the legacy convention (negative = unknown).
         if (wantOverlay && overlayHandle) {
           const overlayEdges = overlayHandle.db
             .prepare(
@@ -740,7 +801,11 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             )
             .all() as unknown as EdgeRow[];
           allEdges = allEdges.concat(
-            overlayEdges.map((e) => ({ ...e, db_index: OVERLAY_DB_INDEX })),
+            overlayEdges.map((e) => ({
+              ...e,
+              db_index: OVERLAY_DB_INDEX,
+              min_depth_known: isDepthKnown(e.min_depth, null),
+            })),
           );
         }
         const CHUNK = 50000;

@@ -21,6 +21,7 @@ import { ItineraryPoint, RouteCrossing, RouteWaypoint } from "./types.js";
 export interface PathSegment {
   distance: number;
   minDepth?: number;
+  minDepthKnown?: boolean;
   minDepthAtPassage?: number;
   maxAirDraft?: number;
   minWidth?: number;
@@ -319,7 +320,7 @@ export function buildItinerary(
         const seg = segments[s];
         if (!seg) continue;
         legDistance += seg.distance ?? 0;
-        if (typeof seg.minDepth === "number" && seg.minDepth >= 0) {
+        if (typeof seg.minDepth === "number" && seg.minDepthKnown) {
           minDepth = Math.min(minDepth, seg.minDepth);
           minDepthAtPassage = Math.min(
             minDepthAtPassage,

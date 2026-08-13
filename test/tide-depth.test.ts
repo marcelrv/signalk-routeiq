@@ -164,26 +164,35 @@ describe("tide-informed depth", () => {
     };
 
     it("adds the rise to a known depth", () => {
-      assert.strictEqual(engine.depthAtPassage(1.5, 52, 5, 1000, env), 2.5);
+      assert.strictEqual(
+        engine.depthAtPassage(1.5, true, 52, 5, 1000, env),
+        2.5,
+      );
     });
 
     it("leaves an unknown depth unknown", () => {
-      // -1 means "the chart does not say", and -1 + 1.0 would turn that into a
-      // shallow reading nobody has any evidence for.
-      assert.strictEqual(engine.depthAtPassage(-1, 52, 5, 1000, env), -1);
+      // known=false means "the chart does not say", and adding 1.0 would turn
+      // that into a shallow reading nobody has any evidence for.
+      assert.strictEqual(
+        engine.depthAtPassage(-1, false, 52, 5, 1000, env),
+        -1,
+      );
     });
 
     it("leaves the depth alone when there is no tide to consult", () => {
       assert.strictEqual(
-        engine.depthAtPassage(1.5, 52, 5, 1000, undefined),
+        engine.depthAtPassage(1.5, true, 52, 5, 1000, undefined),
         1.5,
       );
       assert.strictEqual(
-        engine.depthAtPassage(1.5, 52, 5, undefined, env),
+        engine.depthAtPassage(1.5, true, 52, 5, undefined, env),
         1.5,
       );
       const silent = { ...env, heights: { riseAt: () => null, maxRiseM: 1.5 } };
-      assert.strictEqual(engine.depthAtPassage(1.5, 52, 5, 1000, silent), 1.5);
+      assert.strictEqual(
+        engine.depthAtPassage(1.5, true, 52, 5, 1000, silent),
+        1.5,
+      );
     });
   });
 
@@ -206,7 +215,7 @@ describe("tide-informed depth", () => {
       // Excluding it by node id, as the first cut did, left the last stretch
       // before the destination judged at low water — the approach to a berth,
       // which is the one place this feature most needs to work.
-      const seg = { from: -1, to: -1, minDepth: 0.5 };
+      const seg = { from: -1, to: -1, minDepth: 0.5, minDepthKnown: true };
       assert.strictEqual(
         engine.segmentDepthAtPassage(seg, from, to, 1000, env),
         2.5,
@@ -216,7 +225,13 @@ describe("tide-informed depth", () => {
     it("leaves a leg drawn across land alone", () => {
       // markOverland writes 0 to say "this crosses dry land". No tide answers
       // that, and adding one would clear the warning that says so.
-      const seg = { from: -1, to: -1, minDepth: 0, crossesLand: true };
+      const seg = {
+        from: -1,
+        to: -1,
+        minDepth: 0,
+        minDepthKnown: true,
+        crossesLand: true,
+      };
       assert.strictEqual(
         engine.segmentDepthAtPassage(seg, from, to, 1000, env),
         0,
@@ -224,11 +239,65 @@ describe("tide-informed depth", () => {
     });
 
     it("still leaves an unknown depth unknown", () => {
-      const seg = { from: 1, to: 2, minDepth: -1 };
+      const seg = { from: 1, to: 2, minDepth: -1, minDepthKnown: false };
       assert.strictEqual(
         engine.segmentDepthAtPassage(seg, from, to, 1000, env),
         -1,
       );
+    });
+  });
+
+  describe("getEdgePenalty — min_depth_known gates the depth check, not the sign", () => {
+    // ROUTEIQ_NEXT_PHASES.md, "Negative charted depths are read as unknown":
+    // schema_version >= 2 databases emit a genuine negative min_depth for a
+    // charted drying/intertidal bank instead of flooring it to 0, and use
+    // min_depth_known (set once in db-worker.ts from that file's own
+    // schema_version) to say so -- NOT `min_depth < 0`, which is still the
+    // legacy per-file convention for older databases in the same loaded set.
+    const engine = Object.create(RoutingEngine.prototype) as any;
+    engine._config = { ...DEFAULT_CONFIG };
+    const dims = { draft: 2.0 }; // requiredDepth = 2.0 + 0.3 margin = 2.3
+
+    const baseEdge = {
+      source: 1,
+      target: 2,
+      distance: 100,
+      max_air_draft: -1,
+      min_width: 999,
+      cost_factor: 1.2,
+      distance_to_land: 9999,
+      edge_type_id: 0,
+      traffic_mode: 0,
+      crosses_land: 0,
+      crosses_obstacle: 0,
+    };
+
+    it("penalizes a genuine charted drying height below the required depth", () => {
+      // -2.0 m: a bank exposed 2 m above chart datum, real survey data on a
+      // schema_version >= 2 build.
+      const edge = { ...baseEdge, min_depth: -2.0, min_depth_known: true };
+      const penalty = engine.getEdgePenalty(edge, 0, dims);
+      assert.ok(penalty > 0, `expected a violation penalty, got ${penalty}`);
+    });
+
+    it("does not penalize the legacy unknown sentinel despite being negative", () => {
+      // -1, min_depth_known false: an older database's "the chart does not
+      // say" -- must stay exempt exactly as before this fix.
+      const edge = { ...baseEdge, min_depth: -1, min_depth_known: false };
+      const penalty = engine.getEdgePenalty(edge, 0, dims);
+      assert.strictEqual(penalty, 0);
+    });
+
+    it("does not penalize the new -999 unknown sentinel", () => {
+      const edge = { ...baseEdge, min_depth: -999, min_depth_known: false };
+      const penalty = engine.getEdgePenalty(edge, 0, dims);
+      assert.strictEqual(penalty, 0);
+    });
+
+    it("does not penalize a known depth that clears the requirement", () => {
+      const edge = { ...baseEdge, min_depth: 5.0, min_depth_known: true };
+      const penalty = engine.getEdgePenalty(edge, 0, dims);
+      assert.strictEqual(penalty, 0);
     });
   });
 
