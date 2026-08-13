@@ -340,6 +340,7 @@ describe('Itinerary', async () => {
   const segments = coords.slice(1).map((_, i) => ({
     distance: i < 10 ? 700 : 1113,
     minDepth: i === 2 ? 3.5 : -1,
+    minDepthKnown: i === 2,
     maxAirDraft: -1,
   }));
 

@@ -81,6 +81,15 @@ export interface EdgeRow {
   target: number;
   distance: number;
   min_depth: number;
+  /** Whether min_depth is a real reading (possibly negative -- a charted
+   *  drying height, on schema_version >= 2) rather than "no data". Computed
+   *  once in db-worker.ts (the only place that knows this row's file's
+   *  schema_version); every depth check here and in routing.ts must read
+   *  this instead of `min_depth < 0` / `>= 0` (ROUTEIQ_NEXT_PHASES.md,
+   *  "Negative charted depths are read as unknown"). Optional only for rows
+   *  synthesized on the main thread (e.g. manual/connector legs), which set
+   *  it explicitly to false alongside their placeholder min_depth. */
+  min_depth_known?: boolean;
   max_air_draft: number;
   min_width: number;
   cost_factor: number;
@@ -232,7 +241,7 @@ export class RoutingDatabase {
   private dbDir: string;
   private nodes: Map<
     number,
-    { lat: number; lon: number; regionId: number; nodeDepth: number }
+    { lat: number; lon: number; regionId: number; nodeDepth: number; nodeDepthKnown: boolean }
   > = new Map();
   private edgesBySource: Map<number, Array<EdgeRow>> = new Map();
   private pois: PoiRow[] = [];
@@ -911,6 +920,23 @@ export class RoutingDatabase {
     return Math.min(a, b);
   }
 
+  /** Same seam-merge rule as tighterLimit, but min_depth-aware: an unknown
+   *  side always loses to a known one (including a known value that happens
+   *  to be negative -- a charted drying height, schema_version >= 2), and
+   *  between two known values the shallower/more-restrictive one wins.
+   *  tighterLimit itself is untouched and still governs max_air_draft/
+   *  min_width, which have no such distinction. */
+  private static tighterDepth(
+    a: number,
+    aKnown: boolean,
+    b: number,
+    bKnown: boolean,
+  ): { value: number; known: boolean } {
+    if (!aKnown) return { value: b, known: bKnown };
+    if (!bKnown) return { value: a, known: aKnown };
+    return { value: Math.min(a, b), known: true };
+  }
+
   /** Add one edge row to `edgesBySource`, merging into an existing
    *  (source,target) rather than appending a second copy of it.
    *
@@ -1024,11 +1050,16 @@ export class RoutingDatabase {
     // entry, and a file row landing afterwards must respect that claim.
     const claimed = RoutingDatabase.applyEdit(existing, edge);
 
-    if (!claimed.has("min_depth"))
-      existing.min_depth = RoutingDatabase.tighterLimit(
+    if (!claimed.has("min_depth")) {
+      const merged = RoutingDatabase.tighterDepth(
         existing.min_depth,
+        existing.min_depth_known ?? existing.min_depth >= 0,
         edge.min_depth,
+        edge.min_depth_known ?? edge.min_depth >= 0,
       );
+      existing.min_depth = merged.value;
+      existing.min_depth_known = merged.known;
+    }
     if (!claimed.has("max_air_draft"))
       existing.max_air_draft = RoutingDatabase.tighterLimit(
         existing.max_air_draft,
@@ -1077,6 +1108,7 @@ export class RoutingDatabase {
       lat: number;
       lon: number;
       node_depth: number;
+      node_depth_known?: boolean;
       region_id?: number;
     }> = await this.sendMessage("loadNodes");
     // Bulk mode opens every file at once, so a node two overlapping files both
@@ -1090,6 +1122,7 @@ export class RoutingDatabase {
         lon: n.lon,
         regionId: n.region_id ?? 0,
         nodeDepth: n.node_depth,
+        nodeDepthKnown: n.node_depth_known ?? n.node_depth >= 0,
       });
     }
 
@@ -1736,6 +1769,7 @@ export class RoutingDatabase {
         lat: number;
         lon: number;
         node_depth: number;
+        node_depth_known?: boolean;
         region_id?: number;
         db_index: number;
       }> = await this.sendMessage("loadNodes", {
@@ -1761,6 +1795,7 @@ export class RoutingDatabase {
           lon: n.lon,
           regionId: n.region_id ?? 0,
           nodeDepth: n.node_depth,
+          nodeDepthKnown: n.node_depth_known ?? n.node_depth >= 0,
         });
         if (isNewNode) this.gridInsertNode(n.id, n.lat, n.lon);
         if (n.db_index === dbIndex) {
@@ -2092,6 +2127,7 @@ export class RoutingDatabase {
     lon: number;
     regionId: number;
     nodeDepth: number;
+    nodeDepthKnown: boolean;
   } | null> {
     if (this.graphLoaded) {
       return this.nodes.get(id) || null;
@@ -2101,7 +2137,7 @@ export class RoutingDatabase {
 
   getNodeSync(
     id: number,
-  ): { lat: number; lon: number; regionId: number; nodeDepth: number } | null {
+  ): { lat: number; lon: number; regionId: number; nodeDepth: number; nodeDepthKnown: boolean } | null {
     if (!this.graphLoaded) {
       throw new Error("Graph must be loaded for synchronous node lookup");
     }
@@ -2116,7 +2152,7 @@ export class RoutingDatabase {
    *  caller's whole loop. Callers must treat it as read-only. */
   getNodeMap(): ReadonlyMap<
     number,
-    { lat: number; lon: number; regionId: number; nodeDepth: number }
+    { lat: number; lon: number; regionId: number; nodeDepth: number; nodeDepthKnown: boolean }
   > {
     return this.nodes;
   }
@@ -3161,6 +3197,7 @@ export class RoutingDatabase {
 
     let totalDist = 0;
     let minDepth = Infinity;
+    let minDepthKnown = false;
     let maxAirDraft = -Infinity;
     let minWidth = Infinity;
     let weightedCostFactor = 0;
@@ -3178,8 +3215,13 @@ export class RoutingDatabase {
       const edge = this.getEdgeSync(originalPath[i], originalPath[i + 1]);
       if (edge) {
         totalDist += edge.distance;
-        if (typeof edge.min_depth === "number" && edge.min_depth >= 0)
+        if (
+          typeof edge.min_depth === "number" &&
+          (edge.min_depth_known ?? edge.min_depth >= 0)
+        ) {
           minDepth = Math.min(minDepth, edge.min_depth);
+          minDepthKnown = true;
+        }
         if (typeof edge.max_air_draft === "number" && edge.max_air_draft >= 0)
           maxAirDraft = Math.min(maxAirDraft, edge.max_air_draft);
         if (typeof edge.min_width === "number" && edge.min_width >= 0)
@@ -3216,7 +3258,8 @@ export class RoutingDatabase {
       source: fromNode,
       target: toNode,
       distance: totalDist,
-      min_depth: minDepth === Infinity ? -1 : minDepth,
+      min_depth: minDepthKnown ? minDepth : -1,
+      min_depth_known: minDepthKnown,
       max_air_draft: maxAirDraft === -Infinity ? -1 : maxAirDraft,
       min_width: minWidth === Infinity ? -1 : minWidth,
       cost_factor: totalDist > 0 ? weightedCostFactor / totalDist : 1.2,
@@ -3351,11 +3394,13 @@ export class RoutingDatabase {
     // the id would be left behind in the wrong cell as well as duplicated.
     const existing = this.nodes.get(node.id);
     if (existing) this.gridRemoveNode(node.id, existing.lat, existing.lon);
+    const nodeDepth = node.node_depth ?? -1;
     this.nodes.set(node.id, {
       lat: node.lat,
       lon: node.lon,
       regionId: 0,
-      nodeDepth: node.node_depth ?? -1,
+      nodeDepth,
+      nodeDepthKnown: nodeDepth >= 0,
     });
     this.gridInsertNode(node.id, node.lat, node.lon);
     // addNode doesn't itself touch edgesBySource/pois, but a moved node's

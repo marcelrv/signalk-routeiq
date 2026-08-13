@@ -1312,6 +1312,7 @@ export class RoutingEngine {
                 to: endNodeId,
                 distance,
                 minDepth: -1,
+                minDepthKnown: false,
                 maxAirDraft: -1,
                 costFactor: 1.0,
                 trafficMode: TRAFFIC_TWO_WAY,
@@ -1400,6 +1401,7 @@ export class RoutingEngine {
       if (!seg) return;
       if (this.db.isLineCrossingLand(fromLat, fromLon, toLat, toLon, 5)) {
         seg.minDepth = 0;
+        seg.minDepthKnown = true;
         // Flagged, not left to be inferred from the 0: that value is
         // indistinguishable from a charted drying height, and something has to
         // stop the tide being added to a leg that crosses dry land.
@@ -1453,6 +1455,7 @@ export class RoutingEngine {
             to: firstSeg?.to ?? -1,
             distance: portionDist,
             minDepth: firstSeg?.minDepth ?? -1,
+            minDepthKnown: firstSeg?.minDepthKnown ?? false,
             maxAirDraft: firstSeg?.maxAirDraft ?? -1,
             costFactor: firstSeg?.costFactor ?? 1.2,
             trafficMode: firstSeg?.trafficMode ?? TRAFFIC_TWO_WAY,
@@ -1464,6 +1467,7 @@ export class RoutingEngine {
             to: -1,
             distance: Math.round(proj.distance),
             minDepth: -1,
+            minDepthKnown: false,
             maxAirDraft: -1,
             costFactor: 1.2,
             trafficMode: TRAFFIC_TWO_WAY,
@@ -1511,6 +1515,7 @@ export class RoutingEngine {
           to: -1,
           distance: Math.round(directDist),
           minDepth: -1,
+          minDepthKnown: false,
           maxAirDraft: -1,
           costFactor: 1.2,
           trafficMode: TRAFFIC_TWO_WAY,
@@ -1581,6 +1586,7 @@ export class RoutingEngine {
                 to: -1,
                 distance: truncatedDist,
                 minDepth: lastSeg.minDepth,
+                minDepthKnown: lastSeg.minDepthKnown,
                 maxAirDraft: lastSeg.maxAirDraft,
                 costFactor: lastSeg.costFactor,
                 trafficMode: lastSeg.trafficMode,
@@ -1592,6 +1598,7 @@ export class RoutingEngine {
                 to: -1,
                 distance: Math.round(proj.distance),
                 minDepth: -1,
+                minDepthKnown: false,
                 maxAirDraft: -1,
                 costFactor: 1.2,
                 trafficMode: TRAFFIC_TWO_WAY,
@@ -1663,6 +1670,8 @@ export class RoutingEngine {
             to: -1,
             distance: Math.round(nodeToSnap + edgePortion),
             minDepth: edgeSnap.edge.min_depth,
+            minDepthKnown:
+              edgeSnap.edge.min_depth_known ?? edgeSnap.edge.min_depth >= 0,
             maxAirDraft: edgeSnap.edge.max_air_draft,
             costFactor: edgeSnap.edge.cost_factor,
             trafficMode: edgeSnap.edge.traffic_mode,
@@ -1673,6 +1682,7 @@ export class RoutingEngine {
             to: -1,
             distance: Math.round(edgeSnap.distance),
             minDepth: -1,
+            minDepthKnown: false,
             maxAirDraft: -1,
             costFactor: 1.2,
             trafficMode: TRAFFIC_TWO_WAY,
@@ -1714,6 +1724,7 @@ export class RoutingEngine {
           to: -1,
           distance: Math.round(directDist),
           minDepth: -1,
+          minDepthKnown: false,
           maxAirDraft: -1,
           costFactor: 1.2,
           trafficMode: TRAFFIC_TWO_WAY,
@@ -1780,6 +1791,7 @@ export class RoutingEngine {
     points: Array<[number, number]>, // [lat, lon], >= 2 points
     attrs: {
       minDepth: number;
+      minDepthKnown: boolean;
       maxAirDraft: number;
       minWidth?: number;
       costFactor: number;
@@ -1807,6 +1819,7 @@ export class RoutingEngine {
         to: i === points.length - 2 ? toNodeId : -1,
         distance,
         minDepth: attrs.minDepth,
+        minDepthKnown: attrs.minDepthKnown,
         maxAirDraft: attrs.maxAirDraft,
         minWidth: attrs.minWidth,
         costFactor: attrs.costFactor,
@@ -1854,6 +1867,7 @@ export class RoutingEngine {
       result.path,
       {
         minDepth: startRegion.depthCeilingM,
+        minDepthKnown: true,
         maxAirDraft: -1,
         costFactor: 1.0,
         trafficMode: TRAFFIC_TWO_WAY,
@@ -1957,6 +1971,7 @@ export class RoutingEngine {
 
     const attrs = {
       minDepth: -1,
+      minDepthKnown: false,
       maxAirDraft: -1,
       costFactor: 1.0,
       trafficMode: TRAFFIC_TWO_WAY,
@@ -2075,9 +2090,11 @@ export class RoutingEngine {
       const nodePos = this.db.getNodeSync(node);
       if (!nodePos) return node;
       const atMs = improveAtMs(label);
+      const depthKnownOf = (e: EdgeRow): boolean =>
+        e.min_depth_known ?? e.min_depth >= 0;
       /** This edge's depth where and when the vessel would meet it. */
       const depthOf = (e: EdgeRow, lat: number, lon: number): number =>
-        this.depthAtPassage(e.min_depth, lat, lon, atMs, env);
+        this.depthAtPassage(e.min_depth, depthKnownOf(e), lat, lon, atMs, env);
       const edges = await this.db.getOutgoingEdges(node);
       // For end nodes with no outgoing edges, the node is still valid as a destination.
       // For start nodes with no outgoing edges, we must find an alternative.
@@ -2106,7 +2123,7 @@ export class RoutingEngine {
           const bearingDiff = Math.abs(edgeBearing - destBearing);
           const towardDest = Math.min(bearingDiff, 360 - bearingDiff) < 90;
           const d = depthOf(e, nodePos.lat, nodePos.lon);
-          const isDeep = d < 0 || d >= minDepth;
+          const isDeep = !depthKnownOf(e) || d >= minDepth;
           if (towardDest && isDeep) {
             anyTowardDeep = true;
             break;
@@ -2118,7 +2135,7 @@ export class RoutingEngine {
         const allShallow = edges.every(
           (e) =>
             typeof e.min_depth === "number" &&
-            e.min_depth >= 0 &&
+            depthKnownOf(e) &&
             depthOf(e, nodePos.lat, nodePos.lon) < minDepth,
         );
         if (!allShallow) return node;
@@ -2139,7 +2156,7 @@ export class RoutingEngine {
         if (cEdges.length === 0) continue; // skip dead-end candidates for start node
         const hasDeep = cEdges.some((e) => {
           const d = depthOf(e, c.lat, c.lon);
-          return d < 0 || d >= minDepth;
+          return !depthKnownOf(e) || d >= minDepth;
         });
         if (hasDeep && c.distance < bestDist) {
           bestDist = c.distance;
@@ -2587,7 +2604,7 @@ export class RoutingEngine {
         times[i],
         env,
       );
-      const depthViolation = depth >= 0 && depth < minDepth;
+      const depthViolation = seg.minDepthKnown && depth < minDepth;
       const airDraftViolation =
         seg.maxAirDraft >= 0 && seg.maxAirDraft < minAirDraft;
       const beamViolation =
@@ -2741,18 +2758,22 @@ export class RoutingEngine {
    * and why the rise itself is deliberately conservative (see TideHeightField).
    *
    * Falls back to the charted value, unchanged, whenever the tide cannot be
-   * spoken for: an unknown depth (-1) must stay unknown rather than become a
+   * spoken for: an unknown depth must stay unknown rather than become a
    * number, and a height field that declines to answer must leave the route
-   * judged exactly as it is today.
+   * judged exactly as it is today. `known` is the caller's word for whether
+   * chartedDepth is real data -- NOT `chartedDepth < 0`, since a genuine
+   * charted drying height (a bank exposed above chart datum) is exactly the
+   * case the tide is supposed to answer, and it is negative too.
    */
   private depthAtPassage(
     chartedDepth: number,
+    known: boolean,
     lat: number,
     lon: number,
     atMs: number | undefined,
     env: RouteEnv | undefined,
   ): number {
-    if (chartedDepth < 0) return chartedDepth;
+    if (!known) return chartedDepth;
     if (!env?.heights || atMs === undefined) return chartedDepth;
     const rise = env.heights.riseAt(lat, lon, atMs);
     return rise === null ? chartedDepth : chartedDepth + rise;
@@ -2786,19 +2807,20 @@ export class RoutingEngine {
 
   /**
    * A segment's depth at the time of passage. Only segments that are real
-   * graph edges get the tide: connector and manual legs carry -1, and
-   * markOverland writes 0 to mean "this crosses land" rather than "charted
-   * 0 m" — adding tide to that would quietly clear a land warning. Requiring
-   * two real node ids excludes all of them.
+   * graph edges get the tide: connector and manual legs carry minDepthKnown
+   * false, and markOverland writes 0 with minDepthKnown true but crossesLand
+   * true to mean "this crosses land" rather than "charted 0 m" — adding tide
+   * to that would quietly clear a land warning. Requiring two real node ids
+   * excludes all of them.
    */
   private segmentDepthAtPassage(
-    seg: { minDepth: number; crossesLand?: boolean },
+    seg: { minDepth: number; minDepthKnown: boolean; crossesLand?: boolean },
     fromCoord: number[] | undefined,
     toCoord: number[] | undefined,
     atMs: number | undefined,
     env: RouteEnv | undefined,
   ): number {
-    if (seg.minDepth < 0 || !env?.heights || atMs === undefined) {
+    if (!seg.minDepthKnown || !env?.heights || atMs === undefined) {
       return seg.minDepth;
     }
     // The only exclusion: a leg the router had to draw across land. Its 0 is a
@@ -2807,6 +2829,7 @@ export class RoutingEngine {
     if (!fromCoord || !toCoord) return seg.minDepth;
     return this.depthAtPassage(
       seg.minDepth,
+      seg.minDepthKnown,
       (fromCoord[1] + toCoord[1]) / 2,
       (fromCoord[0] + toCoord[0]) / 2,
       atMs,
@@ -2853,9 +2876,10 @@ export class RoutingEngine {
     }
 
     const minDepth = this.requiredDepth(dims);
+    const edgeDepthKnown = edge.min_depth_known ?? edge.min_depth >= 0;
     if (
       typeof edge.min_depth === "number" &&
-      edge.min_depth >= 0 &&
+      edgeDepthKnown &&
       edge.min_depth < minDepth
     ) {
       // Charted depth is the low-water case, so before calling this a
@@ -2867,6 +2891,7 @@ export class RoutingEngine {
         tide && edge.min_depth + tide.heights.maxRiseM >= minDepth
           ? this.depthAtPassage(
               edge.min_depth,
+              edgeDepthKnown,
               tide.lat,
               tide.lon,
               tide.atMs,
@@ -3421,6 +3446,7 @@ export class RoutingEngine {
 
       const segmentProps: Record<string, any> = {
         minDepth: seg.minDepth,
+        minDepthKnown: seg.minDepthKnown,
         maxAirDraft: seg.maxAirDraft,
         costFactor: seg.costFactor,
         trafficMode: seg.trafficMode,
@@ -3504,6 +3530,7 @@ export class RoutingEngine {
                 pts,
                 {
                   minDepth: edge.min_depth,
+                  minDepthKnown: edge.min_depth_known ?? edge.min_depth >= 0,
                   maxAirDraft: edge.max_air_draft,
                   minWidth: edge.min_width,
                   costFactor: edge.cost_factor,
@@ -3521,6 +3548,7 @@ export class RoutingEngine {
               to: currNode,
               distance: edge.distance,
               minDepth: edge.min_depth,
+              minDepthKnown: edge.min_depth_known ?? edge.min_depth >= 0,
               maxAirDraft: edge.max_air_draft,
               minWidth: edge.min_width,
               costFactor: edge.cost_factor,
@@ -3547,6 +3575,7 @@ export class RoutingEngine {
               to: currNode,
               distance: dist,
               minDepth: -1,
+              minDepthKnown: false,
               maxAirDraft: -1,
               costFactor: 1.2,
               trafficMode: TRAFFIC_TWO_WAY,
@@ -3820,7 +3849,7 @@ export class RoutingEngine {
         times[i],
         env,
       );
-      const depthViolation = depth >= 0 && depth < minDepth;
+      const depthViolation = seg.minDepthKnown && depth < minDepth;
       const airDraftViolation =
         seg.maxAirDraft >= 0 && seg.maxAirDraft < airDraft;
       const beamViolation =
