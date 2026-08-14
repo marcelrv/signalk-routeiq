@@ -1257,7 +1257,7 @@ serving routes at the time.
 **Now: a file declares its own sentinel** in `metadata.depth_unknown_sentinel`
 (REAL, nullable). `isDepthKnown(value, sentinel)` is `value !== sentinel` when
 declared, and the legacy `value >= 0` when the column is absent — so every
-existing database keeps exactly today's behaviour and nothing has to be
+existing database keeps exactly today's behavior and nothing has to be
 rebuilt to stay correct.
 
 **Pipeline contract:** emit `depth_unknown_sentinel = -999` in `metadata`

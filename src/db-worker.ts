@@ -79,11 +79,13 @@ interface DbHandle {
   depthUnknownSentinel: number | null;
 }
 
-// A distinct "unknown depth" sentinel (ROUTEIQ_NEXT_PHASES.md, "Negative
-// charted depths are read as unknown"), and the metadata.schema_version a
-// file must carry for -999/other-negative to mean that instead of the
-// legacy "any negative is unknown" convention. Must match the pipeline's
-// UNKNOWN_DEPTH / DEPTH_SENTINEL_SCHEMA_VERSION (nautical_routing_pipeline.py).
+// A file declares its own "unknown depth" sentinel in
+// metadata.depth_unknown_sentinel (ROUTEIQ_NEXT_PHASES.md, "Depth-unknown is
+// declared by the file, not inferred"). There is deliberately no
+// schema-version threshold here: one was tried and had to be removed, because
+// schema_version numbers the database format and had already climbed past
+// the value being gated on in files that still meant "any negative is
+// unknown" -- see depthUnknownSentinel on DbHandle above.
 /**
  * Whether a raw min_depth/node_depth value is a real reading -- possibly
  * negative, a charted drying height -- rather than "no data".
