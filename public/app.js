@@ -1932,15 +1932,23 @@
         if (!data || !data.nodes) return;
         for (const n of data.nodes) {
           const isOverlay = n.region_id === 0 && state.editMode;
+          // min_depth_known separates a real reading from "no data". It
+          // matters for negatives: on schema_version >= 2 data a negative
+          // depth is a charted drying height, and grey would read as "the
+          // survey is silent here" when the survey is in fact saying the
+          // bank dries. Grey is kept for genuinely unknown depths, and a
+          // known drying height takes the shallowest colour there is.
+          const depthKnown =
+            n.min_depth_known != null ? n.min_depth_known : n.min_depth >= 0;
           const color = isOverlay
             ? "#8b5cf6"
-            : n.min_depth > 2
-              ? "#3b8fd4"
-              : n.min_depth >= 1.2
-                ? "#eab308"
-                : n.min_depth >= 0
-                  ? "#ef4444"
-                  : "#888888";
+            : !depthKnown
+              ? "#888888"
+              : n.min_depth > 2
+                ? "#3b8fd4"
+                : n.min_depth >= 1.2
+                  ? "#eab308"
+                  : "#ef4444";
           const radius =
             n.resolution > 0
               ? Math.max(3, Math.min(8, n.resolution * 1000))
@@ -3043,12 +3051,18 @@
     var form = document.getElementById("editor-props-form");
     var isOverlayNode = nodeData.region_id === 0;
     // #6: no Resolution field; #5: coords as read-only info line
+    // Blank means genuinely unknown, so it has to be decided by the flag and
+    // not by the sign: a known drying height is negative and must show its
+    // value, or opening this form and saving would quietly overwrite a real
+    // charted depth with nothing.
+    var nodeDepthKnown =
+      nodeData.min_depth_known != null
+        ? nodeData.min_depth_known
+        : nodeData.min_depth != null && nodeData.min_depth >= 0;
     form.innerHTML =
       "<label>Water depth (m)</label>" +
       '<input id="edit-node-depth" type="number" step="0.1" value="' +
-      (nodeData.min_depth != null && nodeData.min_depth >= 0
-        ? nodeData.min_depth
-        : "") +
+      (nodeDepthKnown && nodeData.min_depth != null ? nodeData.min_depth : "") +
       '" placeholder="unknown" />' +
       '<div style="display:flex;gap:8px;margin-top:6px">' +
       '<div style="flex:1"><label style="color:#4a6a8a">Latitude</label><input type="text" value="' +
@@ -4936,9 +4950,16 @@
     const isSegmentWarning = (props) => {
       if (!props) return false;
       if (props.edgeType === "overland") return true;
+      // minDepthKnown (set by the server on schema_version >= 2 data) tells
+      // a real charted drying height (negative minDepth) apart from "no
+      // data". Fall back to the legacy sign convention when it's absent
+      // (older server). Without this, a drying bank shallower than the
+      // vessel's draft would silently not be flagged as a warning.
+      const depthKnown =
+        props.minDepthKnown != null ? props.minDepthKnown : props.minDepth >= 0;
       if (
         typeof props.minDepth === "number" &&
-        props.minDepth >= 0 &&
+        depthKnown &&
         props.minDepth < shallowThreshold
       )
         return true;
@@ -5871,6 +5892,7 @@
         segments.push({
           distance: f.properties.distance != null ? f.properties.distance : 0,
           minDepth: f.properties.minDepth != null ? f.properties.minDepth : -1,
+          minDepthKnown: f.properties.minDepthKnown,
           maxAirDraft:
             f.properties.maxAirDraft != null ? f.properties.maxAirDraft : -1,
           isFairway:
@@ -6214,11 +6236,15 @@
           );
           hasLegData = legSegs.length > 0;
           for (const s of legSegs) {
-            if (
-              s.minDepth !== null &&
-              s.minDepth !== undefined &&
-              s.minDepth >= 0
-            )
+            // minDepthKnown (schema_version >= 2) tells known apart from
+            // unknown; older rows/servers don't send it, so fall back to the
+            // legacy sign convention. Without this, a real charted drying
+            // height (a negative minDepth) gets treated as "no data" and
+            // dropped from the leg minimum, understating how shallow the leg
+            // really is.
+            const sDepthKnown =
+              s.minDepthKnown != null ? s.minDepthKnown : s.minDepth >= 0;
+            if (s.minDepth !== null && s.minDepth !== undefined && sDepthKnown)
               minDepth = Math.min(minDepth, s.minDepth);
             if (
               s.minDepthAtPassage !== null &&

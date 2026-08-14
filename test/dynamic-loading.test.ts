@@ -458,6 +458,20 @@ describe('§4a dynamic database loading', () => {
         [...REGION_A_NODE_IDS].sort((a, b) => a - b),
       );
 
+      // Every node carries whether its depth is a reading at all. The graph
+      // editor cannot work this out for itself: on newer data a negative
+      // depth is a charted drying height rather than the unknown sentinel,
+      // and telling those apart needs the file's schema_version, which never
+      // leaves the server. These fixture nodes have no depth at all, so the
+      // flag must be present and false — not merely absent.
+      for (const n of bboxResult) {
+        assert.strictEqual(
+          n.min_depth_known,
+          false,
+          `node ${n.id} should report its depth as unknown`,
+        );
+      }
+
       // hasNodeWithinRadius sanity check (also grid-backed — findNearestEdge's
       // sibling method, unconverted by M4 but exercising the same grid).
       assert.strictEqual(db.hasNodeWithinRadius(10.5, 10.5, 500000), true);

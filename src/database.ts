@@ -2642,6 +2642,14 @@ export class RoutingDatabase {
       lat: number;
       lon: number;
       min_depth: number;
+      /** Whether `min_depth` is a reading at all. Sent because a negative
+       *  depth is a charted drying height on schema_version >= 2 data, and a
+       *  client cannot tell that from the unknown sentinel on its own — the
+       *  test depends on the file's schema version, which never leaves the
+       *  server. Without it the graph editor renders a real drying height as
+       *  "no data", and its depth field blanks a value the user can then
+       *  save over. */
+      min_depth_known: boolean;
       region_id: number;
     }>
   > {
@@ -2650,6 +2658,7 @@ export class RoutingDatabase {
       lat: number;
       lon: number;
       min_depth: number;
+      min_depth_known: boolean;
       region_id: number;
     }> = [];
     // Box query, not a radius query — no cos(lat) correction needed: iterate
@@ -2679,6 +2688,7 @@ export class RoutingDatabase {
               lat: c.lat,
               lon: c.lon,
               min_depth: c.nodeDepth,
+              min_depth_known: c.nodeDepthKnown,
               region_id: c.regionId,
             });
             if (results.length >= limit) break outer;
@@ -2706,6 +2716,10 @@ export class RoutingDatabase {
       target_lon: number;
       distance: number;
       min_depth: number;
+      /** See the same field on getNodesInBBox — a negative depth is a real
+       *  drying height on newer data, and the client cannot tell that from
+       *  the unknown sentinel by itself. */
+      min_depth_known: boolean;
       max_air_draft: number;
       min_width: number;
       edge_type_id: number;
@@ -2731,6 +2745,7 @@ export class RoutingDatabase {
       target_lon: number;
       distance: number;
       min_depth: number;
+      min_depth_known: boolean;
       max_air_draft: number;
       min_width: number;
       edge_type_id: number;
@@ -2795,6 +2810,7 @@ export class RoutingDatabase {
               target_lon: t.lon,
               distance: e.distance,
               min_depth: e.min_depth,
+              min_depth_known: e.min_depth_known ?? e.min_depth >= 0,
               max_air_draft: e.max_air_draft,
               min_width: e.min_width,
               edge_type_id: e.edge_type_id,
