@@ -20,7 +20,13 @@ import { DEFAULT_CONFIG } from "../dist/types.js";
 
 const HOUR_MS = 3_600_000;
 const TIDE_PERIOD_MS = 12.42 * HOUR_MS; // one semidiurnal cycle
-const AMPLITUDE_M = 0.75; // so the full range, and the largest rise, is 1.5 m
+const AMPLITUDE_M = 0.75;
+const SENTINEL_BBOX = {
+  min_lat: 53.9,
+  min_lon: 6.9,
+  max_lat: 54.1,
+  max_lon: 7.1,
+}; // so the full range, and the largest rise, is 1.5 m
 
 /** A synthetic tide: a sinusoid at 10-minute steps, `datumOffset` metres away
  *  from whatever anyone else's zero is. Low water at `lowWaterMs`. */
@@ -247,13 +253,134 @@ describe("tide-informed depth", () => {
     });
   });
 
+  describe("a file declares its own unknown-depth sentinel", () => {
+    // The gate used to be `schema_version >= 2`, and that was wrong in a way
+    // no unit test caught: schema_version numbers the database *format*, and
+    // had already reached 3 on builds using the legacy convention while the
+    // first build using the new one carried 2 -- the newer file with the
+    // lower number. Read as new-convention, one European build's 2,047,231
+    // legacy `-1` edges (92% of it) turned from "unknown" into "dries 1.0 m".
+    // So a file now says outright which value it means by unknown.
+    const fixturesDir = "./test/fixtures/depth-sentinel";
+
+    function build(name: string, sentinel: number | null, depth: number): void {
+      const p = path.join(fixturesDir, name);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+      const db = new DatabaseSync(p, { open: true });
+      const run = (sql: string, params: unknown[] = []) =>
+        db.prepare(sql).run(...(params as any[]));
+      // The column exists only when this file declares one, exactly as a
+      // database built before the convention would look.
+      run(
+        `CREATE TABLE metadata (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, country TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL, description TEXT, last_update_date TEXT NOT NULL,
+          bounding_box TEXT, schema_version INTEGER${
+            sentinel !== null ? ", depth_unknown_sentinel REAL" : ""
+          }
+        )`,
+      );
+      // schema_version 3 on both, deliberately: it must no longer influence
+      // the answer either way.
+      if (sentinel !== null) {
+        run(
+          `INSERT INTO metadata (country, name, description, last_update_date, bounding_box, schema_version, depth_unknown_sentinel)
+           VALUES (?, ?, '', '2026-01-01T00:00:00Z', ?, 3, ?)`,
+          [name, name, JSON.stringify(SENTINEL_BBOX), sentinel],
+        );
+      } else {
+        run(
+          `INSERT INTO metadata (country, name, description, last_update_date, bounding_box, schema_version)
+           VALUES (?, ?, '', '2026-01-01T00:00:00Z', ?, 3)`,
+          [name, name, JSON.stringify(SENTINEL_BBOX)],
+        );
+      }
+      run(
+        `CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL, lon REAL, resolution REAL DEFAULT 0.0, node_depth REAL DEFAULT -1, region_id INTEGER)`,
+      );
+      run(
+        `INSERT INTO nodes (id, lat, lon, region_id) VALUES (1, 54.0, 7.0, 1), (2, 54.0, 7.02, 1)`,
+      );
+      run(
+        `CREATE TABLE edges (
+          source INTEGER, target INTEGER, distance REAL, min_depth REAL,
+          max_air_draft REAL, min_width REAL, cost_factor REAL DEFAULT 1.0,
+          distance_to_land REAL, edge_type_id INTEGER DEFAULT 0,
+          traffic_mode INTEGER DEFAULT 0, edge_kind_id INTEGER DEFAULT 0
+        )`,
+      );
+      run(
+        `INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id)
+         VALUES (1, 2, 1300, ?, 40.0, 50.0, 1.0, 500, 0, 0, 0)`,
+        [depth],
+      );
+      run(
+        `CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`,
+      );
+      db.close();
+    }
+
+    async function knownFlagFor(
+      name: string,
+      sentinel: number | null,
+      depth: number,
+    ): Promise<boolean | undefined> {
+      if (!fs.existsSync(fixturesDir))
+        fs.mkdirSync(fixturesDir, { recursive: true });
+      for (const f of fs.readdirSync(fixturesDir)) {
+        fs.unlinkSync(path.join(fixturesDir, f));
+      }
+      build(name, sentinel, depth);
+      const db = new RoutingDatabase(fixturesDir);
+      await db.init();
+      await db.loadGraph();
+      const edges = await db.getOutgoingEdges(1);
+      const flag = edges[0]?.min_depth_known;
+      await db.close();
+      for (const f of fs.readdirSync(fixturesDir)) {
+        fs.unlinkSync(path.join(fixturesDir, f));
+      }
+      return flag;
+    }
+
+    after(() => {
+      if (fs.existsSync(fixturesDir)) fs.rmdirSync(fixturesDir);
+    });
+
+    it("treats a real drying height as known when the file declares -999", async () => {
+      assert.strictEqual(
+        await knownFlagFor("declared.sqlite", -999, -2.0),
+        true,
+      );
+    });
+
+    it("treats the declared sentinel itself as unknown", async () => {
+      assert.strictEqual(
+        await knownFlagFor("declared.sqlite", -999, -999),
+        false,
+      );
+    });
+
+    it("keeps the legacy rule when the file declares nothing, whatever its schema_version", async () => {
+      // The regression in one line: this file says schema_version 3 and means
+      // -1 as unknown. Nothing about the number 3 may be taken to mean the
+      // new convention.
+      assert.strictEqual(await knownFlagFor("legacy.sqlite", null, -1), false);
+      assert.strictEqual(
+        await knownFlagFor("legacy.sqlite", null, -2.0),
+        false,
+      );
+      assert.strictEqual(await knownFlagFor("legacy.sqlite", null, 5.0), true);
+    });
+  });
+
   describe("getEdgePenalty — min_depth_known gates the depth check, not the sign", () => {
     // ROUTEIQ_NEXT_PHASES.md, "Negative charted depths are read as unknown":
-    // schema_version >= 2 databases emit a genuine negative min_depth for a
-    // charted drying/intertidal bank instead of flooring it to 0, and use
-    // min_depth_known (set once in db-worker.ts from that file's own
-    // schema_version) to say so -- NOT `min_depth < 0`, which is still the
-    // legacy per-file convention for older databases in the same loaded set.
+    // newer databases emit a genuine negative min_depth for a charted
+    // drying/intertidal bank instead of flooring it to 0, and carry
+    // min_depth_known (set once in db-worker.ts, from the sentinel that file
+    // declares) to say so -- NOT `min_depth < 0`, which is still the legacy
+    // per-file convention for older databases in the same loaded set.
     const engine = Object.create(RoutingEngine.prototype) as any;
     engine._config = { ...DEFAULT_CONFIG };
     const dims = { draft: 2.0 }; // requiredDepth = 2.0 + 0.3 margin = 2.3

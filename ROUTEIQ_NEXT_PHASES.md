@@ -1238,7 +1238,40 @@ charted-shallow warnings that are now correctly priced and correctly
 drawn. Next real work is Phase 3 (PHASE_3_DESIGN.md) / Phase 4
 (PHASE_4_DESIGN.md).
 
-## Negative charted depths are read as "unknown" — OPEN, cross-repo, safety-relevant
+## Depth-unknown is declared by the file, not inferred (2026-08-14)
+
+**The `schema_version` gate was wrong and had to be replaced.** Measured on the
+two databases actually installed here:
+
+| file | built | schema_version | `-1` edges | real negatives |
+|---|---|---|---|---|
+| `zeeland.sqlite` (new convention) | 2026-08-13 | **2** | 8 | **13,862** |
+| `europe.sqlite` (legacy) | 2026-08-02 | **3** | **2,047,231** (92%) | 0 |
+
+The newer file carries the *lower* version: `schema_version` numbers the
+database format and had already reached 3 on legacy builds. No threshold can
+separate them, and reading europe's 3 as new-convention turned 2,047,231 edges
+from "unknown" into "dries 1.0 m" — on the database that was loaded and
+serving routes at the time.
+
+**Now: a file declares its own sentinel** in `metadata.depth_unknown_sentinel`
+(REAL, nullable). `isDepthKnown(value, sentinel)` is `value !== sentinel` when
+declared, and the legacy `value >= 0` when the column is absent — so every
+existing database keeps exactly today's behaviour and nothing has to be
+rebuilt to stay correct.
+
+**Pipeline contract:** emit `depth_unknown_sentinel = -999` in `metadata`
+whenever the build preserves real negative drying heights. Omit the column for
+legacy builds. Do not reuse `schema_version` for this.
+
+**Still open — overlay depths.** User edits are read with the legacy rule
+(`isDepthKnown(value, null)`), so a hand-entered negative is treated as
+unknown and exempt from every depth check. The local `user-edits.sqlite` has
+34 of 38 edges negative. This matters more now that the graph editor shows and
+accepts those values; the overlay needs its own known-flag, since a blank
+field genuinely means unknown and cannot be told from a drying height by sign.
+
+### Original finding (2026-08-12), kept for the measurements
 
 Found 2026-08-12 while testing tide-aware depth against the live server.
 

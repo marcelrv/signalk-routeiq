@@ -74,8 +74,9 @@ interface DbHandle {
   /** This file's `metadata.schema_version`, read once at open time (null if
    *  the file predates that column, or has no metadata row at all). Decides
    *  how min_depth/node_depth negatives are interpreted -- see
-   *  DEPTH_SENTINEL_SCHEMA_VERSION below. */
-  depthSchemaVersion: number | null;
+   *  isDepthKnown below. Null when the file does not declare one, which
+   *  means the legacy "any negative is unknown" convention. */
+  depthUnknownSentinel: number | null;
 }
 
 // A distinct "unknown depth" sentinel (ROUTEIQ_NEXT_PHASES.md, "Negative
@@ -83,26 +84,29 @@ interface DbHandle {
 // file must carry for -999/other-negative to mean that instead of the
 // legacy "any negative is unknown" convention. Must match the pipeline's
 // UNKNOWN_DEPTH / DEPTH_SENTINEL_SCHEMA_VERSION (nautical_routing_pipeline.py).
-const UNKNOWN_DEPTH = -999;
-const DEPTH_SENTINEL_SCHEMA_VERSION = 2;
-
-/** Whether a raw min_depth/node_depth value represents a real (possibly
- *  negative, e.g. a charted drying height) reading rather than "no data".
- *  Computed once per row here, in the one place that knows which file --
- *  and therefore which schema convention -- the row came from, so every
- *  downstream consumer on the main thread can trust a plain boolean instead
- *  of re-deriving schema-version logic at each depth check. Files at or
- *  above DEPTH_SENTINEL_SCHEMA_VERSION use the distinct -999 sentinel and
- *  leave real negatives alone; older files (schemaVersion null or < 2) keep
- *  the legacy convention where any negative means unknown -- do not
- *  reinterpret those, some regions are 30-70% UNKNOWN_DEPTH by design. */
-function isDepthKnown(value: number, schemaVersion: number | null): boolean {
-  if (
-    schemaVersion !== null &&
-    schemaVersion >= DEPTH_SENTINEL_SCHEMA_VERSION
-  ) {
-    return value !== UNKNOWN_DEPTH;
-  }
+/**
+ * Whether a raw min_depth/node_depth value is a real reading -- possibly
+ * negative, a charted drying height -- rather than "no data".
+ *
+ * A file says for itself which value it reserves for unknown, in
+ * `metadata.depth_unknown_sentinel`. When it says nothing, the legacy
+ * convention applies: any negative means unknown.
+ *
+ * **This was gated on `schema_version` and must not be again.** That field
+ * numbers the database format, and it had already reached 3 on builds that
+ * still used the legacy convention, while the first build using the new one
+ * carried 2 -- the newer file with the lower number. No threshold can
+ * separate them. Reading those 3s as new-convention turned 2,047,231 edges
+ * of one European build (92% of it) from "unknown" into "dries 1.0 m"
+ * overnight. Some regions are 30-70% unknown by design; misreading that is
+ * not a rounding error.
+ *
+ * Computed once per row, here in the only place that knows which file the
+ * row came from, so every consumer downstream gets a plain boolean instead
+ * of re-deriving the convention at each depth check.
+ */
+function isDepthKnown(value: number, unknownSentinel: number | null): boolean {
+  if (unknownSentinel !== null) return value !== unknownSentinel;
   return value >= 0;
 }
 
@@ -178,6 +182,12 @@ function readMetadataRow(
   boundingBox: string | null;
   boundaryGeometry: string | null;
   schemaVersion: number | null;
+  /** The value this file reserves for "depth unknown", from
+   *  `metadata.depth_unknown_sentinel`. Null when the column is absent,
+   *  meaning the legacy convention (any negative is unknown). Read
+   *  tolerantly like every other optional column here, so a file built
+   *  before the column existed still loads. */
+  depthUnknownSentinel: number | null;
   contributor: string | null;
   url: string | null;
   filename: string;
@@ -193,6 +203,7 @@ function readMetadataRow(
       ${colNames.has("bounding_box") ? "bounding_box" : "NULL AS bounding_box"},
       ${colNames.has("boundary_geometry") ? "boundary_geometry" : "NULL AS boundary_geometry"},
       ${colNames.has("schema_version") ? "schema_version" : "NULL AS schema_version"},
+      ${colNames.has("depth_unknown_sentinel") ? "depth_unknown_sentinel" : "NULL AS depth_unknown_sentinel"},
       ${colNames.has("contributor") ? "contributor" : "'' AS contributor"},
       ${colNames.has("url") ? "url" : "'' AS url"}
       FROM metadata LIMIT 1`;
@@ -208,6 +219,10 @@ function readMetadataRow(
       boundingBox: r.bounding_box ?? null,
       boundaryGeometry: r.boundary_geometry ?? null,
       schemaVersion: r.schema_version ?? null,
+      depthUnknownSentinel:
+        typeof r.depth_unknown_sentinel === "number"
+          ? r.depth_unknown_sentinel
+          : null,
       contributor: r.contributor ?? null,
       url: r.url ?? null,
       filename,
@@ -300,9 +315,9 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             hasNodeDepth = hasNodeDepth || flags.hasNodeDepth;
             hasRegionId = hasRegionId || flags.hasRegionId;
             const filename = filenameOf(dbPath);
-            const depthSchemaVersion =
-              readMetadataRow(db, filename)?.schemaVersion ?? null;
-            handles.push({ db, path: dbPath, flags, depthSchemaVersion });
+            const depthUnknownSentinel =
+              readMetadataRow(db, filename)?.depthUnknownSentinel ?? null;
+            handles.push({ db, path: dbPath, flags, depthUnknownSentinel });
             filenames.push(filename);
             console.log(`[db-worker] Loaded database: ${dbPath}`);
           } catch (err: any) {
@@ -444,9 +459,9 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
 
         const filename = filenameOf(dbPath);
         const dbIndex = handles.length;
-        const depthSchemaVersion =
-          readMetadataRow(db, filename)?.schemaVersion ?? null;
-        handles.push({ db, path: dbPath, flags, depthSchemaVersion });
+        const depthUnknownSentinel =
+          readMetadataRow(db, filename)?.depthUnknownSentinel ?? null;
+        handles.push({ db, path: dbPath, flags, depthUnknownSentinel });
         filenames.push(filename);
         console.log(
           `[db-worker] Opened database on demand: ${dbPath} (dbIndex=${dbIndex})`,
@@ -601,7 +616,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             flags: detectSchemaFlags(db),
             // User-entered edits, not pipeline output -- always legacy
             // semantics (isDepthKnown's null branch: negative = unknown).
-            depthSchemaVersion: null,
+            depthUnknownSentinel: null,
           };
           console.log(`[db-worker] Overlay opened: ${overlayPath}`);
           parentPort!.postMessage({ id, type, result: { success: true } });
@@ -721,7 +736,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
               db_index: i,
               node_depth_known: isDepthKnown(
                 r.node_depth,
-                h.depthSchemaVersion,
+                h.depthUnknownSentinel,
               ),
             });
         }
@@ -791,7 +806,10 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             edges.map((e) => ({
               ...e,
               db_index: i,
-              min_depth_known: isDepthKnown(e.min_depth, h.depthSchemaVersion),
+              min_depth_known: isDepthKnown(
+                e.min_depth,
+                h.depthUnknownSentinel,
+              ),
             })),
           );
         }
