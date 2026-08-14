@@ -1238,7 +1238,7 @@ charted-shallow warnings that are now correctly priced and correctly
 drawn. Next real work is Phase 3 (PHASE_3_DESIGN.md) / Phase 4
 (PHASE_4_DESIGN.md).
 
-## Negative charted depths are read as "unknown" — OPEN, cross-repo, safety-relevant
+## Negative charted depths are read as "unknown" — RESOLVED 2026-08-14, cross-repo
 
 Found 2026-08-12 while testing tide-aware depth against the live server.
 
@@ -1286,6 +1286,40 @@ floored at 0 (schema_version 1, e.g. `zeeland.sqlite`), a reported passage
 depth can overstate the real water by the drying height — 0.0 + 4.3 m of tide
 reads as 4.3 m where a bank drying 1.5 m really carries 2.8 m. The arithmetic
 is right; the input has already lost the sign.
+
+**Resolved, in sequence, across three commits/two repos:**
+
+1. **Pipeline** (`signalk-router-pipeline` PR #3, merged): `UNKNOWN_DEPTH` is
+   now `-999` (was `-1`), `metadata.schema_version` bumps to `2`, and real
+   negative `DRVAL1` (a charted drying height) exports unfloored instead of
+   being clamped to `0.0`. Along the way, found and fixed a related data
+   artifact — 1,901 Zeeland DEPARE polygons carrying an implausible
+   `DRVAL1=-50.0` placeholder — and a node-depth/edge-depth inconsistency
+   (`_compute_node_depths` picked the first containing DEPARE candidate
+   instead of the finest, unlike edge sampling).
+2. **routeiq** (`10b6516`/PR #31, merged): `min_depth_known`/`node_depth_known`
+   computed once per row in `db-worker.ts` from that row's own file's
+   `schema_version` — old builds keep the legacy `< 0` convention exactly as
+   before (NH/RI/CT's 30-70%+ `-1` populations untouched), new builds gate on
+   the flag everywhere: the A* search's edge penalty, tide-passage arithmetic,
+   post-route violation audits, seam-merge, and path aggregation.
+3. **routeiq webapp/graph-editor** (`2dc5ea2`): the server-side fix alone
+   left four client-side `>= 0` checks blind to it — leg-minimum aggregation
+   dropped a drying bank and overstated the leg's Min Depth, the shallow-
+   warning predicate had the same blind spot, and `/graph/nodes`+`/graph/edges`
+   never sent the flag at all, which meant the node-edit form rendered a real
+   drying height as a blank field and would silently overwrite it on save. All
+   four now read `min_depth_known`, falling back to the sign when the field's
+   server predates it.
+
+**Still open, pipeline-side, deliberately deferred**: `_compute_node_depths()`
+runs after `_adopt_seam_nodes()` and unconditionally recomputes every node's
+depth, discarding an adopted node's registry-provided value if this build's
+own local DEPARE has no coverage there. May be intentional (each build
+validates against its own data before republishing, per `STITCHING_DESIGN.md`
+§3.2/3.3) or may not be — needs a deliberate contract decision, not a
+reflexive patch. See `signalk-router-pipeline/NEXT_PHASES.md`, "CodeRabbit on
+the depth-sentinel PR".
 
 ## Round 23 — deployed: tiled ocean regions + real edge geometry
 
