@@ -431,7 +431,7 @@ export class RoutingEngine {
         // time of passage and need the tide to do it.
         const sameRegionEnv = await this.prepareEnv(request, [start, end]);
         const violationWarnings: RouteWarning[] = [];
-        this.addViolationWarnings(
+        await this.addViolationWarnings(
           navmeshRoute,
           violationWarnings,
           "destination",
@@ -439,6 +439,7 @@ export class RoutingEngine {
           end,
           effectiveDims,
           sameRegionEnv,
+          request,
         );
         if (violationWarnings.length) navmeshRoute.warnings = violationWarnings;
         await this.finalizeRoute(navmeshRoute, [], sameRegionEnv, request);
@@ -526,10 +527,11 @@ export class RoutingEngine {
 
         const cost = result.features[0].properties.totalCost ?? 0;
         const distance = result.features[0].properties.totalDistance ?? 0;
-        const violatingMeters = this.pathViolationMeters(
+        const violatingMeters = await this.pathViolationMeters(
           result,
           effectiveDims,
           env,
+          request,
         );
         candidates.push({ result, violatingMeters, cost, distance });
 
@@ -593,7 +595,7 @@ export class RoutingEngine {
 
       // Check for constraint violations (draft, beam, air draft) on the found path
       const violationWarnings: RouteWarning[] = [];
-      this.addViolationWarnings(
+      await this.addViolationWarnings(
         result,
         violationWarnings,
         "destination",
@@ -601,6 +603,7 @@ export class RoutingEngine {
         end,
         effectiveDims,
         env,
+        request,
       );
 
       // Attach any warning types
@@ -950,6 +953,7 @@ export class RoutingEngine {
           dims,
           segmentBbox,
           legEnv,
+          waitOverrides,
         );
       }
       if (!segmentResult) {
@@ -1017,6 +1021,7 @@ export class RoutingEngine {
         dims,
         finalBbox,
         env ? { ...env, offsetSec: elapsedSec } : undefined,
+        waitOverrides,
       );
     }
 
@@ -1080,6 +1085,7 @@ export class RoutingEngine {
     dims: VesselDimensions,
     bbox?: BBox,
     env?: RouteEnv,
+    waitOverrides?: WaitOverrides,
   ): Promise<RouteResult | null> {
     const label = viaIndex >= 0 ? `Via point ${viaIndex + 1}` : "Destination";
     const startPt = { latitude: startLat, longitude: startLon };
@@ -1122,7 +1128,12 @@ export class RoutingEngine {
 
         const cost = result.features[0].properties.totalCost ?? 0;
         const distance = result.features[0].properties.totalDistance ?? 0;
-        const violatingMeters = this.pathViolationMeters(result, dims, env);
+        const violatingMeters = await this.pathViolationMeters(
+          result,
+          dims,
+          env,
+          waitOverrides,
+        );
         candidates.push({ result, violatingMeters, cost, distance });
 
         const penalized = violatingMeters > 0;
@@ -1173,7 +1184,7 @@ export class RoutingEngine {
           `Route search for ${label} penalized-result retry ${best.violatingMeters > 0 ? "did not clear the penalty" : "won"} (final cost ${best.cost.toFixed(0)}, ${best.violatingMeters.toFixed(0)}m constraint-violating)`,
         );
       }
-      this.addViolationWarnings(
+      await this.addViolationWarnings(
         best.result,
         warnings,
         label,
@@ -1181,6 +1192,7 @@ export class RoutingEngine {
         endPt,
         dims,
         env,
+        waitOverrides,
       );
       return best.result;
     }
@@ -2581,11 +2593,12 @@ export class RoutingEngine {
    * retry (below) trigger almost unconditionally instead of only when a
    * route is actually forced through a depth/air/beam violation.
    */
-  private pathViolationMeters(
+  private async pathViolationMeters(
     result: RouteResult,
     dims: VesselDimensions,
     env?: RouteEnv,
-  ): number {
+    waitOverrides?: WaitOverrides,
+  ): Promise<number> {
     const segments = result.features[0]?.properties.segments;
     if (!segments) return 0;
     const minDepth = this.requiredDepth(dims);
@@ -2593,7 +2606,12 @@ export class RoutingEngine {
     const minBeam = (dims.beam ?? 4.0) + this.config.safetyMarginBeam;
 
     const coords = result.features[0]?.geometry.coordinates ?? [];
-    const times = this.passageTimes(segments, env);
+    const times = await this.truePassageTimes(
+      coords,
+      segments,
+      env,
+      waitOverrides,
+    );
     let meters = 0;
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
@@ -2780,29 +2798,50 @@ export class RoutingEngine {
   }
 
   /**
-   * Clock time at the start of each segment, walked at speed through the
-   * water. The post-search audit and the warning text both run before
-   * finalizeRoute has worked out real per-segment times, so they need their
-   * own reckoning.
+   * Clock time at the start of each segment, for the post-search audit and
+   * the warning text — both of which run before finalizeRoute exists to hand
+   * them the real one, so they need their own reckoning.
    *
-   * It is approximate in the same direction the search's own clock is: it
-   * ignores tidal current and the time spent waiting at locks and opening
-   * bridges, so it runs early. Both consumers sharing one walk matters more
-   * than either being exact — a route the audit counts as violating but the
-   * warning stays quiet about is one the helm is never told about.
+   * This used to be a cruder, STW-only approximation with no wait awareness —
+   * worse than even the search's own clock, which at least adjusts for
+   * current. It now shares walkPassageClock with annotateSegmentTimes: same
+   * current-adjusted SOG, same lock/bridge waits, detected and scheduled
+   * fresh for this candidate/leg (crossings depend on which path was found,
+   * so they can't be precomputed once and reused across bbox-retry
+   * candidates). Both consumers sharing one real walk matters for the same
+   * reason sharing the old approximate one did — a route the audit counts as
+   * violating but the warning stays quiet about is one the helm is never
+   * told about — except now "real" instead of "consistently approximate".
+   *
+   * What this does NOT fix: the search's own decision (getEdgePenalty, during
+   * pathfinding) still has no wait information, because the path a wait would
+   * apply to doesn't exist until the search finishes. See
+   * feature-tidal-routing.md, "Tide-aware depth" — that gap is structural,
+   * not an oversight, and it only ever makes the search more conservative
+   * than strictly necessary, never less safe.
    */
-  private passageTimes(
-    segments: Array<{ distance: number }>,
+  private async truePassageTimes(
+    coords: Array<[number, number]>,
+    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
     env: RouteEnv | undefined,
-  ): Array<number | undefined> {
+    waitOverrides?: WaitOverrides,
+  ): Promise<Array<number | undefined>> {
     if (!env) return segments.map(() => undefined);
-    const times: Array<number | undefined> = [];
-    let elapsed = 0;
-    for (const seg of segments) {
-      times.push(env.departureMs + (env.offsetSec + elapsed) * 1000);
-      elapsed += (seg.distance || 0) / env.speedMs;
-    }
-    return times;
+    const crossings = await this.detectCrossings(coords);
+    const waits = this.crossingWaitSchedule(
+      coords,
+      segments,
+      crossings,
+      waitOverrides,
+    );
+    const { perSegment } = this.walkPassageClock(
+      coords,
+      segments,
+      env,
+      env.offsetSec,
+      waits,
+    );
+    return perSegment.map((p) => p.atMs);
   }
 
   /**
@@ -3345,41 +3384,65 @@ export class RoutingEngine {
   }
 
   /**
-   * Annotate each path segment with sailing seconds and (when a flow field is
-   * active) the estimated along-track current and SOG, sampling the field at
-   * the vessel's actual passage time. Returns the cumulative seconds at the
-   * end of the path (startOffsetSec + sailing time).
+   * The per-segment clock/speed walk, shared by the mutating finalize-time
+   * pass (annotateSegmentTimes, below) and the read-only audit/warning pass
+   * (truePassageTimes, near passageTimes' old home) so the two can never
+   * compute a different answer for the same route — the same reasoning that
+   * used to justify sharing the cruder `passageTimes`, now extended to the
+   * real clock instead of an approximation of it.
+   *
+   * Spends any wait reached before each segment starts, so the flow field is
+   * sampled at the clock time the vessel actually gets there — a lock passed
+   * early otherwise leaves every later leg reading the tide an hour young —
+   * and adjusts for tidal current (SOG, not STW) when a flow field is
+   * active. Returns the clock at the *start* of each segment and the total
+   * elapsed seconds at the end of the path (including any trailing wait at
+   * the destination). Does not mutate `segments`.
    */
-  private annotateSegmentTimes(
+  private walkPassageClock(
     coords: Array<[number, number]>,
-    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
+    segments: Array<{ distance: number }>,
     env: RouteEnv | undefined,
     startOffsetSec: number,
-    waits: Array<{ atMetres: number; seconds: number }> = [],
-  ): number {
+    waits: Array<{ atMetres: number; seconds: number }>,
+  ): {
+    perSegment: Array<{
+      atMs: number | undefined;
+      sog: number;
+      currentKn?: number;
+      sogKn?: number;
+    }>;
+    totalSec: number;
+  } {
     const speedMs =
       env?.speedMs ??
       Math.max(0.5, this.config.averageSpeedKnots) * KNOTS_TO_MS;
+    const perSegment: Array<{
+      atMs: number | undefined;
+      sog: number;
+      currentKn?: number;
+      sogKn?: number;
+    }> = [];
     let cum = startOffsetSec;
     let alongM = 0;
     let nextWait = 0;
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
-      // Spend any wait reached before this leg starts, so the flow below is
-      // sampled at the clock time the vessel actually gets here. A lock passed
-      // early otherwise leaves every later leg reading the tide an hour young.
       while (nextWait < waits.length && waits[nextWait].atMetres <= alongM) {
         cum += waits[nextWait].seconds;
         nextWait++;
       }
       const from = coords[i];
       const to = coords[i + 1];
+      const atMs = env ? env.departureMs + cum * 1000 : undefined;
       let sog = speedMs;
+      let currentKn: number | undefined;
+      let sogKn: number | undefined;
       if (env && from && to) {
         const flow = env.flow.sample(
           (from[1] + to[1]) / 2,
           (from[0] + to[0]) / 2,
-          env.departureMs + cum * 1000,
+          atMs!,
         );
         if (flow.u !== 0 || flow.v !== 0) {
           const brg = this.toRadians(
@@ -3387,29 +3450,12 @@ export class RoutingEngine {
           );
           const along = flow.u * Math.sin(brg) + flow.v * Math.cos(brg);
           sog = Math.max(0.2 * speedMs, speedMs + along);
-          seg.currentKn = Math.round((along / KNOTS_TO_MS) * 100) / 100;
-          seg.sogKn = Math.round((sog / KNOTS_TO_MS) * 100) / 100;
+          currentKn = Math.round((along / KNOTS_TO_MS) * 100) / 100;
+          sogKn = Math.round((sog / KNOTS_TO_MS) * 100) / 100;
         }
       }
-      // This is the first point at which a segment knows the real time it is
-      // crossed — waits included, which the search's own clock does not have.
-      // Report the depth against that clock, so what the helm reads is at
-      // least as good as what the search decided on.
-      if (env?.heights && from && to) {
-        const atPassage = this.segmentDepthAtPassage(
-          seg,
-          from,
-          to,
-          env.departureMs + cum * 1000,
-          env,
-        );
-        if (atPassage - seg.minDepth >= RoutingEngine.TIDE_REPORT_MIN_RISE_M) {
-          seg.minDepthAtPassage = Math.round(atPassage * 100) / 100;
-          seg.tideRiseM = Math.round((atPassage - seg.minDepth) * 100) / 100;
-        }
-      }
+      perSegment.push({ atMs, sog, currentKn, sogKn });
       const sec = (seg.distance || 0) / sog;
-      seg.seconds = Math.round(sec * 10) / 10;
       cum += sec;
       alongM += seg.distance || 0;
     }
@@ -3418,7 +3464,52 @@ export class RoutingEngine {
       cum += waits[nextWait].seconds;
       nextWait++;
     }
-    return cum;
+    return { perSegment, totalSec: cum };
+  }
+
+  /**
+   * Annotate each path segment with sailing seconds and (when a flow field is
+   * active) the estimated along-track current, SOG and tide-corrected depth
+   * at the vessel's actual passage time — the real clock, from
+   * walkPassageClock. Returns the cumulative seconds at the end of the path
+   * (startOffsetSec + sailing time).
+   */
+  private annotateSegmentTimes(
+    coords: Array<[number, number]>,
+    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
+    env: RouteEnv | undefined,
+    startOffsetSec: number,
+    waits: Array<{ atMetres: number; seconds: number }> = [],
+  ): number {
+    const { perSegment, totalSec } = this.walkPassageClock(
+      coords,
+      segments,
+      env,
+      startOffsetSec,
+      waits,
+    );
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const { atMs, sog, currentKn, sogKn } = perSegment[i];
+      if (currentKn !== undefined) seg.currentKn = currentKn;
+      if (sogKn !== undefined) seg.sogKn = sogKn;
+      // This is the first point at which a segment knows the real time it is
+      // crossed — waits included, which the search's own clock does not have.
+      // Report the depth against that clock, so what the helm reads is at
+      // least as good as what the search decided on.
+      const from = coords[i];
+      const to = coords[i + 1];
+      if (env?.heights && from && to) {
+        const atPassage = this.segmentDepthAtPassage(seg, from, to, atMs, env);
+        if (atPassage - seg.minDepth >= RoutingEngine.TIDE_REPORT_MIN_RISE_M) {
+          seg.minDepthAtPassage = Math.round(atPassage * 100) / 100;
+          seg.tideRiseM = Math.round((atPassage - seg.minDepth) * 100) / 100;
+        }
+      }
+      const sec = (seg.distance || 0) / sog;
+      seg.seconds = Math.round(sec * 10) / 10;
+    }
+    return totalSec;
   }
 
   /**
@@ -3806,7 +3897,7 @@ export class RoutingEngine {
     return [...bridgeCrossings, ...lockCrossings];
   }
 
-  private addViolationWarnings(
+  private async addViolationWarnings(
     result: RouteResult,
     warnings: RouteWarning[],
     label: string,
@@ -3814,7 +3905,8 @@ export class RoutingEngine {
     endPt: { latitude: number; longitude: number },
     dims: VesselDimensions,
     env?: RouteEnv,
-  ) {
+    waitOverrides?: WaitOverrides,
+  ): Promise<void> {
     if (!result.features[0] || !result.features[0].properties.segments) return;
     const coords = result.features[0].geometry.coordinates;
     const segments = result.features[0].properties.segments!;
@@ -3828,7 +3920,12 @@ export class RoutingEngine {
 
     let totalViolationSegments = 0;
     let totalViolationDist = 0;
-    const times = this.passageTimes(segments, env);
+    const times = await this.truePassageTimes(
+      coords,
+      segments,
+      env,
+      waitOverrides,
+    );
     let worstDepth = Infinity;
     // The charted figure behind the worst passage depth, so the message can
     // show both when the tide is what makes the difference.
