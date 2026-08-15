@@ -3586,6 +3586,14 @@
       }
     });
 
+  // Close icon: same deselect as Escape / a click on empty map, but visible —
+  // and reachable on a touch screen, where neither of those is obvious.
+  document
+    .getElementById("editor-close-btn")
+    .addEventListener("click", function () {
+      clearEditorSelection();
+    });
+
   // Map click: deselect when in edit mode and nothing else active (#2)
   map.on("click", function () {
     if (state.editMode && !state.editAddMode && state.selectedItem) {
