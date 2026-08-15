@@ -2606,10 +2606,19 @@ export class RoutingEngine {
     const minBeam = (dims.beam ?? 4.0) + this.config.safetyMarginBeam;
 
     const coords = result.features[0]?.geometry.coordinates ?? [];
+    // Reuse crossings this same result already carries, rather than a fresh
+    // lookup — never true today (nothing sets `result.crossings` before this
+    // runs), kept for symmetry with addViolationWarnings and so a future
+    // caller that does pre-populate it pays nothing extra. Never detected at
+    // all with tides off, matching truePassageTimes' own early-out.
+    const crossings = env
+      ? (result.crossings ?? (await this.detectCrossings(coords)))
+      : [];
     const times = await this.truePassageTimes(
       coords,
       segments,
       env,
+      crossings,
       waitOverrides,
     );
     let meters = 0;
@@ -2819,15 +2828,22 @@ export class RoutingEngine {
    * feature-tidal-routing.md, "Tide-aware depth" — that gap is structural,
    * not an oversight, and it only ever makes the search more conservative
    * than strictly necessary, never less safe.
+   *
+   * Takes `crossings` rather than detecting them itself, so a caller that
+   * already has them — because it just detected them for the same route, or
+   * because a downstream finalizeRoute will want to reuse them — never pays
+   * for a second lookup. Detection itself must still run per candidate: which
+   * locks/bridges a route crosses depends on which path was found, so it
+   * cannot be shared *across* bbox-retry attempts, only reused within one.
    */
   private async truePassageTimes(
     coords: Array<[number, number]>,
     segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
     env: RouteEnv | undefined,
+    crossings: RouteCrossing[],
     waitOverrides?: WaitOverrides,
   ): Promise<Array<number | undefined>> {
     if (!env) return segments.map(() => undefined);
-    const crossings = await this.detectCrossings(coords);
     const waits = this.crossingWaitSchedule(
       coords,
       segments,
@@ -3920,10 +3936,24 @@ export class RoutingEngine {
 
     let totalViolationSegments = 0;
     let totalViolationDist = 0;
+    // Stashed onto `result.crossings` below (when freshly detected) so
+    // finalizeRoute's own `if (!route.crossings)` guard — already there,
+    // unchanged — picks it up instead of detecting a second time. Safe only
+    // because nothing mutates `coords` between here and finalizeRoute on the
+    // paths where the same object reaches it (the single-leg route, and the
+    // same-region navmesh route); on a multi-leg via route this result is a
+    // per-leg object that finalizeRoute never sees directly (routeViaPoints
+    // builds a fresh merged one), so the write is simply never read there —
+    // harmless, not wrong.
+    const crossings = env
+      ? (result.crossings ?? (await this.detectCrossings(coords)))
+      : [];
+    if (env && !result.crossings) result.crossings = crossings;
     const times = await this.truePassageTimes(
       coords,
       segments,
       env,
+      crossings,
       waitOverrides,
     );
     let worstDepth = Infinity;

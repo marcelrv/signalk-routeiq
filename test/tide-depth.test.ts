@@ -3,7 +3,7 @@ import * as path from "path";
 import assert from "node:assert";
 import { after, before, describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { RoutingDatabase } from "../dist/database.js";
+import { POI_TYPE_LOCK, RoutingDatabase } from "../dist/database.js";
 import { RoutingEngine } from "../dist/routing.js";
 import { prepareTidalFlowField, TidesClient } from "../dist/tides.js";
 import { DEFAULT_CONFIG } from "../dist/types.js";
@@ -660,12 +660,14 @@ describe("tide-informed depth", () => {
     // properly counted. Before the fix, pathViolationMeters/addViolationWarnings
     // would have reported a violation the true clock (minDepthAtPassage,
     // computed later in finalizeRoute) already knew was not real.
-    const POI_TYPE_LOCK = 1;
     const departureMs = Date.parse("2026-08-12T00:00:00Z");
     const A = { latitude: 52.0, longitude: 5.0 };
     const B = { latitude: 52.0, longitude: 5.001 };
     const WAIT_SEC = DEFAULT_CONFIG.lockWaitMinutes * 60;
-    const CHARTED_DEPTH = 2.29; // 0.01 m short of required (draft 2.0 + margin 0.3)
+    const DRAFT = 2.0;
+    // Derived from the config's own margin, not hard-coded, so a future change
+    // to the default margin can't silently make this pass for the wrong reason.
+    const CHARTED_DEPTH = DRAFT + DEFAULT_CONFIG.safetyMarginDraft - 0.01;
 
     function buildEngine() {
       const engine = Object.create(RoutingEngine.prototype) as any;
@@ -744,7 +746,7 @@ describe("tide-informed depth", () => {
       const engine = buildEngine();
       const meters = await engine.pathViolationMeters(
         result(),
-        { draft: 2.0, beam: 4.0 },
+        { draft: DRAFT, beam: 4.0 },
         envWithStepRise(),
       );
       assert.strictEqual(
@@ -763,7 +765,7 @@ describe("tide-informed depth", () => {
         "destination",
         A,
         B,
-        { draft: 2.0, beam: 4.0 },
+        { draft: DRAFT, beam: 4.0 },
         envWithStepRise(),
       );
       assert.deepStrictEqual(warnings, []);
@@ -771,8 +773,8 @@ describe("tide-informed depth", () => {
 
     it("without the wait, the same segment is genuinely violating — the fixture is not vacuous", async () => {
       // Proves the CHARTED_DEPTH/requiredDepth gap is real: a rise that never
-      // arrives (no lock detected) leaves the segment short of the 2.3 m
-      // requirement, so the two tests above are passing because the wait was
+      // arrives (no lock detected) leaves the segment short of the required
+      // depth, so the two tests above are passing because the wait was
       // counted, not because the numbers can never violate.
       const engine = Object.create(RoutingEngine.prototype) as any;
       engine._config = { ...DEFAULT_CONFIG };
@@ -780,10 +782,52 @@ describe("tide-informed depth", () => {
       engine.db = { getPoisInBBox: async () => [] }; // no lock this time
       const meters = await engine.pathViolationMeters(
         result(),
-        { draft: 2.0, beam: 4.0 },
+        { draft: DRAFT, beam: 4.0 },
         envWithStepRise(),
       );
       assert.strictEqual(meters, 70);
+    });
+
+    it("stashes crossings on the result, so finalizeRoute need not detect them again", async () => {
+      // finalizeRoute's own `if (!route.crossings)` guard (unchanged by this
+      // fix) is what actually benefits — this proves the half addViolation-
+      // Warnings is responsible for: one detection, and the result carries it
+      // forward rather than the caller needing to know to reuse it.
+      let calls = 0;
+      const engine = Object.create(RoutingEngine.prototype) as any;
+      engine._config = { ...DEFAULT_CONFIG };
+      engine.toRadians = (d: number) => (d * Math.PI) / 180;
+      engine.db = {
+        getPoisInBBox: async () => {
+          calls++;
+          return [
+            {
+              id: 1,
+              name: "Test Lock",
+              typeId: POI_TYPE_LOCK,
+              properties: {},
+              lat: A.latitude,
+              lon: A.longitude,
+            },
+          ];
+        },
+      };
+      const r = result();
+      assert.strictEqual(r.crossings, undefined);
+      await engine.addViolationWarnings(
+        r,
+        [],
+        "destination",
+        A,
+        B,
+        { draft: DRAFT, beam: 4.0 },
+        envWithStepRise(),
+      );
+      assert.strictEqual(calls, 1, "expected exactly one POI lookup");
+      assert.ok(
+        Array.isArray(r.crossings) && r.crossings.length === 1,
+        "expected the detected lock to be stashed on the result",
+      );
     });
   });
 });
