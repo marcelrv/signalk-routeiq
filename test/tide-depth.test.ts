@@ -723,7 +723,13 @@ describe("tide-informed depth", () => {
       };
     }
 
-    function result() {
+    function result(): any {
+      // `any`, matching the rest of this fake-engine block: addViolationWarnings
+      // mutates `.crossings` onto whatever it is handed, and a real RouteResult
+      // literal's inferred type only carries the fields this file's object
+      // literal happens to set — `any` avoids a property-does-not-exist error
+      // for a field only ever assigned to, never read off the object literal
+      // itself, without pulling in the real (much larger) RouteResult type.
       return {
         type: "FeatureCollection" as const,
         features: [
