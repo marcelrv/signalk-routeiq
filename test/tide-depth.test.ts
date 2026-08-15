@@ -579,4 +579,211 @@ describe("tide-informed depth", () => {
       assert.ok(props.every((p) => p.minDepthAtPassage === undefined));
     });
   });
+
+  describe("walkPassageClock — the real clock, shared by the audit and the finalize pass", () => {
+    // passageTimes used to walk segments at plain STW, dropping current
+    // entirely -- worse than even the search's own clock, which does adjust
+    // for it. This is the fix's first half: prove the shared walk is
+    // current-aware, independent of any wait.
+    const engine = Object.create(RoutingEngine.prototype) as any;
+    engine._config = { ...DEFAULT_CONFIG };
+    engine.toRadians = (d: number) => (d * Math.PI) / 180;
+
+    it("a fair current makes the true clock run ahead of the old STW-only one", () => {
+      const departureMs = Date.parse("2026-08-12T00:00:00Z");
+      const speedMs = 3; // STW
+      const fairCurrentMs = 1; // strong, deliberately so the effect is unmistakable
+      // Due east at a fixed latitude: bearing 90 deg, so an eastward flow is
+      // fully along-track (sin(90)=1) with nothing across it (cos(90)=0).
+      const coords: Array<[number, number]> = [
+        [5.0, 52.0],
+        [5.01, 52.0],
+        [5.02, 52.0],
+      ];
+      const segments = [{ distance: 700 }, { distance: 700 }];
+      const env = {
+        departureMs,
+        offsetSec: 0,
+        speedMs,
+        flow: { sample: () => ({ u: fairCurrentMs, v: 0 }) },
+        heights: undefined,
+      };
+
+      const { perSegment } = engine.walkPassageClock(
+        coords,
+        segments,
+        env,
+        0,
+        [],
+      );
+
+      const sog = speedMs + fairCurrentMs;
+      const trueSeg0Sec = segments[0].distance / sog;
+      const staleSeg0Sec = segments[0].distance / speedMs; // what passageTimes used to say
+      assert.ok(
+        trueSeg0Sec < staleSeg0Sec,
+        "sanity: a fair current should shorten the leg",
+      );
+      assert.strictEqual(perSegment[1].atMs, departureMs + trueSeg0Sec * 1000);
+      assert.notStrictEqual(
+        perSegment[1].atMs,
+        departureMs + staleSeg0Sec * 1000,
+        "the walk must not fall back to the old STW-only elapsed time",
+      );
+    });
+
+    it("with no env, every segment's clock is undefined", () => {
+      const segments = [{ distance: 700 }, { distance: 700 }];
+      const { perSegment, totalSec } = engine.walkPassageClock(
+        [
+          [5.0, 52.0],
+          [5.01, 52.0],
+          [5.02, 52.0],
+        ],
+        segments,
+        undefined,
+        0,
+        [],
+      );
+      assert.ok(
+        perSegment.every((p: { atMs?: number }) => p.atMs === undefined),
+      );
+      // Still computes elapsed time, at the configured average speed, for
+      // annotateSegmentTimes' tides-off callers.
+      assert.ok(totalSec > 0);
+    });
+  });
+
+  describe("the audit and warning now use the real clock — the wait-awareness case", () => {
+    // The core regression this fix exists for: a segment that is depth-
+    // violating at the naive (no-wait) clock but clears once a lock's wait is
+    // properly counted. Before the fix, pathViolationMeters/addViolationWarnings
+    // would have reported a violation the true clock (minDepthAtPassage,
+    // computed later in finalizeRoute) already knew was not real.
+    const POI_TYPE_LOCK = 1;
+    const departureMs = Date.parse("2026-08-12T00:00:00Z");
+    const A = { latitude: 52.0, longitude: 5.0 };
+    const B = { latitude: 52.0, longitude: 5.001 };
+    const WAIT_SEC = DEFAULT_CONFIG.lockWaitMinutes * 60;
+    const CHARTED_DEPTH = 2.29; // 0.01 m short of required (draft 2.0 + margin 0.3)
+
+    function buildEngine() {
+      const engine = Object.create(RoutingEngine.prototype) as any;
+      engine._config = { ...DEFAULT_CONFIG };
+      engine.toRadians = (d: number) => (d * Math.PI) / 180;
+      // A lock sitting exactly at the route's start, so its chainage is 0 and
+      // the wait is spent before segment 0 even begins -- no real database
+      // needed, detectCrossings only touches this one method.
+      engine.db = {
+        getPoisInBBox: async () => [
+          {
+            id: 1,
+            name: "Test Lock",
+            typeId: POI_TYPE_LOCK,
+            properties: {},
+            lat: A.latitude,
+            lon: A.longitude,
+          },
+        ],
+      };
+      return engine;
+    }
+
+    // Rise is a step function of the wait alone, not a real tide curve: 0
+    // before the lock's wait would have elapsed, clearing the requirement
+    // only after it. Isolates "was the wait counted" from any current/tide
+    // modelling question already covered elsewhere in this file.
+    function envWithStepRise() {
+      return {
+        departureMs,
+        offsetSec: 0,
+        speedMs: 3,
+        flow: { sample: () => ({ u: 0, v: 0 }) },
+        heights: {
+          riseAt: (_lat: number, _lon: number, atMs: number) =>
+            atMs - departureMs >= WAIT_SEC * 1000 ? 0.5 : 0.0,
+          maxRiseM: 0.5,
+        },
+      };
+    }
+
+    function segment() {
+      return {
+        from: 1,
+        to: 2,
+        distance: 70,
+        minDepth: CHARTED_DEPTH,
+        minDepthKnown: true,
+        maxAirDraft: -1,
+        minWidth: 999,
+        costFactor: 1.2,
+        trafficMode: 0,
+      };
+    }
+
+    function result() {
+      return {
+        type: "FeatureCollection" as const,
+        features: [
+          {
+            type: "Feature" as const,
+            geometry: {
+              type: "LineString" as const,
+              coordinates: [
+                [A.longitude, A.latitude],
+                [B.longitude, B.latitude],
+              ],
+            },
+            properties: { segments: [segment()] },
+          },
+        ],
+      };
+    }
+
+    it("pathViolationMeters counts nothing once the lock wait clears the depth", async () => {
+      const engine = buildEngine();
+      const meters = await engine.pathViolationMeters(
+        result(),
+        { draft: 2.0, beam: 4.0 },
+        envWithStepRise(),
+      );
+      assert.strictEqual(
+        meters,
+        0,
+        "the wait should have pushed the sample past the rise threshold",
+      );
+    });
+
+    it("addViolationWarnings reports no depth warning either, for the same reason", async () => {
+      const engine = buildEngine();
+      const warnings: unknown[] = [];
+      await engine.addViolationWarnings(
+        result(),
+        warnings,
+        "destination",
+        A,
+        B,
+        { draft: 2.0, beam: 4.0 },
+        envWithStepRise(),
+      );
+      assert.deepStrictEqual(warnings, []);
+    });
+
+    it("without the wait, the same segment is genuinely violating — the fixture is not vacuous", async () => {
+      // Proves the CHARTED_DEPTH/requiredDepth gap is real: a rise that never
+      // arrives (no lock detected) leaves the segment short of the 2.3 m
+      // requirement, so the two tests above are passing because the wait was
+      // counted, not because the numbers can never violate.
+      const engine = Object.create(RoutingEngine.prototype) as any;
+      engine._config = { ...DEFAULT_CONFIG };
+      engine.toRadians = (d: number) => (d * Math.PI) / 180;
+      engine.db = { getPoisInBBox: async () => [] }; // no lock this time
+      const meters = await engine.pathViolationMeters(
+        result(),
+        { draft: 2.0, beam: 4.0 },
+        envWithStepRise(),
+      );
+      assert.strictEqual(meters, 70);
+    });
+  });
 });

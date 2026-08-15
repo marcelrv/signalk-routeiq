@@ -331,13 +331,34 @@ closer than assuming low water all day.
 
 ### Known limitations
 
-- **The passage clock is approximate.** `pathViolationMeters` and
-  `addViolationWarnings` run before `finalizeRoute`, so `seg.seconds` does not
-  exist yet and they walk the segments at STW instead. The search's own `tSec`
-  has the same shape of bias — lock and bridge waits are applied only in
-  `finalizeRoute`, so search-time samples are early by the waits ahead of them.
-  Moving `annotateSegmentTimes` ahead of the audit would fix both and is the
-  obvious follow-up.
+- **RESOLVED 2026-08-15 (branch `fix/passage-clock-timing`): the
+  audit/warning clock.** `pathViolationMeters` and `addViolationWarnings` used
+  to walk segments at plain STW, before `finalizeRoute` had computed real
+  per-segment times — worse than an oversight, since it also dropped
+  current-adjustment entirely, making it *less* accurate than the search's own
+  clock rather than merely earlier. Both now share `walkPassageClock` with
+  `annotateSegmentTimes` (current-adjusted SOG, lock/bridge waits included),
+  via a new async `truePassageTimes` that detects crossings and builds a wait
+  schedule fresh for the specific candidate/leg being audited — crossings
+  depend on which path was found, so they can't be precomputed once and reused
+  across bbox-retry candidates. Cost: one bounded crossing-detection lookup per
+  retry attempt (typically 1–3 per route), the same lookup `finalizeRoute`
+  already does once, just repeated a few more times during candidate
+  selection — accepted deliberately rather than leaving the audit and the
+  final report able to disagree, even in the retry loop.
+- **STILL OPEN, structurally: the search's own decision.** `astarSearch`'s
+  `tSec`/`atMs` (feeding `getEdgePenalty` during pathfinding) still has no
+  wait information, and this PR doesn't attempt to fix that — a wait applies
+  to a path that doesn't exist yet while the search is still finding one, so
+  closing this gap needs a genuinely different two-pass search (route once,
+  detect waits, re-route), not a bigger version of the clock-sharing fix
+  above. Consequence, and why it's acceptable: the search can still be *more
+  conservative than strictly necessary* on a wait-heavy route — it may steer
+  around a bank that, once a wait is properly counted, would actually have
+  cleared by the time the vessel got there — but never less safe, only
+  possibly more circuitous. The now-accurate audit/warning above is what lets
+  a user actually notice such a case, via `addViolationWarnings`' text, even
+  though the search itself can't yet act on it.
 - **The rise under-reads**, by construction — see decision 1.
 - **Station assignment is still straight-line.** The ≥3-station rule mitigates a
   wrong-side station; it does not remove it. The Voronoi-by-water-distance
