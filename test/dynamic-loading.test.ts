@@ -180,6 +180,46 @@ function bruteForceNearest(lat: number, lon: number, maxDist: number): number | 
   return bestId;
 }
 
+type RegionBBox = { min_lat: number; min_lon: number; max_lat: number; max_lon: number };
+
+/** A minimal routable region: two nodes joined by an edge in both
+ *  directions, no navmesh, with the metadata bounding box the coverage index
+ *  peeks. Shared by the transit-loading and preload-extent blocks below —
+ *  both need "a region that exists at a known bbox and can answer a route". */
+function buildPlainRegion(
+  dbPath: string, country: string, bbox: RegionBBox,
+  pointA: [number, number], pointB: [number, number],
+): void {
+  const sdb = new DatabaseSync(dbPath, { open: true });
+  const run = (sql: string, params: unknown[] = []) => sdb.prepare(sql).run(...(params as any[]));
+  run(`CREATE TABLE metadata (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, country TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL, description TEXT, last_update_date TEXT NOT NULL,
+    bounding_box TEXT
+  )`);
+  run(`INSERT INTO metadata (country, name, description, last_update_date, bounding_box)
+       VALUES (?, ?, 'Plain two-node region fixture', '2026-01-01T00:00:00Z', ?)`,
+    [country, `Region ${country}`, JSON.stringify(bbox)]);
+  const idA = nodeIdFor(pointA[0], pointA[1]);
+  const idB = nodeIdFor(pointB[0], pointB[1]);
+  run(`CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL, lon REAL, resolution REAL DEFAULT 0.0, node_depth REAL DEFAULT -1, region_id INTEGER)`);
+  run(`INSERT INTO nodes (id, lat, lon, region_id) VALUES (?, ?, ?, 1)`, [idA, pointA[0], pointA[1]]);
+  run(`INSERT INTO nodes (id, lat, lon, region_id) VALUES (?, ?, ?, 1)`, [idB, pointB[0], pointB[1]]);
+  run(`CREATE TABLE edges (
+    source INTEGER, target INTEGER, distance REAL,
+    min_depth REAL, max_air_draft REAL, min_width REAL,
+    cost_factor REAL DEFAULT 1.0, distance_to_land REAL,
+    edge_type_id INTEGER DEFAULT 0, traffic_mode INTEGER DEFAULT 0,
+    edge_kind_id INTEGER DEFAULT 0
+  )`);
+  const d = Math.round(haversine(pointA[0], pointA[1], pointB[0], pointB[1]));
+  run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES (?, ?, ?, 5.0, 20.0, 10.0, 1.0, 500, 0, 0, 0)`,
+    [idA, idB, d]);
+  run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES (?, ?, ?, 5.0, 20.0, 10.0, 1.0, 500, 0, 0, 0)`,
+    [idB, idA, d]);
+  sdb.close();
+}
+
 function bruteForceWithinRadius(lat: number, lon: number, radius: number): Array<{ id: number; distance: number }> {
   return KNOWN_NODES
     .map(n => ({ id: n.id, distance: haversine(lat, lon, n.lat, n.lon) }))
@@ -972,40 +1012,6 @@ describe('§4a dynamic database loading', () => {
     const MID_BBOX = { min_lat: 9.9, min_lon: 14.9, max_lat: 11.1, max_lon: 16.1 };
     const END_BBOX = { min_lat: 9.9, min_lon: 19.9, max_lat: 11.1, max_lon: 21.1 };
 
-    function buildPlainRegion(
-      dbPath: string, country: string, bbox: typeof START_BBOX,
-      pointA: [number, number], pointB: [number, number],
-    ): void {
-      const sdb = new DatabaseSync(dbPath, { open: true });
-      const run = (sql: string, params: unknown[] = []) => sdb.prepare(sql).run(...(params as any[]));
-      run(`CREATE TABLE metadata (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, country TEXT NOT NULL UNIQUE,
-        name TEXT NOT NULL, description TEXT, last_update_date TEXT NOT NULL,
-        bounding_box TEXT
-      )`);
-      run(`INSERT INTO metadata (country, name, description, last_update_date, bounding_box)
-           VALUES (?, ?, 'Transit-loading fixture', '2026-01-01T00:00:00Z', ?)`,
-        [country, `Transit region ${country}`, JSON.stringify(bbox)]);
-      const idA = nodeIdFor(pointA[0], pointA[1]);
-      const idB = nodeIdFor(pointB[0], pointB[1]);
-      run(`CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL, lon REAL, resolution REAL DEFAULT 0.0, node_depth REAL DEFAULT -1, region_id INTEGER)`);
-      run(`INSERT INTO nodes (id, lat, lon, region_id) VALUES (?, ?, ?, 1)`, [idA, pointA[0], pointA[1]]);
-      run(`INSERT INTO nodes (id, lat, lon, region_id) VALUES (?, ?, ?, 1)`, [idB, pointB[0], pointB[1]]);
-      run(`CREATE TABLE edges (
-        source INTEGER, target INTEGER, distance REAL,
-        min_depth REAL, max_air_draft REAL, min_width REAL,
-        cost_factor REAL DEFAULT 1.0, distance_to_land REAL,
-        edge_type_id INTEGER DEFAULT 0, traffic_mode INTEGER DEFAULT 0,
-        edge_kind_id INTEGER DEFAULT 0
-      )`);
-      const d = Math.round(haversine(pointA[0], pointA[1], pointB[0], pointB[1]));
-      run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES (?, ?, ?, 5.0, 20.0, 10.0, 1.0, 500, 0, 0, 0)`,
-        [idA, idB, d]);
-      run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES (?, ?, ?, 5.0, 20.0, 10.0, 1.0, 500, 0, 0, 0)`,
-        [idB, idA, d]);
-      sdb.close();
-    }
-
     let transitDb: RoutingDatabase;
 
     before(async () => {
@@ -1042,7 +1048,9 @@ describe('§4a dynamic database loading', () => {
       } catch {
         // Expected: the three regions' graphs are disconnected from each
         // other, so no actual path exists. Loading — the thing under test
-        // — happens up front, before the search runs, regardless.
+        // — happens before each search attempt, regardless. The first
+        // attempt's box alone (routingBBoxMargin, 1°: lon 9.5-21.5) already
+        // spans mid, so this does not depend on the expansion retries.
       }
 
       const after = new Map(transitDb.getCoverageStatus().map(s => [s.filename, s.state]));
@@ -1051,6 +1059,152 @@ describe('§4a dynamic database loading', () => {
       assert.strictEqual(
         after.get('transit-mid.sqlite'), 'loaded',
         'transit region — no waypoint inside it, but on the direct path between start and end — should load too (§4a.1 task 4)',
+      );
+    });
+  });
+
+  // The other half of the transit-loading bargain: loading the regions a
+  // search box covers must not mean loading everything it *could* cover if
+  // every expansion retry fired. Both preload sites used to pass
+  // routingBBoxMaxExtent (10°) as the margin, so a route of any length read
+  // in every database within ~1100 km of it, inline, before searching —
+  // which on a state-tiled coast meant a Chesapeake Bay route loading Maine,
+  // then thrashing those regions against the maxLoadedRegions LRU cap.
+  describe('preload extent — a route loads the box it searches, not the widest box it could search', () => {
+    const preloadDir = './test/fixtures/dynamic-loading-preload';
+    const nearPath = path.join(preloadDir, 'near.sqlite');
+    const farPath = path.join(preloadDir, 'far.sqlite');
+
+    // NEAR holds both waypoints. FAR sits 7° east of them: outside the first
+    // attempt's box (routingBBoxMargin 1° → lon 9.4-11.6) and comfortably
+    // inside the old max-extent one (10° → lon 0.4-20.6). Nothing about this
+    // route ever needs FAR — the search succeeds on its first attempt and
+    // never expands.
+    const NEAR_BBOX = { min_lat: 9.9, min_lon: 9.9, max_lat: 11.1, max_lon: 11.1 };
+    const FAR_BBOX = { min_lat: 9.9, min_lon: 17.9, max_lat: 11.1, max_lon: 19.1 };
+    const NEAR_A: [number, number] = [10.4, 10.4];
+    const NEAR_B: [number, number] = [10.6, 10.6];
+
+    let preloadDb: RoutingDatabase;
+
+    before(async () => {
+      if (!fs.existsSync(preloadDir)) fs.mkdirSync(preloadDir, { recursive: true });
+      for (const p of [nearPath, farPath]) if (fs.existsSync(p)) fs.unlinkSync(p);
+      buildPlainRegion(nearPath, 'PNEAR', NEAR_BBOX, NEAR_A, NEAR_B);
+      buildPlainRegion(farPath, 'PFAR', FAR_BBOX, [10.4, 18.4], [10.6, 18.6]);
+
+      preloadDb = new RoutingDatabase(preloadDir, true);
+      await preloadDb.init();
+      await preloadDb.loadGraph(); // no-op in dynamic mode
+    });
+
+    after(async () => {
+      await preloadDb.close();
+      for (const p of [nearPath, farPath]) if (fs.existsSync(p)) fs.unlinkSync(p);
+    });
+
+    it('a route answered on the first attempt does not load a region only the max-extent box would reach', async () => {
+      const before = new Map(preloadDb.getCoverageStatus().map(s => [s.filename, s.state]));
+      assert.strictEqual(before.get('near.sqlite'), 'not_loaded');
+      assert.strictEqual(before.get('far.sqlite'), 'not_loaded');
+
+      const engine = new RoutingEngine(preloadDb, DEFAULT_CONFIG);
+      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+
+      // Both endpoints are NEAR's own two nodes, joined by an edge that
+      // violates nothing — so the first attempt returns an unpenalized
+      // result and the expansion loop breaks immediately.
+      const result = await engine.calculateRoute({
+        start: { latitude: NEAR_A[0], longitude: NEAR_A[1] },
+        end: { latitude: NEAR_B[0], longitude: NEAR_B[1] },
+        minCoastDistance: 0,
+      });
+      assert.ok(result.features.length > 0, 'the route itself should succeed on the first attempt');
+
+      const after = new Map(preloadDb.getCoverageStatus().map(s => [s.filename, s.state]));
+      assert.strictEqual(after.get('near.sqlite'), 'loaded', 'the region holding both waypoints must load');
+      assert.strictEqual(
+        after.get('far.sqlite'), 'not_loaded',
+        'a region 7° away, which no search attempt examined, must not be read in',
+      );
+    });
+  });
+
+  // A departure scan is ~25 full route calculations over the same waypoints,
+  // and therefore over the same regions. Each one used to return
+  // activeRouteCount to 0 on its way out, firing the LRU cap between steps:
+  // a working set larger than maxLoadedRegions was evicted and re-read from
+  // disk once per step. streamDepartures now counts the whole scan as one
+  // route in flight.
+  describe('departure scan holds its regions for the length of the scan', () => {
+    const scanDir = './test/fixtures/dynamic-loading-scan';
+    const scanNearPath = path.join(scanDir, 'scan-near.sqlite');
+    const scanFarPath = path.join(scanDir, 'scan-far.sqlite');
+
+    const SCAN_NEAR_BBOX = { min_lat: 9.9, min_lon: 9.9, max_lat: 11.1, max_lon: 11.1 };
+    const SCAN_FAR_BBOX = { min_lat: 49.9, min_lon: 49.9, max_lat: 51.1, max_lon: 51.1 };
+    const SCAN_A: [number, number] = [10.4, 10.4];
+    const SCAN_B: [number, number] = [10.6, 10.6];
+
+    let scanDb: RoutingDatabase;
+
+    before(async () => {
+      if (!fs.existsSync(scanDir)) fs.mkdirSync(scanDir, { recursive: true });
+      for (const p of [scanNearPath, scanFarPath]) if (fs.existsSync(p)) fs.unlinkSync(p);
+      buildPlainRegion(scanNearPath, 'SNEAR', SCAN_NEAR_BBOX, SCAN_A, SCAN_B);
+      buildPlainRegion(scanFarPath, 'SFAR', SCAN_FAR_BBOX, [50.4, 50.4], [50.6, 50.6]);
+
+      // maxLoadedRegions = 1 with two regions loaded: every enforcement pass
+      // that is allowed to run will evict one.
+      scanDb = new RoutingDatabase(scanDir, true, 1);
+      await scanDb.init();
+      await scanDb.loadGraph();
+      await scanDb.loadDatabaseGraph('scan-far.sqlite');
+      await scanDb.loadDatabaseGraph('scan-near.sqlite');
+    });
+
+    after(async () => {
+      await scanDb.close();
+      for (const p of [scanNearPath, scanFarPath]) if (fs.existsSync(p)) fs.unlinkSync(p);
+    });
+
+    it('no region is evicted between scan steps, and the hold is released when the scan ends', async () => {
+      const engine = new RoutingEngine(scanDb, DEFAULT_CONFIG);
+      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+
+      const scan = engine.streamDepartures(
+        {
+          start: { latitude: SCAN_A[0], longitude: SCAN_A[1] },
+          end: { latitude: SCAN_B[0], longitude: SCAN_B[1] },
+          minCoastDistance: 0,
+        },
+        2, // scanHours -> 3 steps at 60-minute spacing
+        60,
+      );
+
+      const first = await scan.next();
+      assert.strictEqual(first.done, false, 'the scan should yield a first step');
+
+      // Mid-scan. The enforcement pass is the same one endRoute() fires, run
+      // here through its test seam so the assertion does not race a
+      // background pass — with the scan counted as in flight it must decline
+      // to evict, cap or no cap.
+      await scanDb.enforceRegionCapForTest();
+      const during = new Map(scanDb.getCoverageStatus().map(s => [s.filename, s.state]));
+      assert.strictEqual(during.get('scan-near.sqlite'), 'loaded');
+      assert.strictEqual(
+        during.get('scan-far.sqlite'), 'loaded',
+        'no region may be evicted while a departure scan is still running',
+      );
+
+      // Abandoning the scan must release the hold — an async generator runs
+      // its finally on .return(), which is what a client hanging up does.
+      await scan.return(undefined as never);
+      await scanDb.enforceRegionCapForTest();
+      const loadedAfter = scanDb.getCoverageStatus().filter(s => s.state === 'loaded');
+      assert.strictEqual(
+        loadedAfter.length, 1,
+        'once the scan is done the cap applies again and trims to maxLoadedRegions',
       );
     });
   });

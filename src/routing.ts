@@ -492,15 +492,6 @@ export class RoutingEngine {
     let currentMargin = this.config.routingBBoxMargin;
     const maxMargin = this.config.routingBBoxMaxExtent;
 
-    // §4a.1 task 4: preload transit regions — databases the search bbox
-    // passes through but that have no start/end waypoint inside them
-    // (ensureRegionsLoaded above only covers waypoint containment). Use
-    // the maximal bbox this expansion loop could ever reach (margin
-    // capped at routingBBoxMaxExtent) so a mid-route region is already in
-    // memory before the first search attempt, without loading beyond
-    // what the search could actually examine.
-    await this.db.ensureRegionsForBbox(bboxFromPoints(start, end, maxMargin));
-
     const candidates: RouteCandidate[] = [];
     let previousAttempt: {
       violatingMeters: number;
@@ -511,6 +502,24 @@ export class RoutingEngine {
 
     while (currentMargin <= maxMargin) {
       const bbox = bboxFromPoints(start, end, currentMargin);
+
+      // §4a.1 task 4: preload transit regions — databases this attempt's box
+      // passes through but that have no start/end waypoint inside them
+      // (ensureRegionsLoaded above only covers waypoint containment).
+      //
+      // Per attempt, for the box that attempt will actually examine — not
+      // once up front for the widest box the expansion loop could ever reach.
+      // That is what this used to do, and at routingBBoxMaxExtent (10°) it
+      // meant every route, however short, synchronously read in every
+      // database within ~1100km of the start-end chord: with the US east
+      // coast tiled by state, a route inside Chesapeake Bay loaded Maine.
+      // Each load blocks the event loop for seconds, and a working set past
+      // maxLoadedRegions then thrashed against the LRU cap, reloading on the
+      // next route what it had just evicted. Nearly every route answers on
+      // the first, routingBBoxMargin-sized attempt; the wider boxes only
+      // exist for the ones that don't, and now only load regions when the
+      // search actually widens to look at them.
+      await this.db.ensureRegionsForBbox(bbox);
 
       try {
         const result = await this.astarSearch(
@@ -685,6 +694,39 @@ export class RoutingEngine {
     stepMinutes: number = 60,
     signal?: { aborted: boolean },
     baseMs: number = RoutingEngine.departureScanBase(request),
+  ): AsyncGenerator<DepartureScanStep> {
+    // Count the whole scan as one route in flight, on top of the per-step
+    // bracket calculateRoute does for itself (so the counter runs 1→2→1 and
+    // never reaches 0 between steps). Every step routes the same waypoints
+    // and therefore wants the same regions, but endRoute() at 0 triggers the
+    // LRU cap: a working set larger than maxLoadedRegions would otherwise be
+    // evicted and re-read from disk ~25 times over, once per step. The
+    // regions are evicted once, when the scan is done.
+    //
+    // Safe for a scan that stops early: an async generator runs `finally` on
+    // .return(), which is what both the `signal.aborted` returns below and a
+    // consumer that stops iterating trigger.
+    this.db.beginRoute();
+    try {
+      yield* this.streamDeparturesInner(
+        request,
+        scanHours,
+        stepMinutes,
+        signal,
+        baseMs,
+      );
+    } finally {
+      this.db.endRoute();
+    }
+  }
+
+  /** Body of streamDepartures — see the region-eviction bracket there. */
+  private async *streamDeparturesInner(
+    request: RoutingRequest,
+    scanHours: number,
+    stepMinutes: number,
+    signal: { aborted: boolean } | undefined,
+    baseMs: number,
   ): AsyncGenerator<DepartureScanStep> {
     for (const i of RoutingEngine.departureScanOrder(
       RoutingEngine.departureScanSteps(scanHours, stepMinutes),
@@ -1088,16 +1130,6 @@ export class RoutingEngine {
     let currentMargin = this.config.routingBBoxMargin;
     const segmentMaxMargin = this.config.routingBBoxMaxExtent;
 
-    // §4a.1 task 4: preload transit regions for this segment. Even when a
-    // fixed `bbox` was passed in (e.g. routeViaPoints' adaptiveMargin box),
-    // an expansion attempt that falls through to bboxFromPoints below can
-    // still reach the full segmentMaxMargin box (see `bbox = undefined`
-    // below), so load for that maximal extent up front rather than
-    // re-checking coverage on every expansion.
-    await this.db.ensureRegionsForBbox(
-      bboxFromPoints(startPt, endPt, segmentMaxMargin),
-    );
-
     const candidates: RouteCandidate[] = [];
     let previousAttempt: {
       violatingMeters: number;
@@ -1108,6 +1140,15 @@ export class RoutingEngine {
 
     while (currentMargin <= segmentMaxMargin) {
       const segmentBbox = bbox ?? bboxFromPoints(startPt, endPt, currentMargin);
+
+      // §4a.1 task 4: preload this segment's transit regions — see the
+      // matching call in calculateRouteImpl for why it is per attempt and
+      // not once up front for the widest reachable box. Here it also covers
+      // the caller-supplied box (routeViaPoints' adaptiveMargin one), which
+      // is dropped on the first retry (`bbox = undefined` below) so later
+      // attempts fall through to the expanding bboxFromPoints box.
+      await this.db.ensureRegionsForBbox(segmentBbox);
+
       try {
         const result = await this.astarSearch(
           startLat,
