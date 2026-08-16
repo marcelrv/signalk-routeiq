@@ -195,7 +195,36 @@ straight chord over them. 57/57 tests; verified live (route START 4.21 → DEST
    uncapped is the number of regions `ensureRegionsForBbox` loads *within one
    request* — a very wide route (up to `routingBBoxMaxExtent`, 10°) over a
    densely-tiled area loads every intersecting region before the LRU trims
-   back. Fine at current dataset size.
+   back. ~~Fine at current dataset size.~~
+
+   **It was not fine, and this is what it cost (2026-08-16, branch
+   `fix/region-preload-overreach`).** The per-request figure above was not a
+   worst case for *wide* routes — it was what *every* route did. Both preload
+   sites passed `routingBBoxMaxExtent` as the bbox margin rather than the
+   margin the search starts with (`routingBBoxMargin`, 1°), reasoning that the
+   expansion loop could reach that far, so load for it once up front. Nearly
+   no route ever does: the first attempt answers. So a route between two points
+   200 m apart in Chesapeake Bay read in every database within ~1100 km — with
+   `data/` tiled by US state, that is DE, NJ, NY, CT, RI, NH, ME and SC/GA,
+   nine-ish regions at seconds of blocked event loop each.
+
+   That is also what made the LRU cap visibly misbehave: nine regions against
+   `maxLoadedRegions` 6 cannot fit, so `endRoute()` evicted three, and the next
+   route re-read exactly what it had just dropped. A departure scan (~25
+   `calculateRoute` calls, `activeRouteCount` back to 0 between each) did that
+   per step.
+
+   Fixed by moving both `ensureRegionsForBbox` calls *inside* the expansion
+   loop, keyed on the box that attempt actually searches — the wider boxes now
+   only load regions if the search widens to look at them. Transit-region
+   loading (task 4 above) is unaffected: it is the same call on the same box,
+   just the box being searched rather than the widest reachable one.
+   `streamDepartures` additionally brackets the whole scan in
+   `beginRoute()`/`endRoute()` so the cap is enforced once at the end instead
+   of between steps, and `enforceRegionCap()` passes are now serialized against
+   each other (two fire-and-forget passes could pick a victim from the same
+   pre-eviction snapshot — observed double-evicting one region in a test run,
+   and able in principle to drop below the one-region floor with three loaded).
 2. ~~**Loading indicator for on-demand region loads.**~~ — **done 2026-08-10**
    (branch `feat/region-loading-indicator`), by the poll route, not the `202`
    one. `getLoadingStatus()` now reports the regions in `state: "loading"`, and

@@ -204,3 +204,10 @@ before adding to the lists above, or dropping if no longer relevant:
   request stays open). Scoped and deliberately deferred — see "Non-blocking
   `202` for route requests that trigger a load" in `ROUTEIQ_NEXT_PHASES.md`,
   which places it behind item 1 above.
+  Separately fixed 2026-08-16, and not the same thing: the *amount* loaded per
+  route. Both preload calls sized their box off `routingBBoxMaxExtent` (10°)
+  instead of the margin the search starts with, so every route read in every
+  region within ~1100 km and then thrashed them against the LRU cap. See the
+  follow-up note under §4a.1 task 4 in `ROUTEIQ_NEXT_PHASES.md`. The blocking
+  `202` question above is untouched by it — a route that genuinely needs a
+  region still waits for it.
