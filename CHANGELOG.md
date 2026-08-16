@@ -20,6 +20,23 @@
   survey, and the usual rule stands: verify against the chart before you rely
   on it.
 
+- Fixed: the first route into a new area loaded far more routing data than the
+  route needed, which is why it took so long and why the "loading" message
+  named regions nowhere near where you were going. A route reserved the widest
+  search area it might ever have to fall back on — about 1100 km around the
+  straight line from start to destination — and read in every installed region
+  touching it before searching. On a coast installed as separate regions that
+  meant a route across a bay loading half the coastline; and since only a
+  limited number of regions are kept in memory at once, the ones it had just
+  loaded were dropped again and reloaded on the next route, over and over. A
+  route now loads only the regions it is actually searching, and widens only if
+  the search itself has to. Regions crossed on the way, without a waypoint in
+  them, still load as before.
+- Fixed: a departure-time scan reloaded the same regions between every step it
+  scanned, since each step counted as a finished route and released the data
+  the next step immediately wanted back. The scan now holds its regions until
+  it is done.
+
 - Added: when a route has to wait for a region's routing data to be read in
   first, the planner now says which region it is waiting on instead of looking
   frozen. With dynamic loading, the first route into an area loads that area's
