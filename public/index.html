@@ -420,8 +420,15 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   flex-shrink: 0;
   transition: background 0.12s, color 0.12s;
 }
+/* Margin, not the header's flex gap: flex gap only landed in Chrome 84 and the
+   browser floor is 66, where the two icons would otherwise touch. */
+#editor-trash-btn, #editor-close-btn { margin-left: 6px; }
 #editor-close-btn:hover { background: rgba(79,148,212,0.35); color: #e0edf5; }
-#editor-close-btn:focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 2px; }
+/* Ring on keyboard focus only. Chrome 66 has no :focus-visible and drops any
+   rule naming it, so the ring is hung on :focus and taken back off again for
+   pointer focus — where that second rule is understood. */
+#editor-close-btn:focus { outline: 2px solid var(--accent-bright); outline-offset: 2px; }
+#editor-close-btn:focus:not(:focus-visible) { outline: none; }
 /* Saved flash */
 @keyframes editor-saved-flash { 0%{color:#22c55e} 100%{color:#6d96c0} }
 .editor-saved { animation: editor-saved-flash 1.4s ease forwards; }
@@ -1695,7 +1702,7 @@ label.switch-row {
     <button id="editor-cancel-btn" class="editor-btn" style="display:none">&#x2715; Cancel</button>
   </div>
   <div id="editor-props" style="display:none;border-top:1px solid rgba(79,148,212,0.15);padding-top:8px">
-    <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+    <div style="display:flex;align-items:center;margin-bottom:8px">
       <div id="editor-props-title" style="flex:1;min-width:0;font-size:12px;font-weight:600;color:#e0edf5"></div>
       <button id="editor-trash-btn" title="Delete (click twice to confirm)">&#x1F5D1;</button>
       <button id="editor-close-btn" type="button" title="Close (deselect)" aria-label="Close properties">&times;</button>
