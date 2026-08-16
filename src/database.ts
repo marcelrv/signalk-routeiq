@@ -366,6 +366,11 @@ export class RoutingDatabase {
   /** Source of the monotonic values in regionLastUsedAt. */
   private lruCounter: number = 0;
 
+  /** Tail of the chain of enforceRegionCap() passes, so two of them never
+   *  run concurrently against the same pre-eviction snapshot. Null until the
+   *  first pass. See enforceRegionCap. */
+  private capEnforcement: Promise<void> | null = null;
+
   constructor(
     dbDir: string,
     dynamicLoading: boolean = false,
@@ -2098,8 +2103,29 @@ export class RoutingDatabase {
    * to drop the last loaded database or run while a route is active — both
    * cases are also checked here to avoid looping, and either one aborts the
    * whole enforcement pass rather than crashing a route.
+   *
+   * Passes are serialized against each other (capEnforcement). endRoute()
+   * fires this and forgets it, so two routes finishing close together can
+   * otherwise have two passes in flight at once — each picking its victim
+   * from the same pre-eviction snapshot, so both evict the *same* region
+   * (harmless but for the wasted reload) or, with a third region loaded,
+   * both evict a different one and together drop below the one-region floor
+   * the loop below is written to hold. Chaining rather than dropping the
+   * second request: a pass that arrives while another is running may have
+   * newly-loaded regions to trim that the running one already looked past.
    */
   private async enforceRegionCap(): Promise<void> {
+    const mine = (this.capEnforcement ?? Promise.resolve()).then(() =>
+      this.enforceRegionCapPass(),
+    );
+    // enforceRegionCapPass never rejects, but the chain must survive a
+    // caller's rejection regardless — a broken link would serialize nothing.
+    this.capEnforcement = mine.catch(() => {});
+    await mine;
+  }
+
+  /** One enforcement pass. See enforceRegionCap, which serializes these. */
+  private async enforceRegionCapPass(): Promise<void> {
     if (!this.dynamicLoading || this.maxLoadedRegions <= 0) return;
     if (this.activeRouteCount > 0) return;
 
@@ -2124,6 +2150,15 @@ export class RoutingDatabase {
       try {
         await this.unloadDatabaseGraph(victim.filename);
         this.regionLastUsedAt.delete(victim.filename);
+        // Logged because the *next* route that needs this region will read it
+        // from disk again and log a second "Loaded database" for it. Without
+        // this line that reload looks unexplained, when it is in fact a
+        // working set larger than maxLoadedRegions cycling against the cap —
+        // which is the thing worth seeing in the log.
+        console.log(
+          `[routeiq] Evicted database ${victim.filename} (least recently used; ` +
+            `${loaded.length} loaded, maxLoadedRegions=${this.maxLoadedRegions})`,
+        );
       } catch (e) {
         // Last-loaded-database guard or a route that started concurrently —
         // either way, stop enforcing rather than loop or throw out of a
