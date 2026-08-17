@@ -2291,6 +2291,16 @@ export class RoutingEngine {
     // 0.8 is the fairway cost_factor floor; if custom edges go lower, update this.
     // With tides, an edge's effective distance can shrink to STW/(STW+maxCurrent)
     // of its length on a fully fair current — fold that into the heuristic bound.
+    //
+    // Still sound now that transitTime can sample an edge's current more than
+    // once: this bound comes from FlowField's own contract (`maxSpeedMs`, an
+    // upper bound on |flow| everywhere), not from any particular sample, so
+    // every chunk's sog is bounded the same way a single sample's was —
+    // `sog <= speedMs + maxSpeedMs` per chunk, hence `chunkSec >=
+    // chunkDist/(speedMs+maxSpeedMs)`, and summing chunks gives the identical
+    // `effDistance >= edge.distance * speedMs/(speedMs+maxSpeedMs)` the
+    // one-sample version already relied on. Subdividing only makes the actual
+    // cost more accurate within that same bound; it cannot loosen it.
     const minMultiplier =
       0.8 * (env ? env.speedMs / (env.speedMs + env.flow.maxSpeedMs) : 1);
 
@@ -2477,24 +2487,35 @@ export class RoutingEngine {
         // existing cost factors and penalties keep their meaning. A fair
         // current shortens the edge, a foul one lengthens it; with tides off
         // (env undefined) this is a no-op and results match the old engine.
+        //
+        // transitTime resamples the current along the way rather than once
+        // for the whole edge — most edges are short enough that this is
+        // still exactly one sample, at the same cost as before, but a real
+        // edge can run to tens of kilometres (the ocean-tiled US East Coast
+        // data has some at ~34 km, hours at cruising speed) and a current
+        // sampled once at entry cannot be trusted for that long.
         let effDistance = edge.distance;
         let edgeSeconds = 0;
         if (env) {
-          let sog = env.speedMs;
           if (fromNode) {
-            const flow = env.flow.sample(midLat, midLon, atMs!);
-            if (flow.u !== 0 || flow.v !== 0) {
-              const brg = this.toRadians(
-                bearingDeg(fromNode.lat, fromNode.lon, toPos.lat, toPos.lon),
-              );
-              const along = flow.u * Math.sin(brg) + flow.v * Math.cos(brg);
-              // Never let a foul current make an edge impossible — floor SOG
-              // at 20% of STW (matches the annotation in finalizeRoute).
-              sog = Math.max(0.2 * env.speedMs, env.speedMs + along);
-            }
+            edgeSeconds = this.transitTime(
+              fromNode.lat,
+              fromNode.lon,
+              toPos.lat,
+              toPos.lon,
+              edge.distance,
+              atMs!,
+              env,
+            ).sec;
+          } else {
+            edgeSeconds = edge.distance / env.speedMs;
           }
-          effDistance = (edge.distance * env.speedMs) / sog;
-          edgeSeconds = edge.distance / sog;
+          // Derived from the true (possibly multi-chunk) elapsed time rather
+          // than from a single sog, so a subdivided edge's cost reflects the
+          // same current variation its time tracking does — a fair current
+          // at entry followed by a foul one further along must not be scored
+          // as though the fair one held for the whole edge.
+          effDistance = env.speedMs * edgeSeconds;
         }
 
         const baseCost = this.calculateEdgeCost(edge, effDistance);
@@ -3440,6 +3461,94 @@ export class RoutingEngine {
     this.splitToSegmentFeatures(route);
   }
 
+  /** How long a single edge's current sample may be trusted for before the
+   *  tide itself could have moved on enough to matter. Most graph edges are
+   *  short enough that one sample covers their whole transit, at zero extra
+   *  cost when it does (see transitTime below — this reduces to exactly
+   *  one sample for anything under the threshold). But real edges run much
+   *  longer: the ocean-tiled US East Coast data has edges up to ~34 km,
+   *  three to four hours at cruising speed — close to a third of the
+   *  ~12.42 h M2 cycle — and a current sampled once at entry and held for
+   *  the whole crossing can be badly wrong by the far end of it. Reported
+   *  live: a sailed route running much longer than the ETA predicted, on a
+   *  multi-hour offshore leg. */
+  private static readonly MAX_CURRENT_SAMPLE_SEC = 1800; // 30 min
+
+  /**
+   * Elapsed sailing time across one edge/segment, current-adjusted,
+   * resampling the flow field every MAX_CURRENT_SAMPLE_SEC of transit
+   * instead of once for the whole edge. Subdivided by distance, not time —
+   * distance is known up front, and the difference is negligible at this
+   * chunk size.
+   *
+   * Shared by astarSearch (the routing decision) and walkPassageClock (the
+   * report), so a long edge cannot be handled two different ways — same
+   * reasoning as sharing walkPassageClock itself between the audit and the
+   * finalize pass.
+   *
+   * For an edge short enough to need only one chunk, this samples at the
+   * midpoint and returns `distance / sog` — byte-identical to what both
+   * call sites computed inline before this existed, at the same one-sample
+   * cost. Subdividing only ever adds work on the edges long enough to need
+   * it.
+   *
+   * Returns the *first* chunk's SOG/current alongside the true integrated
+   * time, for callers that report one representative figure per edge
+   * (walkPassageClock's per-segment entry) — the value in effect where the
+   * edge is entered, not an average across a current that may have reversed
+   * by the far end.
+   */
+  private transitTime(
+    fromLat: number,
+    fromLon: number,
+    toLat: number,
+    toLon: number,
+    distanceM: number,
+    entryAtMs: number,
+    env: RouteEnv,
+  ): { sec: number; sog: number; currentKn?: number; sogKn?: number } {
+    const bearing = this.toRadians(bearingDeg(fromLat, fromLon, toLat, toLon));
+    // Cheap estimate from STW alone, only to decide how many chunks are
+    // needed — exact enough for that, and this must stay free for the
+    // common case: almost every edge resolves to chunks=1 and takes exactly
+    // the one sample it always did.
+    const roughSec = distanceM / env.speedMs;
+    const chunks = Math.max(
+      1,
+      Math.ceil(roughSec / RoutingEngine.MAX_CURRENT_SAMPLE_SEC),
+    );
+
+    let cum = 0;
+    let atMs = entryAtMs;
+    let first: { sog: number; currentKn?: number; sogKn?: number } | undefined;
+    for (let i = 0; i < chunks; i++) {
+      // Midpoint of this chunk along the chord, matching the whole-edge
+      // midpoint sampling this replaces when chunks === 1 (midT = 0.5).
+      const midT = (i + 0.5) / chunks;
+      const lat = fromLat + (toLat - fromLat) * midT;
+      const lon = fromLon + (toLon - fromLon) * midT;
+
+      let sog = env.speedMs;
+      let currentKn: number | undefined;
+      let sogKn: number | undefined;
+      const flow = env.flow.sample(lat, lon, atMs);
+      if (flow.u !== 0 || flow.v !== 0) {
+        const along = flow.u * Math.sin(bearing) + flow.v * Math.cos(bearing);
+        // Never let a foul current make an edge impossible — floor SOG at
+        // 20% of STW (matches the annotation in finalizeRoute).
+        sog = Math.max(0.2 * env.speedMs, env.speedMs + along);
+        currentKn = Math.round((along / KNOTS_TO_MS) * 100) / 100;
+        sogKn = Math.round((sog / KNOTS_TO_MS) * 100) / 100;
+      }
+      if (!first) first = { sog, currentKn, sogKn };
+
+      const chunkSec = distanceM / chunks / sog;
+      cum += chunkSec;
+      atMs += chunkSec * 1000;
+    }
+    return { sec: cum, ...first! };
+  }
+
   /**
    * The per-segment clock/speed walk, shared by the mutating finalize-time
    * pass (annotateSegmentTimes, below) and the read-only audit/warning pass
@@ -3495,24 +3604,31 @@ export class RoutingEngine {
       let sog = speedMs;
       let currentKn: number | undefined;
       let sogKn: number | undefined;
+      let sec: number;
       if (env && from && to) {
-        const flow = env.flow.sample(
-          (from[1] + to[1]) / 2,
-          (from[0] + to[0]) / 2,
+        // transitTime resamples the current every MAX_CURRENT_SAMPLE_SEC of
+        // transit instead of once for the whole segment — a segment can be a
+        // single graph edge tens of kilometres long (the ocean-tiled US East
+        // Coast data reaches ~34 km), and a current held constant for a
+        // multi-hour crossing was reported here exactly as wrongly as it was
+        // acted on during the search.
+        const t = this.transitTime(
+          from[1],
+          from[0],
+          to[1],
+          to[0],
+          seg.distance || 0,
           atMs!,
+          env,
         );
-        if (flow.u !== 0 || flow.v !== 0) {
-          const brg = this.toRadians(
-            bearingDeg(from[1], from[0], to[1], to[0]),
-          );
-          const along = flow.u * Math.sin(brg) + flow.v * Math.cos(brg);
-          sog = Math.max(0.2 * speedMs, speedMs + along);
-          currentKn = Math.round((along / KNOTS_TO_MS) * 100) / 100;
-          sogKn = Math.round((sog / KNOTS_TO_MS) * 100) / 100;
-        }
+        sog = t.sog;
+        currentKn = t.currentKn;
+        sogKn = t.sogKn;
+        sec = t.sec;
+      } else {
+        sec = (seg.distance || 0) / sog;
       }
       perSegment.push({ atMs, sog, currentKn, sogKn });
-      const sec = (seg.distance || 0) / sog;
       cum += sec;
       alongM += seg.distance || 0;
     }

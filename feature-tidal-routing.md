@@ -383,3 +383,47 @@ closer than assuming low water all day.
   charted `minDepth`; `route.tide.depthAware` says whether any rise was applied.
 - No new user-facing setting: it rides on `useTides` / `considerTides` /
   `departureTime`. With tides off, results stay bit-identical.
+
+## Long-edge current resampling (2026-08-17)
+
+Reported live while actually sailing a calculated route: a route ran much
+longer than its ETA on a multi-hour offshore leg. Cause: both the search
+(`astarSearch`) and the reporting/audit clock (`walkPassageClock`, see the
+timing fix above) sampled the current **once per graph edge** — at the
+midpoint, at the moment the edge was entered — and applied that single SOG to
+the edge's *entire* transit, however long. Most edges are short enough that
+one sample covers the whole crossing, but the ocean-tiled US East Coast data
+(Phasing/Round 23) has real edges up to **~34.5 km, 3–4 hours at cruising
+speed** — close to a third of the ~12.42 h M2 cycle — where a current sampled
+at entry and held for the crossing can be badly wrong by the far end of it.
+Measured against the shipped `us_east_sc_ga.sqlite`: max edge 34.5 km, 142
+edges over 10 km, 26 over 30 km.
+
+**Fix: a shared `transitTime` helper, resampling every 30 minutes of transit
+instead of once per edge.** Subdivided by distance (known up front) rather
+than time. Used identically by `astarSearch`'s edge relaxation and by
+`walkPassageClock` — the same "search and reporting change together"
+principle as the depth feature above, so a long edge can't be routed on one
+current model and reported on another.
+
+- **Byte-identical for the common case.** For any edge under the 30-minute
+  threshold — the overwhelming majority, everywhere except the ocean-tiled
+  regions — `transitTime` reduces to exactly one sample at the midpoint,
+  same formula, same cost, as before this fix. Proven by the full existing
+  test suite passing unchanged (all prior fixtures use short edges).
+- **A* admissibility is unaffected.** The `minMultiplier` heuristic bound
+  (`routing.ts`, near the edge relaxation loop) comes from `FlowField`'s own
+  contract — `maxSpeedMs`, an upper bound on `|flow|` everywhere — not from
+  any particular sample. Every chunk's SOG is bounded by it the same way a
+  single sample's was, so summing chunks preserves the identical
+  `effDistance >= edge.distance * speedMs/(speedMs+maxSpeedMs)` bound the
+  one-sample version relied on. Subdividing only makes the actual cost more
+  accurate within that bound; it cannot loosen it.
+- **Tests:** `test/tide-depth.test.ts`, "transitTime — resampling current
+  across a long edge" and the added case in the `walkPassageClock` describe
+  block — a reversing-current long edge (fair for the first 30 minutes,
+  foul after) proving the integrated crossing time differs sharply from the
+  old single-sample estimate, plus a short-edge case proving the
+  chunks-in-changed output is unchanged. Confirmed non-vacuous by forcing
+  `chunks = 1` and observing exactly those two new tests fail, nothing else.
+- Branch `fix/long-edge-current-resample`.
