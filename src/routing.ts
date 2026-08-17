@@ -3474,25 +3474,62 @@ export class RoutingEngine {
    *  multi-hour offshore leg. */
   private static readonly MAX_CURRENT_SAMPLE_SEC = 1800; // 30 min
 
+  // Matches the floor already applied in finalizeRoute: a foul current can
+  // never make an edge impossible, only slow.
+  private static readonly MIN_SOG_FRACTION = 0.2;
+
+  /** Current/SOG at one point along an edge, current-adjusted. */
+  private sampleAlong(
+    lat: number,
+    lon: number,
+    atMs: number,
+    bearing: number,
+    env: RouteEnv,
+  ): { sog: number; currentKn?: number; sogKn?: number } {
+    let sog = env.speedMs;
+    let currentKn: number | undefined;
+    let sogKn: number | undefined;
+    const flow = env.flow.sample(lat, lon, atMs);
+    if (flow.u !== 0 || flow.v !== 0) {
+      const along = flow.u * Math.sin(bearing) + flow.v * Math.cos(bearing);
+      sog = Math.max(
+        RoutingEngine.MIN_SOG_FRACTION * env.speedMs,
+        env.speedMs + along,
+      );
+      currentKn = Math.round((along / KNOTS_TO_MS) * 100) / 100;
+      sogKn = Math.round((sog / KNOTS_TO_MS) * 100) / 100;
+    }
+    return { sog, currentKn, sogKn };
+  }
+
   /**
    * Elapsed sailing time across one edge/segment, current-adjusted,
-   * resampling the flow field every MAX_CURRENT_SAMPLE_SEC of transit
-   * instead of once for the whole edge. Subdivided by distance, not time —
-   * distance is known up front, and the difference is negligible at this
-   * chunk size.
+   * resampling the flow field every MAX_CURRENT_SAMPLE_SEC of *actual*
+   * transit instead of once for the whole edge.
    *
    * Shared by astarSearch (the routing decision) and walkPassageClock (the
    * report), so a long edge cannot be handled two different ways — same
    * reasoning as sharing walkPassageClock itself between the audit and the
    * finalize pass.
    *
-   * For an edge short enough to need only one chunk, this samples at the
-   * midpoint and returns `distance / sog` — byte-identical to what both
-   * call sites computed inline before this existed, at the same one-sample
-   * cost. Subdividing only ever adds work on the edges long enough to need
-   * it.
+   * The short-circuit below is exact, not a heuristic: even at the worst
+   * case (a dead-foul current, floored at MIN_SOG_FRACTION of STW for the
+   * whole edge), this distance still can't take longer than the resample
+   * window, so a single midpoint sample is provably as accurate as
+   * subdividing would be — byte-identical to what both call sites computed
+   * inline before this existed, at the same one-sample cost. Subdividing
+   * only ever adds work on the edges long enough to need it.
    *
-   * Returns the *first* chunk's SOG/current alongside the true integrated
+   * Above that, this walks the edge in slices sized from the *sampled* SOG
+   * at each slice's start, not from a distance guessed off STW alone —
+   * otherwise a foul current can stretch a single sample well past the
+   * window it's supposed to bound (a 5 km slice at 1 m/s is 83 minutes, not
+   * 30, if the slice count were fixed from STW instead of measured SOG).
+   * The SOG floor bounds this loop: the smallest a slice can be is
+   * MIN_SOG_FRACTION * speedMs * MAX_CURRENT_SAMPLE_SEC, so even a fully
+   * foul multi-hour edge takes a bounded number of iterations.
+   *
+   * Returns the *first* slice's SOG/current alongside the true integrated
    * time, for callers that report one representative figure per edge
    * (walkPassageClock's per-segment entry) — the value in effect where the
    * edge is entered, not an average across a current that may have reversed
@@ -3508,43 +3545,35 @@ export class RoutingEngine {
     env: RouteEnv,
   ): { sec: number; sog: number; currentKn?: number; sogKn?: number } {
     const bearing = this.toRadians(bearingDeg(fromLat, fromLon, toLat, toLon));
-    // Cheap estimate from STW alone, only to decide how many chunks are
-    // needed — exact enough for that, and this must stay free for the
-    // common case: almost every edge resolves to chunks=1 and takes exactly
-    // the one sample it always did.
-    const roughSec = distanceM / env.speedMs;
-    const chunks = Math.max(
-      1,
-      Math.ceil(roughSec / RoutingEngine.MAX_CURRENT_SAMPLE_SEC),
-    );
+    const floorSog = RoutingEngine.MIN_SOG_FRACTION * env.speedMs;
+    const worstCaseSec = distanceM / floorSog;
 
+    if (worstCaseSec <= RoutingEngine.MAX_CURRENT_SAMPLE_SEC) {
+      const midLat = fromLat + (toLat - fromLat) * 0.5;
+      const midLon = fromLon + (toLon - fromLon) * 0.5;
+      const s = this.sampleAlong(midLat, midLon, entryAtMs, bearing, env);
+      return { sec: distanceM / s.sog, ...s };
+    }
+
+    let coveredM = 0;
     let cum = 0;
     let atMs = entryAtMs;
     let first: { sog: number; currentKn?: number; sogKn?: number } | undefined;
-    for (let i = 0; i < chunks; i++) {
-      // Midpoint of this chunk along the chord, matching the whole-edge
-      // midpoint sampling this replaces when chunks === 1 (midT = 0.5).
-      const midT = (i + 0.5) / chunks;
-      const lat = fromLat + (toLat - fromLat) * midT;
-      const lon = fromLon + (toLon - fromLon) * midT;
+    while (coveredM < distanceM - 1e-6) {
+      const frac = coveredM / distanceM;
+      const lat = fromLat + (toLat - fromLat) * frac;
+      const lon = fromLon + (toLon - fromLon) * frac;
+      const s = this.sampleAlong(lat, lon, atMs, bearing, env);
+      if (!first) first = s;
 
-      let sog = env.speedMs;
-      let currentKn: number | undefined;
-      let sogKn: number | undefined;
-      const flow = env.flow.sample(lat, lon, atMs);
-      if (flow.u !== 0 || flow.v !== 0) {
-        const along = flow.u * Math.sin(bearing) + flow.v * Math.cos(bearing);
-        // Never let a foul current make an edge impossible — floor SOG at
-        // 20% of STW (matches the annotation in finalizeRoute).
-        sog = Math.max(0.2 * env.speedMs, env.speedMs + along);
-        currentKn = Math.round((along / KNOTS_TO_MS) * 100) / 100;
-        sogKn = Math.round((sog / KNOTS_TO_MS) * 100) / 100;
-      }
-      if (!first) first = { sog, currentKn, sogKn };
-
-      const chunkSec = distanceM / chunks / sog;
-      cum += chunkSec;
-      atMs += chunkSec * 1000;
+      const sliceDist = Math.min(
+        distanceM - coveredM,
+        s.sog * RoutingEngine.MAX_CURRENT_SAMPLE_SEC,
+      );
+      const sliceSec = sliceDist / s.sog;
+      cum += sliceSec;
+      coveredM += sliceDist;
+      atMs += sliceSec * 1000;
     }
     return { sec: cum, ...first! };
   }
@@ -3577,6 +3606,7 @@ export class RoutingEngine {
       sog: number;
       currentKn?: number;
       sogKn?: number;
+      sec: number;
     }>;
     totalSec: number;
   } {
@@ -3588,6 +3618,7 @@ export class RoutingEngine {
       sog: number;
       currentKn?: number;
       sogKn?: number;
+      sec: number;
     }> = [];
     let cum = startOffsetSec;
     let alongM = 0;
@@ -3628,7 +3659,7 @@ export class RoutingEngine {
       } else {
         sec = (seg.distance || 0) / sog;
       }
-      perSegment.push({ atMs, sog, currentKn, sogKn });
+      perSegment.push({ atMs, sog, currentKn, sogKn, sec });
       cum += sec;
       alongM += seg.distance || 0;
     }
@@ -3663,7 +3694,7 @@ export class RoutingEngine {
     );
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
-      const { atMs, sog, currentKn, sogKn } = perSegment[i];
+      const { atMs, sec, currentKn, sogKn } = perSegment[i];
       if (currentKn !== undefined) seg.currentKn = currentKn;
       if (sogKn !== undefined) seg.sogKn = sogKn;
       // This is the first point at which a segment knows the real time it is
@@ -3679,7 +3710,6 @@ export class RoutingEngine {
           seg.tideRiseM = Math.round((atPassage - seg.minDepth) * 100) / 100;
         }
       }
-      const sec = (seg.distance || 0) / sog;
       seg.seconds = Math.round(sec * 10) / 10;
     }
     return totalSec;
