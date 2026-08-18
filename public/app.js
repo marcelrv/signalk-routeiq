@@ -7142,6 +7142,9 @@
   // download endpoint, .gz suffix and all, since the server (api.ts
   // handleDownloadDatabase) uses that suffix to decide whether to gunzip.
   function dmCatalogFilename(r) {
+    // catalog_schema_version >= 1.1.0 names the asset directly; older
+    // catalogs only carry the repo-relative `file` path.
+    if (r.filename) return r.filename;
     return r.file ? r.file.split("/").pop() : null;
   }
 
@@ -7266,7 +7269,7 @@
     var btn = card.querySelector(".dm-btn-dl:not([disabled]), .dm-btn-update");
     if (btn) {
       btn.addEventListener("click", function () {
-        dmStartDownload(dlUrl, dlFilename, btn);
+        dmStartDownload(dlUrl, dlFilename, btn, r.sha256);
       });
     }
     return card;
@@ -7596,7 +7599,7 @@
     }, 5000);
   }
 
-  function dmStartDownload(url, filename, btn) {
+  function dmStartDownload(url, filename, btn, sha256) {
     if (!url || !filename) return;
     btn.textContent = "Downloading...";
     btn.disabled = true;
@@ -7615,7 +7618,10 @@
     fetch(getApiBase() + "/signalk/v1/api/router/databases/download", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: url, filename: filename }),
+      // sha256 comes straight from the catalog entry this card was built
+      // from -- the server hashes the downloaded bytes and rejects the
+      // install on a mismatch (corruption or an interrupted transfer).
+      body: JSON.stringify({ url: url, filename: filename, sha256: sha256 }),
     })
       .then(function (r) {
         return r.json().then(function (data) {

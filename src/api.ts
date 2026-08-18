@@ -8,7 +8,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as zlib from "node:zlib";
 import { pipeline } from "node:stream/promises";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { ServerAPI } from "@signalk/server-api";
 import { NextFunction, Request, Response, Router } from "express";
 import { DISABLED_SUFFIX, RoutingDatabase } from "./database.js";
@@ -235,6 +235,29 @@ export function validateRequestConstraints(request: RoutingRequest): {
     }
   }
   return { error: null, warnings };
+}
+
+/**
+ * Forwards every chunk unchanged while hashing it -- unlike a bare
+ * crypto.createHash(), which is writable-only-then-drain: piping it
+ * downstream yields just the final digest, not the bytes written to it.
+ */
+class HashingPassThrough extends Transform {
+  private readonly hash = crypto.createHash("sha256");
+
+  override _transform(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    this.hash.update(chunk);
+    this.push(chunk);
+    callback();
+  }
+
+  digestHex(): string {
+    return this.hash.digest("hex");
+  }
 }
 
 export class ApiHandler {
@@ -1633,6 +1656,42 @@ export class ApiHandler {
   }
 
   /**
+   * Release-asset download prefix for the same GitHub repository the catalog
+   * is served from, e.g.
+   *   https://raw.githubusercontent.com/owner/repo/main/routing-index.json
+   *   -> https://github.com/owner/repo/releases/download/
+   *
+   * Large routing databases are published as rolling release assets rather
+   * than committed to the repo, so their URLs sit outside catalogBaseUrl()
+   * and need their own trusted prefix. It is still pinned to the catalog's
+   * own owner/repo: any other repo's releases stay untrusted, which is the
+   * same property the catalog-directory check gives us.
+   *
+   * Null when the catalog is not served from a recognised GitHub raw URL —
+   * in that case release-hosted downloads are simply not accepted.
+   */
+  private releaseDownloadBase(): string | null {
+    if (!this.config.catalogUrl) return null;
+    try {
+      const u = new URL(this.config.catalogUrl);
+      const parts = u.pathname.split("/").filter(Boolean);
+      let owner: string | undefined;
+      let repo: string | undefined;
+      if (u.hostname === "raw.githubusercontent.com") {
+        // /owner/repo/ref/path...
+        [owner, repo] = parts;
+      } else if (u.hostname === "github.com" && parts[2] === "raw") {
+        // /owner/repo/raw/ref/path...
+        [owner, repo] = parts;
+      }
+      if (!owner || !repo) return null;
+      return `https://github.com/${owner}/${repo}/releases/download/`;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Handle fetch available databases from remote catalog
    * GET /signalk/v1/api/router/databases/available
    */
@@ -1659,9 +1718,15 @@ export class ApiHandler {
       const catalog = (await response.json()) as any;
       // Derive the base URL from the catalog URL for constructing download links
       const baseUrl = this.catalogBaseUrl();
-      if (baseUrl && catalog.regions && Array.isArray(catalog.regions)) {
+      if (catalog.regions && Array.isArray(catalog.regions)) {
         for (const region of catalog.regions) {
-          if (region.file) {
+          // catalog_schema_version >= 1.1.0 carries an absolute download_url
+          // for release-hosted databases; `file` (repo-relative, resolved
+          // against the catalog's directory) remains for regions still
+          // served straight out of the repository.
+          if (region.download_url) {
+            region.downloadUrl = region.download_url;
+          } else if (baseUrl && region.file) {
             region.downloadUrl = baseUrl + region.file;
           }
         }
@@ -1687,11 +1752,25 @@ export class ApiHandler {
   ): Promise<void> {
     if (!this.requireAuth(req, res)) return;
     try {
-      const { url, filename } = req.body;
+      const { url, filename, sha256 } = req.body;
       if (!url || !filename) {
         res
           .status(400)
           .json({ error: "Missing required fields: url, filename" });
+        return;
+      }
+      if (
+        sha256 !== undefined &&
+        (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/i.test(sha256))
+      ) {
+        // typeof check first: RegExp#test() coerces its argument via
+        // ToString, and a single-element array stringifies to just that
+        // element (no brackets/commas) -- ["<64 hex chars>"] would otherwise
+        // pass the regex, then crash on sha256.toLowerCase() below (arrays
+        // have no such method) only after the download already ran.
+        res
+          .status(400)
+          .json({ error: "sha256 must be a 64-character hex string" });
         return;
       }
 
@@ -1719,15 +1798,20 @@ export class ApiHandler {
           .json({ error: "Configured catalog URL is not a valid URL" });
         return;
       }
+      // Release assets of the catalog's own repository are equally trusted —
+      // that is where the large routing databases actually live.
+      const trustedBases = [trustedBase, this.releaseDownloadBase()].filter(
+        (b): b is string => b !== null,
+      );
       try {
         // Compare the *parsed* href, not the raw string: dot segments and
         // percent-encoding are normalized away first, so a URL that merely
         // starts with the trusted prefix but resolves elsewhere
         // (…/main/../../other/evil.sqlite) is rejected.
         const normalized = new URL(url).href;
-        if (!normalized.startsWith(trustedBase)) {
+        if (!trustedBases.some((b) => normalized.startsWith(b))) {
           res.status(400).json({
-            error: `Download URL must be under the configured catalog path (${trustedBase})`,
+            error: `Download URL must be under the configured catalog path (${trustedBases.join(" or ")})`,
           });
           return;
         }
@@ -1801,17 +1885,42 @@ export class ApiHandler {
         return;
       }
       let closedForRename = false;
+      // Hashes the bytes exactly as downloaded -- i.e. still gzip-compressed
+      // for a .sqlite.gz -- because that is what generate_index.py and
+      // deploy_to_data_repo.py hash when they compute the catalog's sha256.
+      // Spliced into the pipeline before decompression, so it observes every
+      // byte without buffering the file. NOT crypto.createHash() directly:
+      // that Hash object is only writable-then-drain -- piped downstream it
+      // emits just the final digest, not the data written to it, silently
+      // truncating the file to 32 bytes. This wrapper forwards each chunk
+      // unchanged in addition to hashing it.
+      const hasher = new HashingPassThrough();
       try {
         const src = Readable.fromWeb(response.body as any);
         if (isGzip) {
           await pipeline(
             src,
+            hasher,
             zlib.createGunzip(),
             fs.createWriteStream(tmpPath),
           );
           console.log(`[routeiq] Decompressed ${filename} -> ${saveFilename}`);
         } else {
-          await pipeline(src, fs.createWriteStream(tmpPath));
+          await pipeline(src, hasher, fs.createWriteStream(tmpPath));
+        }
+        if (sha256) {
+          const actual = hasher.digestHex();
+          if (actual.toLowerCase() !== sha256.toLowerCase()) {
+            await fs.promises.unlink(tmpPath);
+            console.error(
+              `[routeiq] SHA-256 mismatch for ${filename}: expected ${sha256}, got ${actual}`,
+            );
+            res.status(502).json({
+              error: `Downloaded file failed integrity check (SHA-256 mismatch) -- the transfer may have been corrupted or interrupted. Try again.`,
+            });
+            return;
+          }
+          console.log(`[routeiq] SHA-256 verified for ${filename}`);
         }
         try {
           await fs.promises.rename(tmpPath, destPath);
