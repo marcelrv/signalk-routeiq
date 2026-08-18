@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.7 — 2026-08-19
+
 - Added: routes can now use water that is only deep enough for part of the day.
   Charted depths are referenced to the lowest astronomical tide, so the planner
   was treating every hour as low water and refusing channels that carry plenty
@@ -89,6 +91,23 @@
   Databases you had already disabled by hand, by renaming them to
   `<name>.sqlite.disabled`, now show up in the list with a Disabled badge
   instead of vanishing from it.
+
+- Fixed: a route with a long open-water leg — the ocean-tiled US East Coast
+  data has some that take three to four hours at cruising speed — could run
+  noticeably longer than its ETA if the tide changed partway across. The
+  current was sampled once, at the moment the leg began, and held for the
+  whole crossing; it's now resampled every 30 minutes of actual transit, so
+  a current that turns foul partway through is caught instead of assumed
+  away for hours. Short legs, the great majority, already took only one
+  sample and are unaffected.
+
+- Added: a downloaded routing database now has its checksum verified against
+  the catalog before it's installed, so a corrupted or interrupted download
+  is rejected instead of silently accepted. The catalog also gained support
+  for databases hosted as GitHub Release assets rather than committed to the
+  data repository, letting the data project host larger regions without
+  bloating its own history — installing and updating look the same either
+  way.
 
 ## 0.1.0-alpha.6 — 2026-08-07
 
