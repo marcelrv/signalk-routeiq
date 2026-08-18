@@ -383,3 +383,77 @@ closer than assuming low water all day.
   charted `minDepth`; `route.tide.depthAware` says whether any rise was applied.
 - No new user-facing setting: it rides on `useTides` / `considerTides` /
   `departureTime`. With tides off, results stay bit-identical.
+
+## Long-edge current resampling (2026-08-17)
+
+Reported live while actually sailing a calculated route: a route ran much
+longer than its ETA on a multi-hour offshore leg. Cause: both the search
+(`astarSearch`) and the reporting/audit clock (`walkPassageClock`, see the
+timing fix above) sampled the current **once per graph edge** — at the
+midpoint, at the moment the edge was entered — and applied that single SOG to
+the edge's *entire* transit, however long. Most edges are short enough that
+one sample covers the whole crossing, but the ocean-tiled US East Coast data
+(Phasing/Round 23) has real edges up to **~34.5 km, 3–4 hours at cruising
+speed** — close to a third of the ~12.42 h M2 cycle — where a current sampled
+at entry and held for the crossing can be badly wrong by the far end of it.
+Measured against the shipped `us_east_sc_ga.sqlite`: max edge 34.5 km, 142
+edges over 10 km, 26 over 30 km.
+
+**Fix: a shared `transitTime` helper, resampling every 30 minutes of *actual*
+transit instead of once per edge.** Used identically by `astarSearch`'s edge
+relaxation and by `walkPassageClock` — the same "search and reporting change
+together" principle as the depth feature above, so a long edge can't be
+routed on one current model and reported on another.
+
+- **Byte-identical for the common case, proven rather than estimated.**
+  `transitTime` takes a single midpoint sample only when the edge provably
+  can't take longer than the resample window *even in the worst case* — a
+  dead-foul current floored at `MIN_SOG_FRACTION` (20%) of STW for the whole
+  distance. That's a short-circuit on a proven bound, not a guess from STW
+  alone, so it can't be fooled into under-sampling an edge a foul current
+  turns out to make slow. Everywhere else — the overwhelming majority of
+  edges — it's exactly the same one sample, same formula, same cost, as
+  before this fix. Proven by the full existing test suite passing unchanged.
+- **Slices are sized from the sampled SOG, not a guess from STW.** An
+  earlier version of this fix picked a fixed number of distance-equal
+  chunks from `distance / STW`, which under a foul current could still hold
+  one sample for well over 30 minutes (CodeRabbit review of #38: a 20 km
+  edge's 5 km STW-chunk took ~83 minutes at 1 m/s foul, not 30). Fixed by
+  walking the edge in slices sized `min(remaining, sog * 1800s)` from each
+  slice's own sampled SOG, so no slice can cover more than the resample
+  window regardless of current direction. The SOG floor bounds the loop
+  itself: the smallest a slice can be is `MIN_SOG_FRACTION * speedMs * 1800s`,
+  so even a fully-foul multi-hour edge takes a small, bounded number of
+  iterations.
+- **The per-segment report uses the true integrated time, not
+  distance/entry-SOG.** Also caught by CodeRabbit: `walkPassageClock`
+  computed the correct integrated `sec` per segment internally (used
+  correctly for the route *total*), but didn't return it — so
+  `annotateSegmentTimes` recomputed each segment's reported `seconds` as
+  `distance / sog` using only the *entry* chunk's SOG, reopening the exact
+  bug this fix exists to close one layer up, at the number a client actually
+  reads per leg. `sec` is now carried through `perSegment` and used directly.
+- **A* admissibility is unaffected.** The `minMultiplier` heuristic bound
+  (`routing.ts`, near the edge relaxation loop) comes from `FlowField`'s own
+  contract — `maxSpeedMs`, an upper bound on `|flow|` everywhere — not from
+  any particular sample or how slices are sized. Every slice's SOG is
+  bounded by it the same way a single sample's was, so summing slices
+  preserves the identical `effDistance >= edge.distance *
+  speedMs/(speedMs+maxSpeedMs)` bound the one-sample version relied on.
+  Subdividing only makes the actual cost more accurate within that bound; it
+  cannot loosen it.
+- **Tests:** `test/tide-depth.test.ts` — "transitTime — resampling current
+  across a long edge", the added case in the `walkPassageClock` describe
+  block, and "annotateSegmentTimes — the finalize pass reports the true
+  integrated time". A reversing-current long edge (fair for the first 30
+  minutes, foul after) hand-integrated to the slice-bounded expected total
+  (12800s over one fair + seven foul slices), proving both the total and the
+  per-segment report differ sharply from the old single-sample/entry-SOG
+  estimates, plus a short-edge case proving the unchanged fast path. Each of
+  the three defects (STW-fixed edges, STW-fixed chunk sizing, discarded
+  per-segment sec) was confirmed non-vacuous individually by reintroducing
+  it and observing exactly its own test fail, nothing else.
+- Branch `fix/long-edge-current-resample`, PR #38 — merge held pending
+  CodeRabbit's automated review, which caught the chunk-sizing and
+  per-segment reporting issues above after the initial version deployed and
+  was live-tested.

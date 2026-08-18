@@ -5,7 +5,11 @@ import { after, before, describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { POI_TYPE_LOCK, RoutingDatabase } from "../dist/database.js";
 import { RoutingEngine } from "../dist/routing.js";
-import { prepareTidalFlowField, TidesClient } from "../dist/tides.js";
+import {
+  KNOTS_TO_MS,
+  prepareTidalFlowField,
+  TidesClient,
+} from "../dist/tides.js";
 import { DEFAULT_CONFIG } from "../dist/types.js";
 
 // Charted depths are referenced to LAT, so they are the low-water case and the
@@ -651,6 +655,205 @@ describe("tide-informed depth", () => {
       // Still computes elapsed time, at the configured average speed, for
       // annotateSegmentTimes' tides-off callers.
       assert.ok(totalSec > 0);
+    });
+
+    it("a long segment's current is resampled mid-crossing, not just at entry", () => {
+      // Same reversing-current shape as the transitTime tests below, driven
+      // through the shared walk instead of the helper directly — proving
+      // the wiring, not just the helper in isolation.
+      const departureMs = Date.parse("2026-08-12T00:00:00Z");
+      const speedMs = 3;
+      const env = {
+        departureMs,
+        offsetSec: 0,
+        speedMs,
+        flow: {
+          sample: (_lat: number, _lon: number, atMs: number) =>
+            atMs - departureMs < 1800_000 ? { u: 2, v: 0 } : { u: -2, v: 0 },
+          maxSpeedMs: 2,
+        },
+        heights: undefined,
+      };
+      const coords: Array<[number, number]> = [
+        [5.0, 52.0],
+        [5.3, 52.0],
+      ];
+      const segments = [{ distance: 20000 }]; // well past the resample window
+
+      const { perSegment, totalSec } = engine.walkPassageClock(
+        coords,
+        segments,
+        env,
+        0,
+        [],
+      );
+
+      // Hand-integrated: a 9000 m fair slice (1800s at sog=5) reaches
+      // exactly the reversal, then seven foul slices (six full 1800 m/1800s
+      // ones plus a 200 m/200s remainder, at sog=1) cover the rest — 12800s
+      // total. Tolerance, not strictEqual: bearing comes from a
+      // great-circle formula, so "due east" isn't exactly 90 deg off the
+      // equator and sog carries a little trig error.
+      assert.ok(
+        Math.abs(totalSec - 12800) < 0.1,
+        `expected ~12800s integrated crossing time, not the old single-sample one, got ${totalSec}`,
+      );
+      // The row's own sec must be the true integrated time, not
+      // distance/entry-sog recomputed afterwards (that would give 20000/5 =
+      // 4000s — the same bug this fix exists to close, just moved to
+      // per-segment reporting instead of the route total).
+      assert.ok(
+        Math.abs(perSegment[0].sec - 12800) < 0.1,
+        `expected the row's sec to be the true integrated time (~12800s), got ${perSegment[0].sec}`,
+      );
+      assert.ok(
+        Math.abs(perSegment[0].sog - 5) < 1e-4,
+        "reports the entry conditions (fair) for the one row this segment gets",
+      );
+    });
+  });
+
+  describe("transitTime — resampling current across a long edge", () => {
+    // Shared by astarSearch and walkPassageClock: an edge/segment gets as
+    // many samples as its transit time needs (one every 30 minutes), not
+    // one sample held for the whole thing. Below the threshold this must
+    // reduce to exactly the old one-sample answer, at the same cost; above
+    // it, this is the fix for the reported bug — a route that ran much
+    // longer than its ETA on a multi-hour offshore leg, because the current
+    // sampled at entry doesn't hold for hours.
+    const engine = Object.create(RoutingEngine.prototype) as any;
+    engine._config = { ...DEFAULT_CONFIG };
+    engine.toRadians = (d: number) => (d * Math.PI) / 180;
+    const entryAtMs = Date.parse("2026-08-12T00:00:00Z");
+
+    it("a short edge takes exactly one sample, at the midpoint — unchanged from before this fix", () => {
+      const speedMs = 3;
+      const currentMs = 1; // fair, eastward
+      const env = {
+        departureMs: entryAtMs,
+        offsetSec: 0,
+        speedMs,
+        flow: { sample: () => ({ u: currentMs, v: 0 }), maxSpeedMs: 2 },
+        heights: undefined,
+      };
+      const t = engine.transitTime(
+        52.0,
+        5.0,
+        52.0,
+        5.01,
+        700, // well under the 30-min-at-STW threshold: chunks === 1
+        entryAtMs,
+        env,
+      );
+      const sog = speedMs + currentMs;
+      // Tolerance, not strictEqual: bearing comes from a great-circle
+      // formula, so "due east" isn't exactly 90 deg off the equator and sog
+      // carries a few parts-per-million of trig error.
+      assert.ok(Math.abs(t.sog - sog) < 1e-6, `expected sog ~${sog}, got ${t.sog}`);
+      assert.ok(
+        Math.abs(t.sec - 700 / sog) < 1e-6,
+        "must match distance/sog, not merely approximate it",
+      );
+    });
+
+    it("a long edge resamples a reversing current instead of holding the entry value for the whole crossing", () => {
+      const speedMs = 3;
+      const env = {
+        departureMs: entryAtMs,
+        offsetSec: 0,
+        speedMs,
+        // Fair for the first 30 minutes of transit, foul for the rest —
+        // exactly the shape of the reported bug: a favourable current at
+        // departure that doesn't hold for a multi-hour crossing.
+        flow: {
+          sample: (_lat: number, _lon: number, atMs: number) =>
+            atMs - entryAtMs < 1800_000 ? { u: 2, v: 0 } : { u: -2, v: 0 },
+          maxSpeedMs: 2,
+        },
+        heights: undefined,
+      };
+      const distanceM = 20000; // well past the resample window at any speed here
+
+      const t = engine.transitTime(52.0, 5.0, 52.0, 5.3, distanceM, entryAtMs, env);
+
+      // Hand-integrated: a 9000 m fair slice (1800s at sog=5) exactly
+      // reaches the reversal, then seven foul slices (six full 1800 m/1800s
+      // ones plus a 200 m/200s remainder, at sog=1) cover the rest —
+      // 12800s total. Tolerance, not strictEqual: bearing comes from a
+      // great-circle formula, so "due east" isn't exactly 90 deg off the
+      // equator and each slice's sog carries a little trig error.
+      assert.ok(
+        Math.abs(t.sec - 12800) < 0.1,
+        `expected ~12800s integrated across the reversal, got ${t.sec}`,
+      );
+
+      // What the old single-sample code computed: one sample at entry
+      // (fair), held for the whole 20 km.
+      const oldSingleSampleSec = distanceM / (speedMs + 2);
+      assert.strictEqual(oldSingleSampleSec, 4000);
+      assert.ok(
+        t.sec > oldSingleSampleSec * 2,
+        `expected the resampled crossing to run much longer than the old estimate (${oldSingleSampleSec}s), got ${t.sec}s`,
+      );
+
+      // Reports the entry conditions, not an average across the reversal —
+      // the value in effect where the edge is entered.
+      assert.ok(Math.abs(t.sog - 5) < 1e-4, `expected sog ~5, got ${t.sog}`);
+      assert.strictEqual(
+        t.currentKn,
+        Math.round((2 / KNOTS_TO_MS) * 100) / 100,
+      );
+    });
+  });
+
+  describe("annotateSegmentTimes — the finalize pass reports the true integrated time", () => {
+    // CodeRabbit review of #38 caught this: walkPassageClock's perSegment
+    // rows carried the true integrated sec, but annotateSegmentTimes threw
+    // it away and recomputed seg.seconds as distance/sog using only the
+    // *entry* SOG — the exact bug this whole fix exists to close, reopened
+    // one layer up, at the number a client actually reads per leg.
+    const engine = Object.create(RoutingEngine.prototype) as any;
+    engine._config = { ...DEFAULT_CONFIG };
+    engine.toRadians = (d: number) => (d * Math.PI) / 180;
+
+    it("a long segment's reported seconds is the integrated time, not distance/entry-sog", () => {
+      const departureMs = Date.parse("2026-08-12T00:00:00Z");
+      const speedMs = 3;
+      const env = {
+        departureMs,
+        offsetSec: 0,
+        speedMs,
+        // Same reversal as the walkPassageClock/transitTime cases above:
+        // fair for the first 30 minutes, foul after.
+        flow: {
+          sample: (_lat: number, _lon: number, atMs: number) =>
+            atMs - departureMs < 1800_000 ? { u: 2, v: 0 } : { u: -2, v: 0 },
+          maxSpeedMs: 2,
+        },
+        heights: undefined,
+      };
+      const coords: Array<[number, number]> = [
+        [5.0, 52.0],
+        [5.3, 52.0],
+      ];
+      const segments = [{ distance: 20000 } as any];
+
+      const totalSec = engine.annotateSegmentTimes(
+        coords,
+        segments,
+        env,
+        0,
+        [],
+      );
+
+      // Hand-integrated exactly as in the transitTime test above: 12800s.
+      // The buggy recompute (distance / entry-sog) would report 20000/5 =
+      // 4000s instead.
+      assert.ok(
+        Math.abs(segments[0].seconds - 12800) < 0.1,
+        `expected seg.seconds ~12800 (the true integrated time), got ${segments[0].seconds}`,
+      );
+      assert.ok(Math.abs(totalSec - 12800) < 0.1);
     });
   });
 
