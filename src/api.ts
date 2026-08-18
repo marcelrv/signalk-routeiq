@@ -1759,7 +1759,15 @@ export class ApiHandler {
           .json({ error: "Missing required fields: url, filename" });
         return;
       }
-      if (sha256 !== undefined && !/^[0-9a-f]{64}$/i.test(sha256)) {
+      if (
+        sha256 !== undefined &&
+        (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/i.test(sha256))
+      ) {
+        // typeof check first: RegExp#test() coerces its argument via
+        // ToString, and a single-element array stringifies to just that
+        // element (no brackets/commas) -- ["<64 hex chars>"] would otherwise
+        // pass the regex, then crash on sha256.toLowerCase() below (arrays
+        // have no such method) only after the download already ran.
         res
           .status(400)
           .json({ error: "sha256 must be a 64-character hex string" });

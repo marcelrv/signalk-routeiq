@@ -218,4 +218,28 @@ describe("/databases/download sha256 verification", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("rejects a single-element array sha256 instead of crashing mid-download", async () => {
+    // RegExp#test() coerces its argument via ToString, and a one-element
+    // array stringifies to just that element (no brackets/commas) -- so
+    // [correctSha256] passes a bare regex check. Without an explicit
+    // typeof guard this reaches sha256.toLowerCase() after the download
+    // has already run, which throws (arrays have no such method).
+    const dir = tempDir("array-hash");
+    try {
+      const res = await post(makeHandler(dir), "/databases/download", {
+        url: TRUSTED_DOWNLOAD_URL,
+        filename: "zeeland.sqlite.gz",
+        sha256: [correctSha256],
+      });
+      assert.equal(res.status, 400, JSON.stringify(res.body));
+      assert.equal(
+        fetchCalls,
+        0,
+        "must validate the hash is a string before downloading anything",
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
