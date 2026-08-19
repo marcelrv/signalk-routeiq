@@ -391,13 +391,24 @@ export class RoutingDatabase {
     this.maxLoadedRegionEdges = maxLoadedRegionEdges;
   }
 
-  /** Sum of stats.edges across every currently-loaded region — see
-   *  maxLoadedRegionEdges. stats is populated for every installed region,
-   *  loaded or not, so this is a cheap in-memory sum, not a fresh read. */
+  /** Sum of stats.edges across every currently-loaded region, *and* every
+   *  region currently mid-load — see maxLoadedRegionEdges. Counting only
+   *  'loaded' would race two concurrent route requests each loading a
+   *  different region: both could pass the budget check before either
+   *  finishes, landing combined above it with nothing able to correct it
+   *  (eviction never runs while a route is active). state flips to
+   *  'loading' synchronously, before the first await in
+   *  loadDatabaseGraphInner, and back to 'not_loaded' if the load fails —
+   *  so a reservation here is exact, not just optimistic, and never gets
+   *  stuck counted after a failed load. stats is populated for every
+   *  installed region, loaded or not, so this is a cheap in-memory sum,
+   *  not a fresh read. */
   private totalLoadedEdges(): number {
     let total = 0;
     for (const entry of this.coverageIndex.values()) {
-      if (entry.state === "loaded") total += entry.stats?.edges ?? 0;
+      if (entry.state === "loaded" || entry.state === "loading") {
+        total += entry.stats?.edges ?? 0;
+      }
     }
     return total;
   }
@@ -1724,6 +1735,9 @@ export class RoutingDatabase {
         );
       }
     }
+    // Position-triggered, not route-triggered — no beginRoute()/endRoute()
+    // bracket runs the usual cap enforcement here, so trigger it directly.
+    if (toLoad.size > 0) this.enforceRegionCapForNonRouteLoad();
   }
 
   /** Dynamic mode only: if exactly one database is installed, load it at
@@ -1790,6 +1804,23 @@ export class RoutingDatabase {
     } finally {
       this.loadingPromises.delete(filename);
     }
+  }
+
+  /** Enforce the cap(s) after a load that didn't happen inside a route's
+   *  own beginRoute()/endRoute() bracket -- eagerLoadForPosition (vessel
+   *  movement) and the direct /databases/load API call (api.ts) both load
+   *  through loadDatabaseGraph() with no route in flight, so endRoute()
+   *  never fires for them and a load there could otherwise sit over either
+   *  cap until some later route happens to finish. Not folded into
+   *  loadDatabaseGraph() itself: that would also fire on every
+   *  route-triggered load (ensureRegionsLoaded/ensureRegionsForBbox, already
+   *  inside a route's own bracket, where enforceRegionCap() correctly
+   *  no-ops) and on tests' direct use of the primitive to set up
+   *  loaded-but-not-yet-enforced fixture state -- harmless in production,
+   *  but a footgun for exactly the kind of setup this class's own tests
+   *  rely on. Fire-and-forget, same as endRoute()'s own trigger. */
+  enforceRegionCapForNonRouteLoad(): void {
+    void this.enforceRegionCap().catch(() => {});
   }
 
   private async loadDatabaseGraphInner(

@@ -342,6 +342,7 @@ export function pluginConstructor(app: ServerAPI) {
             description:
               "Only applies with dynamic loading on. Sibling cap to 'Max loaded regions', weighted by size instead of count — a handful of large regions can exceed a count-based cap alone. A route search that would need to load past this stops widening its search box rather than loading more; between routes, the least-recently-used region is evicted past it the same way the region-count cap works. 0 = unlimited. Defaults to an estimate based on this server's available memory.",
             default: DEFAULT_CONFIG.maxLoadedRegionEdges,
+            minimum: 0,
           },
         },
       };
