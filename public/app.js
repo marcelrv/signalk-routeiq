@@ -2126,7 +2126,18 @@
             }),
           });
           m.bindTooltip(label, { direction: "top", offset: [0, -12] });
-          m.on("click", function () {
+          m.on("click", function (e) {
+            // Without this, the click also bubbles to the map's own click
+            // handler (map.on('click', ...)), which treats it as "place a
+            // waypoint here" — running a route calculation while this
+            // popup is also open.
+            L.DomEvent.stopPropagation(e);
+            // The bound tooltip (below) shows on hover and only hides on
+            // mouseout — clicking without moving the cursor away (the
+            // normal way to click something you're already hovering)
+            // leaves it showing right on top of the popup this opens,
+            // seen as two overlapping dialogs from one click.
+            m.closeTooltip();
             const name = p.name || "POI";
             const lat = p.lat,
               lng = p.lon;
@@ -7870,5 +7881,6 @@
     undoRoute,
     redoRoute,
     setManualMode,
+    poiLayer,
   };
 })();
