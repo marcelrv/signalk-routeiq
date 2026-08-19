@@ -225,6 +225,55 @@ straight chord over them. 57/57 tests; verified live (route START 4.21 → DEST
    each other (two fire-and-forget passes could pick a victim from the same
    pre-eviction snapshot — observed double-evicting one region in a test run,
    and able in principle to drop below the one-region floor with three loaded).
+
+   **Still not enough — the 2026-08-16 fix bounded *sequencing*, not *size*
+   (2026-08-19, branch `fix/region-load-memory-budget`).** A route with a via
+   point needed a start/end pair 446 km apart. Its bbox-widening loop, now
+   correctly scoped to the box each attempt actually searches, still grew
+   111 km → 222 km → 444 km → 888 km chasing a constraint violation, and each
+   step pulled in another large not-yet-loaded US East Coast region —
+   `us_east_me.sqlite` (264,676 edges), `us_east_nh.sqlite` (132,936 edges,
+   loaded, evicted, then reloaded seconds later), `us_east_sc_ga.sqlite` —
+   all resident at once. `maxLoadedRegions=6` never tripped (six regions of
+   that size is still too much memory), and `enforceRegionCap()` structurally
+   cannot help: it's a no-op the entire time any route is in flight, by
+   design, and this was one request's own widening loop, not six separate
+   routes. Crashed the dev server with a V8 heap OOM
+   (`FATAL ERROR: ... JavaScript heap out of memory`); Docker's restart
+   policy brought it back ~13s later, visible client-side as a burst of
+   "failed to fetch".
+
+   Fixed with a size-aware sibling cap, `maxLoadedRegionEdges` (`types.ts`),
+   weighted by `stats.edges` instead of region count, defaulted from this
+   process's actual `v8.getHeapStatistics().heap_size_limit` rather than a
+   fixed number (a Raspberry Pi and a beefy server have very different real
+   ceilings). Enforced two ways, both reusing existing mechanisms rather than
+   adding new ones: `ensureRegionsForBbox` — the *discretionary* transit/
+   widening load, not the *mandatory* waypoint-containment one
+   (`ensureRegionsLoaded`, which is never capped — refusing to load the
+   region a stated start/end/via point sits in would make the plugin unable
+   to route there at all) — skips a load that would push total loaded edges
+   past the budget, logs why, and lets the existing widening loop's own
+   penalized/stalled/`fallbackRoute` handling treat the gap the same way it
+   treats any other reason an attempt comes up short; `enforceRegionCapPass`
+   evicts LRU regions past the edge budget the same way it already evicts
+   past the region-count one, between routes.
+
+   Deliberately not fixed by allowing eviction to run mid-route instead:
+   there is no per-request "which regions does *this* search still need"
+   tracking today (only the global LRU recency map), so evicting mid-route
+   without one would risk pulling a region out from under the active search
+   — a correctness bug (missing graph data, wrong or failed routes), which is
+   worse than the clean crash-and-restart this fix prevents. Also
+   deliberately not fixed by loading regions partially (bbox-filtered
+   slices instead of whole files) — the real root-cause fix, since it would
+   reduce memory pressure at the source instead of capping it after the
+   fact, but a substantially bigger project: partial-load state per region,
+   handling for edges reaching into a region's still-unloaded remainder,
+   progressive widening of what's loaded *within* a region, and it touches
+   the navmesh/funnel-edge/seam-merge machinery, which assumes a region
+   loads atomically throughout today's codebase. Recorded here as the real
+   follow-up direction, not built.
 2. ~~**Loading indicator for on-demand region loads.**~~ — **done 2026-08-10**
    (branch `feat/region-loading-indicator`), by the poll route, not the `202`
    one. `getLoadingStatus()` now reports the regions in `state: "loading"`, and

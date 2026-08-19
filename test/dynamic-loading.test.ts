@@ -830,6 +830,165 @@ describe('§4a dynamic database loading', () => {
     });
   });
 
+  // 2026-08-19 incident: maxLoadedRegions (count) never tripped even though
+  // three large regions loaded by one request's own bbox-widening loop
+  // crashed the server with a V8 heap OOM -- six *regions* of that size is
+  // still too much memory. maxLoadedRegionEdges is the size-aware sibling
+  // cap, weighted by stats.edges instead of count. Each buildPlainRegion
+  // fixture below carries exactly 2 directed edges, so small integer
+  // budgets exercise the threshold precisely.
+  describe('§4a M5 continued: bounded working set by size (maxLoadedRegionEdges)', () => {
+    it('ensureRegionsForBbox skips a discretionary transit load that would exceed the edge budget', async () => {
+      buildFixtures();
+      // maxLoadedRegions left unlimited (0) -- only the edge budget is
+      // under test. region-a (8 edges) is already loaded; loading
+      // region-b (2 more) would bring the total to 10, over a budget of 9.
+      const db = new RoutingDatabase(fixturesDir, true, 0, 9);
+      try {
+        await db.init();
+        await db.loadGraph();
+        await db.loadDatabaseGraph('region-a.sqlite');
+
+        await db.ensureRegionsForBbox({
+          minLat: REGION_B_BBOX.min_lat, minLon: REGION_B_BBOX.min_lon,
+          maxLat: REGION_B_BBOX.max_lat, maxLon: REGION_B_BBOX.max_lon,
+        });
+
+        const status = new Map(db.getCoverageStatus().map(s => [s.filename, s.state]));
+        assert.strictEqual(status.get('region-a.sqlite'), 'loaded');
+        assert.strictEqual(
+          status.get('region-b.sqlite'), 'not_loaded',
+          'loading region-b would exceed maxLoadedRegionEdges and must be skipped, not thrown',
+        );
+      } finally {
+        await db.close();
+        cleanupFixtures();
+      }
+    });
+
+    it('the same call loads the region when the budget is not exceeded (non-vacuous: budget=10 fits exactly)', async () => {
+      buildFixtures();
+      const db = new RoutingDatabase(fixturesDir, true, 0, 10);
+      try {
+        await db.init();
+        await db.loadGraph();
+        await db.loadDatabaseGraph('region-a.sqlite');
+
+        await db.ensureRegionsForBbox({
+          minLat: REGION_B_BBOX.min_lat, minLon: REGION_B_BBOX.min_lon,
+          maxLat: REGION_B_BBOX.max_lat, maxLon: REGION_B_BBOX.max_lon,
+        });
+
+        const status = new Map(db.getCoverageStatus().map(s => [s.filename, s.state]));
+        assert.strictEqual(status.get('region-b.sqlite'), 'loaded');
+      } finally {
+        await db.close();
+        cleanupFixtures();
+      }
+    });
+
+    it('enforceRegionCapPass evicts on edge count even when region count is under maxLoadedRegions', async () => {
+      buildFixtures();
+      // maxLoadedRegions=10 alone would never trigger on 2 loaded regions.
+      // maxLoadedRegionEdges=5 does: region-a (8) + region-b (2) = 10 total.
+      const db = new RoutingDatabase(fixturesDir, true, 10, 5);
+      try {
+        await db.init();
+        await db.loadGraph();
+        await db.loadDatabaseGraph('region-a.sqlite'); // older
+        await db.loadDatabaseGraph('region-b.sqlite'); // more recently used
+
+        db.beginRoute();
+        db.endRoute();
+        await db.enforceRegionCapForTest();
+
+        const status = new Map(db.getCoverageStatus().map(s => [s.filename, s.state]));
+        assert.strictEqual(
+          status.get('region-a.sqlite'), 'not_loaded',
+          'region A is least-recently-used and should be evicted to bring total edges under budget',
+        );
+        assert.strictEqual(status.get('region-b.sqlite'), 'loaded');
+      } finally {
+        await db.close();
+        cleanupFixtures();
+      }
+    });
+
+    it('a route that does not need the skipped region still completes, not throws', async () => {
+      // NEAR holds a violating (too-shallow) direct edge, forcing the
+      // search to widen looking for a better path. FAR sits inside the
+      // *second* attempt's box (routingBBoxMargin 1 deg -> lon 9.4-11.6;
+      // 2x that -> lon 8.4-12.6) but shares no node with NEAR, so it could
+      // never have fixed the violation anyway -- exactly the "transit
+      // region that turned out not to matter" case, just also unaffordable
+      // here. Positioned deliberately close (not the ~7 deg the "preload
+      // extent" fixture above uses): NEAR's own result can't improve
+      // without FAR, so the search stalls and gives up widening right
+      // after the second attempt -- a FAR placed past that point would
+      // never be reached by any attempt regardless of this fix, making the
+      // test vacuous.
+      const dir = './test/fixtures/dynamic-loading-edge-budget-e2e';
+      const nearPath = path.join(dir, 'near.sqlite');
+      const farPath = path.join(dir, 'far.sqlite');
+      const NEAR_BBOX = { min_lat: 9.9, min_lon: 9.9, max_lat: 11.1, max_lon: 11.1 };
+      const FAR_BBOX = { min_lat: 9.9, min_lon: 12.0, max_lat: 11.1, max_lon: 12.2 };
+      const NEAR_A: [number, number] = [10.4, 10.4];
+      const NEAR_B: [number, number] = [10.6, 10.6];
+
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      for (const p of [nearPath, farPath]) if (fs.existsSync(p)) fs.unlinkSync(p);
+      try {
+        const sdb = new DatabaseSync(nearPath, { open: true });
+        const run = (sql: string, params: unknown[] = []) => sdb.prepare(sql).run(...(params as any[]));
+        run(`CREATE TABLE metadata (id INTEGER PRIMARY KEY AUTOINCREMENT, country TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT, last_update_date TEXT NOT NULL, bounding_box TEXT)`);
+        run(`INSERT INTO metadata (country, name, description, last_update_date, bounding_box) VALUES ('ENEAR', 'Near', 'fixture', '2026-01-01T00:00:00Z', ?)`, [JSON.stringify(NEAR_BBOX)]);
+        const idA = nodeIdFor(NEAR_A[0], NEAR_A[1]);
+        const idB = nodeIdFor(NEAR_B[0], NEAR_B[1]);
+        run(`CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL, lon REAL, resolution REAL DEFAULT 0.0, node_depth REAL DEFAULT -1, region_id INTEGER)`);
+        run(`INSERT INTO nodes (id, lat, lon, region_id) VALUES (?, ?, ?, 1)`, [idA, NEAR_A[0], NEAR_A[1]]);
+        run(`INSERT INTO nodes (id, lat, lon, region_id) VALUES (?, ?, ?, 1)`, [idB, NEAR_B[0], NEAR_B[1]]);
+        run(`CREATE TABLE edges (source INTEGER, target INTEGER, distance REAL, min_depth REAL, max_air_draft REAL, min_width REAL, cost_factor REAL DEFAULT 1.0, distance_to_land REAL, edge_type_id INTEGER DEFAULT 0, traffic_mode INTEGER DEFAULT 0, edge_kind_id INTEGER DEFAULT 0)`);
+        const d = Math.round(haversine(NEAR_A[0], NEAR_A[1], NEAR_B[0], NEAR_B[1]));
+        // min_depth 1.0 against a 2.0 m draft request -- a genuine violation.
+        run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES (?, ?, ?, 1.0, 20.0, 10.0, 1.0, 500, 0, 0, 0)`, [idA, idB, d]);
+        run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES (?, ?, ?, 1.0, 20.0, 10.0, 1.0, 500, 0, 0, 0)`, [idB, idA, d]);
+        sdb.close();
+
+        buildPlainRegion(farPath, 'EFAR', FAR_BBOX, [10.4, 12.1], [10.6, 12.1]);
+
+        // NEAR's 2 edges load unconditionally (mandatory waypoint
+        // containment, never budget-capped). Loading FAR's 2 more, once
+        // the widening loop reaches for it, would bring the total to 4 --
+        // over a budget of 3, so it must be skipped.
+        const db = new RoutingDatabase(dir, true, 0, 3);
+        await db.init();
+        await db.loadGraph();
+        try {
+          const engine = new RoutingEngine(db, DEFAULT_CONFIG);
+          engine.setVesselDimensions({ draft: 2.0, beam: 4.0, airDraft: 10.0 });
+
+          const result = await engine.calculateRoute({
+            start: { latitude: NEAR_A[0], longitude: NEAR_A[1] },
+            end: { latitude: NEAR_B[0], longitude: NEAR_B[1] },
+            minCoastDistance: 0,
+          });
+
+          assert.ok(result.features.length > 0, 'expected a completed route despite the skipped transit region, not a crash');
+          const status = new Map(db.getCoverageStatus().map(s => [s.filename, s.state]));
+          assert.strictEqual(status.get('near.sqlite'), 'loaded');
+          assert.strictEqual(
+            status.get('far.sqlite'), 'not_loaded',
+            'far.sqlite would exceed the edge budget and must stay skipped',
+          );
+        } finally {
+          await db.close();
+        }
+      } finally {
+        if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('unload rejects unknown filenames', () => {
     it('loadDatabaseGraph/unloadDatabaseGraph reject a filename the coverage index has never seen', async () => {
       buildFixtures();

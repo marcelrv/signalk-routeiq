@@ -352,6 +352,14 @@ export class RoutingDatabase {
    *  dynamicLoading is also true. */
   private maxLoadedRegions: number;
 
+  /** Sibling cap to maxLoadedRegions, weighted by size (stats.edges) rather
+   *  than count — see the PluginConfig doc comment on maxLoadedRegionEdges
+   *  for the incident that motivated it. 0 = unlimited. Enforced in two
+   *  places: ensureRegionsForBbox skips a discretionary transit/widening
+   *  load that would exceed it, and enforceRegionCapPass evicts past it the
+   *  same way it evicts past maxLoadedRegions. */
+  private maxLoadedRegionEdges: number;
+
   /** filename -> monotonic "last used" counter, driving LRU eviction in
    *  enforceRegionCap(). Bumped every time a region is loaded or found
    *  relevant to a route/position request (loadDatabaseGraphInner on
@@ -375,10 +383,23 @@ export class RoutingDatabase {
     dbDir: string,
     dynamicLoading: boolean = false,
     maxLoadedRegions: number = 0,
+    maxLoadedRegionEdges: number = 0,
   ) {
     this.dbDir = dbDir;
     this.dynamicLoading = dynamicLoading;
     this.maxLoadedRegions = maxLoadedRegions;
+    this.maxLoadedRegionEdges = maxLoadedRegionEdges;
+  }
+
+  /** Sum of stats.edges across every currently-loaded region — see
+   *  maxLoadedRegionEdges. stats is populated for every installed region,
+   *  loaded or not, so this is a cheap in-memory sum, not a fresh read. */
+  private totalLoadedEdges(): number {
+    let total = 0;
+    for (const entry of this.coverageIndex.values()) {
+      if (entry.state === "loaded") total += entry.stats?.edges ?? 0;
+    }
+    return total;
   }
 
   /** Bump filename's LRU recency to "most recently used". See
@@ -1624,6 +1645,24 @@ export class RoutingDatabase {
       }
     }
     for (const filename of toLoad) {
+      // A discretionary load (this method, not ensureRegionsLoaded) can be
+      // skipped rather than made to fit — the search just runs with a gap
+      // in the graph, which the existing penalized/stalled/fallbackRoute
+      // machinery already handles the same way it handles any other reason
+      // an attempt comes up short. See maxLoadedRegionEdges' doc comment.
+      if (this.maxLoadedRegionEdges > 0) {
+        const need = this.coverageIndex.get(filename)?.stats?.edges ?? 0;
+        const current = this.totalLoadedEdges();
+        if (current + need > this.maxLoadedRegionEdges) {
+          console.log(
+            `[routeiq] Skipping load of ${filename} (${need} edges) — would push loaded ` +
+              `edges from ${current} to ${current + need}, over maxLoadedRegionEdges=` +
+              `${this.maxLoadedRegionEdges}. Search continues without it; a shorter or ` +
+              `less circuitous route may find one that doesn't need it.`,
+          );
+          continue;
+        }
+      }
       const t0 = Date.now();
       console.log(
         `[routeiq] Route search bounding box overlaps not-yet-loaded database ${filename} — loading inline before search`,
@@ -2090,15 +2129,16 @@ export class RoutingDatabase {
   }
 
   /**
-   * §4a M5: bounded working set. No-op unless dynamic loading is on and
-   * maxLoadedRegions > 0 (the constructor default, 0, is unlimited; the
-   * plugin passes DEFAULT_CONFIG.maxLoadedRegions, which is a finite cap so
-   * the heap can't grow without bound). No-op while a route is in flight (activeRouteCount >
-   * 0) — never evict out from under an in-progress or about-to-run search;
-   * endRoute() is the only caller, and only once activeRouteCount reaches 0.
+   * §4a M5: bounded working set, by count and by size. No-op unless dynamic
+   * loading is on and at least one of maxLoadedRegions/maxLoadedRegionEdges
+   * is > 0 (both default finite via DEFAULT_CONFIG). No-op while a route is
+   * in flight (activeRouteCount > 0) — never evict out from under an
+   * in-progress or about-to-run search; endRoute() is the only caller, and
+   * only once activeRouteCount reaches 0.
    *
-   * While more databases are 'loaded' than maxLoadedRegions allows, evicts
-   * the least-recently-used one (smallest regionLastUsedAt; a region never
+   * While more databases are 'loaded' than maxLoadedRegions allows, or the
+   * total edges across them exceeds maxLoadedRegionEdges, evicts the
+   * least-recently-used one (smallest regionLastUsedAt; a region never
    * touched sorts as oldest) via unloadDatabaseGraph, which itself refuses
    * to drop the last loaded database or run while a route is active — both
    * cases are also checked here to avoid looping, and either one aborts the
@@ -2126,14 +2166,21 @@ export class RoutingDatabase {
 
   /** One enforcement pass. See enforceRegionCap, which serializes these. */
   private async enforceRegionCapPass(): Promise<void> {
-    if (!this.dynamicLoading || this.maxLoadedRegions <= 0) return;
+    if (!this.dynamicLoading) return;
+    if (this.maxLoadedRegions <= 0 && this.maxLoadedRegionEdges <= 0) return;
     if (this.activeRouteCount > 0) return;
 
     for (;;) {
       const loaded = Array.from(this.coverageIndex.values()).filter(
         (e) => e.state === "loaded",
       );
-      if (loaded.length <= this.maxLoadedRegions || loaded.length <= 1) return;
+      if (loaded.length <= 1) return;
+      const overCount =
+        this.maxLoadedRegions > 0 && loaded.length > this.maxLoadedRegions;
+      const totalEdges = this.totalLoadedEdges();
+      const overEdges =
+        this.maxLoadedRegionEdges > 0 && totalEdges > this.maxLoadedRegionEdges;
+      if (!overCount && !overEdges) return;
       if (this.activeRouteCount > 0) return;
 
       let victim: DatabaseCoverageEntry | null = null;
@@ -2153,11 +2200,13 @@ export class RoutingDatabase {
         // Logged because the *next* route that needs this region will read it
         // from disk again and log a second "Loaded database" for it. Without
         // this line that reload looks unexplained, when it is in fact a
-        // working set larger than maxLoadedRegions cycling against the cap —
-        // which is the thing worth seeing in the log.
+        // working set larger than the cap(s) cycling against them — which is
+        // the thing worth seeing in the log.
         console.log(
           `[routeiq] Evicted database ${victim.filename} (least recently used; ` +
-            `${loaded.length} loaded, maxLoadedRegions=${this.maxLoadedRegions})`,
+            `${loaded.length} loaded [maxLoadedRegions=${this.maxLoadedRegions}], ` +
+            `${totalEdges} edges loaded [maxLoadedRegionEdges=${this.maxLoadedRegionEdges}], ` +
+            `over ${overCount && overEdges ? "count and size" : overCount ? "count" : "size"})`,
         );
       } catch (e) {
         // Last-loaded-database guard or a route that started concurrently —
