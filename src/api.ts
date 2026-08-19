@@ -2045,6 +2045,10 @@ export class ApiHandler {
         return;
       }
       await this.db!.loadDatabaseGraph(filename);
+      // No route is in flight for a direct load, so the usual
+      // beginRoute()/endRoute() cap enforcement never fires for it —
+      // trigger it explicitly, same as eagerLoadForPosition does.
+      this.db!.enforceRegionCapForNonRouteLoad();
       res.json({
         success: true,
         filename,

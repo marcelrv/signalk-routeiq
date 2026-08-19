@@ -2,6 +2,8 @@
  * Type definitions for the SignalK RouteIQ Nautical Route Planner Plugin
  */
 
+import * as v8 from "node:v8";
+
 /** Edge columns the graph editor can set, and therefore the ones a user-edits
  *  overlay row can claim in `edited_fields`. Everything else on such a row is
  *  a placeholder written for a value the edit never mentioned, which is why
@@ -367,6 +369,47 @@ export interface PluginConfig {
   // a wide corridor — eviction only happens between routes, and an evicted
   // region reloads on demand.
   maxLoadedRegions: number;
+  // Sibling cap to maxLoadedRegions, weighted by size instead of count. A
+  // region's memory footprint varies ~100x (a small Zeeland-scale file vs.
+  // a 260k-edge US-coast state tile), so a handful of large regions can
+  // still exceed a count-based cap. 0 = unlimited, same convention as
+  // maxLoadedRegions.
+  //
+  // Enforced two ways: ensureRegionsForBbox (the *discretionary* transit/
+  // widening load, not the mandatory waypoint-containment one) skips
+  // loading a region that would push total loaded edges past this, and
+  // enforceRegionCapPass evicts LRU regions past it once no route is in
+  // flight — same two mechanisms maxLoadedRegions already uses, just also
+  // triggered by size. Added 2026-08-19 after a route whose bounding-box
+  // widening (111km -> 888km chasing a via-point constraint violation)
+  // loaded three large US East Coast regions at once and crashed the
+  // server with a V8 heap OOM; maxLoadedRegions=6 never triggered because
+  // six *regions* of that size is still too much memory, and eviction
+  // cannot run mid-request regardless (never evicts out from under an
+  // in-progress search — see activeRouteCount).
+  maxLoadedRegionEdges: number;
+}
+
+// Order-of-magnitude heuristic, not a measured constant: how many loaded
+// graph edges (with their share of associated node/POI/navmesh overhead) a
+// device can safely hold per MB of V8 heap ceiling, deliberately
+// conservative. Calibrated against the 2026-08-19 incident: three real US
+// East Coast regions (~600k+ combined edges, before counting whatever else
+// was already resident) crashed a ~4.1 GB heap, so this is chosen to land
+// well under that on a heap of the same size, not to maximize how much a
+// single request can load.
+const EDGES_PER_MB_OF_HEAP = 120;
+
+/** Heap-size-aware default for maxLoadedRegionEdges, computed once from
+ *  *this* process's actual V8 heap ceiling (v8.getHeapStatistics --
+ *  respects --max-old-space-size if set, otherwise V8's own default,
+ *  itself informed by host memory) rather than a fixed number, so a
+ *  Raspberry Pi and a beefy server each get a cap sized to what they can
+ *  actually hold without hand-tuning. A deployment that wants a different
+ *  number can still set maxLoadedRegionEdges explicitly in plugin config. */
+function defaultMaxLoadedRegionEdges(): number {
+  const heapLimitMb = v8.getHeapStatistics().heap_size_limit / (1024 * 1024);
+  return Math.floor(heapLimitMb * EDGES_PER_MB_OF_HEAP);
 }
 
 // Default plugin configuration
@@ -396,4 +439,5 @@ export const DEFAULT_CONFIG: PluginConfig = {
   eagerLoadAtPosition: true,
   loadRadiusNm: 0,
   maxLoadedRegions: 6,
+  maxLoadedRegionEdges: defaultMaxLoadedRegionEdges(),
 };

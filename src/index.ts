@@ -336,6 +336,14 @@ export function pluginConstructor(app: ServerAPI) {
               "Only applies with dynamic loading on. Keep at most this many regions loaded in memory, evicting the least-recently-used region once a route finishes and none is in progress. 0 = unlimited (keep every region ever loaded) — uncapped memory growth on long passages.",
             default: DEFAULT_CONFIG.maxLoadedRegions,
           },
+          maxLoadedRegionEdges: {
+            type: "number",
+            title: "Max loaded graph edges (dynamic loading)",
+            description:
+              "Only applies with dynamic loading on. Sibling cap to 'Max loaded regions', weighted by size instead of count — a handful of large regions can exceed a count-based cap alone. A route search that would need to load past this stops widening its search box rather than loading more; between routes, the least-recently-used region is evicted past it the same way the region-count cap works. 0 = unlimited. Defaults to an estimate based on this server's available memory.",
+            default: DEFAULT_CONFIG.maxLoadedRegionEdges,
+            minimum: 0,
+          },
         },
       };
     },
@@ -545,6 +553,7 @@ export function pluginConstructor(app: ServerAPI) {
         config.routingDataDir,
         config.dynamicLoading,
         config.maxLoadedRegions,
+        config.maxLoadedRegionEdges,
       );
       await db.init();
       await db.loadGraph();
@@ -652,6 +661,7 @@ export function pluginConstructor(app: ServerAPI) {
         dataDir,
         config.dynamicLoading,
         config.maxLoadedRegions,
+        config.maxLoadedRegionEdges,
       );
       await db.init();
       await db.loadGraph();
