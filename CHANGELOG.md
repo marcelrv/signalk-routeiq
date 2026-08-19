@@ -109,6 +109,22 @@
   bloating its own history — installing and updating look the same either
   way.
 
+- Fixed: a route whose search had to reach unusually far — a long offshore
+  leg, or a via point a long way from the rest — could load enough routing
+  data into memory at once to crash the server, taking every other route
+  request down with it until it restarted. The amount of data a single
+  search is allowed to pull in now has a memory-aware ceiling, sized to the
+  device it's running on rather than a fixed number, so a Raspberry Pi and a
+  full server each get a sensible limit. A search that would exceed it stays
+  narrower instead — the same graceful fallback already used whenever a
+  search comes up short for any other reason — rather than the server
+  going down.
+
+- Fixed: clicking a point of interest could show two overlapping popups —
+  the usual "Route from / Route to" one, plus a leftover hover label stuck
+  on top of it, or occasionally a route silently starting from the clicked
+  point underneath. Clicking a POI now cleanly shows just the one popup.
+
 ## 0.1.0-alpha.6 — 2026-08-07
 
 - Fixed: a lock could appear twice in the itinerary — once under its own name
