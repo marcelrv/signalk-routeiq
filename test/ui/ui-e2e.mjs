@@ -308,15 +308,29 @@ if (poiFound) {
   // is the shape that reproduces it staying open under the popup. Matched
   // by this POI's own tooltip text, not just any .leaflet-tooltip on the
   // page, in case another one is bound nearby.
+  const tooltipVisible = (name) =>
+    [...globalThis.document.querySelectorAll('.leaflet-tooltip')]
+      .some((el) => el.offsetParent !== null && el.textContent.includes(name));
   await poiPage.mouse.move(pt.x, pt.y);
-  await poiPage.waitForTimeout(200);
+  // Confirmed rather than assumed: without this, a hover that silently
+  // fails to reproduce (wrong pixel, marker not yet interactive) would
+  // still pass the "tooltip is gone" check below trivially — there'd be
+  // nothing to have lingered in the first place.
+  check('this POI\'s hover tooltip opened before the click', await poiPage
+    .waitForFunction(tooltipVisible, poi.name, { timeout: 5000 })
+    .then(() => true)
+    .catch(() => false));
   const before = await poiPage.evaluate(() => JSON.stringify({
     start: globalThis.__marine.state.startLatLng, dest: globalThis.__marine.state.destLatLng,
     via: globalThis.__marine.state.viaPoints.length,
   }));
   await poiPage.mouse.click(pt.x, pt.y);
-  check('POI popup (Route from/Route to) opened',
-    await poiPage.waitForSelector('.poi-popup', { timeout: 5000 }).then(() => true).catch(() => false));
+  await poiPage.waitForSelector('.poi-popup', { timeout: 5000 }).catch(() => {});
+  // Exactly one, not just "at least one" — two POI popups stacked would be
+  // the very bug this section exists to catch, just from a different cause
+  // than the one already fixed.
+  const popupCount = await poiPage.evaluate(() => globalThis.document.querySelectorAll('.poi-popup').length);
+  check('exactly one POI popup (Route from/Route to) opened', popupCount === 1, `count=${popupCount}`);
   // Poll rather than a fixed sleep-then-snapshot: closeTooltip() triggers
   // Leaflet's own opacity-fade CSS transition, so the tooltip element can
   // still be present (mid-fade, offsetParent !== null) for a beat after the
