@@ -887,6 +887,66 @@ describe('§4a dynamic database loading', () => {
       }
     });
 
+    it('two concurrent callers wanting the same region do not double-count it against the budget', async () => {
+      // CodeRabbit review of #40: totalLoadedEdges() counts a region in
+      // 'loading' state (needed to close the race the first review round
+      // fixed), but ensureRegionsForBbox's own toLoad set can also contain
+      // a filename someone else is already mid-load on. Budget-checking
+      // that candidate the same way as a fresh one double-counts its edges
+      // -- once already in the running total, once as `need` -- and could
+      // wrongly skip a region that's already being loaded and about to be
+      // available for free.
+      //
+      // region-b is exactly 2 edges; a budget of 2 fits one load exactly
+      // but not a double-counted 4 -- sized to fail loudly if the bug
+      // regresses. Node's single-threaded run-to-first-await means calling
+      // ensureRegionsForBbox twice without awaiting between them
+      // deterministically interleaves at loadDatabaseGraph's first real
+      // await, reproducing the race without relying on timing.
+      buildFixtures();
+      const db = new RoutingDatabase(fixturesDir, true, 0, 2);
+      try {
+        await db.init();
+        await db.loadGraph();
+
+        // The final coverage state alone can't tell the two calls apart:
+        // whichever call actually starts the load succeeds regardless of
+        // what the *other* one decides, so a bugged second call that skips
+        // region-b as "over budget" is masked -- region-b still ends up
+        // 'loaded' via the first call either way. What must never happen is
+        // the skip log itself, since that is the call proceeding with a
+        // search that has a gap in it, moments before the region it needed
+        // becomes available for free.
+        const logged: string[] = [];
+        const realLog = console.log;
+        console.log = (...args: unknown[]) => {
+          logged.push(String(args[0]));
+        };
+        try {
+          const bbox = {
+            minLat: REGION_B_BBOX.min_lat, minLon: REGION_B_BBOX.min_lon,
+            maxLat: REGION_B_BBOX.max_lat, maxLon: REGION_B_BBOX.max_lon,
+          };
+          await Promise.all([
+            db.ensureRegionsForBbox(bbox),
+            db.ensureRegionsForBbox(bbox),
+          ]);
+        } finally {
+          console.log = realLog;
+        }
+
+        assert.ok(
+          !logged.some(l => l.includes('Skipping load of region-b.sqlite')),
+          'a concurrent caller must await the in-flight load, not skip it as over-budget',
+        );
+        const status = new Map(db.getCoverageStatus().map(s => [s.filename, s.state]));
+        assert.strictEqual(status.get('region-b.sqlite'), 'loaded');
+      } finally {
+        await db.close();
+        cleanupFixtures();
+      }
+    });
+
     it('enforceRegionCapPass evicts on edge count even when region count is under maxLoadedRegions', async () => {
       buildFixtures();
       // maxLoadedRegions=10 alone would never trigger on 2 loaded regions.

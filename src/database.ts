@@ -1661,8 +1661,19 @@ export class RoutingDatabase {
       // in the graph, which the existing penalized/stalled/fallbackRoute
       // machinery already handles the same way it handles any other reason
       // an attempt comes up short. See maxLoadedRegionEdges' doc comment.
-      if (this.maxLoadedRegionEdges > 0) {
-        const need = this.coverageIndex.get(filename)?.stats?.edges ?? 0;
+      //
+      // Only for a genuinely new (not_loaded) candidate: toLoad also
+      // collects regions a concurrent caller is already mid-load on
+      // (state === "loading"), and totalLoadedEdges() already reserves
+      // those regions' edges. Budget-checking one of those here would
+      // double-count it (once in the running total, once as `need`) and
+      // could skip a region that's already being loaded and about to be
+      // available for free — the fix must still fall through to
+      // loadDatabaseGraph() below for it, which awaits the shared in-flight
+      // promise rather than starting a second load.
+      const entry = this.coverageIndex.get(filename);
+      if (this.maxLoadedRegionEdges > 0 && entry?.state !== "loading") {
+        const need = entry?.stats?.edges ?? 0;
         const current = this.totalLoadedEdges();
         if (current + need > this.maxLoadedRegionEdges) {
           console.log(
