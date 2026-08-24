@@ -2242,7 +2242,7 @@
                 dashArray: "6,5",
               };
           let layer = null;
-          if (loaded && db.boundaryGeometry) {
+          if (db.boundaryGeometry) {
             layer = L.geoJSON(db.boundaryGeometry, { style: style });
           } else {
             const bb = db.coverage || db.boundingBox;
