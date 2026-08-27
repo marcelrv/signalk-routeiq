@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added: hovering over a graph node or edge (with Show Nodes / Show Edges
+  enabled) now shows a tooltip with its key info — for a node, depth and
+  position; for an edge, distance, depth, traffic direction, air draft,
+  width, and routing preference.
+
 ## 0.1.0-alpha.7 — 2026-08-19
 
 - Added: routes can now use water that is only deep enough for part of the day.
