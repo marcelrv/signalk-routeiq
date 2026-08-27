@@ -1919,6 +1919,61 @@
     );
   }
 
+  function nodeTooltipHtml(n, depthKnown) {
+    var depthStr =
+      depthKnown && n.min_depth != null
+        ? n.min_depth.toFixed(1) + " m"
+        : "unknown";
+    var latStr =
+      Math.abs(n.lat).toFixed(4) + "°" + (n.lat >= 0 ? "N" : "S");
+    var lonStr =
+      Math.abs(n.lon).toFixed(4) + "°" + (n.lon >= 0 ? "E" : "W");
+    return (
+      "Node #" +
+      n.id +
+      "<br>" +
+      latStr +
+      " · " +
+      lonStr +
+      "<br>Depth: " +
+      depthStr +
+      (n.region_id === 0 ? "<br>Manual node" : "")
+    );
+  }
+
+  function edgeTooltipHtml(e) {
+    var dist =
+      e.distance != null ? Math.round(e.distance) + " m" : "unknown";
+    var depthKnown =
+      e.min_depth_known != null ? e.min_depth_known : e.min_depth >= 0;
+    var depthStr =
+      depthKnown && e.min_depth != null
+        ? e.min_depth.toFixed(1) + " m"
+        : "unknown";
+    var dir =
+      e.traffic_mode === 1 ? "→" : e.traffic_mode === 2 ? "←" : "↔";
+    var extras = "";
+    if (e.max_air_draft != null && e.max_air_draft >= 0)
+      extras += "<br>Air draft: " + e.max_air_draft.toFixed(1) + " m";
+    if (e.min_width != null && e.min_width >= 0)
+      extras += "<br>Width: " + e.min_width.toFixed(1) + " m";
+    return (
+      "Edge " +
+      e.source +
+      " – " +
+      e.target +
+      " " +
+      dir +
+      "<br>Distance: " +
+      dist +
+      "<br>Depth: " +
+      depthStr +
+      extras +
+      "<br>Preference: " +
+      costPresetLabel(e.cost_factor)
+    );
+  }
+
   function fetchGraphNodes() {
     if (!graphVisible) return;
     graphLayer.clearLayers();
@@ -1970,6 +2025,10 @@
                 weight: 1.5,
                 opacity: 0.8,
               });
+          marker.bindTooltip(nodeTooltipHtml(n, depthKnown), {
+            direction: "top",
+            offset: [0, -(radius + 4)],
+          });
           if (state.editMode) {
             marker._nodeData = n;
             marker.on("click", function (e) {
@@ -2023,6 +2082,7 @@
             latlngs.push(...e.path_points);
           latlngs.push([e.target_lat, e.target_lon]);
           const line = L.polyline(latlngs, opts);
+          line.bindTooltip(edgeTooltipHtml(e), { sticky: true });
           if (state.editMode) {
             line._edgeData = e;
             line.on("click", function (e) {
@@ -3009,6 +3069,16 @@
         html;
     }
     return html;
+  }
+
+  // Same nearest-preset lookup as costPresetOptions, but for a plain label
+  // (used in the edge hover tooltip, where a <select> would be wrong).
+  function costPresetLabel(current) {
+    var val = current != null ? current : 1.2;
+    var preset = COST_PRESETS.find(function (p) {
+      return Math.abs(p.value - val) < 0.01;
+    });
+    return preset ? preset.label : "Custom (" + val + ")";
   }
 
   function attachAutoSave(form) {
