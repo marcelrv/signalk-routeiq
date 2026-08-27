@@ -1924,10 +1924,8 @@
       depthKnown && n.min_depth != null
         ? n.min_depth.toFixed(1) + " m"
         : "unknown";
-    var latStr =
-      Math.abs(n.lat).toFixed(4) + "°" + (n.lat >= 0 ? "N" : "S");
-    var lonStr =
-      Math.abs(n.lon).toFixed(4) + "°" + (n.lon >= 0 ? "E" : "W");
+    var latStr = Math.abs(n.lat).toFixed(4) + "°" + (n.lat >= 0 ? "N" : "S");
+    var lonStr = Math.abs(n.lon).toFixed(4) + "°" + (n.lon >= 0 ? "E" : "W");
     return (
       "Node #" +
       n.id +
@@ -1942,16 +1940,14 @@
   }
 
   function edgeTooltipHtml(e) {
-    var dist =
-      e.distance != null ? Math.round(e.distance) + " m" : "unknown";
+    var dist = e.distance != null ? Math.round(e.distance) + " m" : "unknown";
     var depthKnown =
       e.min_depth_known != null ? e.min_depth_known : e.min_depth >= 0;
     var depthStr =
       depthKnown && e.min_depth != null
         ? e.min_depth.toFixed(1) + " m"
         : "unknown";
-    var dir =
-      e.traffic_mode === 1 ? "→" : e.traffic_mode === 2 ? "←" : "↔";
+    var dir = e.traffic_mode === 1 ? "→" : e.traffic_mode === 2 ? "←" : "↔";
     var extras = "";
     if (e.max_air_draft != null && e.max_air_draft >= 0)
       extras += "<br>Air draft: " + e.max_air_draft.toFixed(1) + " m";
