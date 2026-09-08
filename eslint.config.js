@@ -106,6 +106,7 @@ export default tseslint.config(
         requestAnimationFrame: 'readonly',
         getComputedStyle: 'readonly',
         TextDecoder: 'readonly',
+        btoa: 'readonly',
         L: 'readonly',
       },
     },
