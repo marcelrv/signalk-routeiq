@@ -1244,6 +1244,7 @@
       this._minZoom = chartOpts.minZoom;
       this._maxNativeZoom = chartOpts.maxNativeZoom;
       this._tileCache = new Map(); // "z:x:y" -> records[] (or a Promise while loading)
+      this._refreshSeq = 0;
     },
     onAdd: function (map) {
       this._map = map;
@@ -1253,6 +1254,7 @@
     },
     onRemove: function (map) {
       map.off("moveend zoomend", this._onMove);
+      this._refreshSeq++; // invalidate any refresh still in flight
       this.clearLayers();
     },
     _fetchTile: function (x, y, z) {
@@ -1297,13 +1299,21 @@
                 }
               });
             }
-            this._tileCache.set(key, records);
+            // Only replace the cache entry if it's still ours — the cap
+            // above can have evicted it (and a fresh fetch for the same
+            // key started) while this one was in flight, and this
+            // resolving late shouldn't overwrite that newer entry.
+            if (this._tileCache.get(key) === entry) {
+              this._tileCache.set(key, records);
+            }
             return records;
           }.bind(this),
         )
         .catch(
           function () {
-            this._tileCache.set(key, []);
+            if (this._tileCache.get(key) === entry) {
+              this._tileCache.set(key, []);
+            }
             return [];
           }.bind(this),
         );
@@ -1329,9 +1339,15 @@
       if (!map) return;
       const zoom = map.getZoom();
       if (zoom < this._minZoom) {
+        this._refreshSeq++;
         this.clearLayers();
         return;
       }
+      // A monotonic token, not just a zoom/map check — a pan at the same
+      // zoom starts a new refresh too, and without this an older one that
+      // happens to resolve later would overwrite the newer one's labels
+      // with stale positions.
+      const seq = ++this._refreshSeq;
       const fetchZoom = Math.min(Math.floor(zoom), this._maxNativeZoom);
       const pending = [];
       this._tilesFor(map.getBounds(), fetchZoom, pending);
@@ -1353,7 +1369,7 @@
       }
       Promise.all(pending).then(
         function (tileResults) {
-          if (this._map !== map || map.getZoom() !== zoom) return; // stale by the time it resolved
+          if (seq !== this._refreshSeq) return; // superseded by a later refresh
           const viewBounds = map.getBounds();
           const best = new Map(); // "kind:name[:lat:lng]" -> {rec, score, inView}
           tileResults.forEach(function (records) {
