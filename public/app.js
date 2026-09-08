@@ -1311,8 +1311,11 @@
         )
         .catch(
           function () {
+            // Delete rather than cache an empty result — a transient
+            // network hiccup shouldn't permanently blank a tile's labels
+            // for the rest of the session; let a later refresh retry it.
             if (this._tileCache.get(key) === entry) {
-              this._tileCache.set(key, []);
+              this._tileCache.delete(key);
             }
             return [];
           }.bind(this),
