@@ -1128,6 +1128,11 @@
     LIGHTS: "navaid",
   };
 
+  // Insertion-order cap on S57LabelLayer's per-tile decode cache — long
+  // chart-plotter sessions can pan across far more tiles than fit in one
+  // view, and nothing else ever evicts an entry.
+  const S57_LABEL_TILE_CACHE_LIMIT = 500;
+
   function s57LabelMinZoom(kind) {
     if (kind === "navaid") return 12; // icons already show from z11; names one step later
     if (kind === "place") return 10;
@@ -1254,6 +1259,9 @@
       const key = z + ":" + x + ":" + y;
       let entry = this._tileCache.get(key);
       if (entry) return entry;
+      if (this._tileCache.size >= S57_LABEL_TILE_CACHE_LIMIT) {
+        this._tileCache.delete(this._tileCache.keys().next().value);
+      }
       const url = resolveChartUrl(
         L.Util.template(this._urlTemplate, { z: z, x: x, y: y, s: "a" }),
       );
@@ -1280,6 +1288,7 @@
                     records.push({
                       name: name,
                       kind: kind,
+                      z: z,
                       lat: anchor.lat,
                       lng: anchor.lng,
                       weight: anchor.weight,
@@ -1305,7 +1314,10 @@
       const range = tileRangeForBounds(bounds, zoom);
       const dx = range.maxX - range.minX;
       const dy = range.maxY - range.minY;
-      if (dx < 0 || dy < 0 || (dx + 1) * (dy + 1) > 64) return; // too many tiles — skip this band
+      // Bounded so an extreme viewport/zoom mismatch can't fire off an
+      // unbounded burst of fetches — generous enough for a large desktop
+      // monitor at a normal zoom (a 4K-wide view is ~16 tiles across).
+      if (dx < 0 || dy < 0 || (dx + 1) * (dy + 1) > 256) return; // too many tiles — skip this band
       for (let x = range.minX; x <= range.maxX; x++) {
         for (let y = range.minY; y <= range.maxY; y++) {
           pending.push(this._fetchTile(x, y, zoom));
@@ -1331,7 +1343,14 @@
       if (fetchZoom !== this._minZoom) {
         this._tilesFor(map.getBounds(), this._minZoom, pending);
       }
-      if (!pending.length) return;
+      if (!pending.length) {
+        // Both bands were skipped as too-large (or this._minZoom coincided
+        // with fetchZoom and that alone tripped the cap) — nothing new is
+        // coming, so don't leave labels from wherever the map used to be
+        // sitting on screen.
+        this.clearLayers();
+        return;
+      }
       Promise.all(pending).then(
         function (tileResults) {
           if (this._map !== map || map.getZoom() !== zoom) return; // stale by the time it resolved
@@ -1340,6 +1359,13 @@
           tileResults.forEach(function (records) {
             (records || []).forEach(function (rec) {
               if (zoom < s57LabelMinZoom(rec.kind)) return;
+              // Navaids are always point features, so unlike a place/water
+              // polygon they gain nothing from the overview band — and if
+              // the same buoy is present in both, decoding it against two
+              // different tile extents rounds to two very slightly
+              // different coordinates, which the lat/lng-keyed dedup below
+              // would then treat as two distinct buoys.
+              if (rec.kind === "navaid" && rec.z !== fetchZoom) return;
               // The overview zoom band's tile covers a much larger area than
               // the current view — most of what it contains is nowhere near
               // here. Drop anything whose extent doesn't even touch the
