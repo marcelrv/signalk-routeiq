@@ -1163,6 +1163,76 @@ label.switch-row {
   outline-offset: 2px;
 }
 
+/* ---------- chart list rows: drag-to-reorder + per-chart opacity ---------- */
+.chart-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.chart-row:last-child { border-bottom: none; }
+.chart-row.chart-unsupported { opacity: 0.5; }
+.chart-row.dragging {
+  background: rgba(59, 143, 212, 0.12);
+  border-radius: 6px;
+}
+.chart-drag-handle {
+  flex-shrink: 0;
+  width: var(--tap-target);
+  min-height: var(--tap-target);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  touch-action: none; /* dragging is handled ourselves via Pointer Events, not native scrolling */
+  border-radius: 6px;
+}
+.chart-drag-handle:active { cursor: grabbing; }
+.chart-drag-handle { --drag-dot: var(--text-faint); }
+/* Ring + dot accent on keyboard focus only. Chrome 66 has no :focus-visible
+   and drops any rule naming it, so the highlight is hung on :focus and taken
+   back off again for pointer focus - where that second rule is understood -
+   matching the #editor-close-btn pattern above. A combined `:hover, :focus-visible`
+   selector would also make Chrome 66 drop the whole rule, hover included, so
+   each state gets its own rule instead. */
+.chart-drag-handle:focus {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 2px;
+  --drag-dot: var(--accent-bright);
+}
+.chart-drag-handle:focus:not(:focus-visible) {
+  outline: none;
+  --drag-dot: var(--text-faint);
+}
+.chart-drag-handle:hover { --drag-dot: var(--accent-bright); }
+.chart-drag-handle::before {
+  content: '';
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--drag-dot);
+  /* six dots in a 2x3 grid, drawn with box-shadow so no extra markup is needed */
+  box-shadow:
+    0 -6px 0 var(--drag-dot), 0 6px 0 var(--drag-dot),
+    6px -6px 0 var(--drag-dot), 6px 0 0 var(--drag-dot), 6px 6px 0 var(--drag-dot);
+}
+.chart-row-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.chart-row-body .switch-row { min-height: 28px; }
+input.chart-opacity {
+  width: 100%;
+  accent-color: var(--accent);
+  margin: 0;
+  height: 18px;
+}
+.chart-row.chart-disabled input.chart-opacity { opacity: 0.45; }
+
 /* ---------- settings panel header (title + close, inside the panel) ---------- */
 .panel-header {
   display: flex;
