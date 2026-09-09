@@ -888,6 +888,63 @@
     };
   }
 
+  // Approximate IALA symbol shapes for buoys/beacons — a plain colour-coded
+  // circle (the old pointStyle) reads as clutter next to Freeboard-SK's real
+  // triangle/square/diamond marks, so pick a shape from the object class and
+  // (for lateral marks, where colour alone doesn't say which side) CATLAM.
+  function s57NavaidShape(layerKey, p) {
+    if (layerKey === "BOYCAR" || layerKey === "BCNCAR") return "diamond";
+    if (layerKey === "BOYSPP" || layerKey === "BCNSPP") return "diamond";
+    if (layerKey === "BOYSAW" || layerKey === "BCNSAW") return "circle";
+    if (layerKey === "BOYISD" || layerKey === "BCNISD") return "circle";
+    if (layerKey === "BOYINB") return "circle";
+    const catlam = Number(p.CATLAM);
+    if (catlam === 2) return "triangle"; // starboard hand (conical/nun)
+    if (catlam === 1) return "square"; // port hand (can)
+    return "circle";
+  }
+
+  // L.Canvas.Tile's PointSymbolizer draws a style's `icon` (an L.Icon) via
+  // drawImage instead of a plain CircleMarker circle, and caches the drawn
+  // image by iconUrl — so a small in-memory data-URI SVG cache here is all
+  // that's needed to get real symbol shapes onto the chart.
+  const S57_NAVAID_ICON_CACHE = {};
+  function s57NavaidIcon(shape, color) {
+    const key = shape + ":" + color;
+    let icon = S57_NAVAID_ICON_CACHE[key];
+    if (icon) return icon;
+    let inner;
+    switch (shape) {
+      case "triangle":
+        inner = '<polygon points="8,1 15,15 1,15"/>';
+        break;
+      case "square":
+        inner = '<rect x="2" y="2" width="12" height="12"/>';
+        break;
+      case "diamond":
+        inner = '<polygon points="8,1 15,8 8,15 1,8"/>';
+        break;
+      default:
+        inner = '<circle cx="8" cy="8" r="6"/>';
+    }
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">' +
+      '<g fill="' +
+      color +
+      '" stroke="' +
+      S52.CHBLK +
+      '" stroke-width="1">' +
+      inner +
+      "</g></svg>";
+    icon = L.icon({
+      iconUrl: "data:image/svg+xml;base64," + btoa(svg),
+      iconSize: [16, 16],
+      iconAnchor: [8, 8],
+    });
+    S57_NAVAID_ICON_CACHE[key] = icon;
+    return icon;
+  }
+
   // Style for one S-57 vector-tile layer (uppercase = coastal ENC,
   // lowercase = inland ENC — same object classes, so match case-insensitively).
   // Returns a (properties, zoom) => style function, or null to hide the layer.
@@ -1001,10 +1058,14 @@
       case "BCNCAR":
       case "BCNSAW":
       case "BCNSPP":
-      case "BCNISD":
+      case "BCNISD": {
+        const layerKey = name.toUpperCase();
         return function (p, z) {
-          return z >= 11 ? pointStyle(buoyFill(p)) : [];
+          if (z < 11) return [];
+          const shape = s57NavaidShape(layerKey, p);
+          return { icon: s57NavaidIcon(shape, buoyFill(p)) };
         };
+      }
       case "LIGHTS":
         return function (p, z) {
           return z >= 12 ? pointStyle(S52.CHYLW, 3) : [];
@@ -1027,8 +1088,382 @@
             : [];
         };
       default:
-        return null; // metadata layers, soundings (no text support), symbols we can't draw
+        return null; // metadata layers, soundings, symbols we can't draw — OBJNAM
+      // text for BUAARE/SEAARE is instead handled by the label layer below.
     }
+  }
+
+  // ---- S-57 place / water-body name labels ----
+  //
+  // Leaflet.VectorGrid's style callback can only return path styles (fill,
+  // stroke…), not text, so town and sea-area names (OBJNAM on BUAARE /
+  // SEAARE) can't be drawn through s57LayerStyle. Leaflet.VectorGrid.Protobuf
+  // does decode each tile with the vector-tile-js classes internally, and —
+  // because its bundle isn't wrapped in a module scope — those classes leak
+  // onto window as VectorTile/Pbf. We reuse them to decode the same tiles a
+  // second time, independently of VectorGrid's own canvas rendering, purely
+  // to pull out named-feature centroids for a text-label overlay.
+  const S57_LABEL_LAYERS = {
+    BUAARE: "place", // built-up area (town/city)
+    ADMARE: "place", // administrative area (state/country) — usually one
+    // fixed label point somewhere in the region, easy to miss unless it's
+    // literally in view; the state/country name is also commonly carried by
+    // LNDARE below, which is what actually shows up at normal chart zooms.
+    LNDRGN: "place", // land region (named natural feature, park…)
+    LNDARE: "place", // land area — coastal/state charts often tag the plain
+    // land polygon itself with the enclosing state/country name (this is
+    // where "Maryland" on a Potomac harbor chart actually comes from)
+    SEAARE: "water", // named sea/bay/river/channel
+    BOYLAT: "navaid",
+    BOYCAR: "navaid",
+    BOYSAW: "navaid",
+    BOYSPP: "navaid",
+    BOYISD: "navaid",
+    BOYINB: "navaid",
+    BCNLAT: "navaid",
+    BCNCAR: "navaid",
+    BCNSAW: "navaid",
+    BCNSPP: "navaid",
+    BCNISD: "navaid",
+    LIGHTS: "navaid",
+  };
+
+  // Insertion-order cap on S57LabelLayer's per-tile decode cache — long
+  // chart-plotter sessions can pan across far more tiles than fit in one
+  // view, and nothing else ever evicts an entry.
+  const S57_LABEL_TILE_CACHE_LIMIT = 500;
+
+  function s57LabelMinZoom(kind) {
+    if (kind === "navaid") return 12; // icons already show from z11; names one step later
+    if (kind === "place") return 10;
+    return 9; // water — useful even zoomed out for route overview
+  }
+
+  // Represent a (possibly multi-part, tile-clipped) polygon fragment by the
+  // center of its largest ring's bounding box — good enough to place a label
+  // roughly in the middle of a bay or town without a full centroid/pole-of-
+  // inaccessibility computation.
+  function s57LabelAnchor(geom) {
+    if (geom.type === "Point") {
+      const lat = geom.coordinates[1];
+      const lng = geom.coordinates[0];
+      return {
+        lat: lat,
+        lng: lng,
+        weight: 1,
+        bbox: { minX: lng, maxX: lng, minY: lat, maxY: lat },
+      };
+    }
+    let rings;
+    if (geom.type === "Polygon") rings = [geom.coordinates[0]];
+    else if (geom.type === "MultiPolygon")
+      rings = geom.coordinates.map(function (p) {
+        return p[0];
+      });
+    else return null;
+    let best = null;
+    let bestArea = -1;
+    rings.forEach(function (ring) {
+      let minX = Infinity,
+        minY = Infinity,
+        maxX = -Infinity,
+        maxY = -Infinity;
+      ring.forEach(function (c) {
+        if (c[0] < minX) minX = c[0];
+        if (c[0] > maxX) maxX = c[0];
+        if (c[1] < minY) minY = c[1];
+        if (c[1] > maxY) maxY = c[1];
+      });
+      const area = (maxX - minX) * (maxY - minY);
+      if (area > bestArea) {
+        bestArea = area;
+        best = {
+          lat: (minY + maxY) / 2,
+          lng: (minX + maxX) / 2,
+          bbox: { minX: minX, maxX: maxX, minY: minY, maxY: maxY },
+        };
+      }
+    });
+    return best
+      ? { lat: best.lat, lng: best.lng, weight: bestArea, bbox: best.bbox }
+      : null;
+  }
+
+  function s57BboxIntersectsView(bbox, viewBounds) {
+    return (
+      bbox.maxX >= viewBounds.getWest() &&
+      bbox.minX <= viewBounds.getEast() &&
+      bbox.maxY >= viewBounds.getSouth() &&
+      bbox.minY <= viewBounds.getNorth()
+    );
+  }
+
+  function s57LabelIcon(text, kind) {
+    // Place/water names center on their (polygon) anchor point. Navaid names
+    // anchor on the buoy/beacon's exact position, so centering text on top of
+    // it would sit right on the symbol — offset right and vertically center
+    // on the icon instead, the way Freeboard-SK lays buoy names out.
+    const style =
+      kind === "water"
+        ? "transform:translate(-50%,-50%);font-style:italic;font-weight:500;"
+        : kind === "navaid"
+          ? "transform:translate(9px,-50%);font-style:normal;font-weight:400;font-size:10px;"
+          : "transform:translate(-50%,-50%);font-style:normal;font-weight:700;";
+    return L.divIcon({
+      className: "",
+      html:
+        '<div style="display:inline-block;white-space:nowrap;pointer-events:none;' +
+        "font-size:11px;color:#1a1a1a;" +
+        style +
+        'text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff">' +
+        escapeHtml(text) +
+        "</div>",
+      iconSize: [0, 0],
+      iconAnchor: [0, 0],
+    });
+  }
+
+  function tileRangeForBounds(bounds, zoom) {
+    const nw = L.CRS.EPSG3857.latLngToPoint(bounds.getNorthWest(), zoom)
+      .divideBy(256)
+      .floor();
+    const se = L.CRS.EPSG3857.latLngToPoint(bounds.getSouthEast(), zoom)
+      .divideBy(256)
+      .floor();
+    return { minX: nw.x, maxX: se.x, minY: nw.y, maxY: se.y };
+  }
+
+  // A LayerGroup that lazily decodes the same MVT tiles a sibling
+  // VectorGrid layer is already drawing, extracts OBJNAM from BUAARE/SEAARE,
+  // and shows one label per unique name in view (keeping the largest
+  // tile-clipped fragment, so a bay split across tiles doesn't repeat).
+  const S57LabelLayer = L.LayerGroup.extend({
+    initialize: function (urlTemplate, chartOpts) {
+      L.LayerGroup.prototype.initialize.call(this, []);
+      this._urlTemplate = urlTemplate;
+      this._minZoom = chartOpts.minZoom;
+      this._maxNativeZoom = chartOpts.maxNativeZoom;
+      this._tileCache = new Map(); // "z:x:y" -> records[] (or a Promise while loading)
+      this._refreshSeq = 0;
+    },
+    onAdd: function (map) {
+      this._map = map;
+      this._onMove = this._refresh.bind(this);
+      map.on("moveend zoomend", this._onMove);
+      this._refresh();
+    },
+    onRemove: function (map) {
+      map.off("moveend zoomend", this._onMove);
+      this._refreshSeq++; // invalidate any refresh still in flight
+      this.clearLayers();
+    },
+    _fetchTile: function (x, y, z) {
+      const key = z + ":" + x + ":" + y;
+      let entry = this._tileCache.get(key);
+      if (entry) return entry;
+      if (this._tileCache.size >= S57_LABEL_TILE_CACHE_LIMIT) {
+        this._tileCache.delete(this._tileCache.keys().next().value);
+      }
+      const url = resolveChartUrl(
+        L.Util.template(this._urlTemplate, { z: z, x: x, y: y, s: "a" }),
+      );
+      entry = fetch(url)
+        .then(function (r) {
+          return r.ok ? r.arrayBuffer() : null;
+        })
+        .then(
+          function (buf) {
+            const records = [];
+            if (buf && window.VectorTile && window.Pbf) {
+              const tile = new window.VectorTile(new window.Pbf(buf));
+              Object.keys(S57_LABEL_LAYERS).forEach(function (lname) {
+                const l = tile.layers[lname];
+                if (!l) return;
+                const kind = S57_LABEL_LAYERS[lname];
+                for (let i = 0; i < l.length; i++) {
+                  const f = l.feature(i);
+                  const name = f.properties && f.properties.OBJNAM;
+                  if (!name) continue;
+                  const g = f.toGeoJSON(x, y, z);
+                  const anchor = s57LabelAnchor(g.geometry);
+                  if (anchor)
+                    records.push({
+                      name: name,
+                      kind: kind,
+                      z: z,
+                      lat: anchor.lat,
+                      lng: anchor.lng,
+                      weight: anchor.weight,
+                      bbox: anchor.bbox,
+                    });
+                }
+              });
+            }
+            // Only replace the cache entry if it's still ours — the cap
+            // above can have evicted it (and a fresh fetch for the same
+            // key started) while this one was in flight, and this
+            // resolving late shouldn't overwrite that newer entry.
+            if (this._tileCache.get(key) === entry) {
+              this._tileCache.set(key, records);
+            }
+            return records;
+          }.bind(this),
+        )
+        .catch(
+          function () {
+            // Delete rather than cache an empty result — a transient
+            // network hiccup shouldn't permanently blank a tile's labels
+            // for the rest of the session; let a later refresh retry it.
+            if (this._tileCache.get(key) === entry) {
+              this._tileCache.delete(key);
+            }
+            return [];
+          }.bind(this),
+        );
+      this._tileCache.set(key, entry);
+      return entry;
+    },
+    _tilesFor: function (bounds, zoom, pending) {
+      const range = tileRangeForBounds(bounds, zoom);
+      const dx = range.maxX - range.minX;
+      const dy = range.maxY - range.minY;
+      // Bounded so an extreme viewport/zoom mismatch can't fire off an
+      // unbounded burst of fetches — generous enough for a large desktop
+      // monitor at a normal zoom (a 4K-wide view is ~16 tiles across).
+      if (dx < 0 || dy < 0 || (dx + 1) * (dy + 1) > 256) return; // too many tiles — skip this band
+      for (let x = range.minX; x <= range.maxX; x++) {
+        for (let y = range.minY; y <= range.maxY; y++) {
+          pending.push(this._fetchTile(x, y, zoom));
+        }
+      }
+    },
+    _refresh: function () {
+      const map = this._map;
+      if (!map) return;
+      const zoom = map.getZoom();
+      if (zoom < this._minZoom) {
+        this._refreshSeq++;
+        this.clearLayers();
+        return;
+      }
+      // A monotonic token, not just a zoom/map check — a pan at the same
+      // zoom starts a new refresh too, and without this an older one that
+      // happens to resolve later would overwrite the newer one's labels
+      // with stale positions.
+      const seq = ++this._refreshSeq;
+      const fetchZoom = Math.min(Math.floor(zoom), this._maxNativeZoom);
+      const pending = [];
+      this._tilesFor(map.getBounds(), fetchZoom, pending);
+      // A name spanning a huge extent (a whole named region, a state) is
+      // usually only carried by the chart's coarsest zoom band — a detail
+      // tile only covers a sliver of that extent, so tile generation drops
+      // it there. Always also pull the chart's minimum-zoom tile(s) so
+      // those don't disappear once the user zooms in past them.
+      if (fetchZoom !== this._minZoom) {
+        this._tilesFor(map.getBounds(), this._minZoom, pending);
+      }
+      if (!pending.length) {
+        // Both bands were skipped as too-large (or this._minZoom coincided
+        // with fetchZoom and that alone tripped the cap) — nothing new is
+        // coming, so don't leave labels from wherever the map used to be
+        // sitting on screen.
+        this.clearLayers();
+        return;
+      }
+      Promise.all(pending).then(
+        function (tileResults) {
+          if (seq !== this._refreshSeq) return; // superseded by a later refresh
+          const viewBounds = map.getBounds();
+          const best = new Map(); // "kind:name[:lat:lng]" -> {rec, score, inView}
+          tileResults.forEach(function (records) {
+            (records || []).forEach(function (rec) {
+              if (zoom < s57LabelMinZoom(rec.kind)) return;
+              // Navaids are always point features, so unlike a place/water
+              // polygon they gain nothing from the overview band — and if
+              // the same buoy is present in both, decoding it against two
+              // different tile extents rounds to two very slightly
+              // different coordinates, which the lat/lng-keyed dedup below
+              // would then treat as two distinct buoys.
+              if (rec.kind === "navaid" && rec.z !== fetchZoom) return;
+              // The overview zoom band's tile covers a much larger area than
+              // the current view — most of what it contains is nowhere near
+              // here. Drop anything whose extent doesn't even touch the
+              // current view before it can compete for a label at all.
+              if (!s57BboxIntersectsView(rec.bbox, viewBounds)) return;
+              // Place/water names dedupe by name alone — the same bay or
+              // town is typically split into several tile-clipped polygon
+              // fragments (now possibly from two different zoom bands too),
+              // and we want one label for all of them. Navaids are
+              // individual points: two real buoys can share a generic name
+              // ("Daybeacon 3" in two different channels), so fold the
+              // position into the key too.
+              const key =
+                rec.kind === "navaid"
+                  ? rec.kind +
+                    ":" +
+                    rec.name +
+                    ":" +
+                    rec.lat.toFixed(4) +
+                    ":" +
+                    rec.lng.toFixed(4)
+                  : rec.kind + ":" + rec.name;
+              // A coarse overview-band fragment can dwarf a detail-band one
+              // in raw bbox area despite being far less relevant here — so
+              // any fragment whose natural anchor already falls inside the
+              // current view always wins over one that doesn't, and area is
+              // only a tiebreaker within the same in-view/out-of-view group.
+              const inView = viewBounds.contains([rec.lat, rec.lng]);
+              const score = (inView ? 1e15 : 0) + rec.weight;
+              const prev = best.get(key);
+              if (!prev || score > prev.score)
+                best.set(key, { rec: rec, score: score, inView: inView });
+            });
+          });
+          this.clearLayers();
+          best.forEach(
+            function (entry) {
+              const rec = entry.rec;
+              // Clamp an off-screen anchor (the whole named region extends
+              // well past this view) onto the visible edge nearest it,
+              // rather than not showing the name at all.
+              const lat = entry.inView
+                ? rec.lat
+                : Math.min(
+                    Math.max(rec.lat, viewBounds.getSouth()),
+                    viewBounds.getNorth(),
+                  );
+              const lng = entry.inView
+                ? rec.lng
+                : Math.min(
+                    Math.max(rec.lng, viewBounds.getWest()),
+                    viewBounds.getEast(),
+                  );
+              this.addLayer(
+                L.marker([lat, lng], {
+                  icon: s57LabelIcon(rec.name, rec.kind),
+                  interactive: false,
+                  keyboard: false,
+                }),
+              );
+            }.bind(this),
+          );
+        }.bind(this),
+      );
+    },
+  });
+
+  function makeS57LabelLayer(c) {
+    const hasLabels = c.layers.some(function (name) {
+      return Object.prototype.hasOwnProperty.call(
+        S57_LABEL_LAYERS,
+        name.toUpperCase(),
+      );
+    });
+    if (!hasLabels) return null;
+    return new S57LabelLayer(c.url, {
+      minZoom: c.minZoom,
+      maxNativeZoom: c.maxZoom,
+    });
   }
 
   // Chart tiles are served from the SK server root, not the plugin router mount
@@ -1125,7 +1560,17 @@
       opts.rendererFactory = L.canvas.tile;
       opts.vectorTileLayerStyles = styles;
       opts.interactive = false;
-      return L.vectorGrid.protobuf(resolveChartUrl(c.url), opts);
+      const tileLayer = L.vectorGrid.protobuf(resolveChartUrl(c.url), opts);
+      const labelLayer = makeS57LabelLayer(c);
+      if (!labelLayer) return tileLayer;
+      const group = L.layerGroup([tileLayer, labelLayer]);
+      // Preserve the scale-based stacking setChartEnabled applies to plain
+      // tile layers — a LayerGroup has no setZIndex of its own.
+      group.setZIndex = function (z) {
+        if (tileLayer.setZIndex) tileLayer.setZIndex(z);
+        return group;
+      };
+      return group;
     }
     return null;
   }
