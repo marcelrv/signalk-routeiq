@@ -1247,6 +1247,7 @@
       this._minZoom = chartOpts.minZoom;
       this._maxNativeZoom = chartOpts.maxNativeZoom;
       this._opacity = chartOpts.opacity != null ? chartOpts.opacity : 1;
+      this._zIndex = 0;
       this._tileCache = new Map(); // "z:x:y" -> records[] (or a Promise while loading)
       this._refreshSeq = 0;
     },
@@ -1268,6 +1269,20 @@
       this._opacity = opacity;
       this.eachLayer(function (l) {
         if (l.setOpacity) l.setOpacity(opacity);
+      });
+      return this;
+    },
+    // Labels are individual markers, each z-ordered by Leaflet itself using
+    // its own screen position (see Marker._updateZIndex) — left alone, that
+    // position-based value would ignore chartOrder entirely. applyChartOrder
+    // spaces chart zIndex values 1e6 apart precisely so this offset (the raw
+    // chart zIndex) dominates a marker's on-screen position term, which is
+    // always far smaller, keeping every label within its own chart's band
+    // and never leaking into a neighboring chart's.
+    setZIndex: function (zIndex) {
+      this._zIndex = zIndex;
+      this.eachLayer(function (l) {
+        if (l.setZIndexOffset) l.setZIndexOffset(zIndex);
       });
       return this;
     },
@@ -1458,6 +1473,8 @@
                   interactive: false,
                   keyboard: false,
                   opacity: this._opacity,
+                  pane: "charts",
+                  zIndexOffset: this._zIndex,
                 }),
               );
             }.bind(this),
@@ -1583,6 +1600,7 @@
       // layers — a LayerGroup has neither setZIndex nor setOpacity of its own.
       group.setZIndex = function (z) {
         if (tileLayer.setZIndex) tileLayer.setZIndex(z);
+        if (labelLayer.setZIndex) labelLayer.setZIndex(z);
         return group;
       };
       group.setOpacity = function (o) {
@@ -1623,9 +1641,20 @@
     return [{ id: "openstreetmap", enabled: true, opacity: 1 }]; // default = previous hardcoded base map
   }
   function saveChartSettings() {
+    // chartOrder can include server-chart ids seeded from a previous saved
+    // order before refreshChartList() has registered them into chartSources
+    // (e.g. the user toggles a built-in while the chart list is still
+    // loading) — fall back to their last-saved record instead of defaults,
+    // so saving one source's change doesn't wipe another's not-yet-loaded one.
+    const savedById = new Map(
+      loadChartSettings().map(function (s) {
+        return [s.id, s];
+      }),
+    );
     const settings = chartOrder.map(function (id) {
       const s = chartSources.get(id);
-      return { id: id, enabled: !!(s && s.enabled), opacity: s ? s.opacity : 1 };
+      if (!s) return savedById.get(id) || { id: id, enabled: false, opacity: 1 };
+      return { id: id, enabled: !!s.enabled, opacity: s.opacity };
     });
     try {
       localStorage.setItem(CHART_STORE_KEY, JSON.stringify(settings));
@@ -1634,12 +1663,20 @@
 
   // Re-applies chartOrder's positions as zIndex to every source with a live
   // layer. Call after any reorder (drag, keyboard, or a fresh registration).
+  //
+  // Bands are spaced 1e6 apart, not 1 apart: a vector chart's S-57 labels are
+  // plain Leaflet markers, which Leaflet itself z-orders by on-screen pixel
+  // position (Marker._updateZIndex) on top of whatever offset we give them.
+  // That position term is always far smaller than 1e6, so spacing bands this
+  // wide guarantees a chart's labels stay within its own band — above its
+  // own tiles, but never above a chart placed higher in chartOrder.
+  const CHART_ZINDEX_BAND = 1e6;
   function applyChartOrder() {
     const n = chartOrder.length;
     chartOrder.forEach(function (id, i) {
       const src = chartSources.get(id);
       if (!src) return;
-      src.zIndex = n - i;
+      src.zIndex = (n - i) * CHART_ZINDEX_BAND;
       if (src.layer && src.layer.setZIndex) src.layer.setZIndex(src.zIndex);
     });
   }

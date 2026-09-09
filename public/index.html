@@ -1189,27 +1189,33 @@ label.switch-row {
   border-radius: 6px;
 }
 .chart-drag-handle:active { cursor: grabbing; }
-.chart-drag-handle:focus-visible {
+.chart-drag-handle { --drag-dot: var(--text-faint); }
+/* Ring + dot accent on keyboard focus only. Chrome 66 has no :focus-visible
+   and drops any rule naming it, so the highlight is hung on :focus and taken
+   back off again for pointer focus - where that second rule is understood -
+   matching the #editor-close-btn pattern above. A combined `:hover, :focus-visible`
+   selector would also make Chrome 66 drop the whole rule, hover included, so
+   each state gets its own rule instead. */
+.chart-drag-handle:focus {
   outline: 2px solid var(--accent-bright);
   outline-offset: 2px;
+  --drag-dot: var(--accent-bright);
 }
+.chart-drag-handle:focus:not(:focus-visible) {
+  outline: none;
+  --drag-dot: var(--text-faint);
+}
+.chart-drag-handle:hover { --drag-dot: var(--accent-bright); }
 .chart-drag-handle::before {
   content: '';
   width: 4px;
   height: 4px;
   border-radius: 50%;
-  background: var(--text-faint);
+  background: var(--drag-dot);
   /* six dots in a 2x3 grid, drawn with box-shadow so no extra markup is needed */
   box-shadow:
-    0 -6px 0 var(--text-faint), 0 6px 0 var(--text-faint),
-    6px -6px 0 var(--text-faint), 6px 0 0 var(--text-faint), 6px 6px 0 var(--text-faint);
-}
-.chart-drag-handle:hover::before,
-.chart-drag-handle:focus-visible::before {
-  background: var(--accent-bright);
-  box-shadow:
-    0 -6px 0 var(--accent-bright), 0 6px 0 var(--accent-bright),
-    6px -6px 0 var(--accent-bright), 6px 0 0 var(--accent-bright), 6px 6px 0 var(--accent-bright);
+    0 -6px 0 var(--drag-dot), 0 6px 0 var(--drag-dot),
+    6px -6px 0 var(--drag-dot), 6px 0 0 var(--drag-dot), 6px 6px 0 var(--drag-dot);
 }
 .chart-row-body {
   flex: 1;
