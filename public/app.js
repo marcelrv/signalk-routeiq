@@ -1757,19 +1757,11 @@
       const span = document.createElement("span");
       span.className = "switch-label";
       span.textContent = src.supported ? src.name : src.name + " (unsupported)";
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = !!src.enabled;
-      if (!src.supported) cb.disabled = true;
-      cb.addEventListener("change", function () {
-        setChartEnabled(src, this.checked);
-        row.classList.toggle("chart-disabled", !this.checked);
-        saveChartSettings();
-      });
       label.appendChild(span);
-      label.appendChild(cb);
-      body.appendChild(label);
 
+      // Opacity slider sits between the name and the toggle, so the toggle
+      // stays flush against the row's right edge (label's flex row: name
+      // grows, opacity and toggle keep their natural fixed widths).
       const opacityInput = document.createElement("input");
       opacityInput.type = "range";
       opacityInput.className = "chart-opacity";
@@ -1787,7 +1779,19 @@
       opacityInput.addEventListener("change", function () {
         saveChartSettings();
       });
-      body.appendChild(opacityInput);
+      label.appendChild(opacityInput);
+
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !!src.enabled;
+      if (!src.supported) cb.disabled = true;
+      cb.addEventListener("change", function () {
+        setChartEnabled(src, this.checked);
+        row.classList.toggle("chart-disabled", !this.checked);
+        saveChartSettings();
+      });
+      label.appendChild(cb);
+      body.appendChild(label);
 
       row.appendChild(body);
       box.appendChild(row);
@@ -1795,41 +1799,68 @@
       // Drag-to-reorder: Pointer Events unify mouse/touch/pen and
       // setPointerCapture keeps tracking even if the pointer leaves the
       // handle, mirroring the time-scrubber's drag pattern elsewhere in
-      // this file. One-step swap against the crossed neighbor per move
-      // event, which cascades naturally as the pointer keeps moving.
+      // this file. Crucially, the row is never moved in the DOM while
+      // dragging - only translateY'd visually - because moving the element
+      // that holds pointer capture can make the browser silently release
+      // capture mid-gesture, which both stops delivering further move/up
+      // events (drag "sticks" after one hop) and leaves the .dragging
+      // highlight stuck forever (endDrag never runs). The real DOM move
+      // (a single insertBefore, via the splice-by-index idiom) happens once
+      // at drop.
       let dragging = false;
+      let dragStartY = 0;
+      let dragStartIndex = 0;
+      let dragCurrentIndex = 0;
+      let dragRowHeight = 0;
+      let dragSiblings = [];
       handle.addEventListener("pointerdown", function (e) {
         dragging = true;
         handle.setPointerCapture(e.pointerId);
         row.classList.add("dragging");
+        dragStartY = e.clientY;
+        dragSiblings = Array.prototype.slice.call(
+          box.querySelectorAll(".chart-row"),
+        );
+        dragStartIndex = dragSiblings.indexOf(row);
+        dragCurrentIndex = dragStartIndex;
+        dragRowHeight = row.getBoundingClientRect().height;
         e.preventDefault();
       });
       handle.addEventListener("pointermove", function (e) {
         if (!dragging) return;
-        const prev = row.previousElementSibling;
-        if (prev) {
-          const r = prev.getBoundingClientRect();
-          if (e.clientY < r.top + r.height / 2) {
-            box.insertBefore(row, prev);
-            return;
-          }
-        }
-        const next = row.nextElementSibling;
-        if (next) {
-          const r = next.getBoundingClientRect();
-          if (e.clientY > r.top + r.height / 2) {
-            box.insertBefore(row, next.nextSibling);
-          }
-        }
+        const deltaY = e.clientY - dragStartY;
+        row.style.transform = "translateY(" + deltaY + "px)";
+        const raw = dragStartIndex + Math.round(deltaY / dragRowHeight);
+        dragCurrentIndex = Math.max(0, Math.min(dragSiblings.length - 1, raw));
+        dragSiblings.forEach(function (sib, i) {
+          if (sib === row) return;
+          let shift = 0;
+          if (i > dragStartIndex && i <= dragCurrentIndex)
+            shift = -dragRowHeight;
+          else if (i < dragStartIndex && i >= dragCurrentIndex)
+            shift = dragRowHeight;
+          sib.style.transform = shift ? "translateY(" + shift + "px)" : "";
+        });
       });
       function endDrag() {
         if (!dragging) return;
         dragging = false;
         row.classList.remove("dragging");
+        row.style.transform = "";
+        dragSiblings.forEach(function (sib) {
+          if (sib !== row) sib.style.transform = "";
+        });
+        if (dragCurrentIndex !== dragStartIndex) {
+          const remaining = dragSiblings.filter(function (s) {
+            return s !== row;
+          });
+          box.insertBefore(row, remaining[dragCurrentIndex] || null);
+        }
         commitChartOrderFromDom();
       }
       handle.addEventListener("pointerup", endDrag);
       handle.addEventListener("pointercancel", endDrag);
+      handle.addEventListener("lostpointercapture", endDrag);
 
       // Keyboard fallback so reordering isn't drag-only.
       handle.addEventListener("keydown", function (e) {

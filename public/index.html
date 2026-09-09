@@ -1126,7 +1126,15 @@ label.switch-row {
   margin-bottom: 0;
   user-select: none;
 }
-.switch-row span.switch-label { color: var(--text-dim); font-size: 13px; flex: 1; }
+.switch-row span.switch-label {
+  color: var(--text-dim);
+  font-size: 13px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .switch-row input[type="checkbox"] {
   appearance: none;
   -webkit-appearance: none;
@@ -1170,12 +1178,16 @@ label.switch-row {
   gap: 8px;
   padding: 6px 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  transition: transform 0.12s ease;
 }
 .chart-row:last-child { border-bottom: none; }
 .chart-row.chart-unsupported { opacity: 0.5; }
 .chart-row.dragging {
   background: rgba(59, 143, 212, 0.12);
   border-radius: 6px;
+  position: relative;
+  z-index: 1;
+  transition: none; /* follows the pointer instantly; see the pointermove handler in app.js */
 }
 .chart-drag-handle {
   flex-shrink: 0;
@@ -1220,13 +1232,15 @@ label.switch-row {
 .chart-row-body {
   flex: 1;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
 }
 .chart-row-body .switch-row { min-height: 28px; }
+/* Sits between the name and the toggle inside label.switch-row: the name
+   span's flex:1 absorbs all the row's free space, so this fixed-width
+   slider and the toggle after it are pushed flush together against the
+   row's right edge. */
 input.chart-opacity {
-  width: 100%;
+  width: 80px;
+  flex-shrink: 0;
   accent-color: var(--accent);
   margin: 0;
   height: 18px;
