@@ -1752,7 +1752,12 @@
       const body = document.createElement("div");
       body.className = "chart-row-body";
 
-      const label = document.createElement("label");
+      // A plain div, not a <label>: it holds both the opacity range input
+      // and the checkbox, and a <label> only has a well-defined implicit
+      // association with a single labelable descendant (it would otherwise
+      // bind to the range input, not the checkbox). The checkbox gets its
+      // own aria-label instead.
+      const label = document.createElement("div");
       label.className = "switch-row";
       const span = document.createElement("span");
       span.className = "switch-label";
@@ -1784,6 +1789,7 @@
       const cb = document.createElement("input");
       cb.type = "checkbox";
       cb.checked = !!src.enabled;
+      cb.setAttribute("aria-label", "Enable " + src.name);
       if (!src.supported) cb.disabled = true;
       cb.addEventListener("change", function () {
         setChartEnabled(src, this.checked);

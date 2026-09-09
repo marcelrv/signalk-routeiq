@@ -1114,8 +1114,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 }
 
 /* ---------- switch toggles (replace bare checkboxes) ---------- */
-/* label.switch-row outranks the generic `.panel label { display:block }` */
-label.switch-row {
+/* Tag-qualified (not bare .switch-row) so this ties the specificity of the
+   generic `.panel label { display:block }` and wins via source order - the
+   chart list's row uses a <div class="switch-row"> (see app.js) rather than
+   a <label>, since it holds two form controls, so both tags are listed. */
+label.switch-row,
+div.switch-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
