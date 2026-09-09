@@ -803,8 +803,11 @@
   // not a navigation display.
   const CHART_STORE_KEY = "routeiq-charts";
 
-  map.createPane("charts").style.zIndex = 210; // above base tiles (200)
-  map.createPane("seamarks").style.zIndex = 220; // seamark overlay above charts
+  // Every chart layer (base maps, server charts, seamark overlay) shares this
+  // one pane so the user-defined stacking order (chartOrder, below) is the
+  // sole authority on what's on top — Leaflet panes outrank in-pane zIndex,
+  // so splitting layers across panes would defeat per-layer reordering.
+  map.createPane("charts").style.zIndex = 210; // above Leaflet's own tilePane (200)
 
   // S-52 DAY_BRIGHT palette (subset) from Freeboard-SK's chartsymbols.xml
   const S52 = {
@@ -1243,6 +1246,7 @@
       this._urlTemplate = urlTemplate;
       this._minZoom = chartOpts.minZoom;
       this._maxNativeZoom = chartOpts.maxNativeZoom;
+      this._opacity = chartOpts.opacity != null ? chartOpts.opacity : 1;
       this._tileCache = new Map(); // "z:x:y" -> records[] (or a Promise while loading)
       this._refreshSeq = 0;
     },
@@ -1256,6 +1260,16 @@
       map.off("moveend zoomend", this._onMove);
       this._refreshSeq++; // invalidate any refresh still in flight
       this.clearLayers();
+    },
+    // L.LayerGroup has no native opacity; each label is its own marker, so
+    // apply to markers already on the map and remember the value for the
+    // ones _refresh() creates next (it rebuilds all of them from scratch).
+    setOpacity: function (opacity) {
+      this._opacity = opacity;
+      this.eachLayer(function (l) {
+        if (l.setOpacity) l.setOpacity(opacity);
+      });
+      return this;
     },
     _fetchTile: function (x, y, z) {
       const key = z + ":" + x + ":" + y;
@@ -1443,6 +1457,7 @@
                   icon: s57LabelIcon(rec.name, rec.kind),
                   interactive: false,
                   keyboard: false,
+                  opacity: this._opacity,
                 }),
               );
             }.bind(this),
@@ -1564,10 +1579,15 @@
       const labelLayer = makeS57LabelLayer(c);
       if (!labelLayer) return tileLayer;
       const group = L.layerGroup([tileLayer, labelLayer]);
-      // Preserve the scale-based stacking setChartEnabled applies to plain
-      // tile layers — a LayerGroup has no setZIndex of its own.
+      // Preserve the stacking/opacity setChartEnabled applies to plain tile
+      // layers — a LayerGroup has neither setZIndex nor setOpacity of its own.
       group.setZIndex = function (z) {
         if (tileLayer.setZIndex) tileLayer.setZIndex(z);
+        return group;
+      };
+      group.setOpacity = function (o) {
+        tileLayer.setOpacity(o);
+        if (labelLayer.setOpacity) labelLayer.setOpacity(o);
         return group;
       };
       return group;
@@ -1575,24 +1595,53 @@
     return null;
   }
 
-  // sources: id -> { id, name, description, builtin, supported, enabled, zIndex, layer, make }
+  // sources: id -> { id, name, description, builtin, supported, enabled, opacity, zIndex, layer, make }
   const chartSources = new Map();
+  // User-defined stacking order: index 0 = top of the list = top of the map
+  // stack (highest zIndex), last = bottom. Seeded from whatever was saved,
+  // so a returning user's arrangement carries over; ids never seen before
+  // (a chart new to the server, or the very first run) are unshifted to the
+  // top as they're registered, below.
+  let chartOrder = loadChartSettings().map(function (s) {
+    return s.id;
+  });
 
-  function loadChartSelection() {
+  function loadChartSettings() {
     try {
       const v = JSON.parse(localStorage.getItem(CHART_STORE_KEY));
-      if (Array.isArray(v)) return v;
+      if (Array.isArray(v)) {
+        // Migrate the old format: a flat array of enabled chart ids, in no
+        // particular order.
+        if (v.every(function (e) { return typeof e === "string"; })) {
+          return v.map(function (id) {
+            return { id: id, enabled: true, opacity: 1 };
+          });
+        }
+        return v;
+      }
     } catch {}
-    return ["openstreetmap"]; // default = previous hardcoded base map
+    return [{ id: "openstreetmap", enabled: true, opacity: 1 }]; // default = previous hardcoded base map
   }
-  function saveChartSelection() {
-    const on = [];
-    chartSources.forEach(function (s) {
-      if (s.enabled) on.push(s.id);
+  function saveChartSettings() {
+    const settings = chartOrder.map(function (id) {
+      const s = chartSources.get(id);
+      return { id: id, enabled: !!(s && s.enabled), opacity: s ? s.opacity : 1 };
     });
     try {
-      localStorage.setItem(CHART_STORE_KEY, JSON.stringify(on));
+      localStorage.setItem(CHART_STORE_KEY, JSON.stringify(settings));
     } catch {}
+  }
+
+  // Re-applies chartOrder's positions as zIndex to every source with a live
+  // layer. Call after any reorder (drag, keyboard, or a fresh registration).
+  function applyChartOrder() {
+    const n = chartOrder.length;
+    chartOrder.forEach(function (id, i) {
+      const src = chartSources.get(id);
+      if (!src) return;
+      src.zIndex = n - i;
+      if (src.layer && src.layer.setZIndex) src.layer.setZIndex(src.zIndex);
+    });
   }
 
   function setChartEnabled(src, on) {
@@ -1605,36 +1654,169 @@
       }
       src.layer.addTo(map);
       if (src.zIndex && src.layer.setZIndex) src.layer.setZIndex(src.zIndex);
+      if (src.layer.setOpacity) src.layer.setOpacity(src.opacity);
     } else if (src.layer) {
       map.removeLayer(src.layer);
     }
   }
 
+  // Creates or updates a chartSources entry from freshly-fetched chart data
+  // (builtin or server), applying saved enabled/opacity settings the first
+  // time an id is seen, and placing genuinely new ids at the top of the
+  // stacking order. Existing entries keep whatever the user has toggled or
+  // dragged this session — only their descriptive fields are refreshed.
+  function registerSource(id, fields, savedSettings) {
+    let src = chartSources.get(id);
+    const isNew = !src;
+    if (isNew) {
+      src = { id: id, layer: null, enabled: false, opacity: 1 };
+      chartSources.set(id, src);
+    }
+    Object.assign(src, fields);
+    if (isNew) {
+      const saved = savedSettings.find(function (s) {
+        return s.id === id;
+      });
+      if (saved) {
+        src.enabled = !!saved.enabled;
+        src.opacity = typeof saved.opacity === "number" ? saved.opacity : 1;
+      }
+      if (!chartOrder.includes(id)) chartOrder.unshift(id);
+    }
+    return src;
+  }
+
   function renderChartList() {
     const box = document.getElementById("chart-list");
     box.innerHTML = "";
-    chartSources.forEach(function (src) {
+    chartOrder.forEach(function (id) {
+      const src = chartSources.get(id);
+      if (!src) return;
+
+      const row = document.createElement("div");
+      row.className = "chart-row";
+      row.dataset.chartId = id;
+      if (!src.enabled) row.classList.add("chart-disabled");
+      if (!src.supported) row.classList.add("chart-unsupported");
+      if (src.description) row.title = src.description;
+
+      const handle = document.createElement("span");
+      handle.className = "chart-drag-handle";
+      handle.tabIndex = 0;
+      handle.setAttribute("role", "button");
+      handle.setAttribute("aria-label", "Reorder " + src.name);
+      row.appendChild(handle);
+
+      const body = document.createElement("div");
+      body.className = "chart-row-body";
+
       const label = document.createElement("label");
       label.className = "switch-row";
       const span = document.createElement("span");
       span.className = "switch-label";
       span.textContent = src.supported ? src.name : src.name + " (unsupported)";
-      if (src.description) label.title = src.description;
       const cb = document.createElement("input");
       cb.type = "checkbox";
       cb.checked = !!src.enabled;
-      if (!src.supported) {
-        cb.disabled = true;
-        label.style.opacity = "0.5";
-      }
+      if (!src.supported) cb.disabled = true;
       cb.addEventListener("change", function () {
         setChartEnabled(src, this.checked);
-        saveChartSelection();
+        row.classList.toggle("chart-disabled", !this.checked);
+        saveChartSettings();
       });
       label.appendChild(span);
       label.appendChild(cb);
-      box.appendChild(label);
+      body.appendChild(label);
+
+      const opacityInput = document.createElement("input");
+      opacityInput.type = "range";
+      opacityInput.className = "chart-opacity";
+      opacityInput.min = "0";
+      opacityInput.max = "100";
+      opacityInput.value = String(Math.round((src.opacity != null ? src.opacity : 1) * 100));
+      opacityInput.setAttribute("aria-label", src.name + " opacity");
+      opacityInput.addEventListener("input", function () {
+        src.opacity = Number(this.value) / 100;
+        if (src.layer && src.layer.setOpacity) src.layer.setOpacity(src.opacity);
+      });
+      opacityInput.addEventListener("change", function () {
+        saveChartSettings();
+      });
+      body.appendChild(opacityInput);
+
+      row.appendChild(body);
+      box.appendChild(row);
+
+      // Drag-to-reorder: Pointer Events unify mouse/touch/pen and
+      // setPointerCapture keeps tracking even if the pointer leaves the
+      // handle, mirroring the time-scrubber's drag pattern elsewhere in
+      // this file. One-step swap against the crossed neighbor per move
+      // event, which cascades naturally as the pointer keeps moving.
+      let dragging = false;
+      handle.addEventListener("pointerdown", function (e) {
+        dragging = true;
+        handle.setPointerCapture(e.pointerId);
+        row.classList.add("dragging");
+        e.preventDefault();
+      });
+      handle.addEventListener("pointermove", function (e) {
+        if (!dragging) return;
+        const prev = row.previousElementSibling;
+        if (prev) {
+          const r = prev.getBoundingClientRect();
+          if (e.clientY < r.top + r.height / 2) {
+            box.insertBefore(row, prev);
+            return;
+          }
+        }
+        const next = row.nextElementSibling;
+        if (next) {
+          const r = next.getBoundingClientRect();
+          if (e.clientY > r.top + r.height / 2) {
+            box.insertBefore(row, next.nextSibling);
+          }
+        }
+      });
+      function endDrag() {
+        if (!dragging) return;
+        dragging = false;
+        row.classList.remove("dragging");
+        commitChartOrderFromDom();
+      }
+      handle.addEventListener("pointerup", endDrag);
+      handle.addEventListener("pointercancel", endDrag);
+
+      // Keyboard fallback so reordering isn't drag-only.
+      handle.addEventListener("keydown", function (e) {
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          moveChartRow(row, -1);
+        } else if (e.key === "ArrowDown") {
+          e.preventDefault();
+          moveChartRow(row, 1);
+        }
+      });
     });
+  }
+
+  function commitChartOrderFromDom() {
+    const box = document.getElementById("chart-list");
+    chartOrder = Array.prototype.map.call(
+      box.querySelectorAll(".chart-row"),
+      function (el) {
+        return el.dataset.chartId;
+      },
+    );
+    applyChartOrder();
+    saveChartSettings();
+  }
+
+  function moveChartRow(row, dir) {
+    const sib = dir < 0 ? row.previousElementSibling : row.nextElementSibling;
+    if (!sib) return;
+    if (dir < 0) row.parentNode.insertBefore(row, sib);
+    else row.parentNode.insertBefore(sib, row);
+    commitChartOrderFromDom();
   }
 
   // Fetch the chart list from the server; called on (re)connect
@@ -1647,40 +1829,44 @@
       })
       .then(function (res) {
         if (!res || typeof res !== "object") return;
-        const saved = loadChartSelection();
+        const savedSettings = loadChartSettings();
         // drop server charts that disappeared
         chartSources.forEach(function (src, id) {
           if (!src.builtin && !res[id]) {
             if (src.layer && src.enabled) map.removeLayer(src.layer);
             chartSources.delete(id);
+            const i = chartOrder.indexOf(id);
+            if (i !== -1) chartOrder.splice(i, 1);
           }
         });
-        // smaller scale number = more detail = drawn on top (Freeboard-SK ordering)
+        // Registration order below only matters for brand-new ids (each
+        // gets unshifted to the top as it's first seen) — smaller scale
+        // number = more detail, so processing least-detailed first leaves
+        // the most-detailed chart nearest the top by default.
         const ids = Object.keys(res).sort(function (a, b) {
           return (
             (res[b].scale || 0) - (res[a].scale || 0) || a.localeCompare(b)
           );
         });
-        let z = 1;
         ids.forEach(function (id) {
           const c = normalizeChart(id, res[id]);
-          let src = chartSources.get(id);
-          if (!src) {
-            src = { id: id, builtin: false, enabled: false, layer: null };
-            chartSources.set(id, src);
-            src.enabled = saved.includes(id);
-          }
-          src.name = c.name;
-          src.description = c.description;
-          src.supported =
-            isRasterChart(c) || (isVectorChart(c) && !!L.vectorGrid);
-          src.make = function () {
-            return makeChartLayer(c);
-          };
-          src.zIndex = z++;
+          const src = registerSource(
+            id,
+            {
+              builtin: false,
+              name: c.name,
+              description: c.description,
+              supported: isRasterChart(c) || (isVectorChart(c) && !!L.vectorGrid),
+              make: function () {
+                return makeChartLayer(c);
+              },
+            },
+            savedSettings,
+          );
           if (src.enabled && src.supported && !src.layer)
             setChartEnabled(src, true);
         });
+        applyChartOrder();
         renderChartList();
       })
       .catch(function () {});
@@ -1696,6 +1882,7 @@
         return L.tileLayer(
           "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
           {
+            pane: "charts",
             maxZoom: 18,
             attribution:
               '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
@@ -1711,7 +1898,7 @@
         return L.tileLayer(
           "https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png",
           {
-            pane: "seamarks",
+            pane: "charts",
             maxZoom: 18,
             attribution:
               '&copy; <a href="https://www.openseamap.org">OpenSeaMap</a>',
@@ -1720,20 +1907,20 @@
       },
     },
   ].forEach(function (b) {
-    const src = {
-      id: b.id,
-      name: b.name,
-      description: b.description,
-      builtin: true,
-      supported: true,
-      enabled: false,
-      layer: null,
-      make: b.make,
-      zIndex: 0,
-    };
-    chartSources.set(b.id, src);
-    if (loadChartSelection().includes(b.id)) setChartEnabled(src, true);
+    const src = registerSource(
+      b.id,
+      {
+        builtin: true,
+        name: b.name,
+        description: b.description,
+        supported: true,
+        make: b.make,
+      },
+      loadChartSettings(),
+    );
+    if (src.enabled) setChartEnabled(src, true);
   });
+  applyChartOrder();
   renderChartList();
 
   // Standard map conventions: left-drag pans (Leaflet default), left-click
