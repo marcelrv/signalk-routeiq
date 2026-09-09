@@ -1630,7 +1630,11 @@
       if (Array.isArray(v)) {
         // Migrate the old format: a flat array of enabled chart ids, in no
         // particular order.
-        if (v.every(function (e) { return typeof e === "string"; })) {
+        if (
+          v.every(function (e) {
+            return typeof e === "string";
+          })
+        ) {
           return v.map(function (id) {
             return { id: id, enabled: true, opacity: 1 };
           });
@@ -1653,7 +1657,8 @@
     );
     const settings = chartOrder.map(function (id) {
       const s = chartSources.get(id);
-      if (!s) return savedById.get(id) || { id: id, enabled: false, opacity: 1 };
+      if (!s)
+        return savedById.get(id) || { id: id, enabled: false, opacity: 1 };
       return { id: id, enabled: !!s.enabled, opacity: s.opacity };
     });
     try {
@@ -1770,11 +1775,14 @@
       opacityInput.className = "chart-opacity";
       opacityInput.min = "0";
       opacityInput.max = "100";
-      opacityInput.value = String(Math.round((src.opacity != null ? src.opacity : 1) * 100));
+      opacityInput.value = String(
+        Math.round((src.opacity != null ? src.opacity : 1) * 100),
+      );
       opacityInput.setAttribute("aria-label", src.name + " opacity");
       opacityInput.addEventListener("input", function () {
         src.opacity = Number(this.value) / 100;
-        if (src.layer && src.layer.setOpacity) src.layer.setOpacity(src.opacity);
+        if (src.layer && src.layer.setOpacity)
+          src.layer.setOpacity(src.opacity);
       });
       opacityInput.addEventListener("change", function () {
         saveChartSettings();
@@ -1893,7 +1901,8 @@
               builtin: false,
               name: c.name,
               description: c.description,
-              supported: isRasterChart(c) || (isVectorChart(c) && !!L.vectorGrid),
+              supported:
+                isRasterChart(c) || (isVectorChart(c) && !!L.vectorGrid),
               make: function () {
                 return makeChartLayer(c);
               },
