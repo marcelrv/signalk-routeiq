@@ -2,10 +2,25 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.8 — 2026-09-23
+
 - Added: hovering over a graph node or edge (with Show Nodes / Show Edges
   enabled) now shows a tooltip with its key info — for a node, depth and
   position; for an edge, distance, depth, traffic direction, air draft,
   width, and routing preference.
+
+- Added: S-57 vector chart layers now show place, water, and navaid names —
+  towns, seas, regions, and buoy/beacon names — instead of leaving them
+  unlabeled, and buoys/beacons render with real IALA-ish shapes (triangle,
+  square, diamond, circle) by mark type instead of every mark being an
+  identical colored dot.
+
+- Added: chart layers in Settings > Charts can now be dragged to reorder,
+  with a keyboard fallback, and each layer has its own opacity slider. Order,
+  enabled state, and opacity are saved together and restored on reload.
+  Stacking order across every chart layer, built-in and server-provided
+  alike, is now controlled solely by this order instead of being fixed by
+  chart scale or hard-coded panes.
 
 ## 0.1.0-alpha.7 — 2026-08-19
 
