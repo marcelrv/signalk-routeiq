@@ -190,7 +190,7 @@ async function init() {
   // Chart actions. A host remembers action visibility only for as long as it
   // runs, so after a panel reload put it back in line with `planning` (null).
   if (client.hasCapability("actions")) {
-    setActionsVisible(["add-via", "set-dest"], false);
+    syncActionVisibility();
     await client.subscribe(["action.invoked"], (_name, inv) => onAction(inv));
   }
   // A panel loaded by an action gets that action in its handshake instead of
@@ -307,8 +307,7 @@ async function startPlanning(start) {
   delete start.fromVessel;
   if (!start.name) start.name = "Start";
   planning = { start, fromVessel, vias: [], routeId: null };
-  setActionsVisible(["set-dest"], true);
-  setActionsVisible(["add-via"], false);
+  syncActionVisibility();
   setStatus(
     "route-status",
     "Start set. Right-click the destination" +
@@ -347,7 +346,6 @@ async function setDestination(dest) {
   lastAutoRouteId = routeId;
   selectedId = routeId;
   await refreshRoutes(routeId);
-  setActionsVisible(["add-via"], true);
   renderPlan();
   // No session yet, so calculate() takes the draft's points (start, vias,
   // destination) as the request points.
@@ -358,7 +356,7 @@ async function addVia(via) {
   if (!planning) {
     setStatus(
       "route-status",
-      "Set a start first (right-click → “Route from here”).",
+      "Set a start first (right-click → “Set start”).",
       "error",
     );
     return;
@@ -382,8 +380,16 @@ async function addVia(via) {
 function endPlanning() {
   if (!planning) return;
   planning = null;
-  setActionsVisible(["add-via", "set-dest"], false);
+  syncActionVisibility();
   renderPlan();
+}
+
+/** Never offer two ways to set a destination: "Route from vessel" outside a
+ * plan, "Add via" / "Set destination" inside one. "Set start" always shows
+ * (inside a plan it starts a new one). */
+function syncActionVisibility() {
+  setActionsVisible(["route-to"], !planning);
+  setActionsVisible(["add-via", "set-dest"], !!planning);
 }
 
 async function pick(actionId, prompt) {
@@ -833,7 +839,7 @@ async function routeToDestination() {
   await createAndCalculate("RouteIQ to destination", dest, "Destination");
   // The route now covers the trip; drop the direct "Navigate to here" course
   // so the chart doesn't show both. (Hosts with chart actions also offer the
-  // one-step "Route here" — this path is for those without.)
+  // one-step "Route from vessel" — this path is for those without.)
   const cleared = await clearActiveDestination();
   if (cleared) {
     setStatus(

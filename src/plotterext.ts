@@ -95,7 +95,7 @@ export function buildManifest(version: string) {
     actions: [
       {
         id: "route-to",
-        title: "Route here",
+        title: "Route from vessel",
         icon: "alt_route",
         targets: [
           "position",
@@ -110,14 +110,14 @@ export function buildManifest(version: string) {
       },
       {
         id: "route-from",
-        title: "Route from here",
+        title: "Set start",
         icon: "trip_origin",
         targets: ["position", "waypoint"],
         action: OPEN_PANEL,
       },
       {
         id: "add-via",
-        title: "Add via here",
+        title: "Add via",
         icon: "add_location_alt",
         targets: ["position", "waypoint"],
         action: OPEN_PANEL,
@@ -125,7 +125,7 @@ export function buildManifest(version: string) {
       },
       {
         id: "set-dest",
-        title: "Set destination here",
+        title: "Set destination",
         icon: "flag",
         targets: ["position", "waypoint", "note"],
         action: OPEN_PANEL,
