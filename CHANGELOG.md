@@ -13,8 +13,11 @@
   keeps routing but its names are switched off, and the Data Manager shows
   why in red.
 
-- Changed: the Freeboard panel no longer shows "air ≤ 999 m" on a leg; 999 means
-  no clearance limit.
+- Changed: the Freeboard panel no longer shows "air ≤ 999 m" on a leg, and
+  neither UI shows a 999 m minimum width; 999 means no limit.
+
+- Fixed: an opened itinerary leg with many crossings was cut off with no way
+  to scroll; it now scrolls.
 
 - Added: in Freeboard-SK 3.4+, RouteIQ adds chart right-click commands —
   "Set start", "Set destination" and "Add via" plan a route by clicking,
