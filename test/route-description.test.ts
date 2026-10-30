@@ -449,6 +449,34 @@ describe('id collisions between regional files', () => {
     assert.strictEqual(findDescribeCollision(a, [old]), null);
   });
 
+  it('skips a partner whose description is already off', () => {
+    const a = handle({}, 'a_navlines.sqlite');
+    const b = handle({ sequences: [{ id: 12, a: 2, b: 4, wb: 100, origin: 1, quality: 4 }] }, 'b_navlines.sqlite');
+    assert.ok(findDescribeCollision(a, [b]), 'a clashes with a healthy b');
+    assert.strictEqual(findDescribeCollision(a, [{ ...b, describeError: 'already off' }]), null);
+  });
+
+  it('after the first file is evicted and reloaded, it is not switched off by the colliding one', async () => {
+    const dir = tmpDir();
+    dirs.push(dir);
+    buildDb(path.join(dir, 'a_navlines.sqlite'), 'AAA');
+    buildDb(path.join(dir, 'b_navlines.sqlite'), 'BBB', { sequences: [{ id: 12, a: 2, b: 4, wb: 100, origin: 1, quality: 4 }, { id: 11, a: 0, b: 2, wb: 100, origin: 1, quality: 4 }, { id: 21, a: 4, b: 5, wb: 200, origin: 2, quality: 0 }] });
+    const db = new RoutingDatabase(dir, true);
+    await db.init();
+    await db.loadGraph();
+    try {
+      await db.loadDatabaseGraph('a_navlines.sqlite');
+      await db.loadDatabaseGraph('b_navlines.sqlite'); // collides with a: b off
+      await db.unloadDatabaseGraph('a_navlines.sqlite');
+      await db.loadDatabaseGraph('a_navlines.sqlite'); // checked against b, which is already off
+      const byName = new Map((await db.getDatabaseCatalog()).map(c => [c.filename, c]));
+      assert.strictEqual(byName.get('a_navlines.sqlite')!.descriptionError, null);
+      assert.match(byName.get('b_navlines.sqlite')!.descriptionError!, /edge sequence id 12/);
+    } finally {
+      await db.close();
+    }
+  });
+
   it('a colliding file still loads and routes, but its description is off and the catalog says why', async () => {
     const dir = tmpDir();
     dirs.push(dir);

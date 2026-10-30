@@ -80,7 +80,9 @@ export function findDescribeCollision(
   others: Array<DescribeSource | null>,
 ): string | null {
   for (const other of others) {
-    if (!other || other === fresh) continue;
+    // A file whose description is already off cannot supply wrong names, so
+    // it must not switch off another file's.
+    if (!other || other === fresh || other.describeError) continue;
     const a = nameOf(fresh.path);
     const b = nameOf(other.path);
 
