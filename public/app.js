@@ -7169,7 +7169,8 @@
               fmtDepth(rise) +
               ")</span></div>";
           }
-          if (minWidth !== Infinity)
+          // 999 m is the graph's "no width limit", not a real width.
+          if (minWidth !== Infinity && minWidth < 999)
             html +=
               '<div class="leg-stat"><span>Min Width</span><span class="leg-val">' +
               minWidth.toFixed(1) +

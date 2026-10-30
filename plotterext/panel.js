@@ -1348,7 +1348,8 @@ function renderItinerary(itinerary) {
       // 999 m is the graph's "no clearance limit", not a real height.
       if (typeof p.leg.maxAirDraft === "number" && p.leg.maxAirDraft < 999)
         bits.push("air ≤ " + p.leg.maxAirDraft.toFixed(1) + " m");
-      if (typeof p.leg.minWidth === "number")
+      // Likewise 999 m is "no width limit".
+      if (typeof p.leg.minWidth === "number" && p.leg.minWidth < 999)
         bits.push("width ≥ " + p.leg.minWidth.toFixed(0) + " m");
       const stats = document.createElement("div");
       stats.innerHTML = bits
