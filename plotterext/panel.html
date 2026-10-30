@@ -162,6 +162,13 @@
   #poi-results .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #poi-results button { padding: 1px 7px; font-size: 11px; }
   #unsupported { display: none; padding: 12px; }
+
+  /* Pick planner rows: label · chosen point · buttons */
+  .plan-row { display: flex; align-items: center; gap: 5px; margin-top: 4px; font-size: 11.5px; }
+  .plan-row .plan-label { flex: 0 0 68px; color: var(--muted); }
+  .plan-row .plan-val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .plan-row .plan-vias { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+  .plan-row button { flex: 0 0 auto; padding: 2px 7px; }
 </style>
 </head>
 <body>
@@ -204,6 +211,28 @@
       <ul id="warnings" class="plain"></ul>
       <ol id="itinerary"></ol>
     </div>
+
+    <!-- Shown only on hosts with map.pick. Each 📍 asks for one tap on the
+         chart; the same flow is reachable from the chart's context menu. -->
+    <section id="plan-section" style="display:none">
+      <h2>Plan on the chart</h2>
+      <div class="plan-row">
+        <span class="plan-label">Start</span>
+        <span id="plan-start" class="plan-val">Vessel</span>
+        <button id="plan-start-vessel" title="Start at the vessel position">Vessel</button>
+        <button id="plan-start-pick" title="Tap the start on the chart">📍</button>
+      </div>
+      <div class="plan-row">
+        <span class="plan-label">Destination</span>
+        <span id="plan-dest" class="plan-val">—</span>
+        <span id="plan-vias" class="plan-vias"></span>
+        <button id="plan-dest-pick" title="Tap the destination on the chart">📍</button>
+      </div>
+      <div class="btnrow">
+        <button id="plan-via-pick" title="Tap a point to route via" disabled>+ Via 📍</button>
+        <button id="plan-clear" title="End this plan (the route stays on the chart)" disabled>Clear</button>
+      </div>
+    </section>
 
     <h2>Route from vessel to…</h2>
     <div class="btnrow">
