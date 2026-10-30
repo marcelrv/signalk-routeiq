@@ -253,7 +253,7 @@ async function onAction(inv) {
       setStatus("route-status", "That route is no longer on the chart.", "");
       return;
     }
-    await run(actionId === "optimise" ? calculate : scanDepartures);
+    await run(actionId === "optimise" ? calculate : bestDeparture);
     return;
   }
 
@@ -262,16 +262,7 @@ async function onAction(inv) {
     setStatus("route-status", "No position for that target.", "error");
     return;
   }
-  if (actionId === "route-to") {
-    await run(() =>
-      createAndCalculate(
-        "To " + (point.name || "chart position"),
-        { latitude: point.position[1], longitude: point.position[0] },
-        point.name,
-        point.href,
-      ),
-    );
-  } else if (actionId === "route-from") {
+  if (actionId === "route-from") {
     await run(() => startPlanning(point));
   } else if (actionId === "set-dest") {
     await run(() => setDestination(point));
@@ -306,7 +297,29 @@ async function startPlanning(start) {
   const fromVessel = !!start.fromVessel;
   delete start.fromVessel;
   if (!start.name) start.name = "Start";
-  planning = { start, fromVessel, vias: [], routeId: null };
+
+  // Destination already chosen (the draft is on the chart): move its start
+  // and recalculate, so start and destination can be set in either order.
+  if (planningRoute()) {
+    const { requestPoints: req } = await currentRequestPoints(planning.routeId);
+    planning.start = start;
+    planning.fromVessel = fromVessel;
+    selectedId = planning.routeId;
+    renderPlan();
+    await calculate([start, ...req.slice(1)]);
+    return;
+  }
+
+  // Destination chosen first (no vessel position to route from): now both
+  // ends are known, so the draft can be created.
+  if (planning?.dest) {
+    planning.start = start;
+    planning.fromVessel = fromVessel;
+    await createPlanDraft();
+    return;
+  }
+
+  planning = { start, dest: null, fromVessel, vias: [], routeId: null };
   syncActionVisibility();
   setStatus(
     "route-status",
@@ -319,7 +332,6 @@ async function startPlanning(start) {
 
 async function setDestination(dest) {
   if (!dest.name) dest.name = "Destination";
-  if (!planning) await startPlanning(await vesselStartPoint());
 
   // Draft already on the chart: move its destination and recalculate.
   if (planningRoute()) {
@@ -330,9 +342,48 @@ async function setDestination(dest) {
     return;
   }
 
-  // First destination: create the draft. Like the other auto-created routes
-  // it replaces our previous unsaved draft instead of piling up next to it.
+  // No start yet: route from the vessel, or — without a vessel position —
+  // keep the destination and wait for a start.
+  if (!planning?.start) {
+    let vessel = null;
+    try {
+      vessel = await vesselStartPoint();
+    } catch {
+      // no position fix; handled below
+    }
+    if (!vessel) {
+      planning = planning || { start: null, fromVessel: false, vias: [] };
+      planning.dest = dest;
+      planning.routeId = null;
+      syncActionVisibility();
+      setStatus(
+        "route-status",
+        "Destination set. No vessel position — right-click the start" +
+          (client.hasCapability("map.pick") ? ", or tap 📍." : "."),
+        "ok",
+      );
+      renderPlan();
+      return;
+    }
+    delete vessel.fromVessel;
+    planning = {
+      start: vessel,
+      fromVessel: true,
+      vias: planning?.vias || [],
+      routeId: null,
+    };
+    syncActionVisibility();
+  }
+  planning.dest = dest;
+  await createPlanDraft();
+}
+
+/** Both ends known: create the draft route and calculate it. Like the other
+ * auto-created routes it replaces our previous unsaved draft instead of
+ * piling up next to it. */
+async function createPlanDraft() {
   await discardPendingAutoRoute();
+  const dest = planning.dest;
   const vias = planning.vias.map((v, i) => ({
     ...v,
     name: v.name || "Via " + (i + 1),
@@ -354,17 +405,20 @@ async function setDestination(dest) {
 
 async function addVia(via) {
   if (!planning) {
-    setStatus(
-      "route-status",
-      "Set a start first (right-click → “Set start”).",
-      "error",
-    );
+    setStatus("route-status", "Set a start or destination first.", "error");
     return;
   }
   if (!planningRoute()) {
-    // No destination yet — keep it for when the draft is created.
+    // Start or destination still missing — keep it for when the draft is
+    // created.
     planning.vias.push(via);
-    setStatus("route-status", "Via added. Now set the destination.", "ok");
+    setStatus(
+      "route-status",
+      planning.dest
+        ? "Via added. Now set the start."
+        : "Via added. Now set the destination.",
+      "ok",
+    );
     renderPlan();
     return;
   }
@@ -384,12 +438,10 @@ function endPlanning() {
   renderPlan();
 }
 
-/** Never offer two ways to set a destination: "Route from vessel" outside a
- * plan, "Add via" / "Set destination" inside one. "Set start" always shows
- * (inside a plan it starts a new one). */
+/** "Set start" and "Set destination" always show; "Add via" only inside a
+ * plan. */
 function syncActionVisibility() {
-  setActionsVisible(["route-to"], !planning);
-  setActionsVisible(["add-via", "set-dest"], !!planning);
+  setActionsVisible(["add-via"], !!planning);
 }
 
 async function pick(actionId, prompt) {
@@ -433,15 +485,20 @@ function fmtPoint(p) {
 function renderPlan() {
   if ($("plan-section").style.display === "none") return;
   const r = planningRoute();
-  $("plan-start").textContent = !planning
-    ? "Vessel"
-    : planning.fromVessel
+  $("plan-start").textContent =
+    !planning || planning.fromVessel
       ? "Vessel"
-      : fmtPoint(planning.start);
+      : planning.start
+        ? fmtPoint(planning.start)
+        : "—";
   const session = r ? sessions.get(r.routeId) : null;
   const req = session?.requestPoints;
   $("plan-dest").textContent =
-    req && req.length >= 2 ? fmtPoint(req[req.length - 1]) : "—";
+    req && req.length >= 2
+      ? fmtPoint(req[req.length - 1])
+      : planning?.dest
+        ? fmtPoint(planning.dest)
+        : "—";
   const viaCount = req ? req.length - 2 : planning ? planning.vias.length : 0;
   $("plan-vias").textContent = viaCount > 0 ? viaCount + " via" : "";
   $("plan-via-pick").disabled = !planning;
@@ -484,23 +541,98 @@ function syncDepartureToNow() {
   if (!departureEdited) setDepartureInput(new Date());
 }
 
-async function checkTides() {
+let tideCheckSeq = 0;
+let tideCheckedFor; // selectedId the tide controls were last checked for
+const MAX_TIDE_PROBES = 8;
+
+/**
+ * Where to ask the server about tide data: the selected route's start, vias
+ * and end plus the start–end midpoint; with no route, the vessel, else the
+ * chart centre (a boat without a position fix, or planning from home).
+ */
+async function tideProbePoints() {
+  const r = selectedRoute();
+  if (r) {
+    try {
+      const { requestPoints } = await currentRequestPoints(r.routeId);
+      let pts = requestPoints.map((p) => p.position);
+      // A hand-drawn route can have many points; sample it evenly.
+      if (pts.length > MAX_TIDE_PROBES - 1) {
+        const n = MAX_TIDE_PROBES - 1;
+        pts = Array.from(
+          { length: n },
+          (_, i) => pts[Math.round((i * (pts.length - 1)) / (n - 1))],
+        );
+      }
+      const a = pts[0],
+        b = pts[pts.length - 1];
+      pts.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
+      return pts;
+    } catch {
+      // route gone meanwhile; fall back below
+    }
+  }
   try {
     const pos = await vesselPosition();
-    const st = await fetch(
-      API + `/tides/status?latitude=${pos.latitude}&longitude=${pos.longitude}`,
-    ).then((r) => (r.ok ? r.json() : null));
-    tidesAvailable = !!(st && st.available);
-    $("tide-row").style.display = tidesAvailable ? "" : "none";
-    if (tidesAvailable && st.considerTidesDefault) {
-      $("tide-cb").checked = true;
-      $("tide-depart").style.display = "";
-      syncDepartureToNow();
-    }
+    return [[pos.longitude, pos.latitude]];
   } catch {
-    tidesAvailable = false;
-    $("tide-row").style.display = "none";
+    // no position fix
   }
+  if (client.hasCapability("map")) {
+    try {
+      const { center } = await client.call("map.getView");
+      if (Array.isArray(center)) return [center];
+    } catch {
+      // no view; nothing to probe
+    }
+  }
+  return [];
+}
+
+/** Show the tide controls when any probe point has tide data. */
+async function checkTides() {
+  const seq = ++tideCheckSeq;
+  tideCheckedFor = selectedId;
+  const pts = await tideProbePoints();
+  const answers = await Promise.all(
+    pts.map(([lon, lat]) =>
+      fetch(API + `/tides/status?latitude=${lat}&longitude=${lon}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+    ),
+  );
+  if (seq !== tideCheckSeq) return; // superseded by a newer check
+  const st = answers.find((a) => a && a.available);
+  const wasAvailable = tidesAvailable;
+  tidesAvailable = !!st;
+  $("tide-row").style.display = tidesAvailable ? "" : "none";
+  // Apply the configured default only when tides become available, so a
+  // re-check after a route change does not undo the user's choice.
+  if (tidesAvailable && !wasAvailable && st.considerTidesDefault) {
+    $("tide-cb").checked = true;
+    $("tide-depart").style.display = "";
+    syncDepartureToNow();
+  }
+}
+
+/**
+ * "Best departure time" chart action. The scan's list lives inside the tide
+ * controls, which stay hidden without tide data or with "Consider tide"
+ * off — so check tides along this route and open the controls first.
+ */
+async function bestDeparture() {
+  await checkTides();
+  if (!tidesAvailable) {
+    setStatus(
+      "route-status",
+      "No tide data for this area, so the departure time does not change the route.",
+      "error",
+    );
+    return;
+  }
+  $("tide-cb").checked = true;
+  $("tide-depart").style.display = "";
+  await scanDepartures();
 }
 
 /* ---------- routing engine status ---------- */
@@ -595,6 +727,8 @@ function selectedRoute() {
 
 function renderRouteState() {
   const r = selectedRoute();
+  // Tide data depends on where the route goes; re-check when it changes.
+  if (selectedId !== tideCheckedFor) checkTides();
   const info = $("route-info");
   if (!r) {
     info.textContent = "";
@@ -807,18 +941,18 @@ async function discardPendingAutoRoute() {
   sessions.delete(prev.routeId);
 }
 
-async function createAndCalculate(name, destination, destName, destHref) {
+async function createAndCalculate(name, destination, destName) {
   const pos = await vesselPosition();
   await discardPendingAutoRoute();
-  const dest = {
-    position: [destination.longitude, destination.latitude],
-    name: destName || "Destination",
-  };
-  // Link the destination to its waypoint when it is one (chart actions).
-  if (destHref) dest.href = destHref;
   const { routeId } = await client.call("route.create", {
     name,
-    points: [{ position: [pos.longitude, pos.latitude], name: "Start" }, dest],
+    points: [
+      { position: [pos.longitude, pos.latitude], name: "Start" },
+      {
+        position: [destination.longitude, destination.latitude],
+        name: destName || "Destination",
+      },
+    ],
   });
   lastAutoRouteId = routeId;
   selectedId = routeId;
@@ -839,7 +973,7 @@ async function routeToDestination() {
   await createAndCalculate("RouteIQ to destination", dest, "Destination");
   // The route now covers the trip; drop the direct "Navigate to here" course
   // so the chart doesn't show both. (Hosts with chart actions also offer the
-  // one-step "Route from vessel" — this path is for those without.)
+  // one-step "Set destination" — this path is for those without.)
   const cleared = await clearActiveDestination();
   if (cleared) {
     setStatus(

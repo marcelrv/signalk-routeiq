@@ -89,25 +89,11 @@ export function buildManifest(version: string) {
     ],
     // Chart context-menu / popover commands (capability `actions`). They only
     // hand the panel a point or a route handle; the routing itself is still
-    // the server's POST /router/route. add-via and set-dest only make sense
-    // while a planning session runs, so they start hidden and the panel
-    // reveals them with actions.setVisibility.
+    // the server's POST /router/route. Start and destination can be set in
+    // either order (a destination alone routes from the vessel); add-via only
+    // makes sense while a plan is open, so it starts hidden and the panel
+    // reveals it with actions.setVisibility.
     actions: [
-      {
-        id: "route-to",
-        title: "Route from vessel",
-        icon: "alt_route",
-        targets: [
-          "position",
-          "waypoint",
-          "note",
-          {
-            kind: "chartFeature",
-            match: [{ path: "class", op: "in", value: ["HRBFAC", "SMCFAC"] }],
-          },
-        ],
-        action: OPEN_PANEL,
-      },
       {
         id: "route-from",
         title: "Set start",
@@ -127,9 +113,16 @@ export function buildManifest(version: string) {
         id: "set-dest",
         title: "Set destination",
         icon: "flag",
-        targets: ["position", "waypoint", "note"],
+        targets: [
+          "position",
+          "waypoint",
+          "note",
+          {
+            kind: "chartFeature",
+            match: [{ path: "class", op: "in", value: ["HRBFAC", "SMCFAC"] }],
+          },
+        ],
         action: OPEN_PANEL,
-        visible: false,
       },
       {
         id: "optimise",

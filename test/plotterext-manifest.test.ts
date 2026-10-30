@@ -54,10 +54,11 @@ describe('plotter extension manifest', () => {
     assert.strictEqual(new Set(ids).size, ids.length, `duplicate in ${ids}`);
   });
 
-  it('hides the planning-session actions until a session exists', () => {
+  it('offers start and destination directly, add-via only in a plan', () => {
     const byId = new Map(manifest.actions.map((a) => [a.id, a]));
-    for (const id of ['add-via', 'set-dest']) {
-      assert.strictEqual(byId.get(id)?.visible, false, `${id} should start hidden`);
+    for (const id of ['route-from', 'set-dest']) {
+      assert.notStrictEqual(byId.get(id)?.visible, false, `${id} should show`);
     }
+    assert.strictEqual(byId.get('add-via')?.visible, false, 'add-via should start hidden');
   });
 });
