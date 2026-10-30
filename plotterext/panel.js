@@ -237,6 +237,17 @@ async function onAction(inv) {
     );
     return;
   }
+  // The panel's own buttons wait for the engine; actions must too. The flag
+  // is only refreshed on demand, so look again before turning the user away.
+  if (!engineReady) await checkEngine();
+  if (!engineReady) {
+    setStatus(
+      "route-status",
+      "The routing engine is not ready yet — try again shortly.",
+      "error",
+    );
+    return;
+  }
 
   if (actionId === "optimise" || actionId === "best-departure") {
     if (!target.routeId) {
@@ -304,12 +315,15 @@ async function startPlanning(start) {
   // Destination already chosen (the draft is on the chart): move its start
   // and recalculate, so start and destination can be set in either order.
   if (planningRoute()) {
-    const { requestPoints: req } = await currentRequestPoints(planning.routeId);
-    planning.start = start;
-    planning.fromVessel = fromVessel;
-    selectedId = planning.routeId;
+    const plan = planning;
+    const derived = await currentRequestPoints(plan.routeId);
+    if (planning !== plan) return; // draft left the chart meanwhile
+    selectedId = plan.routeId;
+    await calculate([start, ...derived.requestPoints.slice(1)], derived);
+    // Only once routed: a failed move leaves the plan on the old start.
+    plan.start = start;
+    plan.fromVessel = fromVessel;
     renderPlan();
-    await calculate([start, ...req.slice(1)]);
     return;
   }
 
@@ -346,10 +360,11 @@ async function setDestination(dest) {
 
   // Draft already on the chart: move its destination and recalculate.
   if (planningRoute()) {
-    const { requestPoints: req } = await currentRequestPoints(planning.routeId);
-    selectedId = planning.routeId;
-    renderPlan();
-    await calculate([...req.slice(0, -1), dest]);
+    const plan = planning;
+    const derived = await currentRequestPoints(plan.routeId);
+    if (planning !== plan) return; // draft left the chart meanwhile
+    selectedId = plan.routeId;
+    await calculate([...derived.requestPoints.slice(0, -1), dest], derived);
     return;
   }
 
@@ -393,25 +408,28 @@ async function setDestination(dest) {
  * auto-created routes it replaces our previous unsaved draft instead of
  * piling up next to it. */
 async function createPlanDraft() {
+  const plan = planning;
   await discardPendingAutoRoute();
-  const dest = planning.dest;
-  const vias = planning.vias.map((v, i) => ({
+  const dest = plan.dest;
+  const vias = plan.vias.map((v, i) => ({
     ...v,
     name: v.name || "Via " + (i + 1),
   }));
   const { routeId } = await client.call("route.create", {
     name: "RouteIQ to " + dest.name,
-    points: [planning.start, ...vias, dest],
+    points: [plan.start, ...vias, dest],
   });
-  planning.routeId = routeId;
-  planning.vias = [];
   lastAutoRouteId = routeId;
   selectedId = routeId;
+  if (planning !== plan) return; // plan ended meanwhile
+  plan.routeId = routeId;
   await refreshRoutes(routeId);
   renderPlan();
   // No session yet, so calculate() takes the draft's points (start, vias,
   // destination) as the request points.
   await calculate();
+  // Kept until routed: without a session the Plan section counts these.
+  plan.vias = [];
 }
 
 async function addVia(via) {
@@ -435,10 +453,13 @@ async function addVia(via) {
   }
   // The new via goes last, just before the destination. Starting from the
   // current request points keeps any reordering the user did on the chart.
-  const { requestPoints: req } = await currentRequestPoints(planning.routeId);
+  const plan = planning;
+  const derived = await currentRequestPoints(plan.routeId);
+  if (planning !== plan) return; // draft left the chart meanwhile
+  const req = derived.requestPoints;
   if (!via.name) via.name = "Via " + (req.length - 1);
-  selectedId = planning.routeId;
-  await calculate([...req.slice(0, -1), via, req[req.length - 1]]);
+  selectedId = plan.routeId;
+  await calculate([...req.slice(0, -1), via, req[req.length - 1]], derived);
   renderPlan();
 }
 
@@ -450,6 +471,11 @@ function endPlanning() {
       .call("map.cancelPick", { pickId: pendingPick.pickId })
       .catch(() => {});
     pendingPick = null;
+  }
+  // The draft is the user's now ("the route stays on the chart"), so the
+  // next auto-route must not discard it as its own leftover.
+  if (planning.routeId && lastAutoRouteId === planning.routeId) {
+    lastAutoRouteId = null;
   }
   planning = null;
   syncActionVisibility();
@@ -499,28 +525,31 @@ function fmtPoint(p) {
   return p.position[1].toFixed(4) + ", " + p.position[0].toFixed(4);
 }
 
-/** The Plan section (pick hosts only) mirrors `planning`. */
+/** The Plan section (pick hosts only) mirrors `planning` until the draft has
+ * been routed, and from then on the request points it was routed by — one
+ * source for start, vias and destination, so they always describe one route. */
 function renderPlan() {
   if ($("plan-section").style.display === "none") return;
   const r = planningRoute();
-  $("plan-start").textContent =
-    !planning || planning.fromVessel
-      ? "Vessel"
-      : planning.start
-        ? fmtPoint(planning.start)
-        : "—";
   const session = r ? sessions.get(r.routeId) : null;
-  const req = session?.requestPoints;
-  $("plan-dest").textContent =
-    req && req.length >= 2
-      ? fmtPoint(req[req.length - 1])
-      : planning?.dest
-        ? fmtPoint(planning.dest)
-        : "—";
+  const req =
+    session?.requestPoints?.length >= 2 ? session.requestPoints : null;
+  const start = req ? req[0] : planning?.start;
+  const fromVessel =
+    !planning ||
+    (planning.fromVessel && (!req || samePoints([req[0]], [planning.start])));
+  $("plan-start").textContent = fromVessel
+    ? "Vessel"
+    : start
+      ? fmtPoint(start)
+      : "—";
+  const dest = req ? req[req.length - 1] : planning?.dest;
+  $("plan-dest").textContent = dest ? fmtPoint(dest) : "—";
   const viaCount = req ? req.length - 2 : planning ? planning.vias.length : 0;
   $("plan-vias").textContent = viaCount > 0 ? viaCount + " via" : "";
   $("plan-via-pick").disabled = !planning;
-  $("plan-clear").disabled = !planning;
+  // Ending the plan mid-calculation would pull `planning` out from under it.
+  $("plan-clear").disabled = busy || !planning;
 }
 
 /* ---------- tides ---------- */
@@ -561,6 +590,7 @@ function syncDepartureToNow() {
 
 let tideCheckSeq = 0;
 let tideCheckedFor; // selectedId the tide controls were last checked for
+let tideDefaultApplied = false; // considerTidesDefault applied this load
 const MAX_TIDE_PROBES = 8;
 
 /**
@@ -621,15 +651,18 @@ async function checkTides() {
   );
   if (seq !== tideCheckSeq) return; // superseded by a newer check
   const st = answers.find((a) => a && a.available);
-  const wasAvailable = tidesAvailable;
   tidesAvailable = !!st;
   $("tide-row").style.display = tidesAvailable ? "" : "none";
-  // Apply the configured default only when tides become available, so a
-  // re-check after a route change does not undo the user's choice.
-  if (tidesAvailable && !wasAvailable && st.considerTidesDefault) {
-    $("tide-cb").checked = true;
-    $("tide-depart").style.display = "";
-    syncDepartureToNow();
+  // Apply the configured default the first time tides show up only, so a
+  // re-check after a route change — even one that hid the controls for a
+  // while — does not undo the user's choice.
+  if (tidesAvailable && !tideDefaultApplied) {
+    tideDefaultApplied = true;
+    if (st.considerTidesDefault) {
+      $("tide-cb").checked = true;
+      $("tide-depart").style.display = "";
+      syncDepartureToNow();
+    }
   }
 }
 
@@ -823,9 +856,11 @@ async function currentRequestPoints(routeId) {
 /**
  * Route the selected route and stage the result on the chart.
  * `forcedRequestPoints` replaces the derived start/via/end — the planning
- * session uses it to add a via or move the destination.
+ * session uses it to add a via or move the destination. `known` is a
+ * currentRequestPoints() answer the caller already has for this route, which
+ * saves a second route.get.
  */
-async function calculate(forcedRequestPoints) {
+async function calculate(forcedRequestPoints, known) {
   const r = selectedRoute();
   if (!r) return;
   setStatus("route-status", "Calculating route…", "");
@@ -833,7 +868,7 @@ async function calculate(forcedRequestPoints) {
 
   const routeId = r.routeId;
   const session = sessions.get(routeId);
-  const derived = await currentRequestPoints(routeId);
+  const derived = known ?? (await currentRequestPoints(routeId));
   const points = derived.points;
   const requestPoints = Array.isArray(forcedRequestPoints)
     ? forcedRequestPoints
@@ -906,7 +941,11 @@ async function calculate(forcedRequestPoints) {
     revertPoints: session?.revertPoints ?? points,
   });
   await client.call("route.replace", { routeId, points: newPoints });
-  tideCheckedFor = undefined; // new geometry under the same routeId
+  // Tide probes sit on the request points, so only a changed request (a new
+  // via, a moved end) needs a fresh check — a plain re-run does not.
+  if (!samePoints(requestPoints, session?.requestPoints)) {
+    tideCheckedFor = undefined;
+  }
 
   setStatus(
     "route-status",
