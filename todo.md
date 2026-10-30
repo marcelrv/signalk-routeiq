@@ -192,6 +192,15 @@ turn text).
 These were one-line ideas without a design behind them; worth a proper look
 before adding to the lists above, or dropping if no longer relevant:
 
+- **To decide: water-body collision rule across borders** (route description,
+  `findDescribeCollision` in `src/route-metadata.ts`). Following the spec
+  ("Ids"), a water body id must have the same `name` and `kind_id` in every
+  loaded file. But one real water keeps one id across borders while each
+  database stores its own local default name, so an NL file's "Maas" and a BE
+  file's "Meuse" would read as a collision and switch the later file's names
+  off. A possible rule: same kind, and the name appears among the other file's
+  `water_body_names`. That is a spec change in signalk-router-pipeline. Kept as
+  is for now (2026-10-30).
 - POI search: better result ranking/selection, more compact result list.
 - Plugin config: candidate for simplification — re-review which settings in
   the table in `README.md` actually need to be user-facing vs. could be

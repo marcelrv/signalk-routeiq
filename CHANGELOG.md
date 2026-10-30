@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Added: routes now say which waters they run through. With a routing database
+  that carries water bodies, the route result has a `description` and each
+  itinerary leg lists its `waters`, shown in the webapp and the Freeboard panel
+  as "3.1 km Waal, then 13.4 km Maas-Waalkanaal", with a warning where the depth
+  was never charted, the line is imported or from the community, or the
+  database has a notice for it. Names follow the browser language (new `lang`
+  request field). Older databases keep working without names. If two regional
+  databases use the same id for different lines or waters, the later one
+  keeps routing but its names are switched off, and the Data Manager shows
+  why in red.
+
+- Changed: the Freeboard panel no longer shows "air ≤ 999 m" on a leg; 999 means
+  no clearance limit.
+
 - Added: in Freeboard-SK 3.4+, RouteIQ adds chart right-click commands —
   "Set start", "Set destination" and "Add via" plan a route by clicking,
   in any order (a destination alone routes from the vessel), and tapping a
