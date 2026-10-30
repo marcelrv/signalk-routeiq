@@ -139,6 +139,15 @@ function buildDb(dbPath: string, country: string, fx: Fixture = {}): void {
   db.close();
 }
 
+/** Close a handle that may already be closed (Windows cannot delete an open SQLite file). */
+function closeQuietly(db: DatabaseSync): void {
+  try {
+    db.close();
+  } catch {
+    /* already closed */
+  }
+}
+
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'routeiq-desc-'));
 }
@@ -150,13 +159,18 @@ async function routeAcross(dir: string, lang?: string, opts: { loadAll?: string[
   for (const f of opts.loadAll ?? []) await db.loadDatabaseGraph(f);
   const engine = new RoutingEngine(db, DEFAULT_CONFIG);
   engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
-  const route = await engine.calculateRoute({
-    start: { latitude: LAT, longitude: LONS[0] },
-    end: { latitude: LAT, longitude: LONS[5] },
-    minCoastDistance: 0,
-    ...(lang ? { lang } : {}),
-  });
-  return { db, route };
+  try {
+    const route = await engine.calculateRoute({
+      start: { latitude: LAT, longitude: LONS[0] },
+      end: { latitude: LAT, longitude: LONS[5] },
+      minCoastDistance: 0,
+      ...(lang ? { lang } : {}),
+    });
+    return { db, route };
+  } catch (e) {
+    await db.close();
+    throw e;
+  }
 }
 
 describe('route description from a routing database', () => {
@@ -263,18 +277,24 @@ describe('old databases without the description tables', () => {
 
 describe('describePairs: enums, ranks, origins, notices', () => {
   const dirs: string[] = [];
+  const opened: DatabaseSync[] = [];
   function open(fx: Fixture): DatabaseSync {
     const d = tmpDir();
     dirs.push(d);
     const p = path.join(d, 'x.sqlite');
     buildDb(p, 'XXX', fx);
-    return new DatabaseSync(p);
+    const db = new DatabaseSync(p);
+    opened.push(db);
+    return db;
   }
   function handleOf(db: DatabaseSync, file = 'x.sqlite') {
     const edgeCols = db.prepare("PRAGMA table_info('edges')").all() as Array<{ name: string }>;
     return { db, path: `/tmp/${file}`, flags: detectDescribeFlags(db, edgeCols) };
   }
-  after(() => dirs.forEach(d => fs.rmSync(d, { recursive: true, force: true })));
+  after(() => {
+    opened.forEach(closeQuietly);
+    dirs.forEach(d => fs.rmSync(d, { recursive: true, force: true }));
+  });
 
   const pairOf = (i: number) => ({ source: NODE[i], target: NODE[i + 1] });
 
@@ -407,16 +427,21 @@ describe('buildRouteDescription / attachWaters (pure)', () => {
 
 describe('id collisions between regional files', () => {
   const dirs: string[] = [];
+  const opened: DatabaseSync[] = [];
   function handle(fx: Fixture, file: string) {
     const d = tmpDir();
     dirs.push(d);
     const p = path.join(d, file);
     buildDb(p, file, fx);
     const db = new DatabaseSync(p);
+    opened.push(db);
     const edgeCols = db.prepare("PRAGMA table_info('edges')").all() as Array<{ name: string }>;
     return { db, path: p, flags: detectDescribeFlags(db, edgeCols) };
   }
-  after(() => dirs.forEach(d => fs.rmSync(d, { recursive: true, force: true })));
+  after(() => {
+    opened.forEach(closeQuietly);
+    dirs.forEach(d => fs.rmSync(d, { recursive: true, force: true }));
+  });
 
   it('accepts files that agree', () => {
     const a = handle({}, 'a_navlines.sqlite');
@@ -525,14 +550,16 @@ describe('real navline database', { skip: !fs.existsSync(REAL) }, () => {
     await db.loadGraph();
     const engine = new RoutingEngine(db, { ...DEFAULT_CONFIG });
     engine.setVesselDimensions({ draft: 1.0, beam: 3, airDraft: 0 });
-    const route = await engine.calculateRoute({
-      start: { latitude: 51.8497, longitude: 5.8680 },
-      end: { latitude: 50.8498, longitude: 5.6900 },
-      minCoastDistance: 0,
-      ...(lang ? { lang } : {}),
-    });
-    await db.close();
-    return route;
+    try {
+      return await engine.calculateRoute({
+        start: { latitude: 51.8497, longitude: 5.8680 },
+        end: { latitude: 50.8498, longitude: 5.6900 },
+        minCoastDistance: 0,
+        ...(lang ? { lang } : {}),
+      });
+    } finally {
+      await db.close();
+    }
   }
 
   it('Nijmegen to Maastricht runs through named waters with warnings', async () => {
@@ -563,8 +590,12 @@ describe('real navline database', { skip: !fs.existsSync(REAL) }, () => {
 
   it('lang fr reads the Maas as Meuse when a French name exists', async () => {
     const wanted = new DatabaseSync(path.join(dir, 'nl_navlines.sqlite'));
-    const hasFr = (wanted.prepare("SELECT COUNT(*) AS c FROM water_body_names WHERE lang = 'fr' AND name LIKE 'Meuse%'").get() as { c: number }).c > 0;
-    wanted.close();
+    let hasFr: boolean;
+    try {
+      hasFr = (wanted.prepare("SELECT COUNT(*) AS c FROM water_body_names WHERE lang = 'fr' AND name LIKE 'Meuse%'").get() as { c: number }).c > 0;
+    } finally {
+      wanted.close();
+    }
     const route = await nijmegenMaastricht('fr');
     const names = (route.description ?? []).map(l => l.name ?? '');
     if (hasFr) assert.ok(names.some(n => /Meuse/.test(n)), `got ${names.join(', ')}`);
