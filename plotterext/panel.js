@@ -1542,6 +1542,12 @@ async function scanDepartures() {
   syncDepartureToNow();
 
   const { requestPoints } = await currentRequestPoints(r.routeId);
+  // Another route selected while route.get ran: depRouteId was not set yet,
+  // so the selection change could not cancel this scan — drop it here.
+  if (selectedId !== r.routeId) {
+    hideDepartures();
+    return;
+  }
   const toLatLon = (p) => ({
     latitude: p.position[1],
     longitude: p.position[0],
