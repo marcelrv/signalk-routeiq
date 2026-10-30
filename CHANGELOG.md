@@ -14,6 +14,11 @@
   position — tide data is checked along the selected route (start, vias,
   end and midpoint), or at the chart centre when there is no route.
 
+- Fixed: the best-departure scan (webapp and Freeboard) works with tidal
+  current stations alone. It used to refuse with "Tide data is not
+  available" whenever no tide-height source was configured, although tidal
+  routing itself already used the currents.
+
 - Fixed: a route reshaped in Freeboard keeps the waypoint links of its
   start and end points.
 

@@ -16,11 +16,14 @@ describe('POST /route/departures streaming', () => {
   const STEPS = 25; // 24 h at 60 min, ends included
 
   /** A routing engine that answers instantly and records what it was asked. */
-  function stubEngine(opts: { failAt?: number } = {}) {
+  function stubEngine(
+    opts: { failAt?: number; tides?: boolean; currents?: boolean } = {},
+  ) {
     const visited: number[] = [];
     return {
       visited,
-      tidesClient: {},
+      tidesClient: opts.tides === false ? null : {},
+      currentsClient: opts.currents ? {} : null,
       departureScanTime: (
         _req: unknown,
         index: number,
@@ -213,6 +216,25 @@ describe('POST /route/departures streaming', () => {
     const err = out.lines.find((l) => l.type === 'error');
     assert.ok(err, 'an error line was written');
     assert.match(err.error, /blew up/);
+  });
+
+  it('scans with current stations alone (no tide-height source)', async () => {
+    // /tides/status reports available for this setup and routing uses the
+    // currents, so the scan must not refuse it.
+    const engine = stubEngine({ tides: false, currents: true });
+    const out = await scan(makeHandler(engine), 'application/x-ndjson');
+    assert.strictEqual(out.status, 200);
+    assert.strictEqual(
+      out.lines.filter((l) => l.type === 'departure').length,
+      STEPS,
+    );
+  });
+
+  it('refuses with TIDES_UNAVAILABLE when there is no tide or current source', async () => {
+    const engine = stubEngine({ tides: false, currents: false });
+    const out = await scan(makeHandler(engine), 'application/x-ndjson');
+    assert.strictEqual(out.status, 422);
+    assert.strictEqual(out.json.code, 'TIDES_UNAVAILABLE');
   });
 
   it('still answers with one JSON document when NDJSON is not requested', async () => {

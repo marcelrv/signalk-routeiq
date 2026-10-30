@@ -638,7 +638,12 @@ export class ApiHandler {
       const hours = Math.min(48, Math.max(1, Number(scanHours) || 24));
       const step = Math.min(240, Math.max(10, Number(stepMinutes) || 60));
 
-      if (!this.routingEngine!.tidesClient) {
+      // Either source makes departure time matter: tide heights, or current
+      // stations on their own (same rule as /tides/status and prepareEnv).
+      if (
+        !this.routingEngine!.tidesClient &&
+        !this.routingEngine!.currentsClient
+      ) {
         res.status(422).json({
           error: "Tide data is not available",
           code: "TIDES_UNAVAILABLE",
