@@ -319,7 +319,15 @@ async function startPlanning(start) {
     return;
   }
 
-  planning = { start, dest: null, fromVessel, vias: [], routeId: null };
+  // A start chosen again before the destination moves the start; vias
+  // already added stay (Clear is the way to start over).
+  planning = {
+    start,
+    dest: null,
+    fromVessel,
+    vias: planning?.vias || [],
+    routeId: null,
+  };
   syncActionVisibility();
   setStatus(
     "route-status",
