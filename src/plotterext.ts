@@ -49,7 +49,11 @@ function readPluginVersion(plugindir: string): string {
   }
 }
 
-function buildManifest(version: string) {
+// Every chart action opens (never toggles) the panel; the panel reads the
+// chosen target from its handshake or the action.invoked event.
+const OPEN_PANEL = { type: "openPanel", panel: "routeiq-panel" } as const;
+
+export function buildManifest(version: string) {
   return {
     name: "RouteIQ",
     description:
@@ -59,8 +63,10 @@ function buildManifest(version: string) {
     // The panel drives the host's live route edit buffer; without these the
     // extension is pointless, so they are hard requirements.
     requires: ["panels.iframe", "buttons", "routes"],
-    // Used when present, degraded gracefully when not.
-    optional: ["map", "units"],
+    // Used when present, degraded gracefully when not. Unknown ids here are
+    // ignored by a host, whereas an unknown id in `requires` would make the
+    // extension incompatible — so every newer capability belongs here.
+    optional: ["map", "units", "actions", "map.pick"],
     buttons: [
       {
         id: "open-routeiq",
@@ -79,6 +85,58 @@ function buildManifest(version: string) {
         // keepAlive: route selection, last result and the revert buffer
         // survive closing/reopening the drawer.
         lifecycle: "keepAlive",
+      },
+    ],
+    // Chart context-menu / popover commands (capability `actions`). They only
+    // hand the panel a point or a route handle; the routing itself is still
+    // the server's POST /router/route. Start and destination can be set in
+    // either order (a destination alone routes from the vessel); add-via only
+    // makes sense while a plan is open, so it starts hidden and the panel
+    // reveals it with actions.setVisibility.
+    actions: [
+      {
+        id: "route-from",
+        title: "Set start",
+        icon: "trip_origin",
+        targets: ["position", "waypoint"],
+        action: OPEN_PANEL,
+      },
+      {
+        id: "add-via",
+        title: "Add via",
+        icon: "add_location_alt",
+        targets: ["position", "waypoint"],
+        action: OPEN_PANEL,
+        visible: false,
+      },
+      {
+        id: "set-dest",
+        title: "Set destination",
+        icon: "flag",
+        targets: [
+          "position",
+          "waypoint",
+          "note",
+          {
+            kind: "chartFeature",
+            match: [{ path: "class", op: "in", value: ["HRBFAC", "SMCFAC"] }],
+          },
+        ],
+        action: OPEN_PANEL,
+      },
+      {
+        id: "optimise",
+        title: "Optimise route",
+        icon: "auto_fix_high",
+        targets: ["route"],
+        action: OPEN_PANEL,
+      },
+      {
+        id: "best-departure",
+        title: "Best departure time",
+        icon: "schedule",
+        targets: ["route"],
+        action: OPEN_PANEL,
       },
     ],
   };

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Added: in Freeboard-SK 3.4+, RouteIQ adds chart right-click commands —
+  "Set start", "Set destination" and "Add via" plan a route by clicking,
+  in any order (a destination alone routes from the vessel), and tapping a
+  route offers "Optimise route" and "Best departure time". The panel also
+  gets a "Plan on the chart" section with 📍 buttons that let you tap the
+  start, destination and vias. Older Freeboard versions keep the existing
+  panel.
+
+- Fixed: the Freeboard panel's tide controls no longer need a vessel
+  position — tide data is checked along the selected route (start, vias,
+  end and midpoint), or at the chart centre when there is no route.
+
+- Fixed: the best-departure scan (webapp and Freeboard) works with tidal
+  current stations alone. It used to refuse with "Tide data is not
+  available" whenever no tide-height source was configured, although tidal
+  routing itself already used the currents.
+
+- Fixed: a route reshaped in Freeboard keeps the waypoint links of its
+  start and end points.
+
 ## 0.1.0-alpha.8 — 2026-09-23
 
 - Added: hovering over a graph node or edge (with Show Nodes / Show Edges

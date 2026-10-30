@@ -82,6 +82,17 @@ let units = { distance: "naut-mile" };
 //   generated     — the points we last wrote with route.replace
 //   revertPoints  — the points before our first replace (for Revert)
 const sessions = new Map();
+// Click-start / via / destination planning, fed by chart actions and by
+// map.pick. Until the destination is known there is no route on the chart
+// (a route needs two points), so the start and any early vias live here;
+// from then on the plan is a draft route (routeId) and its request points
+// live in `sessions` like any other route's.
+//   start    — route point { position, name, href? }
+//   fromVessel — the start is the vessel position, not a chosen point
+//   vias     — vias added before the draft existed
+//   routeId  — the draft once created
+let planning = null;
+let pendingPick = null; // { pickId, actionId } of our map.pick in flight
 
 init().catch((e) => {
   $("unsupported").style.display = "block";
@@ -154,6 +165,391 @@ async function init() {
     if (depScanVisible) hideDepartures();
     else run(scanDepartures);
   });
+
+  // Pick planner: each 📍 asks the host for one tap on the chart and feeds
+  // the answer through the same path as the matching chart action.
+  if (client.hasCapability("map.pick")) {
+    $("plan-section").style.display = "";
+    await client.subscribe(["map.picked"], onPicked);
+    $("plan-start-vessel").addEventListener("click", () =>
+      run(async () => startPlanning(await vesselStartPoint())),
+    );
+    $("plan-start-pick").addEventListener("click", () =>
+      run(() => pick("route-from", "Tap the start of the route")),
+    );
+    $("plan-dest-pick").addEventListener("click", () =>
+      run(() => pick("set-dest", "Tap the destination")),
+    );
+    $("plan-via-pick").addEventListener("click", () =>
+      run(() => pick("add-via", "Tap a point to route via")),
+    );
+    $("plan-clear").addEventListener("click", () => endPlanning());
+    renderPlan();
+  }
+
+  // Chart actions. A host remembers action visibility only for as long as it
+  // runs, so after a panel reload put it back in line with `planning` (null).
+  if (client.hasCapability("actions")) {
+    syncActionVisibility();
+    await client.subscribe(["action.invoked"], (_name, inv) => onAction(inv));
+  }
+  // A panel loaded by an action gets that action in its handshake instead of
+  // as an event.
+  if (client.context?.invocation) onAction(client.context.invocation);
+}
+
+/* ---------- chart actions + planning session ---------- */
+
+/** Route point for an action/pick target: the feature's own position when it
+ * has one, its name, and the waypoint link when it is a waypoint. */
+function targetPoint(target) {
+  const pos = target?.featurePosition ?? target?.position;
+  if (
+    !Array.isArray(pos) ||
+    typeof pos[0] !== "number" ||
+    typeof pos[1] !== "number"
+  ) {
+    return null;
+  }
+  const p = { position: [pos[0], pos[1]] };
+  if (typeof target.name === "string" && target.name) p.name = target.name;
+  // Only a waypoint reference is a valid point link — a note's href would be
+  // rejected by route.create/route.replace.
+  if (
+    target.kind === "waypoint" &&
+    typeof target.href === "string" &&
+    target.href.indexOf("/resources/waypoints/") === 0
+  ) {
+    p.href = target.href;
+  }
+  return p;
+}
+
+async function onAction(inv) {
+  const actionId = inv?.actionId;
+  const target = inv?.target;
+  if (!actionId || !target) return;
+  if (busy) {
+    setStatus(
+      "route-status",
+      "RouteIQ is still busy — try again when it has finished.",
+      "error",
+    );
+    return;
+  }
+  // The panel's own buttons wait for the engine; actions must too. The flag
+  // is only refreshed on demand, so look again before turning the user away.
+  if (!engineReady) await checkEngine();
+  if (!engineReady) {
+    setStatus(
+      "route-status",
+      "The routing engine is not ready yet — try again shortly.",
+      "error",
+    );
+    return;
+  }
+
+  if (actionId === "optimise" || actionId === "best-departure") {
+    if (!target.routeId) {
+      setStatus(
+        "route-status",
+        "This chartplotter did not hand over that route — open it for editing and use Auto-route.",
+        "error",
+      );
+      return;
+    }
+    // Busy from the start, so nothing else can begin while the list refreshes.
+    await run(async () => {
+      selectedId = target.routeId;
+      await refreshRoutes(target.routeId);
+      if (selectedId !== target.routeId) {
+        setStatus("route-status", "That route is no longer on the chart.", "");
+        return;
+      }
+      await (actionId === "optimise" ? calculate() : bestDeparture());
+    });
+    return;
+  }
+
+  const point = targetPoint(target);
+  if (!point) {
+    setStatus("route-status", "No position for that target.", "error");
+    return;
+  }
+  if (actionId === "route-from") {
+    await run(() => startPlanning(point));
+  } else if (actionId === "set-dest") {
+    await run(() => setDestination(point));
+  } else if (actionId === "add-via") {
+    await run(() => addVia(point));
+  }
+}
+
+function setActionsVisible(ids, visible) {
+  if (!client.hasCapability("actions")) return;
+  // Cosmetic: a failure only means the menu shows a stale entry, which the
+  // handlers below cope with.
+  client.call("actions.setVisibility", { ids, visible }).catch(() => {});
+}
+
+async function vesselStartPoint() {
+  const pos = await vesselPosition();
+  return {
+    position: [pos.longitude, pos.latitude],
+    name: "Start",
+    fromVessel: true,
+  };
+}
+
+function planningRoute() {
+  return planning?.routeId
+    ? routes.find((r) => r.routeId === planning.routeId) || null
+    : null;
+}
+
+async function startPlanning(start) {
+  const fromVessel = !!start.fromVessel;
+  delete start.fromVessel;
+  if (!start.name) start.name = "Start";
+
+  // Destination already chosen (the draft is on the chart): move its start
+  // and recalculate, so start and destination can be set in either order.
+  if (planningRoute()) {
+    const plan = planning;
+    const derived = await currentRequestPoints(plan.routeId);
+    if (planning !== plan) return; // draft left the chart meanwhile
+    selectedId = plan.routeId;
+    await calculate([start, ...derived.requestPoints.slice(1)], derived);
+    // Only once routed: a failed move leaves the plan on the old start.
+    plan.start = start;
+    plan.fromVessel = fromVessel;
+    renderPlan();
+    return;
+  }
+
+  // Destination chosen first (no vessel position to route from): now both
+  // ends are known, so the draft can be created.
+  if (planning?.dest) {
+    planning.start = start;
+    planning.fromVessel = fromVessel;
+    await createPlanDraft();
+    return;
+  }
+
+  // A start chosen again before the destination moves the start; vias
+  // already added stay (Clear is the way to start over).
+  planning = {
+    start,
+    dest: null,
+    fromVessel,
+    vias: planning?.vias || [],
+    routeId: null,
+  };
+  syncActionVisibility();
+  setStatus(
+    "route-status",
+    "Start set. Right-click the destination" +
+      (client.hasCapability("map.pick") ? ", or tap 📍." : "."),
+    "ok",
+  );
+  renderPlan();
+}
+
+async function setDestination(dest) {
+  if (!dest.name) dest.name = "Destination";
+
+  // Draft already on the chart: move its destination and recalculate.
+  if (planningRoute()) {
+    const plan = planning;
+    const derived = await currentRequestPoints(plan.routeId);
+    if (planning !== plan) return; // draft left the chart meanwhile
+    selectedId = plan.routeId;
+    await calculate([...derived.requestPoints.slice(0, -1), dest], derived);
+    return;
+  }
+
+  // No start yet: route from the vessel, or — without a vessel position —
+  // keep the destination and wait for a start.
+  if (!planning?.start) {
+    let vessel = null;
+    try {
+      vessel = await vesselStartPoint();
+    } catch {
+      // no position fix; handled below
+    }
+    if (!vessel) {
+      planning = planning || { start: null, fromVessel: false, vias: [] };
+      planning.dest = dest;
+      planning.routeId = null;
+      syncActionVisibility();
+      setStatus(
+        "route-status",
+        "Destination set. No vessel position — right-click the start" +
+          (client.hasCapability("map.pick") ? ", or tap 📍." : "."),
+        "ok",
+      );
+      renderPlan();
+      return;
+    }
+    delete vessel.fromVessel;
+    planning = {
+      start: vessel,
+      fromVessel: true,
+      vias: planning?.vias || [],
+      routeId: null,
+    };
+    syncActionVisibility();
+  }
+  planning.dest = dest;
+  await createPlanDraft();
+}
+
+/** Both ends known: create the draft route and calculate it. Like the other
+ * auto-created routes it replaces our previous unsaved draft instead of
+ * piling up next to it. */
+async function createPlanDraft() {
+  const plan = planning;
+  await discardPendingAutoRoute();
+  const dest = plan.dest;
+  const vias = plan.vias.map((v, i) => ({
+    ...v,
+    name: v.name || "Via " + (i + 1),
+  }));
+  const { routeId } = await client.call("route.create", {
+    name: "RouteIQ to " + dest.name,
+    points: [plan.start, ...vias, dest],
+  });
+  lastAutoRouteId = routeId;
+  selectedId = routeId;
+  if (planning !== plan) return; // plan ended meanwhile
+  plan.routeId = routeId;
+  await refreshRoutes(routeId);
+  renderPlan();
+  // No session yet, so calculate() takes the draft's points (start, vias,
+  // destination) as the request points.
+  await calculate();
+  // Kept until routed: without a session the Plan section counts these.
+  plan.vias = [];
+}
+
+async function addVia(via) {
+  if (!planning) {
+    setStatus("route-status", "Set a start or destination first.", "error");
+    return;
+  }
+  if (!planningRoute()) {
+    // Start or destination still missing — keep it for when the draft is
+    // created.
+    planning.vias.push(via);
+    setStatus(
+      "route-status",
+      planning.dest
+        ? "Via added. Now set the start."
+        : "Via added. Now set the destination.",
+      "ok",
+    );
+    renderPlan();
+    return;
+  }
+  // The new via goes last, just before the destination. Starting from the
+  // current request points keeps any reordering the user did on the chart.
+  const plan = planning;
+  const derived = await currentRequestPoints(plan.routeId);
+  if (planning !== plan) return; // draft left the chart meanwhile
+  const req = derived.requestPoints;
+  if (!via.name) via.name = "Via " + (req.length - 1);
+  selectedId = plan.routeId;
+  await calculate([...req.slice(0, -1), via, req[req.length - 1]], derived);
+  renderPlan();
+}
+
+function endPlanning() {
+  if (!planning) return;
+  // A pick still waiting for a tap belongs to this plan.
+  if (pendingPick) {
+    client
+      .call("map.cancelPick", { pickId: pendingPick.pickId })
+      .catch(() => {});
+    pendingPick = null;
+  }
+  // The draft is the user's now ("the route stays on the chart"), so the
+  // next auto-route must not discard it as its own leftover.
+  if (planning.routeId && lastAutoRouteId === planning.routeId) {
+    lastAutoRouteId = null;
+  }
+  planning = null;
+  syncActionVisibility();
+  renderPlan();
+}
+
+/** "Set start" and "Set destination" always show; "Add via" only inside a
+ * plan. */
+function syncActionVisibility() {
+  setActionsVisible(["add-via"], !!planning);
+}
+
+async function pick(actionId, prompt) {
+  if (pendingPick) {
+    client
+      .call("map.cancelPick", { pickId: pendingPick.pickId })
+      .catch(() => {});
+    pendingPick = null;
+  }
+  try {
+    const { pickId } = await client.call("map.pick", {
+      prompt,
+      targets: ["waypoint", "position"],
+    });
+    pendingPick = { pickId, actionId };
+  } catch (e) {
+    const reason = e?.data?.reason || e?.reason;
+    if (reason === "map.pickBusy") {
+      setStatus("route-status", "Finish drawing on the chart first.", "error");
+      return;
+    }
+    throw e;
+  }
+}
+
+function onPicked(_name, picked) {
+  if (!pendingPick || picked?.pickId !== pendingPick.pickId) return;
+  const { actionId } = pendingPick;
+  pendingPick = null;
+  // Cancelled (by the user, or superseded by another pick): nothing to do.
+  if (picked.cancelled || !picked.target) return;
+  onAction({ actionId, target: picked.target });
+}
+
+function fmtPoint(p) {
+  if (p.name && p.name !== "Start" && p.name !== "Destination") return p.name;
+  return p.position[1].toFixed(4) + ", " + p.position[0].toFixed(4);
+}
+
+/** The Plan section (pick hosts only) mirrors `planning` until the draft has
+ * been routed, and from then on the request points it was routed by — one
+ * source for start, vias and destination, so they always describe one route. */
+function renderPlan() {
+  if ($("plan-section").style.display === "none") return;
+  const r = planningRoute();
+  const session = r ? sessions.get(r.routeId) : null;
+  const req =
+    session?.requestPoints?.length >= 2 ? session.requestPoints : null;
+  const start = req ? req[0] : planning?.start;
+  const fromVessel =
+    !planning ||
+    (planning.fromVessel && (!req || samePoints([req[0]], [planning.start])));
+  $("plan-start").textContent = fromVessel
+    ? "Vessel"
+    : start
+      ? fmtPoint(start)
+      : "—";
+  const dest = req ? req[req.length - 1] : planning?.dest;
+  $("plan-dest").textContent = dest ? fmtPoint(dest) : "—";
+  const viaCount = req ? req.length - 2 : planning ? planning.vias.length : 0;
+  $("plan-vias").textContent = viaCount > 0 ? viaCount + " via" : "";
+  $("plan-via-pick").disabled = !planning;
+  // Ending the plan mid-calculation would pull `planning` out from under it.
+  $("plan-clear").disabled = busy || !planning;
 }
 
 /* ---------- tides ---------- */
@@ -192,23 +588,102 @@ function syncDepartureToNow() {
   if (!departureEdited) setDepartureInput(new Date());
 }
 
-async function checkTides() {
+let tideCheckSeq = 0;
+let tideCheckedFor; // selectedId the tide controls were last checked for
+let tideDefaultApplied = false; // considerTidesDefault applied this load
+const MAX_TIDE_PROBES = 8;
+
+/**
+ * Where to ask the server about tide data: the selected route's start, vias
+ * and end plus the start–end midpoint; with no route, the vessel, else the
+ * chart centre (a boat without a position fix, or planning from home).
+ */
+async function tideProbePoints() {
+  const r = selectedRoute();
+  if (r) {
+    try {
+      const { requestPoints } = await currentRequestPoints(r.routeId);
+      let pts = requestPoints.map((p) => p.position);
+      // A hand-drawn route can have many points; sample it evenly.
+      if (pts.length > MAX_TIDE_PROBES - 1) {
+        const n = MAX_TIDE_PROBES - 1;
+        pts = Array.from(
+          { length: n },
+          (_, i) => pts[Math.round((i * (pts.length - 1)) / (n - 1))],
+        );
+      }
+      const a = pts[0],
+        b = pts[pts.length - 1];
+      pts.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
+      return pts;
+    } catch {
+      // route gone meanwhile; fall back below
+    }
+  }
   try {
     const pos = await vesselPosition();
-    const st = await fetch(
-      API + `/tides/status?latitude=${pos.latitude}&longitude=${pos.longitude}`,
-    ).then((r) => (r.ok ? r.json() : null));
-    tidesAvailable = !!(st && st.available);
-    $("tide-row").style.display = tidesAvailable ? "" : "none";
-    if (tidesAvailable && st.considerTidesDefault) {
+    return [[pos.longitude, pos.latitude]];
+  } catch {
+    // no position fix
+  }
+  if (client.hasCapability("map")) {
+    try {
+      const { center } = await client.call("map.getView");
+      if (Array.isArray(center)) return [center];
+    } catch {
+      // no view; nothing to probe
+    }
+  }
+  return [];
+}
+
+/** Show the tide controls when any probe point has tide data. */
+async function checkTides() {
+  const seq = ++tideCheckSeq;
+  tideCheckedFor = selectedId;
+  const pts = await tideProbePoints();
+  const answers = await Promise.all(
+    pts.map(([lon, lat]) =>
+      fetch(API + `/tides/status?latitude=${lat}&longitude=${lon}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+    ),
+  );
+  if (seq !== tideCheckSeq) return; // superseded by a newer check
+  const st = answers.find((a) => a && a.available);
+  tidesAvailable = !!st;
+  $("tide-row").style.display = tidesAvailable ? "" : "none";
+  // Apply the configured default the first time tides show up only, so a
+  // re-check after a route change — even one that hid the controls for a
+  // while — does not undo the user's choice.
+  if (tidesAvailable && !tideDefaultApplied) {
+    tideDefaultApplied = true;
+    if (st.considerTidesDefault) {
       $("tide-cb").checked = true;
       $("tide-depart").style.display = "";
       syncDepartureToNow();
     }
-  } catch {
-    tidesAvailable = false;
-    $("tide-row").style.display = "none";
   }
+}
+
+/**
+ * "Best departure time" chart action. The scan's list lives inside the tide
+ * controls, which stay hidden without tide data or with "Consider tide"
+ * off — so check tides along this route and open the controls first.
+ */
+async function bestDeparture() {
+  await checkTides();
+  if (!tidesAvailable) {
+    setStatus(
+      "route-status",
+      "No tide data for this area, so the departure time does not change the route.",
+      "error",
+    );
+    return;
+  }
+  $("tide-cb").checked = true;
+  $("tide-depart").style.display = "";
+  await scanDepartures();
 }
 
 /* ---------- routing engine status ---------- */
@@ -244,6 +719,15 @@ async function checkEngine() {
 async function onRouteEvent(name, params) {
   if (name === "route.hidden" && params?.routeId) {
     sessions.delete(params.routeId);
+  }
+  // The planning draft is done once it leaves the chart or the user saves
+  // it — from then on it is an ordinary route.
+  if (
+    planning?.routeId &&
+    params?.routeId === planning.routeId &&
+    (name === "route.hidden" || name === "route.saved")
+  ) {
+    endPlanning();
   }
   if (name === "route.saved" && params?.routeId === selectedId) {
     setStatus(
@@ -294,6 +778,10 @@ function selectedRoute() {
 
 function renderRouteState() {
   const r = selectedRoute();
+  // Tide data depends on where the route goes; re-check when it changes.
+  if (selectedId !== tideCheckedFor) checkTides();
+  // A departure list belongs to the route it was scanned for.
+  if (depRouteId && selectedId !== depRouteId) hideDepartures();
   const info = $("route-info");
   if (!r) {
     info.textContent = "";
@@ -315,6 +803,7 @@ function renderRouteState() {
   $("btn-save").disabled = busy || !r || !(r.dirty || !r.saved);
   $("btn-dest").disabled = busy || !engineReady;
   $("btn-wp").disabled = busy || !engineReady || !$("wp-select").value;
+  renderPlan();
 }
 
 /* ---------- actions ---------- */
@@ -348,22 +837,42 @@ function samePoints(a, b) {
   );
 }
 
-async function calculate() {
+/**
+ * The start/via/end to route a visible route by. Re-running on a route we
+ * generated reuses the user's original start/via/end instead of treating
+ * every generated waypoint as a via; once the user has edited it on the
+ * chart, its current points are the request.
+ */
+async function currentRequestPoints(routeId) {
+  const { points } = await client.call("route.get", { routeId });
+  const session = sessions.get(routeId);
+  const requestPoints =
+    session && samePoints(points, session.generated)
+      ? session.requestPoints
+      : points;
+  return { points, requestPoints };
+}
+
+/**
+ * Route the selected route and stage the result on the chart.
+ * `forcedRequestPoints` replaces the derived start/via/end — the planning
+ * session uses it to add a via or move the destination. `known` is a
+ * currentRequestPoints() answer the caller already has for this route, which
+ * saves a second route.get.
+ */
+async function calculate(forcedRequestPoints, known) {
   const r = selectedRoute();
   if (!r) return;
   setStatus("route-status", "Calculating route…", "");
   hideSummary();
 
   const routeId = r.routeId;
-  const { points } = await client.call("route.get", { routeId });
-
-  // Re-running on a route we generated: reuse the user's original
-  // start/via/end instead of treating every generated waypoint as a via.
   const session = sessions.get(routeId);
-  const requestPoints =
-    session && samePoints(points, session.generated)
-      ? session.requestPoints
-      : points;
+  const derived = known ?? (await currentRequestPoints(routeId));
+  const points = derived.points;
+  const requestPoints = Array.isArray(forcedRequestPoints)
+    ? forcedRequestPoints
+    : derived.requestPoints;
 
   const toLatLon = (p) => ({
     latitude: p.position[1],
@@ -416,11 +925,15 @@ async function calculate() {
     position: [lon, lat],
     name: "WP" + (i + 1),
   }));
-  // Keep the user's start/end waypoint names on the reshaped route.
+  // Keep the user's start/end waypoint names — and their waypoint links — on
+  // the reshaped route. The engine's path begins and ends at exactly those
+  // points, so a linked endpoint still sits on its waypoint.
   const first = requestPoints[0],
     last = requestPoints[requestPoints.length - 1];
   if (first.name) newPoints[0].name = first.name;
   if (last.name) newPoints[newPoints.length - 1].name = last.name;
+  if (first.href) newPoints[0].href = first.href;
+  if (last.href) newPoints[newPoints.length - 1].href = last.href;
 
   sessions.set(routeId, {
     requestPoints,
@@ -428,6 +941,11 @@ async function calculate() {
     revertPoints: session?.revertPoints ?? points,
   });
   await client.call("route.replace", { routeId, points: newPoints });
+  // Tide probes sit on the request points, so only a changed request (a new
+  // via, a moved end) needs a fresh check — a plain re-run does not.
+  if (!samePoints(requestPoints, session?.requestPoints)) {
+    tideCheckedFor = undefined;
+  }
 
   setStatus(
     "route-status",
@@ -447,6 +965,7 @@ async function revert() {
     name: p.name || "WP" + (i + 1),
   }));
   await client.call("route.replace", { routeId: selectedId, points });
+  tideCheckedFor = undefined;
   sessions.delete(selectedId);
   hideSummary();
   setStatus("route-status", "Original waypoints restored (still unsaved).", "");
@@ -514,8 +1033,8 @@ async function routeToDestination() {
   }
   await createAndCalculate("RouteIQ to destination", dest, "Destination");
   // The route now covers the trip; drop the direct "Navigate to here" course
-  // so the chart doesn't show both. (The host offers no context-menu hook for
-  // extensions, so this is the closest to a one-step "auto-route to here".)
+  // so the chart doesn't show both. (Hosts with chart actions also offer the
+  // one-step "Set destination" — this path is for those without.)
   const cleared = await clearActiveDestination();
   if (cleared) {
     setStatus(
@@ -969,10 +1488,12 @@ function fmtDurationSec(sec) {
 let depScanVisible = false;
 let depAbort = null; // AbortController of the scan in flight, if any
 let depSteps = []; // one slot per step: { departureTime, result }
+let depRouteId = null; // the route the list was scanned for
 
 function hideDepartures() {
   if (depAbort) depAbort.abort(); // also tells the server to stop calculating
   depAbort = null;
+  depRouteId = null;
   depSteps = [];
   $("dep-list").innerHTML = "";
   $("btn-departures").textContent = "Best…";
@@ -1020,12 +1541,13 @@ async function scanDepartures() {
   // Scan forward from now unless a departure was actually chosen.
   syncDepartureToNow();
 
-  const { points } = await client.call("route.get", { routeId: r.routeId });
-  const session = sessions.get(r.routeId);
-  const requestPoints =
-    session && samePoints(points, session.generated)
-      ? session.requestPoints
-      : points;
+  const { requestPoints } = await currentRequestPoints(r.routeId);
+  // Another route selected while route.get ran: depRouteId was not set yet,
+  // so the selection change could not cancel this scan — drop it here.
+  if (selectedId !== r.routeId) {
+    hideDepartures();
+    return;
+  }
   const toLatLon = (p) => ({
     latitude: p.position[1],
     longitude: p.position[0],
@@ -1044,6 +1566,7 @@ async function scanDepartures() {
   const ctrl = new AbortController();
   depAbort = ctrl;
   depSteps = [];
+  depRouteId = r.routeId;
 
   try {
     const resp = await fetch(API + "/route/departures", {
