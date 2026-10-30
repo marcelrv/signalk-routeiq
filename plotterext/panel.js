@@ -247,13 +247,16 @@ async function onAction(inv) {
       );
       return;
     }
-    selectedId = target.routeId;
-    await refreshRoutes(target.routeId);
-    if (selectedId !== target.routeId) {
-      setStatus("route-status", "That route is no longer on the chart.", "");
-      return;
-    }
-    await run(actionId === "optimise" ? calculate : bestDeparture);
+    // Busy from the start, so nothing else can begin while the list refreshes.
+    await run(async () => {
+      selectedId = target.routeId;
+      await refreshRoutes(target.routeId);
+      if (selectedId !== target.routeId) {
+        setStatus("route-status", "That route is no longer on the chart.", "");
+        return;
+      }
+      await (actionId === "optimise" ? calculate() : bestDeparture());
+    });
     return;
   }
 
@@ -441,6 +444,13 @@ async function addVia(via) {
 
 function endPlanning() {
   if (!planning) return;
+  // A pick still waiting for a tap belongs to this plan.
+  if (pendingPick) {
+    client
+      .call("map.cancelPick", { pickId: pendingPick.pickId })
+      .catch(() => {});
+    pendingPick = null;
+  }
   planning = null;
   syncActionVisibility();
   renderPlan();
@@ -737,6 +747,8 @@ function renderRouteState() {
   const r = selectedRoute();
   // Tide data depends on where the route goes; re-check when it changes.
   if (selectedId !== tideCheckedFor) checkTides();
+  // A departure list belongs to the route it was scanned for.
+  if (depRouteId && selectedId !== depRouteId) hideDepartures();
   const info = $("route-info");
   if (!r) {
     info.textContent = "";
@@ -894,6 +906,7 @@ async function calculate(forcedRequestPoints) {
     revertPoints: session?.revertPoints ?? points,
   });
   await client.call("route.replace", { routeId, points: newPoints });
+  tideCheckedFor = undefined; // new geometry under the same routeId
 
   setStatus(
     "route-status",
@@ -913,6 +926,7 @@ async function revert() {
     name: p.name || "WP" + (i + 1),
   }));
   await client.call("route.replace", { routeId: selectedId, points });
+  tideCheckedFor = undefined;
   sessions.delete(selectedId);
   hideSummary();
   setStatus("route-status", "Original waypoints restored (still unsaved).", "");
@@ -1435,10 +1449,12 @@ function fmtDurationSec(sec) {
 let depScanVisible = false;
 let depAbort = null; // AbortController of the scan in flight, if any
 let depSteps = []; // one slot per step: { departureTime, result }
+let depRouteId = null; // the route the list was scanned for
 
 function hideDepartures() {
   if (depAbort) depAbort.abort(); // also tells the server to stop calculating
   depAbort = null;
+  depRouteId = null;
   depSteps = [];
   $("dep-list").innerHTML = "";
   $("btn-departures").textContent = "Best…";
@@ -1505,6 +1521,7 @@ async function scanDepartures() {
   const ctrl = new AbortController();
   depAbort = ctrl;
   depSteps = [];
+  depRouteId = r.routeId;
 
   try {
     const resp = await fetch(API + "/route/departures", {
