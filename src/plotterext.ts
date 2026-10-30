@@ -95,7 +95,7 @@ export function buildManifest(version: string) {
     actions: [
       {
         id: "route-to",
-        title: "Route here with RouteIQ",
+        title: "Route here",
         icon: "alt_route",
         targets: [
           "position",
@@ -110,14 +110,14 @@ export function buildManifest(version: string) {
       },
       {
         id: "route-from",
-        title: "Route from here with RouteIQ",
+        title: "Route from here",
         icon: "trip_origin",
         targets: ["position", "waypoint"],
         action: OPEN_PANEL,
       },
       {
         id: "add-via",
-        title: "Add RouteIQ via here",
+        title: "Add via here",
         icon: "add_location_alt",
         targets: ["position", "waypoint"],
         action: OPEN_PANEL,
@@ -125,7 +125,7 @@ export function buildManifest(version: string) {
       },
       {
         id: "set-dest",
-        title: "Set RouteIQ destination here",
+        title: "Set destination here",
         icon: "flag",
         targets: ["position", "waypoint", "note"],
         action: OPEN_PANEL,
@@ -133,14 +133,14 @@ export function buildManifest(version: string) {
       },
       {
         id: "optimise",
-        title: "Optimise with RouteIQ",
+        title: "Optimise route",
         icon: "auto_fix_high",
         targets: ["route"],
         action: OPEN_PANEL,
       },
       {
         id: "best-departure",
-        title: "Best departure time (RouteIQ)",
+        title: "Best departure time",
         icon: "schedule",
         targets: ["route"],
         action: OPEN_PANEL,

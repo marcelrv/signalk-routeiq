@@ -324,7 +324,7 @@ async function setDestination(dest) {
 
   // Draft already on the chart: move its destination and recalculate.
   if (planningRoute()) {
-    const req = await currentRequestPoints(planning.routeId);
+    const { requestPoints: req } = await currentRequestPoints(planning.routeId);
     selectedId = planning.routeId;
     renderPlan();
     await calculate([...req.slice(0, -1), dest]);
@@ -358,7 +358,7 @@ async function addVia(via) {
   if (!planning) {
     setStatus(
       "route-status",
-      "Set a start first (“Route from here with RouteIQ”).",
+      "Set a start first (right-click → “Route from here”).",
       "error",
     );
     return;
@@ -372,7 +372,7 @@ async function addVia(via) {
   }
   // The new via goes last, just before the destination. Starting from the
   // current request points keeps any reordering the user did on the chart.
-  const req = await currentRequestPoints(planning.routeId);
+  const { requestPoints: req } = await currentRequestPoints(planning.routeId);
   if (!via.name) via.name = "Via " + (req.length - 1);
   selectedId = planning.routeId;
   await calculate([...req.slice(0, -1), via, req[req.length - 1]]);
@@ -833,7 +833,7 @@ async function routeToDestination() {
   await createAndCalculate("RouteIQ to destination", dest, "Destination");
   // The route now covers the trip; drop the direct "Navigate to here" course
   // so the chart doesn't show both. (Hosts with chart actions also offer the
-  // one-step "Route here with RouteIQ" — this path is for those without.)
+  // one-step "Route here" — this path is for those without.)
   const cleared = await clearActiveDestination();
   if (cleared) {
     setStatus(
