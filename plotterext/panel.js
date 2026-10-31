@@ -887,6 +887,8 @@ async function calculate(forcedRequestPoints, known) {
     useTides: tideEnabled(),
   };
   if (tideEnabled() && departureIso()) body.departureTime = departureIso();
+  // Language for water names in the route description.
+  if (window.navigator.language) body.lang = window.navigator.language;
 
   const resp = await fetch(API + "/route", {
     method: "POST",
@@ -1343,15 +1345,38 @@ function renderItinerary(itinerary) {
       }
       if (typeof p.leg.minDepth === "number")
         bits.push("depth ≥ " + p.leg.minDepth.toFixed(1) + " m");
-      if (typeof p.leg.maxAirDraft === "number")
+      // 999 m is the graph's "no clearance limit", not a real height.
+      if (typeof p.leg.maxAirDraft === "number" && p.leg.maxAirDraft < 999)
         bits.push("air ≤ " + p.leg.maxAirDraft.toFixed(1) + " m");
-      if (typeof p.leg.minWidth === "number")
+      // Likewise 999 m is "no width limit".
+      if (typeof p.leg.minWidth === "number" && p.leg.minWidth < 999)
         bits.push("width ≥ " + p.leg.minWidth.toFixed(0) + " m");
       const stats = document.createElement("div");
       stats.innerHTML = bits
         .map((b) => '<span class="constraint">' + b + "</span>")
         .join(" · ");
       leg.appendChild(stats);
+
+      // Which waters the leg runs through and what the routing database says
+      // about them, as the server sent them.
+      const waters = p.leg.waters || [];
+      if (waters.length > 0) {
+        const line = document.createElement("div");
+        line.className = "it-waters";
+        line.textContent = waters
+          .map((w) => fmtDistance(w.distance) + (w.name ? " " + w.name : ""))
+          .join(", then ");
+        leg.appendChild(line);
+        for (const w of waters) {
+          for (const ww of w.warnings || []) {
+            const warn = document.createElement("div");
+            warn.className = "it-warn";
+            warn.textContent =
+              "⚠ " + (w.name ? w.name + ": " : "") + (ww.message || ww.type);
+            leg.appendChild(warn);
+          }
+        }
+      }
 
       // Group same-named crossings (a bridge can have a fixed and an opening
       // span) — same presentation as the webapp's route leg details.

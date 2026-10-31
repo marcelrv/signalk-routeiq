@@ -5181,6 +5181,8 @@
         ...waitOverrides(),
         useTides: tideEnabled(),
       };
+      // Language for water names in the route description.
+      if (navigator.language) payload.lang = navigator.language;
       // An untouched field means "leave now", not "leave whenever this page was
       // opened", so re-read it against the clock before the route is planned.
       if (tideEnabled()) syncDepartureToNow();
@@ -7167,7 +7169,8 @@
               fmtDepth(rise) +
               ")</span></div>";
           }
-          if (minWidth !== Infinity)
+          // 999 m is the graph's "no width limit", not a real width.
+          if (minWidth !== Infinity && minWidth < 999)
             html +=
               '<div class="leg-stat"><span>Min Width</span><span class="leg-val">' +
               minWidth.toFixed(1) +
@@ -7237,6 +7240,30 @@
                   : "") +
                 "</div>";
             }
+          }
+
+          // Which waters the leg runs through, and what the database says
+          // about them (rendered as sent: the server decides, not us).
+          const waters = itinerary && node.leg && node.leg.waters;
+          if (waters && waters.length > 0) {
+            html +=
+              '<div class="leg-stat"><span>Waters</span><span class="leg-val">' +
+              waters
+                .map(function (w) {
+                  return (
+                    fmtDist(w.distance) +
+                    (w.name ? " " + escapeHtml(w.name) : "")
+                  );
+                })
+                .join(", then ") +
+              "</span></div>";
+            for (const w of waters)
+              for (const ww of w.warnings || [])
+                legWarnings.push(
+                  escapeHtml(
+                    (w.name ? w.name + ": " : "") + (ww.message || ww.type),
+                  ),
+                );
           }
 
           const unique = [...new Set(legWarnings)];
@@ -8183,6 +8210,11 @@
         "</div>" +
         (description
           ? '<div class="dm-region-desc">' + description + "</div>"
+          : "") +
+        (r.descriptionError
+          ? '<div class="dm-region-desc" style="color:#ef4444">Route description off: ' +
+            escapeHtml(r.descriptionError) +
+            "</div>"
           : "") +
         '<div class="dm-region-meta">' +
         '<span title="Database file">' +

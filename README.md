@@ -99,6 +99,31 @@ Routes avoid edges where:
 
 Routing prefers marked fairways over open water and penalizes travel against marked traffic flow.
 
+## Route API: naming the waters
+
+`POST /signalk/v1/api/router/route` takes an optional `lang` (BCP-47, for
+example `"nl"` or `"de-CH"`; the built-in UIs send the browser language). When
+a loaded routing database carries water bodies (the `edge_sequences` and
+`water_bodies` tables), the result also has:
+
+- `description`: where the route runs, by water, in route order. Each entry has
+  `distanceFromStart` and `distance` (m), `name` and `kind` (canal, river, lake,
+  channel, sea_area, harbour, estuary, other) and `warnings`. A name follows
+  `lang`, then its base language (`de-CH` falls back to `de`), then the
+  database's default name. Neighbouring stretches of one water are merged.
+- `itinerary[].leg.waters`: the part of each itinerary leg inside each named
+  water, with its warnings, so a client can show "23 km Prinses Margrietkanaal,
+  then 4 km Pikmeer" without working out the overlap itself.
+
+Warnings are `depth_quality` (the depth is not as trusted as a charted one),
+`origin` (an imported or community line) and `notice` (a line notice from the
+database). Each has an English `message` and structured fields. They are
+information only: depth quality and water kind never change the route. Older
+databases without the tables simply give no `description`. If two loaded
+databases use the same sequence or water body id for different things, both
+still route, but the later file's description is switched off and
+`GET /databases` reports why in `descriptionError`.
+
 ## License
 
 Apache License 2.0 - see LICENSE file for details

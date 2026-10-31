@@ -60,6 +60,12 @@ export interface RoutingRequest {
   // default: a lock that always has a chamber ready is not an hour.
   lockWaitMinutes?: number;
   bridgeWaitMinutes?: number;
+  // BCP-47 language for water names in the route description ("de-CH" falls
+  // back to "de", then to the database's default name).
+  lang?: string;
+  // Set false to skip the route description. The departure scan does, because
+  // it only needs the times and nobody reads a description for each step.
+  describe?: boolean;
 }
 
 // Edge attributes from routing database
@@ -137,7 +143,41 @@ export interface ItineraryPoint {
     waitSeconds?: number; // of `seconds`, time held at locks / opening spans
     currentKn?: number; // distance-weighted mean along-track current (+ = fair)
     crossings?: RouteCrossing[]; // bridges/locks on this leg, in route order
+    // The named waters this leg runs through, in route order, with the part of
+    // the leg that lies in each. Only waters that have a name or a warning.
+    waters?: RouteWaterPart[];
   };
+}
+
+// A warning on a stretch of the route, from the routing database's metadata.
+// `message` is English; the structured fields let a client word it itself.
+export type RouteDescriptionWarning =
+  | { type: "depth_quality"; quality: string; message: string }
+  | { type: "origin"; origin: string; message: string }
+  | {
+      type: "notice";
+      severity: number; // 0 info, 1 caution, 2 depth
+      text: string;
+      name?: string;
+      message: string;
+    };
+
+// One stretch of the route inside one water (consecutive stretches of the same
+// water are merged). Display only: never a routing cost.
+export interface RouteDescriptionLeg {
+  distanceFromStart: number; // meters along the route
+  distance: number; // meters
+  waterBodyId?: number;
+  name?: string; // in the requested language, else the database's default name
+  kind?: string; // canal, river, lake, channel, sea_area, harbour, estuary, other
+  warnings: RouteDescriptionWarning[];
+}
+
+export interface RouteWaterPart {
+  name?: string;
+  kind?: string;
+  distance: number; // meters of the itinerary leg that lie in this water
+  warnings: RouteDescriptionWarning[];
 }
 
 // Route result
@@ -161,7 +201,9 @@ export interface RouteWarning {
     | "manual_segment"
     // A supplied draft/beam/airDraft was unusable and was dropped; the route
     // was planned against the server's configured dimensions instead.
-    | "vessel_dimension_ignored";
+    | "vessel_dimension_ignored"
+    // The route was found but the water names and warnings could not be read.
+    | "description_unavailable";
   message: string;
   from?: { latitude: number; longitude: number };
   to?: { latitude: number; longitude: number };
@@ -190,6 +232,9 @@ export interface RouteResult {
   crossings?: RouteCrossing[];
   waypoints?: RouteWaypoint[];
   itinerary?: ItineraryPoint[];
+  // Where the route runs, by water: absent when no loaded database carries the
+  // water-body tables (older databases) or no edge of the route is in one.
+  description?: RouteDescriptionLeg[];
   features: Array<{
     type: "Feature";
     geometry: {
@@ -217,6 +262,10 @@ export interface RouteResult {
         from: number; // node id
         to: number; // node id
         distance: number; // meters
+        // Graph nodes from..to inclusive when this segment aggregates several
+        // edges (collinear compression, line-of-sight). Internal: read by the
+        // route description, never sent to clients.
+        nodes?: number[];
         minDepth: number; // meters
         // Whether minDepth is a real reading (possibly negative -- a charted
         // drying height, on schema_version >= 2) rather than "no data" (manual/

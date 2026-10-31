@@ -15,6 +15,7 @@ import {
   TRAFFIC_ONE_WAY_REV,
 } from "./database.js";
 import type { FunnelResult, NavmeshRegion } from "./navmesh.js";
+import { attachWaters, buildRouteDescription } from "./route-description.js";
 import {
   bearingDeg,
   buildItinerary,
@@ -59,7 +60,7 @@ function isInsideBBox(lat: number, lon: number, bbox: BBox): boolean {
 /** Per-request replacements for the configured waits, carried to finalizeRoute. */
 type WaitOverrides = Pick<
   RoutingRequest,
-  "lockWaitMinutes" | "bridgeWaitMinutes"
+  "lockWaitMinutes" | "bridgeWaitMinutes" | "lang" | "describe"
 >;
 
 interface RouteEnv {
@@ -745,6 +746,7 @@ export class RoutingEngine {
           ...request,
           departureTime,
           useTides: true,
+          describe: false,
         });
         // Checked again on the way out, not just on the way in. A search that
         // was already running when the client hung up finishes — cancellation
@@ -3427,6 +3429,51 @@ export class RoutingEngine {
     route.waypoints = waypoints;
     route.itinerary = itinerary;
 
+    // Where the route runs, by water. A failure here never fails the route.
+    if (waitOverrides?.describe !== false) {
+      try {
+        // One unit per graph edge: an aggregated segment (collinear
+        // compression, line-of-sight) spans several, and only edges are in
+        // the databases' sequence tables.
+        const units: Array<{ from: number; to: number; distance: number }> = [];
+        for (const seg of segments) {
+          const n = seg.nodes;
+          if (n && n.length >= 2) {
+            for (let k = 0; k + 1 < n.length; k++) {
+              units.push({
+                from: n[k],
+                to: n[k + 1],
+                distance: this.db.getEdgeSync(n[k], n[k + 1])?.distance ?? 0,
+              });
+            }
+          } else {
+            units.push({
+              from: seg.from,
+              to: seg.to,
+              distance: seg.distance ?? 0,
+            });
+          }
+        }
+        const described = await this.db.describeRoute(
+          units,
+          waitOverrides?.lang,
+        );
+        const description = buildRouteDescription(units, described);
+        if (description) {
+          route.description = description;
+          attachWaters(itinerary, description);
+        }
+      } catch (e) {
+        route.warnings = [
+          ...(route.warnings ?? []),
+          {
+            type: "description_unavailable",
+            message: `Route description unavailable: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ];
+      }
+    }
+
     route.totalSeconds = Math.round(totalSec);
     if (waitSec > 0) route.totalWaitSeconds = Math.round(waitSec);
     if (env) {
@@ -3792,6 +3839,9 @@ export class RoutingEngine {
         const prevNode = smoothedPath[i - 1];
         const currNode = smoothedPath[i];
         let edge = await this.db.getEdge(prevNode, currNode);
+        // The graph nodes an aggregated segment spans, for the route
+        // description (the segment itself only names its two ends).
+        let spanned: number[] | undefined;
 
         if (!edge && originalPath !== smoothedPath) {
           edge = this.db.aggregateSegmentEdges(
@@ -3799,6 +3849,12 @@ export class RoutingEngine {
             currNode,
             originalPath,
           );
+          if (edge) {
+            spanned = originalPath.slice(
+              originalPath.indexOf(prevNode),
+              originalPath.indexOf(currNode) + 1,
+            );
+          }
         }
 
         if (edge) {
@@ -3819,23 +3875,29 @@ export class RoutingEngine {
             ];
             for (const [lat, lon] of edge.path_points)
               coordinates.push([lon, lat]);
-            segments.push(
-              ...this.buildSubSegments(
-                pts,
-                {
-                  minDepth: edge.min_depth,
-                  minDepthKnown: edge.min_depth_known ?? edge.min_depth >= 0,
-                  maxAirDraft: edge.max_air_draft,
-                  minWidth: edge.min_width,
-                  costFactor: edge.cost_factor,
-                  trafficMode: edge.traffic_mode,
-                  edgeTypeId: edge.edge_type_id,
-                  ...RoutingEngine.edgeLockIds(edge),
-                },
-                prevNode,
-                currNode,
-              ),
+            const subs = this.buildSubSegments(
+              pts,
+              {
+                minDepth: edge.min_depth,
+                minDepthKnown: edge.min_depth_known ?? edge.min_depth >= 0,
+                maxAirDraft: edge.max_air_draft,
+                minWidth: edge.min_width,
+                costFactor: edge.cost_factor,
+                trafficMode: edge.traffic_mode,
+                edgeTypeId: edge.edge_type_id,
+                ...RoutingEngine.edgeLockIds(edge),
+              },
+              prevNode,
+              currNode,
             );
+            // One sub-segment per hop: when the polyline is exactly the
+            // spanned graph nodes, say which edge each one is.
+            if (spanned && spanned.length === pts.length) {
+              subs.forEach((sub, k) => {
+                sub.nodes = [spanned[k], spanned[k + 1]];
+              });
+            }
+            segments.push(...subs);
           } else {
             segments.push({
               from: prevNode,
@@ -3849,6 +3911,7 @@ export class RoutingEngine {
               trafficMode: edge.traffic_mode,
               edgeTypeId: edge.edge_type_id,
               ...RoutingEngine.edgeLockIds(edge),
+              ...(spanned && spanned.length > 2 ? { nodes: spanned } : {}),
             });
           }
         } else {

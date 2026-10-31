@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { BBox, PoiResult, OVERLAY_EDITABLE_COLUMNS } from "./types.js";
 import * as Navmesh from "./navmesh.js";
+import type { DescribeWorkerResult } from "./route-description.js";
 
 // Node type constants (encoded in the node ID via coordinate hashing)
 export const NODE_TYPE_COASTAL = 0;
@@ -309,6 +310,11 @@ export class RoutingDatabase {
    *  never drift out of sync with each other. */
   private coverageIndex: Map<string, DatabaseCoverageEntry> = new Map();
 
+  /** filename -> why this loaded file's route description is switched off
+   *  (its edge sequence / water body ids collide with another loaded file's).
+   *  The file still routes. Shown as `descriptionError` in GET /databases. */
+  private descriptionErrors: Map<string, string> = new Map();
+
   /** Peeked *.sqlite.disabled entries, kept aside in non-dynamic mode so the
    *  bulk load's coverageIndex rebuild can re-merge them — the bulk path only
    *  ever knows about files it actually opened. Empty in dynamic mode, where
@@ -569,6 +575,9 @@ export class RoutingDatabase {
       this.hasNodeDepth = schema.hasNodeDepth;
       this.hasRegionId = schema.hasRegionId;
       const filenames: string[] = schema.filenames || [];
+      this.descriptionErrors = new Map(
+        Object.entries(schema.descriptionErrors ?? {}),
+      );
       this.bulkFileList = dbPaths.map((p, i) => ({
         filename: filenames[i] || p.split("/").pop() || "",
         path: p,
@@ -703,6 +712,7 @@ export class RoutingDatabase {
       schemaVersion: number | null;
       contributor: string | null;
       url: string | null;
+      descriptionError: string | null;
     }>
   > {
     const result: Array<{
@@ -727,6 +737,7 @@ export class RoutingDatabase {
       schemaVersion: number | null;
       contributor: string | null;
       url: string | null;
+      descriptionError: string | null;
     }> = [];
     for (const entry of this.coverageIndex.values()) {
       const m = entry.meta;
@@ -748,6 +759,7 @@ export class RoutingDatabase {
         schemaVersion: m ? m.schemaVersion : null,
         contributor: m ? m.contributor : null,
         url: m ? m.url : null,
+        descriptionError: this.descriptionErrors.get(entry.filename) ?? null,
       });
     }
     return result;
@@ -1850,8 +1862,14 @@ export class RoutingDatabase {
           hasRegionId: boolean;
           hasEdgeKind: boolean;
         };
+        descriptionError?: string | null;
       } = await this.sendMessage("openDb", { dbPath: entry.path });
       const dbIndex = opened.dbIndex;
+      if (opened.descriptionError) {
+        this.descriptionErrors.set(filename, opened.descriptionError);
+      } else {
+        this.descriptionErrors.delete(filename);
+      }
       this.hasCrossesLand = this.hasCrossesLand || opened.flags.hasCrossesLand;
       this.hasCrossesObstacle =
         this.hasCrossesObstacle || opened.flags.hasCrossesObstacle;
@@ -2152,6 +2170,7 @@ export class RoutingDatabase {
     this.pois = this.pois.filter((p) => p.dbIndex !== dbIndex);
 
     await this.sendMessage("closeDb", { dbIndex });
+    this.descriptionErrors.delete(filename);
 
     // spatialGrid is maintained incrementally above (gridRemoveNode for
     // exactly the nodes actually removed) — no full rebuild needed (M6).
@@ -2312,6 +2331,29 @@ export class RoutingDatabase {
       return this.edgesBySource.get(nodeId) || [];
     }
     return [];
+  }
+
+  /**
+   * Water names and warnings for a found route's segments (the worker reads
+   * the databases' edge sequence tables; nothing of it lives in the graph).
+   * Segments are node pairs; ones that are not database edges (connectors,
+   * manual legs, overlay edits) come back null.
+   */
+  async describeRoute(
+    segments: Array<{ from: number; to: number }>,
+    lang?: string,
+  ): Promise<DescribeWorkerResult> {
+    const pairs = segments.map((seg) => {
+      const edge = this.edgesBySource
+        .get(seg.from)
+        ?.find((e) => e.target === seg.to);
+      return {
+        source: seg.from,
+        target: seg.to,
+        ...(edge?.dbIndex !== undefined ? { dbIndex: edge.dbIndex } : {}),
+      };
+    });
+    return this.sendMessage("describeRoute", { pairs, lang });
   }
 
   async getEdge(source: number, target: number): Promise<EdgeRow | null> {
@@ -3649,6 +3691,7 @@ export class RoutingDatabase {
     }
     this.nodes.clear();
     this.edgesBySource.clear();
+    this.descriptionErrors.clear();
     this.pois = [];
     this.navmeshRegions = [];
     this.spatialGrid.clear();

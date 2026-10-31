@@ -1,6 +1,12 @@
 import { parentPort } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
 import { OVERLAY_EDITABLE_COLUMNS } from "./types.js";
+import {
+  DescribeFlags,
+  describePairs,
+  detectDescribeFlags,
+  findDescribeCollision,
+} from "./route-metadata.js";
 
 interface NodeRow {
   id: number;
@@ -51,7 +57,7 @@ interface PoiRow {
   lon: number;
 }
 
-interface SchemaFlags {
+interface SchemaFlags extends DescribeFlags {
   hasCrossesLand: boolean;
   hasCrossesObstacle: boolean;
   hasNodeDepth: boolean;
@@ -77,6 +83,10 @@ interface DbHandle {
    *  isDepthKnown below. Null when the file does not declare one, which
    *  means the legacy "any negative is unknown" convention. */
   depthUnknownSentinel: number | null;
+  /** Set when this file's edge sequence / water body ids collide with another
+   *  open file's: the file still loads and routes, but its route description
+   *  is off. Surfaced as `descriptionError` in GET /databases. */
+  describeError?: string;
 }
 
 // A file declares its own "unknown depth" sentinel in
@@ -157,9 +167,40 @@ function detectSchemaFlags(db: DatabaseSync): SchemaFlags & {
     hasLockId: edgeCols.some((c) => c.name === "lock_id"),
     hasNodeDepth: nodeCols.some((c) => c.name === "node_depth"),
     hasRegionId: nodeCols.some((c) => c.name === "region_id"),
+    // Route-description tables, detected per file like the columns above.
+    ...detectDescribeFlags(db, edgeCols),
     edgeCols,
     nodeCols,
   };
+}
+
+/** Collision check for a freshly opened handle against the others (see
+ *  findDescribeCollision). On a clash the new file keeps routing but loses its
+ *  description; the error names both files and the id. */
+function checkDescribeCollision(fresh: DbHandle): void {
+  try {
+    const err = findDescribeCollision(fresh, handles);
+    if (err) {
+      fresh.describeError = err;
+      console.error(
+        `[db-worker] Route description disabled for ${filenameOf(fresh.path)}: ${err}`,
+      );
+    }
+  } catch (e: any) {
+    fresh.describeError = `description check failed: ${e.message ?? String(e)}`;
+    console.error(
+      `[db-worker] ${filenameOf(fresh.path)}: ${fresh.describeError}`,
+    );
+  }
+}
+
+/** filename -> description error, for the files that have one. */
+function describeErrors(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const h of handles) {
+    if (h?.describeError) out[filenameOf(h.path)] = h.describeError;
+  }
+  return out;
 }
 
 function filenameOf(dbPath: string): string {
@@ -319,7 +360,14 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             const filename = filenameOf(dbPath);
             const depthUnknownSentinel =
               readMetadataRow(db, filename)?.depthUnknownSentinel ?? null;
-            handles.push({ db, path: dbPath, flags, depthUnknownSentinel });
+            const handle: DbHandle = {
+              db,
+              path: dbPath,
+              flags,
+              depthUnknownSentinel,
+            };
+            checkDescribeCollision(handle);
+            handles.push(handle);
             filenames.push(filename);
             console.log(`[db-worker] Loaded database: ${dbPath}`);
           } catch (err: any) {
@@ -347,6 +395,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             hasNodeDepth,
             hasRegionId,
             filenames: loadedFilenames,
+            descriptionErrors: describeErrors(),
           },
         });
         break;
@@ -463,7 +512,14 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
         const dbIndex = handles.length;
         const depthUnknownSentinel =
           readMetadataRow(db, filename)?.depthUnknownSentinel ?? null;
-        handles.push({ db, path: dbPath, flags, depthUnknownSentinel });
+        const handle: DbHandle = {
+          db,
+          path: dbPath,
+          flags,
+          depthUnknownSentinel,
+        };
+        checkDescribeCollision(handle);
+        handles.push(handle);
         filenames.push(filename);
         console.log(
           `[db-worker] Opened database on demand: ${dbPath} (dbIndex=${dbIndex})`,
@@ -471,7 +527,12 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
         parentPort!.postMessage({
           id,
           type,
-          result: { dbIndex, filename, flags },
+          result: {
+            dbIndex,
+            filename,
+            flags,
+            descriptionError: handle.describeError ?? null,
+          },
         });
         break;
       }
@@ -847,6 +908,20 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
           });
         }
         parentPort!.postMessage({ id, type, result: null, chunk: false });
+        break;
+      }
+      case "describeRoute": {
+        // Names and warnings for a found route's node pairs; see
+        // route-metadata.ts. Reads only the route's own rows.
+        const { pairs, lang } = payload as {
+          pairs: Array<{ source: number; target: number; dbIndex?: number }>;
+          lang?: string;
+        };
+        parentPort!.postMessage({
+          id,
+          type,
+          result: describePairs(handles, pairs, lang),
+        });
         break;
       }
       case "loadPois": {
