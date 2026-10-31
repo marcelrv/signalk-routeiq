@@ -1,43 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.9 — 2026-10-31
 
-- Added: routes now say which waters they run through. With a routing database
-  that carries water bodies, the route result has a `description` and each
-  itinerary leg lists its `waters`, shown in the webapp and the Freeboard panel
-  as "3.1 km Waal, then 13.4 km Maas-Waalkanaal", with a warning where the depth
-  was never charted, the line is imported or from the community, or the
-  database has a notice for it. Names follow the browser language (new `lang`
-  request field). Older databases keep working without names. If two regional
-  databases use the same id for different lines or waters, the later one
-  keeps routing but its names are switched off, and the Data Manager shows
-  why in red.
+- Added: plan routes straight from the chart in Freeboard-SK 3.4+. Right-click
+  to set start, destination and vias in any order, or tap a route to optimise
+  it or find the best departure time. The panel gets 📍 buttons for the same.
 
-- Changed: the Freeboard panel no longer shows "air ≤ 999 m" on a leg, and
-  neither UI shows a 999 m minimum width; 999 means no limit.
+- Added: the itinerary names the waters each leg runs through ("3.1 km Waal,
+  then 13.4 km Maas-Waalkanaal"), with warnings for uncharted depths and route
+  notices. Needs routing data with water names; the published regions don't
+  have them yet.
 
-- Fixed: an opened itinerary leg with many crossings was cut off with no way
-  to scroll; it now scrolls.
-
-- Added: in Freeboard-SK 3.4+, RouteIQ adds chart right-click commands —
-  "Set start", "Set destination" and "Add via" plan a route by clicking,
-  in any order (a destination alone routes from the vessel), and tapping a
-  route offers "Optimise route" and "Best departure time". The panel also
-  gets a "Plan on the chart" section with 📍 buttons that let you tap the
-  start, destination and vias. Older Freeboard versions keep the existing
-  panel.
-
-- Fixed: the Freeboard panel's tide controls no longer need a vessel
-  position — tide data is checked along the selected route (start, vias,
-  end and midpoint), or at the chart centre when there is no route.
-
-- Fixed: the best-departure scan (webapp and Freeboard) works with tidal
-  current stations alone. It used to refuse with "Tide data is not
-  available" whenever no tide-height source was configured, although tidal
-  routing itself already used the currents.
-
-- Fixed: a route reshaped in Freeboard keeps the waypoint links of its
-  start and end points.
+- Fixed: Freeboard tide controls no longer need a vessel position.
+- Fixed: best departure time works with tidal current stations alone.
+- Fixed: a route reshaped in Freeboard keeps its start and end waypoints.
+- Fixed: a long itinerary leg now scrolls instead of being cut off.
+- Changed: a 999 m ("no limit") width, and in Freeboard air draft, is no
+  longer shown.
 
 ## 0.1.0-alpha.8 — 2026-09-23
 
