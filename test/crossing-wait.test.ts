@@ -9,8 +9,9 @@
  */
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { RoutingEngine } from '../dist/routing.js';
+import { RoutingEngine, passesClosedSpan } from '../dist/routing.js';
 import { DEFAULT_CONFIG } from '../dist/types.js';
+import { POI_TYPE_BRIDGE } from '../dist/database.js';
 
 describe('crossing wait time', () => {
   /**
@@ -312,6 +313,114 @@ describe('crossing wait time', () => {
   });
 });
 
+describe('opening span low enough to pass closed', () => {
+  /** As in the suite above, with a request (overrides) and vessel air draft. */
+  const schedule = (
+    crossings: unknown[],
+    { overrides, vesselAirDraft, config }: { overrides?: object; vesselAirDraft?: number; config?: object } = {},
+  ) => {
+    const engine = Object.create(RoutingEngine.prototype) as {
+      _config: unknown;
+      vesselDimensions: unknown;
+      crossingWaitSchedule: (c: unknown[], s: unknown[], x: unknown[], o?: object) => Array<{ seconds: number }>;
+    };
+    engine._config = { ...DEFAULT_CONFIG, ...config };
+    engine.vesselDimensions = { draft: 1.5, beam: 3, airDraft: vesselAirDraft ?? 0 };
+    return engine
+      .crossingWaitSchedule([[4, 51], [4.001, 51]], [], crossings, overrides)
+      .reduce((t, w) => t + w.seconds, 0);
+  };
+  const pos = { latitude: 51, longitude: 4 };
+  type C = Record<string, unknown>;
+  /** An opening-span crossing at the start of the route; `extra` overrides fields. */
+  const opening = (extra = {}): C => ({ type: 'bridge', subtype: 'opening', name: 'Span', position: pos, distanceFromStart: 0, ...extra });
+  /** A lock crossing at the start of the route; `extra` overrides fields. */
+  const lock = (extra = {}): C => ({ type: 'lock', name: 'Lock', position: pos, distanceFromStart: 0, ...extra });
+  const margin = DEFAULT_CONFIG.safetyMarginAirDraft; // 1.5
+
+  it('skips the wait when air draft + margin is below the closed clearance', () => {
+    const c = opening({ closedHeight: 6.6 });
+    assert.strictEqual(schedule([c], { overrides: { airDraft: 5 } }), 0);
+    assert.strictEqual(c.passesClosed, true);
+    assert.strictEqual(c.waitSeconds, undefined);
+    assert.strictEqual(c.note, 'passes closed (air draft 5.0 m + 1.5 m margin < closed 6.6 m), no wait');
+  });
+
+  it('waits when air draft + margin is above or equal to it', () => {
+    const above = opening({ closedHeight: 6.6 });
+    assert.strictEqual(schedule([above], { overrides: { airDraft: 5.5 } }), 1800);
+    assert.strictEqual(above.passesClosed, undefined);
+    assert.strictEqual(above.note, undefined);
+    // 5.1 + 1.5 == 6.6: equal is not below, so it waits
+    assert.strictEqual(schedule([opening({ closedHeight: 6.6 })], { overrides: { airDraft: 5.1 } }), 1800);
+  });
+
+  it('waits without a closed clearance or a known air draft', () => {
+    assert.strictEqual(schedule([opening()], { overrides: { airDraft: 2 } }), 1800);
+    assert.strictEqual(schedule([opening({ closedHeight: 6.6 })]), 1800, 'no air draft anywhere');
+    assert.strictEqual(schedule([opening({ closedHeight: 6.6 })], { overrides: { airDraft: 0 } }), 1800, '0 is unknown');
+  });
+
+  it('applies the configured margin', () => {
+    // 5 + 1.5 < 6.6 passes; with a 2 m margin it does not
+    assert.strictEqual(schedule([opening({ closedHeight: 6.6 })], { overrides: { airDraft: 5 }, config: { safetyMarginAirDraft: 2 } }), 1800);
+    assert.strictEqual(schedule([opening({ closedHeight: 6.6 })], { overrides: { airDraft: 5.9 }, config: { safetyMarginAirDraft: 0.5 } }), 0);
+  });
+
+  it('falls back to the vessel air draft, and the request wins over it', () => {
+    assert.strictEqual(schedule([opening({ closedHeight: 6.6 })], { vesselAirDraft: 5 }), 0);
+    assert.strictEqual(schedule([opening({ closedHeight: 6.6 })], { vesselAirDraft: 5, overrides: { airDraft: 8 } }), 1800);
+  });
+
+  it('leaves the wait to a lock in the same group', () => {
+    const span = opening({ closedHeight: 6.6, distanceFromStart: 60 });
+    const theLock = lock();
+    assert.strictEqual(schedule([theLock, span], { overrides: { airDraft: 5 } }), 3600);
+    assert.strictEqual(theLock.waitSeconds, 3600);
+    assert.strictEqual(span.waitSeconds, undefined);
+    // the span still passes closed, but the group does wait — no "no wait"
+    assert.strictEqual(span.note, 'passes closed (air draft 5.0 m + 1.5 m margin < closed 6.6 m)');
+  });
+
+  it('lets a non-passing opening span in the group own the wait', () => {
+    const low = opening({ closedHeight: 6.6, distanceFromStart: 0 });
+    const high = opening({ closedHeight: 3, distanceFromStart: 40 });
+    const unknown = opening({ distanceFromStart: 80 });
+    assert.strictEqual(schedule([low, high], { overrides: { airDraft: 5 } }), 1800);
+    assert.strictEqual(low.waitSeconds, undefined, 'a passing span never owns the wait');
+    assert.strictEqual(high.waitSeconds, 1800);
+    const pair = [opening({ closedHeight: 6.6, distanceFromStart: 0 }), unknown];
+    assert.strictEqual(schedule(pair, { overrides: { airDraft: 5 } }), 1800);
+    assert.strictEqual(unknown.waitSeconds, 1800);
+  });
+
+  it('is recomputed per request', () => {
+    const c = opening({ closedHeight: 6.6 });
+    schedule([c], { overrides: { airDraft: 5 } });
+    assert.strictEqual(c.passesClosed, true);
+    schedule([c], { overrides: { airDraft: 9 } });
+    assert.strictEqual(c.passesClosed, undefined);
+    assert.strictEqual(c.note, undefined);
+  });
+
+  it('passesClosedSpan only accepts opening bridges', () => {
+    assert.strictEqual(passesClosedSpan({ type: 'bridge', subtype: 'opening', closedHeight: 6.6 }, 5, margin), true);
+    assert.strictEqual(passesClosedSpan({ type: 'bridge', subtype: 'fixed', closedHeight: 6.6 }, 5, margin), false);
+    assert.strictEqual(passesClosedSpan({ type: 'bridge', closedHeight: 6.6 }, 5, margin), false);
+    assert.strictEqual(passesClosedSpan({ type: 'lock', closedHeight: 6.6 }, 5, margin), false);
+    assert.strictEqual(passesClosedSpan({ type: 'bridge', subtype: 'opening' }, 5, margin), false);
+    assert.strictEqual(passesClosedSpan({ type: 'bridge', subtype: 'opening', closedHeight: 6.6 }, undefined, margin), false);
+    assert.strictEqual(passesClosedSpan({ type: 'bridge', subtype: 'opening', closedHeight: 6.6 }, 0, margin), false);
+    assert.strictEqual(passesClosedSpan({ type: 'bridge', subtype: 'opening', closedHeight: 6.6 }, 5.1, margin), false);
+  });
+
+  it('labels the three span kinds', () => {
+    assert.strictEqual(RoutingEngine.formatSpanSuffix('opening', undefined, 6.6), ' (opening, closed 6.6m)');
+    assert.strictEqual(RoutingEngine.formatSpanSuffix('opening', undefined), ' (opening span)');
+    assert.strictEqual(RoutingEngine.formatSpanSuffix('fixed', 7.2), ' (fixed, 7.2m)');
+  });
+});
+
 describe('a wait moves the tide clock, not just the total', () => {
   /**
    * The point of placing waits rather than summing them: an hour in a lock puts
@@ -378,5 +487,94 @@ describe('a wait moves the tide clock, not just the total', () => {
     assert.deepStrictEqual(end.sampledAt, none.sampledAt,
       'a wait after the last leg shifts no sample');
     assert.ok(Math.abs((end.total - none.total) - 1800) < 1e-6);
+  });
+});
+
+describe('one crossing per bridge structure', () => {
+  // Woubrugsebrug in the Dutch database: VNDS names every span on its own, so
+  // the opening span and the fixed span ~15 m east share no name. The pipeline
+  // ties them together with properties.structure.
+  const LAT = 52.1667;
+  const OPEN_LON = 4.639;
+  const FIXED_LON = 4.63922; // ~15 m east
+  const OPEN_NAME = 'Doorvaartopening 2 (beweegbaar) Woubrugsebrug';
+  const FIXED_NAME = 'Doorvaartopening 1 (vast) Woubrugsebrug';
+
+  type Poi = { id: number; name: string; lat: number; lon: number; properties: Record<string, unknown> };
+  /** The Woubrugsebrug opening span POI; `props` are added to its properties. */
+  const openSpan = (props: Record<string, unknown> = {}, name = OPEN_NAME): Poi => ({
+    id: 1, name, lat: LAT, lon: OPEN_LON, properties: { subtype: 'opening', ...props },
+  });
+  /** The Woubrugsebrug fixed span POI, 2.61 m, ~15 m east of the opening. */
+  const fixedSpan = (props: Record<string, unknown> = {}, name = FIXED_NAME): Poi => ({
+    id: 2, name, lat: LAT, lon: FIXED_LON, properties: { subtype: 'fixed', height: 2.61, ...props },
+  });
+
+  /** A north-south route along `lon` through the bridge, a point every ~22 m. */
+  const routeAlong = (lon: number): [number, number][] => {
+    const coords: [number, number][] = [];
+    for (let i = -30; i <= 30; i++) coords.push([lon, LAT + i * 0.0002]);
+    return coords;
+  };
+
+  /** Run detectCrossings for a route along `lon`, with `pois` as the database's bridges. */
+  const detect = async (pois: Poi[], lon: number) => {
+    const engine = Object.create(RoutingEngine.prototype) as any;
+    engine._config = { ...DEFAULT_CONFIG };
+    engine.toRadians = (d: number) => (d * Math.PI) / 180;
+    engine.db = {
+      getPoisInBBox: async () => pois.map((p) => ({ ...p, typeId: POI_TYPE_BRIDGE })),
+    };
+    return (await engine.detectCrossings(routeAlong(lon))) as Array<{ name: string; subtype?: string }>;
+  };
+
+  it('lists only the opening span when the route goes through it', async () => {
+    const c = await detect([openSpan({ structure: '101' }), fixedSpan({ structure: '101' })], OPEN_LON);
+    assert.deepStrictEqual(c.map((x) => x.name), [`${OPEN_NAME} (opening span)`]);
+    assert.strictEqual(c[0].subtype, 'opening');
+  });
+
+  it('lists only the fixed span when the route goes through it', async () => {
+    const c = await detect([openSpan({ structure: '101' }), fixedSpan({ structure: '101' })], FIXED_LON);
+    assert.deepStrictEqual(c.map((x) => x.name), [`${FIXED_NAME} (fixed, 2.6m)`]);
+  });
+
+  it('keeps two structures apart, each listed', async () => {
+    const c = await detect([openSpan({ structure: '101' }), fixedSpan({ structure: '102' })], OPEN_LON);
+    assert.strictEqual(c.length, 2);
+  });
+
+  it('without a structure key, differently named spans are listed each (unchanged)', async () => {
+    const c = await detect([openSpan(), fixedSpan()], OPEN_LON);
+    assert.deepStrictEqual(c.map((x) => x.name).sort(),
+      [`${FIXED_NAME} (fixed, 2.6m)`, `${OPEN_NAME} (opening span)`]);
+  });
+
+  it('without a structure key, same-named spans are one crossing, the nearest (unchanged)', async () => {
+    const c = await detect([openSpan({}, 'Woubrugsebrug'), fixedSpan({}, 'Woubrugsebrug')], OPEN_LON);
+    assert.deepStrictEqual(c.map((x) => x.name), ['Woubrugsebrug (opening span)']);
+  });
+
+  it('lists the span the route line goes through, not the one nearest a graph node', async () => {
+    // The real NL graph: one 131 m edge passes the bridge through the opening
+    // span, but its node south of the bridge is 31.4 m from the fixed span and
+    // 33.1 m from the opening. The line itself is 6.7 m from the opening.
+    const pois: Poi[] = [
+      { id: 1, name: OPEN_NAME, lat: 52.16674, lon: 4.63913, properties: { subtype: 'opening', structure: '316044088261125' } },
+      { id: 2, name: FIXED_NAME, lat: 52.16678, lon: 4.63934, properties: { subtype: 'fixed', height: 2.61, structure: '316044088261125' } },
+    ];
+    const engine = Object.create(RoutingEngine.prototype) as any;
+    engine._config = { ...DEFAULT_CONFIG };
+    engine.toRadians = (d: number) => (d * Math.PI) / 180;
+    engine.db = { getPoisInBBox: async () => pois.map((p) => ({ ...p, typeId: POI_TYPE_BRIDGE })) };
+    const c = await engine.detectCrossings([[4.63942, 52.1665], [4.63861, 52.16757]]);
+    assert.deepStrictEqual(c.map((x: { name: string }) => x.name), [`${OPEN_NAME} (opening span)`]);
+  });
+
+  it('falls back to the name for an empty or non-string key', () => {
+    assert.strictEqual(RoutingEngine.structureKey({ name: 'X', properties: { structure: '' } }), 'n:X');
+    assert.strictEqual(RoutingEngine.structureKey({ name: 'X', properties: { structure: 7 } }), 'n:X');
+    assert.strictEqual(RoutingEngine.structureKey({ name: 'X', properties: { structure: '7' } }), 's:7');
+    assert.strictEqual(RoutingEngine.structureKey({ name: 'X' }), 'n:X');
   });
 });

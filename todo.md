@@ -136,16 +136,20 @@ turn text).
   panel: the host draws the route and sends no tap events for route lines.
 - ~~Click a bridge/lock in the route pane → pan the map to it~~ — **done** in
   the webapp and the Freeboard panel (`map.center`), same branch.
-- **Tide slider: GRIB and UTCEF (station) current layers behave differently**
-  (investigate before fixing; both are in `public/app.js`):
-  - *Live update:* the GRIB overlay redraws its arrows continuously while the
-    time slider is dragged, but the station (UTCEF) markers seem to update only
-    on mouse down/release. Make both follow the slider's `input` event (throttled
-    if the redraw is heavy), not just `change`/mousedown.
-  - *Hover box:* the GRIB tooltip is a neat box, the station one is not. The
-    station tooltip lacks the current direction, and probably the icons too.
-    Give both the same layout (speed, direction, time, source), ideally one
-    shared tooltip builder. Values come from the server; no client-side maths.
+- ~~Tide slider: GRIB and UTCEF current layers behave differently~~ — **done**
+  (branch `fix/tide-slider-currents`). It was the other way round: stations
+  already followed the drag, the GRIB grid only refetched on release. It now
+  refetches throttled while dragging, and both share `currentTooltipHtml`.
+- **Current data source in the hover box — waiting on signalk-tidal-currents.**
+  The GRIB overlay should say where its data comes from ("BSH North Sea ·
+  forecast, run 9 Nov 00:00 UTC"). Today `/currents/grid` only tags points
+  `source: grib|utcef|station`, and the summary lists GRIB files by filename
+  only. Needs signalk-tidal-currents to expose per-dataset `provider`/`model`/
+  `runTime`/`kind` (from the GRIB2 header, not the filename) and a `datasetId`
+  per `/grid` point; then show it as a muted line in `currentTooltipHtml`.
+  Same change: `/grid` mixes GRIB and UTCEF points (50 of 122 in a Zeeland
+  view were UTCEF). The hover title already follows each point's `source`;
+  the arrows are still all drawn in the grid colour.
 - **Dynamic isochrones (reachability polygons)** — Dijkstra from the vessel's
   position out to a time budget, returned as a GeoJSON polygon boundary.
 - **Custom avoidance / no-go zones** — user-drawn polygons passed to

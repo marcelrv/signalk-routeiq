@@ -2845,6 +2845,11 @@
     return { harbour: "⚓", fairway: "⛵", waterway: "💧" }[type] || "📍";
   }
 
+  /**
+   * Reload the POI markers for the current map view, when the POI layer is on.
+   * Bridges are coloured and labelled by span: a fixed span with its clearance,
+   * an opening span with its closed clearance when the database gives one.
+   */
   function fetchPois() {
     if (!poiVisible) return;
     poiLayer.clearLayers();
@@ -2881,7 +2886,12 @@
               if (props.height != null && props.height < 999)
                 label += " — " + props.height + "m";
             } else if (props.subtype === "opening") {
-              label += " (opening)";
+              // Closed clearance: below it you need not wait for an opening.
+              const ch = props.closed_height;
+              label +=
+                typeof ch === "number" && ch > 0 && ch < 999
+                  ? " (opening, closed " + ch + "m)"
+                  : " (opening)";
             }
           }
           const m = L.marker([p.lat, p.lon], {
@@ -3128,10 +3138,6 @@
     return sameDay ? "Today" : "Tomorrow";
   }
 
-  function fmtScrubTime(ms) {
-    return clockStr(ms) + " (" + scrubOffsetStr(ms) + ")";
-  }
-
   // Builds the 24h ruler: one segment per real clock hour (the edge
   // segments are partial when stationsWindowStart isn't itself on the
   // hour), alternating shading for readability, every hour labeled (a
@@ -3254,6 +3260,84 @@
     return html;
   }
 
+  const COMPASS_16 =
+    "N NNE NE ENE E ESE SE SSE S SSW SW WSW W WNW NW NNW".split(" ");
+
+  /**
+   * Shared hover card for current markers (UTCEF/harmonic stations and GRIB
+   * grid points): a two-line card, title + time offset, then speed · set.
+   * Pure formatting, no derivation.
+   * @param {object} opts
+   * @param {string} opts.title Station name or point label; a trailing
+   *   "lat,lon" pair is dropped.
+   * @param {number} opts.speedKn Shown as the server sends it: signed along
+   *   the flood/ebb axis for harmonic stations (negative = ebb), a plain
+   *   magnitude for UTCEF/GRIB.
+   * @param {number|null} opts.direction The SET: degrees true the water flows
+   *   TOWARDS (same as the arrow); null = slack / unknown.
+   * @param {number} opts.timeMs Sample time, shown as an offset from now.
+   * @returns {string} Tooltip HTML.
+   */
+  function currentTooltipHtml(opts) {
+    const muted = "color:#5f7a9a";
+    // Station names may carry a trailing "lat,lon" pair; drop it.
+    let title = String(opts.title);
+    const stripped = title.replace(
+      /\s+-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?\s*$/,
+      "",
+    );
+    if (stripped) title = stripped;
+    let dirHtml;
+    if (typeof opts.direction === "number") {
+      const deg = Math.round(opts.direction) % 360;
+      dirHtml =
+        '<span style="display:inline-block;color:#2563eb;transform:rotate(' +
+        deg +
+        'deg)">▲</span> ' +
+        deg +
+        "° " +
+        COMPASS_16[Math.round(deg / 22.5) % 16];
+    } else {
+      // No direction but still moving: the set is unknown, not slack.
+      dirHtml =
+        '<span style="' +
+        muted +
+        '">' +
+        (Math.abs(opts.speedKn) >= 0.05 ? "direction unknown" : "slack") +
+        "</span>";
+    }
+    // Inline SVG wave rather than a glyph: old plotter fonts may lack 〰.
+    const waveIcon =
+      '<svg width="14" height="8" viewBox="0 0 14 8" style="vertical-align:middle;margin-right:3px">' +
+      '<path d="M1 4 Q4 0 7 4 T13 4" fill="none" stroke="#2563eb" stroke-width="1.6" stroke-linecap="round"/></svg>';
+    const speedHtml =
+      waveIcon +
+      opts.speedKn.toFixed(1) +
+      " kn" +
+      (opts.speedKn < 0 ? ' <span style="' + muted + '">(ebb)</span>' : "");
+    return (
+      '<div style="font-weight:600">' +
+      escapeHtml(title) +
+      '<span style="font-weight:normal;margin-left:6px;' +
+      muted +
+      '">' +
+      scrubOffsetStr(opts.timeMs) +
+      "</span></div>" +
+      '<div style="white-space:nowrap">' +
+      speedHtml +
+      '<span style="' +
+      muted +
+      '"> · </span>' +
+      dirHtml +
+      "</div>"
+    );
+  }
+
+  /**
+   * Move the station current arrows and their hover boxes to a scrubber
+   * position, from each station's already-fetched 15-minute timeline.
+   * @param {number} minutes Offset into the 24h window (scrubber value).
+   */
   function updateStationMarkers(minutes) {
     const t = stationsWindowStart + minutes * 60000;
     document.getElementById("time-scrubber-pill").textContent =
@@ -3264,14 +3348,21 @@
       const entry = currentStationMarkers[id];
       const sample =
         entry.timeline[Math.max(0, Math.min(entry.timeline.length - 1, idx))];
-      if (!sample || sample.direction === null) continue;
-      entry.marker.setIcon(currentArrowIcon(sample.direction, sample.speedKn));
+      if (!sample) continue;
+      // no direction (slack / unknown axis): neutral zero-speed arrow
+      // rather than leaving the previous time step's icon in place.
+      entry.marker.setIcon(
+        sample.direction === null
+          ? currentArrowIcon(0, 0)
+          : currentArrowIcon(sample.direction, sample.speedKn),
+      );
       entry.marker.setTooltipContent(
-        entry.name +
-          "<br/>" +
-          sample.speedKn.toFixed(1) +
-          " kn @ " +
-          fmtScrubTime(new Date(sample.time).getTime()),
+        currentTooltipHtml({
+          title: entry.name,
+          speedKn: sample.speedKn,
+          direction: sample.direction,
+          timeMs: new Date(sample.time).getTime(),
+        }),
       );
     }
   }
@@ -3353,17 +3444,25 @@
     fetchCurrentGrid();
   }
 
-  // GRIB gridded current field (if the plugin has one configured) sampled
-  // over the viewport at the currently-scrubbed time. Unlike station
-  // markers this has no per-point timeline to interpolate locally — it's
-  // refetched on viewport change, on scrubber release, and on every tick
-  // while playing. gridFetchToken guards against an in-flight request
-  // resolving out of order (e.g. during playback) and drawing stale points
-  // over a newer frame.
+  // gridFetchToken guards against an in-flight request resolving out of
+  // order (e.g. during playback) and drawing stale points over a newer
+  // frame; hiding the overlay bumps it too.
   let gridFetchToken = 0;
+  /**
+   * Fetch the gridded current field (GRIB lattice plus stations, if the
+   * currents plugin has them) over the viewport at the currently-scrubbed
+   * time and redraw the grid arrows. Unlike station markers this has no
+   * per-point timeline to interpolate locally — it's refetched on viewport
+   * change, while dragging the scrubber (throttled, see scheduleGridFetch),
+   * on scrubber release, and on every tick while playing. The previous
+   * arrows stay up until the new frame arrives so the layer doesn't blink
+   * while scrubbing.
+   */
   function fetchCurrentGrid() {
-    currentGridLayer.clearLayers();
-    if (!stationsVisible) return;
+    if (!stationsVisible) {
+      currentGridLayer.clearLayers();
+      return;
+    }
     const minutes = Number(document.getElementById("time-scrubber").value);
     const t = (stationsWindowStart || Date.now()) + minutes * 60000;
     const token = ++gridFetchToken;
@@ -3371,19 +3470,61 @@
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (token !== gridFetchToken) return; // superseded by a newer request
-        if (!data || !data.points) return; // no GRIB source configured, or 503/404
+        // no GRIB source configured, or 503/404: nothing to show
+        if (!data || !data.points) {
+          currentGridLayer.clearLayers();
+          return;
+        }
+        currentGridLayer.clearLayers();
         for (const p of data.points) {
           L.marker([p.latitude, p.longitude], {
             icon: currentArrowIcon(p.direction, p.speedKn, "grid"),
           })
-            .bindTooltip("GRIB current<br/>" + p.speedKn.toFixed(1) + " kn", {
-              direction: "top",
-              offset: [0, -10],
-            })
+            .bindTooltip(
+              currentTooltipHtml({
+                // /grid mixes GRIB lattice points with stations
+                title:
+                  p.source === "grib"
+                    ? "GRIB current"
+                    : p.source === "utcef" || p.source === "station"
+                      ? "Current station"
+                      : "Current",
+                speedKn: p.speedKn,
+                direction: p.direction,
+                timeMs: t,
+              }),
+              { direction: "top", offset: [0, -10] },
+            )
             .addTo(currentGridLayer);
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        // Don't leave the previous time's arrows up as if they were current.
+        if (token === gridFetchToken) currentGridLayer.clearLayers();
+      });
+  }
+
+  const GRID_THROTTLE_MS = 250;
+  let gridThrottleTimer = null;
+  let gridLastFetch = 0;
+  /**
+   * Trailing throttle for fetchCurrentGrid while the scrubber is dragged:
+   * at most one request per GRID_THROTTLE_MS, and the last position always
+   * gets fetched (the trailing call), so the grid follows the slider live.
+   */
+  function scheduleGridFetch() {
+    if (gridThrottleTimer) return; // a trailing call is already pending
+    const wait = Math.max(0, gridLastFetch + GRID_THROTTLE_MS - Date.now());
+    gridThrottleTimer = setTimeout(function () {
+      gridThrottleTimer = null;
+      gridLastFetch = Date.now();
+      fetchCurrentGrid();
+    }, wait);
+  }
+  /** Drop a pending throttled grid fetch; on release the caller fetches now. */
+  function cancelScheduledGridFetch() {
+    clearTimeout(gridThrottleTimer);
+    gridThrottleTimer = null;
   }
 
   // Play/pause: steps the scrubber forward on a timer so set/drift can be
@@ -3431,6 +3572,7 @@
       } else {
         stopPlay();
         stationsLayer.clearLayers();
+        gridFetchToken++; // a grid reply still in flight must not redraw
         currentGridLayer.clearLayers();
         for (const id in currentStationMarkers)
           delete currentStationMarkers[id];
@@ -3445,10 +3587,12 @@
     .addEventListener("input", function () {
       stopPlay();
       updateStationMarkers(Number(this.value));
+      scheduleGridFetch();
     });
   document
     .getElementById("time-scrubber")
     .addEventListener("change", function () {
+      cancelScheduledGridFetch();
       fetchCurrentGrid();
     });
 
@@ -3484,9 +3628,15 @@
       return Math.min(max, Math.round((frac * max) / step) * step);
     }
 
+    /**
+     * Set the scrubber from the hour bar: station arrows follow at once, the
+     * grid through the throttle.
+     * @param {number} minutes Offset into the 24h window.
+     */
     function scrubTo(minutes) {
       input.value = minutes;
       updateStationMarkers(minutes);
+      scheduleGridFetch();
     }
 
     hourbar.addEventListener("pointerdown", function (e) {
@@ -3505,6 +3655,7 @@
       if (!dragging) return;
       dragging = false;
       scrubTo(minutesFromClientX(e.clientX));
+      cancelScheduledGridFetch();
       fetchCurrentGrid(); // commit, same as releasing the native slider
     });
   })();
@@ -6815,11 +6966,13 @@
   }
 
   /**
-   * Build the route pane (warnings, itinerary nodes and legs, crossings) from
-   * the server's route result. Also runs again on a speed change or late
-   * config; the picked route section is restored afterwards.
-   * @param {object|null} geoJson The route FeatureCollection; null clears the
-   *   pane.
+   * Fill the route pane from a route result: warnings, then each route point
+   * with the leg after it (distance, time, the bridges and locks on that leg
+   * with their waits, and the waters it runs through). Clears the pane when
+   * there is no route. Also runs again on a speed change or late config;
+   * the section picked on the route line is restored afterwards.
+   *
+   * @param {object|null} geoJson - The route result as returned by the server.
    */
   function renderRoutePane(geoJson) {
     const pane = document.getElementById("route-pane");
@@ -7345,7 +7498,8 @@
               '<div class="leg-stat"><span>Min Width</span><span class="leg-val">' +
               minWidth.toFixed(1) +
               " m</span></div>";
-          if (maxAirDraft !== Infinity)
+          // 999 m is the graph's "no air draft limit", like width above.
+          if (maxAirDraft !== Infinity && maxAirDraft < 999)
             html +=
               '<div class="leg-stat"><span>Max Air Draft</span><span class="leg-val">' +
               fmtHeight(maxAirDraft) +
@@ -7370,12 +7524,15 @@
                     ? "#ef4444"
                     : "#22c55e";
               // Span info (subtype/height) is baked into c.name by the server
-              // when known (e.g. "... (opening span)" / "... (fixed, 18.4m)").
+              // when known (e.g. "... (opening span)", "... (opening, closed
+              // 6.6m)" / "... (fixed, 18.4m)").
               // Only synthesize a separate badge for older/raw data that lacks it.
               let info = "";
               if (
                 e0.type === "bridge" &&
-                !/\((?:opening span|fixed(?:,[^)]*)?)\)/.test(e0.name)
+                !/\((?:opening(?: span|,[^)]*)|fixed(?:,[^)]*)?)\)/.test(
+                  e0.name,
+                )
               ) {
                 const fixedEntry = entries.find((e) => e.subtype === "fixed");
                 const hasOpening = entries.some((e) => e.subtype === "opening");
@@ -7413,6 +7570,15 @@
                     "</span>"
                   : "") +
                 "</div>";
+              // A span low enough to pass closed charges no wait; the server
+              // says why, so the skipped wait stays visible.
+              for (const e of entries) {
+                if (e.note)
+                  html +=
+                    '<div class="leg-crossing-note">' +
+                    escapeHtml(e.note) +
+                    "</div>";
+              }
             }
           }
 

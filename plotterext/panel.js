@@ -1262,10 +1262,13 @@ function renderSummary(result) {
 }
 
 /**
- * Render the server's itinerary as the panel's turn list: start, vias,
- * turns and end, each with its leg's stats, waters, warnings and crossings.
- * Positioned crossings centre the host chart on them.
- * @param {object[]} itinerary The route result's `itinerary` points.
+ * Fill the itinerary list: one item per route point (start, turns, vias,
+ * destination) with its running time, and under it the leg that follows:
+ * distance, time, the bridges and locks crossed with their waits, and the
+ * waters it runs through. Crossings with a position centre the host chart
+ * on them.
+ *
+ * @param {Array<object>} itinerary - The server's itinerary points, in route order.
  */
 function renderItinerary(itinerary) {
   const ol = $("itinerary");
@@ -1421,11 +1424,13 @@ function renderItinerary(itinerary) {
         const cn = document.createElement("span");
         cn.className = "cname";
         // Span info (subtype/height) is baked into c.name by the server when
-        // known (e.g. "... (opening span)" / "... (fixed, 18.4m)"). Only
-        // synthesize a separate suffix for older/raw data that lacks it.
-        const nameHasSpanInfo = /\((?:opening span|fixed(?:,[^)]*)?)\)/.test(
-          e0.name || "",
-        );
+        // known (e.g. "... (opening span)", "... (opening, closed 6.6m)" /
+        // "... (fixed, 18.4m)"). Only synthesize a separate suffix for
+        // older/raw data that lacks it.
+        const nameHasSpanInfo =
+          /\((?:opening(?: span|,[^)]*)|fixed(?:,[^)]*)?)\)/.test(
+            e0.name || "",
+          );
         let info = "";
         if (nameHasSpanInfo) {
           info = "";
@@ -1507,6 +1512,15 @@ function renderItinerary(itinerary) {
           });
         }
         leg.appendChild(row);
+        // A span low enough to pass closed charges no wait; the server says
+        // why, so the skipped wait stays visible.
+        for (const e of entries) {
+          if (!e.note) continue;
+          const note = document.createElement("div");
+          note.className = "cnote";
+          note.textContent = e.note;
+          leg.appendChild(note);
+        }
       }
       li.appendChild(leg);
     }

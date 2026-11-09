@@ -6,6 +6,10 @@
   in the webapp and the Freeboard panel.
 - Added: click the route line to select and open that section in the route
   list; it stays highlighted until Esc, a map click or a new route.
+- Fixed: GRIB current arrows now follow the tide slider while you drag it,
+  instead of jumping only on release, and no longer blink while loading.
+- Changed: station and GRIB current markers share one hover box with speed,
+  set (direction) and time.
 
 ## 0.1.0-alpha.9 — 2026-10-31
 
