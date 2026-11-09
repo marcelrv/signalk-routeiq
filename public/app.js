@@ -3253,6 +3253,52 @@
     return html;
   }
 
+  const COMPASS_16 =
+    "N NNE NE ENE E ESE SE SSE S SSW SW WSW W WNW NW NNW".split(" ");
+
+  // Shared hover card for current markers (UTCEF/harmonic stations and GRIB
+  // grid points), styled like tideTooltipHtml. direction is the SET: degrees
+  // true the water flows TOWARDS (same as the arrow); null = slack / unknown.
+  // speedKn is shown as the server sends it — for harmonic stations it is
+  // signed along the flood/ebb axis (negative = ebb), for UTCEF/GRIB it is a
+  // plain magnitude. Pure formatting, no derivation.
+  function currentTooltipHtml(opts) {
+    const rowStyle = 'style="padding:0 8px 0 0;color:#5f7a9a"';
+    const row = function (label, value) {
+      return (
+        "<tr><td " + rowStyle + ">" + label + "</td><td>" + value + "</td></tr>"
+      );
+    };
+    let dirHtml;
+    if (typeof opts.direction === "number") {
+      const deg = Math.round(opts.direction) % 360;
+      dirHtml =
+        '<span style="display:inline-block;color:#2563eb;transform:rotate(' +
+        deg +
+        'deg)">▲</span> ' +
+        deg +
+        "° " +
+        COMPASS_16[Math.round(deg / 22.5) % 16];
+    } else {
+      dirHtml = '<span style="color:#5f7a9a">slack / no direction</span>';
+    }
+    const speedHtml =
+      opts.speedKn.toFixed(1) +
+      " kn" +
+      (opts.speedKn < 0 ? ' <span style="color:#5f7a9a">(ebb)</span>' : "");
+    return (
+      '<div style="font-weight:600;margin-bottom:2px">' +
+      escapeHtml(opts.title) +
+      "</div>" +
+      '<table style="border-collapse:collapse;font-size:11px">' +
+      row("Speed", speedHtml) +
+      row("Set", dirHtml) +
+      row("Time", fmtScrubTime(opts.timeMs)) +
+      row("Source", opts.source) +
+      "</table>"
+    );
+  }
+
   function updateStationMarkers(minutes) {
     const t = stationsWindowStart + minutes * 60000;
     document.getElementById("time-scrubber-pill").textContent =
@@ -3263,14 +3309,22 @@
       const entry = currentStationMarkers[id];
       const sample =
         entry.timeline[Math.max(0, Math.min(entry.timeline.length - 1, idx))];
-      if (!sample || sample.direction === null) continue;
-      entry.marker.setIcon(currentArrowIcon(sample.direction, sample.speedKn));
+      if (!sample) continue;
+      // no direction (slack / unknown axis): neutral zero-speed arrow
+      // rather than leaving the previous time step's icon in place.
+      entry.marker.setIcon(
+        sample.direction === null
+          ? currentArrowIcon(0, 0)
+          : currentArrowIcon(sample.direction, sample.speedKn),
+      );
       entry.marker.setTooltipContent(
-        entry.name +
-          "<br/>" +
-          sample.speedKn.toFixed(1) +
-          " kn @ " +
-          fmtScrubTime(new Date(sample.time).getTime()),
+        currentTooltipHtml({
+          title: entry.name,
+          source: "Station",
+          speedKn: sample.speedKn,
+          direction: sample.direction,
+          timeMs: new Date(sample.time).getTime(),
+        }),
       );
     }
   }
@@ -3355,14 +3409,18 @@
   // GRIB gridded current field (if the plugin has one configured) sampled
   // over the viewport at the currently-scrubbed time. Unlike station
   // markers this has no per-point timeline to interpolate locally — it's
-  // refetched on viewport change, on scrubber release, and on every tick
-  // while playing. gridFetchToken guards against an in-flight request
-  // resolving out of order (e.g. during playback) and drawing stale points
-  // over a newer frame.
+  // refetched on viewport change, while dragging the scrubber (throttled,
+  // see scheduleGridFetch), on scrubber release, and on every tick while
+  // playing. gridFetchToken guards against an in-flight request resolving
+  // out of order (e.g. during playback) and drawing stale points over a
+  // newer frame. The previous arrows stay up until the new frame arrives
+  // so the layer doesn't blink while scrubbing.
   let gridFetchToken = 0;
   function fetchCurrentGrid() {
-    currentGridLayer.clearLayers();
-    if (!stationsVisible) return;
+    if (!stationsVisible) {
+      currentGridLayer.clearLayers();
+      return;
+    }
     const minutes = Number(document.getElementById("time-scrubber").value);
     const t = (stationsWindowStart || Date.now()) + minutes * 60000;
     const token = ++gridFetchToken;
@@ -3370,19 +3428,50 @@
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (token !== gridFetchToken) return; // superseded by a newer request
-        if (!data || !data.points) return; // no GRIB source configured, or 503/404
+        // no GRIB source configured, or 503/404: nothing to show
+        if (!data || !data.points) {
+          currentGridLayer.clearLayers();
+          return;
+        }
+        currentGridLayer.clearLayers();
         for (const p of data.points) {
           L.marker([p.latitude, p.longitude], {
             icon: currentArrowIcon(p.direction, p.speedKn, "grid"),
           })
-            .bindTooltip("GRIB current<br/>" + p.speedKn.toFixed(1) + " kn", {
-              direction: "top",
-              offset: [0, -10],
-            })
+            .bindTooltip(
+              currentTooltipHtml({
+                title: "GRIB current",
+                source: "GRIB",
+                speedKn: p.speedKn,
+                direction: p.direction,
+                timeMs: t,
+              }),
+              { direction: "top", offset: [0, -10] },
+            )
             .addTo(currentGridLayer);
         }
       })
       .catch(() => {});
+  }
+
+  // Trailing throttle for fetchCurrentGrid while the scrubber is dragged:
+  // at most one request per GRID_THROTTLE_MS, and the last position always
+  // gets fetched (the trailing call), so the grid follows the slider live.
+  const GRID_THROTTLE_MS = 250;
+  let gridThrottleTimer = null;
+  let gridLastFetch = 0;
+  function scheduleGridFetch() {
+    if (gridThrottleTimer) return; // a trailing call is already pending
+    const wait = Math.max(0, gridLastFetch + GRID_THROTTLE_MS - Date.now());
+    gridThrottleTimer = setTimeout(function () {
+      gridThrottleTimer = null;
+      gridLastFetch = Date.now();
+      fetchCurrentGrid();
+    }, wait);
+  }
+  function cancelScheduledGridFetch() {
+    clearTimeout(gridThrottleTimer);
+    gridThrottleTimer = null;
   }
 
   // Play/pause: steps the scrubber forward on a timer so set/drift can be
@@ -3444,10 +3533,12 @@
     .addEventListener("input", function () {
       stopPlay();
       updateStationMarkers(Number(this.value));
+      scheduleGridFetch();
     });
   document
     .getElementById("time-scrubber")
     .addEventListener("change", function () {
+      cancelScheduledGridFetch();
       fetchCurrentGrid();
     });
 
@@ -3486,6 +3577,7 @@
     function scrubTo(minutes) {
       input.value = minutes;
       updateStationMarkers(minutes);
+      scheduleGridFetch();
     }
 
     hourbar.addEventListener("pointerdown", function (e) {
@@ -3504,6 +3596,7 @@
       if (!dragging) return;
       dragging = false;
       scrubTo(minutesFromClientX(e.clientX));
+      cancelScheduledGridFetch();
       fetchCurrentGrid(); // commit, same as releasing the native slider
     });
   })();

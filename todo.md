@@ -146,16 +146,10 @@ turn text).
   the Freeboard panel use the host's map capability (check
   `client.hasCapability()` first, and add any new capability to the
   manifest's `optional` list).
-- **Tide slider: GRIB and UTCEF (station) current layers behave differently**
-  (investigate before fixing; both are in `public/app.js`):
-  - *Live update:* the GRIB overlay redraws its arrows continuously while the
-    time slider is dragged, but the station (UTCEF) markers seem to update only
-    on mouse down/release. Make both follow the slider's `input` event (throttled
-    if the redraw is heavy), not just `change`/mousedown.
-  - *Hover box:* the GRIB tooltip is a neat box, the station one is not. The
-    station tooltip lacks the current direction, and probably the icons too.
-    Give both the same layout (speed, direction, time, source), ideally one
-    shared tooltip builder. Values come from the server; no client-side maths.
+- ~~Tide slider: GRIB and UTCEF current layers behave differently~~ — **done**
+  (branch `fix/tide-slider-currents`). It was the other way round: stations
+  already followed the drag, the GRIB grid only refetched on release. It now
+  refetches throttled while dragging, and both share `currentTooltipHtml`.
 - **Dynamic isochrones (reachability polygons)** — Dijkstra from the vessel's
   position out to a time budget, returned as a GeoJSON polygon boundary.
 - **Custom avoidance / no-go zones** — user-drawn polygons passed to
