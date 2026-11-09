@@ -3279,7 +3279,13 @@
         "° " +
         COMPASS_16[Math.round(deg / 22.5) % 16];
     } else {
-      dirHtml = '<span style="' + muted + '">slack</span>';
+      // No direction but still moving: the set is unknown, not slack.
+      dirHtml =
+        '<span style="' +
+        muted +
+        '">' +
+        (Math.abs(opts.speedKn) >= 0.05 ? "direction unknown" : "slack") +
+        "</span>";
     }
     // Inline SVG wave rather than a glyph: old plotter fonts may lack 〰.
     const waveIcon =
@@ -3448,7 +3454,13 @@
           })
             .bindTooltip(
               currentTooltipHtml({
-                title: "GRIB current",
+                // /grid mixes GRIB lattice points with stations
+                title:
+                  p.source === "grib"
+                    ? "GRIB current"
+                    : p.source === "utcef" || p.source === "station"
+                      ? "Current station"
+                      : "Current",
                 speedKn: p.speedKn,
                 direction: p.direction,
                 timeMs: t,
@@ -3458,7 +3470,10 @@
             .addTo(currentGridLayer);
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        // Don't leave the previous time's arrows up as if they were current.
+        if (token === gridFetchToken) currentGridLayer.clearLayers();
+      });
   }
 
   // Trailing throttle for fetchCurrentGrid while the scrubber is dragged:
@@ -3526,6 +3541,7 @@
       } else {
         stopPlay();
         stationsLayer.clearLayers();
+        gridFetchToken++; // a grid reply still in flight must not redraw
         currentGridLayer.clearLayers();
         for (const id in currentStationMarkers)
           delete currentStationMarkers[id];
