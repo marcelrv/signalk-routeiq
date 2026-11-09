@@ -7175,7 +7175,8 @@
               '<div class="leg-stat"><span>Min Width</span><span class="leg-val">' +
               minWidth.toFixed(1) +
               " m</span></div>";
-          if (maxAirDraft !== Infinity)
+          // 999 m is the graph's "no air draft limit", like width above.
+          if (maxAirDraft !== Infinity && maxAirDraft < 999)
             html +=
               '<div class="leg-stat"><span>Max Air Draft</span><span class="leg-val">' +
               fmtHeight(maxAirDraft) +
