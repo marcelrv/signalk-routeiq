@@ -60,8 +60,33 @@ function isInsideBBox(lat: number, lon: number, bbox: BBox): boolean {
 /** Per-request replacements for the configured waits, carried to finalizeRoute. */
 type WaitOverrides = Pick<
   RoutingRequest,
-  "lockWaitMinutes" | "bridgeWaitMinutes" | "lang" | "describe"
+  "lockWaitMinutes" | "bridgeWaitMinutes" | "lang" | "describe" | "airDraft"
 >;
+
+/**
+ * Whether a vessel can pass under an opening span without waiting for it to
+ * open: only with a known closed clearance, a known air draft (0 means unknown,
+ * as in the edge checks) and airDraft + margin strictly below the clearance.
+ * Fixed spans and locks never qualify — this decides waits, not air-draft limits.
+ */
+export function passesClosedSpan(
+  crossing: Pick<RouteCrossing, "type" | "subtype" | "closedHeight">,
+  airDraft: number | undefined,
+  margin: number,
+): boolean {
+  if (crossing.type !== "bridge" || crossing.subtype !== "opening")
+    return false;
+  const closed = crossing.closedHeight;
+  if (typeof closed !== "number" || !Number.isFinite(closed) || closed <= 0)
+    return false;
+  if (
+    typeof airDraft !== "number" ||
+    !Number.isFinite(airDraft) ||
+    airDraft <= 0
+  )
+    return false;
+  return airDraft + margin < closed;
+}
 
 interface RouteEnv {
   flow: FlowField;
@@ -3190,6 +3215,16 @@ export class RoutingEngine {
           : 0;
       }
       delete c.waitSeconds; // recomputed below; never carried over from before
+      delete c.passesClosed;
+      delete c.note;
+    }
+
+    // An opening span low enough to clear while closed is not something to
+    // wait for. Request air draft first, then the vessel's own.
+    const airDraft = overrides?.airDraft ?? this.vesselDimensions?.airDraft;
+    const margin = this.config.safetyMarginAirDraft ?? 1.5;
+    for (const c of crossings) {
+      if (passesClosedSpan(c, airDraft, margin)) c.passesClosed = true;
     }
 
     // Locks the route demonstrably passed through, from the edges it used, at
@@ -3282,10 +3317,22 @@ export class RoutingEngine {
       // A lock complex is a lock. Whichever chamber you take you lock through
       // once, and the spans carried over its heads open with it — so the
       // bridges in this group cost nothing on top, however the lock was found.
+      // A span that passes closed never owns the wait; any other opening span
+      // in the same group still does.
       const owner =
         group.find((c) => c.type === "lock") ??
-        group.find((c) => c.type === "bridge" && c.subtype === "opening");
-      if (!owner) continue; // fixed spans only — nothing to wait for
+        group.find(
+          (c) =>
+            c.type === "bridge" && c.subtype === "opening" && !c.passesClosed,
+        );
+      for (const c of group) {
+        if (!c.passesClosed) continue;
+        c.note =
+          `passes closed (air draft ${airDraft!.toFixed(1)} m + ` +
+          `${margin.toFixed(1)} m margin < closed ${c.closedHeight!.toFixed(1)} m)` +
+          (owner ? "" : ", no wait");
+      }
+      if (!owner) continue; // fixed or passable spans only — nothing to wait for
       const minutes =
         owner.waitMinutes ??
         (owner.type === "lock" ? lockDefault : bridgeDefault);
@@ -3967,14 +4014,20 @@ export class RoutingEngine {
     };
   }
 
-  // Human-readable span suffix for a bridge crossing, e.g. " (opening span)"
-  // or " (fixed, 18.4m)". S-57 gives every span of a bridge the same OBJNAM,
-  // so this is what lets a route report distinguish which span was crossed.
-  private static formatSpanSuffix(
+  // Human-readable span suffix for a bridge crossing, e.g. " (opening span)",
+  // " (opening, closed 6.6m)" or " (fixed, 18.4m)". S-57 gives every span of a
+  // bridge the same OBJNAM, so this is what lets a route report distinguish
+  // which span was crossed.
+  static formatSpanSuffix(
     subtype: string | undefined,
     height: number | undefined,
+    closedHeight?: number,
   ): string {
-    if (subtype === "opening") return " (opening span)";
+    if (subtype === "opening") {
+      return typeof closedHeight === "number"
+        ? ` (opening, closed ${closedHeight.toFixed(1)}m)`
+        : " (opening span)";
+    }
     if (subtype === "fixed") {
       return typeof height === "number"
         ? ` (fixed, ${height.toFixed(1)}m)`
@@ -4144,11 +4197,21 @@ export class RoutingEngine {
       const props = poi.properties as Record<string, unknown>;
       const subtype = props?.subtype as string | undefined;
       const height = props?.height as number | undefined;
+      // Opening spans only, and only a real figure: absent means unknown.
+      const ch = props?.closed_height;
+      const closedHeight =
+        subtype === "opening" &&
+        typeof ch === "number" &&
+        Number.isFinite(ch) &&
+        ch > 0
+          ? ch
+          : undefined;
       return {
         type: "bridge",
-        name: `${poi.name}${RoutingEngine.formatSpanSuffix(subtype, height)}`,
+        name: `${poi.name}${RoutingEngine.formatSpanSuffix(subtype, height, closedHeight)}`,
         subtype,
         height,
+        ...(closedHeight !== undefined ? { closedHeight } : {}),
         waitMinutes: poiWaitMinutes(props),
         position: { latitude: poi.lat, longitude: poi.lon },
       };

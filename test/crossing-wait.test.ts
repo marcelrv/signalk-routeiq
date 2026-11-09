@@ -9,7 +9,7 @@
  */
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { RoutingEngine } from '../dist/routing.js';
+import { RoutingEngine, passesClosedSpan } from '../dist/routing.js';
 import { DEFAULT_CONFIG } from '../dist/types.js';
 
 describe('crossing wait time', () => {
@@ -309,6 +309,112 @@ describe('crossing wait time', () => {
       waitSeconds([{ type: 'bridge', name: 'unclassified', position: pos }]),
       0,
     );
+  });
+});
+
+describe('opening span low enough to pass closed', () => {
+  /** As in the suite above, with a request (overrides) and vessel air draft. */
+  const schedule = (
+    crossings: unknown[],
+    { overrides, vesselAirDraft, config }: { overrides?: object; vesselAirDraft?: number; config?: object } = {},
+  ) => {
+    const engine = Object.create(RoutingEngine.prototype) as {
+      _config: unknown;
+      vesselDimensions: unknown;
+      crossingWaitSchedule: (c: unknown[], s: unknown[], x: unknown[], o?: object) => Array<{ seconds: number }>;
+    };
+    engine._config = { ...DEFAULT_CONFIG, ...config };
+    engine.vesselDimensions = { draft: 1.5, beam: 3, airDraft: vesselAirDraft ?? 0 };
+    return engine
+      .crossingWaitSchedule([[4, 51], [4.001, 51]], [], crossings, overrides)
+      .reduce((t, w) => t + w.seconds, 0);
+  };
+  const pos = { latitude: 51, longitude: 4 };
+  type C = Record<string, unknown>;
+  const opening = (extra = {}): C => ({ type: 'bridge', subtype: 'opening', name: 'Span', position: pos, distanceFromStart: 0, ...extra });
+  const lock = (extra = {}): C => ({ type: 'lock', name: 'Lock', position: pos, distanceFromStart: 0, ...extra });
+  const margin = DEFAULT_CONFIG.safetyMarginAirDraft; // 1.5
+
+  it('skips the wait when air draft + margin is below the closed clearance', () => {
+    const c = opening({ closedHeight: 6.6 });
+    assert.strictEqual(schedule([c], { overrides: { airDraft: 5 } }), 0);
+    assert.strictEqual(c.passesClosed, true);
+    assert.strictEqual(c.waitSeconds, undefined);
+    assert.strictEqual(c.note, 'passes closed (air draft 5.0 m + 1.5 m margin < closed 6.6 m), no wait');
+  });
+
+  it('waits when air draft + margin is above or equal to it', () => {
+    const above = opening({ closedHeight: 6.6 });
+    assert.strictEqual(schedule([above], { overrides: { airDraft: 5.5 } }), 1800);
+    assert.strictEqual(above.passesClosed, undefined);
+    assert.strictEqual(above.note, undefined);
+    // 5.1 + 1.5 == 6.6: equal is not below, so it waits
+    assert.strictEqual(schedule([opening({ closedHeight: 6.6 })], { overrides: { airDraft: 5.1 } }), 1800);
+  });
+
+  it('waits without a closed clearance or a known air draft', () => {
+    assert.strictEqual(schedule([opening()], { overrides: { airDraft: 2 } }), 1800);
+    assert.strictEqual(schedule([opening({ closedHeight: 6.6 })]), 1800, 'no air draft anywhere');
+    assert.strictEqual(schedule([opening({ closedHeight: 6.6 })], { overrides: { airDraft: 0 } }), 1800, '0 is unknown');
+  });
+
+  it('applies the configured margin', () => {
+    // 5 + 1.5 < 6.6 passes; with a 2 m margin it does not
+    assert.strictEqual(schedule([opening({ closedHeight: 6.6 })], { overrides: { airDraft: 5 }, config: { safetyMarginAirDraft: 2 } }), 1800);
+    assert.strictEqual(schedule([opening({ closedHeight: 6.6 })], { overrides: { airDraft: 5.9 }, config: { safetyMarginAirDraft: 0.5 } }), 0);
+  });
+
+  it('falls back to the vessel air draft, and the request wins over it', () => {
+    assert.strictEqual(schedule([opening({ closedHeight: 6.6 })], { vesselAirDraft: 5 }), 0);
+    assert.strictEqual(schedule([opening({ closedHeight: 6.6 })], { vesselAirDraft: 5, overrides: { airDraft: 8 } }), 1800);
+  });
+
+  it('leaves the wait to a lock in the same group', () => {
+    const span = opening({ closedHeight: 6.6, distanceFromStart: 60 });
+    const theLock = lock();
+    assert.strictEqual(schedule([theLock, span], { overrides: { airDraft: 5 } }), 3600);
+    assert.strictEqual(theLock.waitSeconds, 3600);
+    assert.strictEqual(span.waitSeconds, undefined);
+    // the span still passes closed, but the group does wait — no "no wait"
+    assert.strictEqual(span.note, 'passes closed (air draft 5.0 m + 1.5 m margin < closed 6.6 m)');
+  });
+
+  it('lets a non-passing opening span in the group own the wait', () => {
+    const low = opening({ closedHeight: 6.6, distanceFromStart: 0 });
+    const high = opening({ closedHeight: 3, distanceFromStart: 40 });
+    const unknown = opening({ distanceFromStart: 80 });
+    assert.strictEqual(schedule([low, high], { overrides: { airDraft: 5 } }), 1800);
+    assert.strictEqual(low.waitSeconds, undefined, 'a passing span never owns the wait');
+    assert.strictEqual(high.waitSeconds, 1800);
+    const pair = [opening({ closedHeight: 6.6, distanceFromStart: 0 }), unknown];
+    assert.strictEqual(schedule(pair, { overrides: { airDraft: 5 } }), 1800);
+    assert.strictEqual(unknown.waitSeconds, 1800);
+  });
+
+  it('is recomputed per request', () => {
+    const c = opening({ closedHeight: 6.6 });
+    schedule([c], { overrides: { airDraft: 5 } });
+    assert.strictEqual(c.passesClosed, true);
+    schedule([c], { overrides: { airDraft: 9 } });
+    assert.strictEqual(c.passesClosed, undefined);
+    assert.strictEqual(c.note, undefined);
+  });
+
+  it('passesClosedSpan only accepts opening bridges', () => {
+    assert.strictEqual(passesClosedSpan({ type: 'bridge', subtype: 'opening', closedHeight: 6.6 }, 5, margin), true);
+    assert.strictEqual(passesClosedSpan({ type: 'bridge', subtype: 'fixed', closedHeight: 6.6 }, 5, margin), false);
+    assert.strictEqual(passesClosedSpan({ type: 'bridge', closedHeight: 6.6 }, 5, margin), false);
+    assert.strictEqual(passesClosedSpan({ type: 'lock', closedHeight: 6.6 }, 5, margin), false);
+    assert.strictEqual(passesClosedSpan({ type: 'bridge', subtype: 'opening' }, 5, margin), false);
+    assert.strictEqual(passesClosedSpan({ type: 'bridge', subtype: 'opening', closedHeight: 6.6 }, undefined, margin), false);
+    assert.strictEqual(passesClosedSpan({ type: 'bridge', subtype: 'opening', closedHeight: 6.6 }, 0, margin), false);
+    assert.strictEqual(passesClosedSpan({ type: 'bridge', subtype: 'opening', closedHeight: 6.6 }, 5.1, margin), false);
+  });
+
+  it('labels the three span kinds', () => {
+    assert.strictEqual(RoutingEngine.formatSpanSuffix('opening', undefined, 6.6), ' (opening, closed 6.6m)');
+    assert.strictEqual(RoutingEngine.formatSpanSuffix('opening', undefined), ' (opening span)');
+    assert.strictEqual(RoutingEngine.formatSpanSuffix('fixed', 7.2), ' (fixed, 7.2m)');
   });
 });
 
