@@ -709,10 +709,15 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   font-family: 'SF Mono', 'Cascadia Code', monospace;
 }
 .route-leg .leg-warn {
-  color: #f59e0b;
+  display: flex;
+  align-items: flex-start;
   padding: 2px 0;
-  font-style: italic;
 }
+.route-leg .leg-warn .sev-badge { margin-right: 5px; margin-top: 1px; }
+.route-leg .leg-warn .leg-warn-text { min-width: 0; }
+.route-leg .leg-warn.lvl-danger { color: #f87171; }
+.route-leg .leg-warn.lvl-caution { color: #f59e0b; }
+.route-leg .leg-warn.lvl-info { color: #9bb8da; font-style: italic; }
 
 .route-leg .leg-crossing {
   color: #b8d4f0;
@@ -751,7 +756,7 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
 }
 .route-leg .leg-crossing .crossing-wait {
   margin-left: auto;
-  color: #f59e0b;
+  color: #9bb8da;
   white-space: nowrap;
 }
 
@@ -765,12 +770,47 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   border-left-color: #5c9bd5;
 }
 
-/* per-leg warning indicator */
-.route-node.has-warn .node-label::after {
-  content: '⚠';
-  color: #f59e0b;
-  font-size: 12px;
+/* severity badges (CSS-drawn so they look the same on old plotter browsers) */
+.sev-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  font-style: normal;
+  font-family: Arial, Helvetica, sans-serif;
+}
+.sev-badge.lvl-danger {
+  background: #ef4444;
+  color: #fff;
+  border-radius: 50%;
+}
+.sev-badge.lvl-danger::before { content: '!'; }
+.sev-badge.lvl-caution {
+  background: #f59e0b;
+  color: #1a1204;
+  -webkit-clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  padding-top: 4px;
+  font-size: 9px;
+}
+.sev-badge.lvl-caution::before { content: '!'; }
+.sev-badge.lvl-info {
+  border: 1.5px solid #6d96c0;
+  color: #6d96c0;
+  border-radius: 50%;
+  font-size: 9px;
+}
+.sev-badge.lvl-info::before { content: 'i'; }
+/* per-leg warning indicator, pushed to the right of the node label row */
+.route-node .node-warn {
   margin-left: auto;
+  align-self: center;
 }
 
 /* overall warnings */
