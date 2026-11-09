@@ -11,6 +11,7 @@ import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import { RoutingEngine, passesClosedSpan } from '../dist/routing.js';
 import { DEFAULT_CONFIG } from '../dist/types.js';
+import { POI_TYPE_BRIDGE } from '../dist/database.js';
 
 describe('crossing wait time', () => {
   /**
@@ -484,5 +485,91 @@ describe('a wait moves the tide clock, not just the total', () => {
     assert.deepStrictEqual(end.sampledAt, none.sampledAt,
       'a wait after the last leg shifts no sample');
     assert.ok(Math.abs((end.total - none.total) - 1800) < 1e-6);
+  });
+});
+
+describe('one crossing per bridge structure', () => {
+  // Woubrugsebrug in the Dutch database: VNDS names every span on its own, so
+  // the opening span and the fixed span ~15 m east share no name. The pipeline
+  // ties them together with properties.structure.
+  const LAT = 52.1667;
+  const OPEN_LON = 4.639;
+  const FIXED_LON = 4.63922; // ~15 m east
+  const OPEN_NAME = 'Doorvaartopening 2 (beweegbaar) Woubrugsebrug';
+  const FIXED_NAME = 'Doorvaartopening 1 (vast) Woubrugsebrug';
+
+  type Poi = { id: number; name: string; lat: number; lon: number; properties: Record<string, unknown> };
+  const openSpan = (props: Record<string, unknown> = {}, name = OPEN_NAME): Poi => ({
+    id: 1, name, lat: LAT, lon: OPEN_LON, properties: { subtype: 'opening', ...props },
+  });
+  const fixedSpan = (props: Record<string, unknown> = {}, name = FIXED_NAME): Poi => ({
+    id: 2, name, lat: LAT, lon: FIXED_LON, properties: { subtype: 'fixed', height: 2.61, ...props },
+  });
+
+  /** A north-south route along `lon` through the bridge, a point every ~22 m. */
+  const routeAlong = (lon: number): [number, number][] => {
+    const coords: [number, number][] = [];
+    for (let i = -30; i <= 30; i++) coords.push([lon, LAT + i * 0.0002]);
+    return coords;
+  };
+
+  const detect = async (pois: Poi[], lon: number) => {
+    const engine = Object.create(RoutingEngine.prototype) as any;
+    engine._config = { ...DEFAULT_CONFIG };
+    engine.toRadians = (d: number) => (d * Math.PI) / 180;
+    engine.db = {
+      getPoisInBBox: async () => pois.map((p) => ({ ...p, typeId: POI_TYPE_BRIDGE })),
+    };
+    return (await engine.detectCrossings(routeAlong(lon))) as Array<{ name: string; subtype?: string }>;
+  };
+
+  it('lists only the opening span when the route goes through it', async () => {
+    const c = await detect([openSpan({ structure: '101' }), fixedSpan({ structure: '101' })], OPEN_LON);
+    assert.deepStrictEqual(c.map((x) => x.name), [`${OPEN_NAME} (opening span)`]);
+    assert.strictEqual(c[0].subtype, 'opening');
+  });
+
+  it('lists only the fixed span when the route goes through it', async () => {
+    const c = await detect([openSpan({ structure: '101' }), fixedSpan({ structure: '101' })], FIXED_LON);
+    assert.deepStrictEqual(c.map((x) => x.name), [`${FIXED_NAME} (fixed, 2.6m)`]);
+  });
+
+  it('keeps two structures apart, each listed', async () => {
+    const c = await detect([openSpan({ structure: '101' }), fixedSpan({ structure: '102' })], OPEN_LON);
+    assert.strictEqual(c.length, 2);
+  });
+
+  it('without a structure key, differently named spans are listed each (unchanged)', async () => {
+    const c = await detect([openSpan(), fixedSpan()], OPEN_LON);
+    assert.deepStrictEqual(c.map((x) => x.name).sort(),
+      [`${FIXED_NAME} (fixed, 2.6m)`, `${OPEN_NAME} (opening span)`]);
+  });
+
+  it('without a structure key, same-named spans are one crossing, the nearest (unchanged)', async () => {
+    const c = await detect([openSpan({}, 'Woubrugsebrug'), fixedSpan({}, 'Woubrugsebrug')], OPEN_LON);
+    assert.deepStrictEqual(c.map((x) => x.name), ['Woubrugsebrug (opening span)']);
+  });
+
+  it('lists the span the route line goes through, not the one nearest a graph node', async () => {
+    // The real NL graph: one 131 m edge passes the bridge through the opening
+    // span, but its node south of the bridge is 31.4 m from the fixed span and
+    // 33.1 m from the opening. The line itself is 6.7 m from the opening.
+    const pois: Poi[] = [
+      { id: 1, name: OPEN_NAME, lat: 52.16674, lon: 4.63913, properties: { subtype: 'opening', structure: '316044088261125' } },
+      { id: 2, name: FIXED_NAME, lat: 52.16678, lon: 4.63934, properties: { subtype: 'fixed', height: 2.61, structure: '316044088261125' } },
+    ];
+    const engine = Object.create(RoutingEngine.prototype) as any;
+    engine._config = { ...DEFAULT_CONFIG };
+    engine.toRadians = (d: number) => (d * Math.PI) / 180;
+    engine.db = { getPoisInBBox: async () => pois.map((p) => ({ ...p, typeId: POI_TYPE_BRIDGE })) };
+    const c = await engine.detectCrossings([[4.63942, 52.1665], [4.63861, 52.16757]]);
+    assert.deepStrictEqual(c.map((x: { name: string }) => x.name), [`${OPEN_NAME} (opening span)`]);
+  });
+
+  it('falls back to the name for an empty or non-string key', () => {
+    assert.strictEqual(RoutingEngine.structureKey({ name: 'X', properties: { structure: '' } }), 'n:X');
+    assert.strictEqual(RoutingEngine.structureKey({ name: 'X', properties: { structure: 7 } }), 'n:X');
+    assert.strictEqual(RoutingEngine.structureKey({ name: 'X', properties: { structure: '7' } }), 's:7');
+    assert.strictEqual(RoutingEngine.structureKey({ name: 'X' }), 'n:X');
   });
 });
