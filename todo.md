@@ -131,21 +131,11 @@ turn text).
   (`kind: "cable"` on the POI properties, tracked as Step 4 item 5 in
   `signalk-router-pipeline/NEXT_PHASES.md`); then a power-line icon in both
   `poiIcon` copies, falling back to the bridge icon when the marker is absent.
-- **Click a route section → select it in the route pane** — clicking a part
-  of the route line on the map should select and scroll to the matching
-  leg/section in the route pane (itinerary), and highlight it on the map.
-  Pure UI: use the server's `itinerary` legs / per-segment features to map the
-  click to a section (no client-side geometry or routing logic, see
-  AGENTS.md). Both the webapp and, where the host allows, the Freeboard panel.
-- **Click a bridge/lock/etc. in the route pane → pan the map to it** — the
-  crossings and other points listed in the route pane (itinerary
-  `crossings`, with lock/bridge/harbour POIs) should centre the map on that
-  POI when clicked, and open or flash its marker. The coordinates come from
-  the route result (`itinerary` / crossing entries); if a crossing lacks a
-  position, add it server-side rather than looking it up in the client. In
-  the Freeboard panel use the host's map capability (check
-  `client.hasCapability()` first, and add any new capability to the
-  manifest's `optional` list).
+- ~~Click a route section → select it in the route pane~~ — **done** in the
+  webapp (branch `feat/route-pane-map-links`). Not possible in the Freeboard
+  panel: the host draws the route and sends no tap events for route lines.
+- ~~Click a bridge/lock in the route pane → pan the map to it~~ — **done** in
+  the webapp and the Freeboard panel (`map.center`), same branch.
 - **Tide slider: GRIB and UTCEF (station) current layers behave differently**
   (investigate before fixing; both are in `public/app.js`):
   - *Live update:* the GRIB overlay redraws its arrows continuously while the

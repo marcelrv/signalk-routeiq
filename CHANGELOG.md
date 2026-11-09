@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Added: click a bridge or lock in the route list to centre the map on it,
+  in the webapp and the Freeboard panel.
+- Added: click the route line to select and open that section in the route
+  list; it stays highlighted until Esc, a map click or a new route.
+
 ## 0.1.0-alpha.9 — 2026-10-31
 
 - Added: plan routes straight from the chart in Freeboard-SK 3.4+. Right-click

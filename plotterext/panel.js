@@ -1467,6 +1467,25 @@ function renderItinerary(itinerary) {
             (cdist.textContent ? " · " : "") + "⏳ " + fmtDurationSec(waitS);
         }
         row.append(cn, cdist);
+        const cpos = e0.position;
+        if (
+          cpos &&
+          typeof cpos.latitude === "number" &&
+          typeof cpos.longitude === "number" &&
+          client.hasCapability("map")
+        ) {
+          row.classList.add("crossing-link");
+          row.title = "Show on map";
+          row.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            run(() =>
+              client.call("map.center", {
+                position: [cpos.longitude, cpos.latitude],
+                zoom: 15,
+              }),
+            );
+          });
+        }
         leg.appendChild(row);
       }
       li.appendChild(leg);

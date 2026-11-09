@@ -767,6 +767,7 @@
     destMode: "auto", // mode of the final leg into the destination
     manualMode: false, // toolbar toggle: new points connect with straight lines
     routeSegments: [], // { polyline, startIdx, endIdx, isWarning, originalStyle }
+    selectedRange: null, // { fromIdx, toIdx } of the pane section picked by clicking the route line
     junctionMarkers: null, // L.layerGroup for hover junction markers
     startPoiName: "", // POI name when start was set via search
     destPoiName: "", // POI name when destination was set via search
@@ -4312,6 +4313,7 @@
       // A segment drag (item 1) or its trailing no-op click already handled
       // this gesture — don't also place a waypoint from the same click.
       if (suppressRouteClick) return;
+      clearPaneSelection();
       var ll = e.latlng;
       // Shift+tap always adds a straight-line ("manual") leg, regardless of
       // the manual-mode toolbar toggle — a quick one-off without switching
@@ -4402,6 +4404,8 @@
         cancelAddMode();
       } else if (state.editMode && state.selectedItem) {
         clearEditorSelection();
+      } else if (state.selectedRange) {
+        clearPaneSelection();
       }
     }
     if (
@@ -5509,6 +5513,57 @@
     for (const seg of state.routeSegments) {
       seg.polyline.setStyle(seg.originalStyle);
     }
+    // The clicked section stays emphasised once hover moves away.
+    const sel = state.selectedRange;
+    if (sel) {
+      for (const seg of state.routeSegments) {
+        if (seg.startIdx >= sel.fromIdx && seg.endIdx <= sel.toIdx) {
+          seg.polyline.setStyle({ weight: 7, opacity: 1.0 });
+        }
+      }
+    }
+  }
+
+  function clearPaneSelection() {
+    state.selectedRange = null;
+    document.querySelectorAll("#route-nodes .selected").forEach(function (el) {
+      el.classList.remove("selected");
+    });
+    clearMapHighlight();
+  }
+
+  // Click on the route line: pick the pane leg containing that route edge.
+  function selectPaneSectionAtEdge(edgeIdx) {
+    const legs = document.querySelectorAll("#route-nodes .route-leg");
+    let leg = null;
+    let last = null;
+    legs.forEach(function (el) {
+      const f = parseInt(el.dataset.coordFrom, 10);
+      const t = parseInt(el.dataset.coordTo, 10);
+      if (isNaN(f) || isNaN(t)) return;
+      if (f <= edgeIdx) last = el;
+      if (!leg && f <= edgeIdx && edgeIdx < t) leg = el;
+    });
+    leg = leg || last;
+    if (!leg) return;
+    const pane = document.getElementById("route-pane");
+    if (pane.classList.contains("collapsed")) {
+      pane.classList.remove("collapsed");
+      document.getElementById("route-pane-tab").textContent = "\u25c0";
+    }
+    document.querySelectorAll("#route-nodes .selected").forEach(function (el) {
+      el.classList.remove("selected");
+    });
+    leg.classList.add("expanded", "selected");
+    const prev = leg.previousElementSibling;
+    if (prev && prev.classList.contains("route-node"))
+      prev.classList.add("selected");
+    leg.scrollIntoView({ block: "nearest" });
+    state.selectedRange = {
+      fromIdx: parseInt(leg.dataset.coordFrom, 10),
+      toIdx: parseInt(leg.dataset.coordTo, 10),
+    };
+    clearMapHighlight();
   }
 
   function highlightPaneByCoordRange(fromIdx, toIdx) {
@@ -5601,6 +5656,15 @@
       insertViaIntoLeg(drag.legIdx, latlng);
       pushHistory();
       applyWaypoints();
+    } else {
+      // Plain press-release on the line: select that section in the pane.
+      selectPaneSectionAtEdge(
+        nearestEdgeIdxInRange(
+          map.mouseEventToLatLng(domEvt),
+          drag.segStartIdx,
+          drag.segEndIdx,
+        ),
+      );
     }
     // Let the browser's own 'click' (which follows this mouseup) see the
     // flag as true so nothing else reacts to it, then clear on the next tick.
@@ -5670,6 +5734,8 @@
         legIdx: legIdx,
         ghost: ghost,
         startPoint: map.latLngToContainerPoint(e.latlng),
+        segStartIdx: segStartIdx,
+        segEndIdx: segEndIdx,
         moved: false,
       };
 
@@ -5709,6 +5775,7 @@
   }
 
   function renderCustomRoute(geoJson) {
+    clearPaneSelection();
     state.routeLayers.clearLayers();
     state.routeSegments = [];
     // The old grab lines are gone, so their mouseout will never fire.
@@ -6951,7 +7018,11 @@
                   ? "#ef4444"
                   : "#22c55e";
             icons.push(
-              '<span class="node-crossing-icon" style="background:' +
+              '<span class="node-crossing-icon' +
+                crossingLinkClass(e0) +
+                '"' +
+                crossingLinkAttrs(e0) +
+                ' style="background:' +
                 color +
                 '">' +
                 poiIcon(e0.type, { subtype: e0.subtype }, 14) +
@@ -7223,7 +7294,11 @@
                 0,
               );
               html +=
-                '<div class="leg-crossing">' +
+                '<div class="leg-crossing' +
+                crossingLinkClass(e0) +
+                '"' +
+                crossingLinkAttrs(e0) +
+                ">" +
                 '<span class="leg-crossing-icon" style="background:' +
                 color +
                 '">' +
@@ -7396,7 +7471,52 @@
       .catch(function () {});
   }
 
+  // Crossings with a position can be clicked to pan the map to them.
+  function crossingLatLng(c) {
+    const p = c && c.position;
+    if (
+      p &&
+      typeof p.latitude === "number" &&
+      typeof p.longitude === "number" &&
+      isFinite(p.latitude) &&
+      isFinite(p.longitude)
+    )
+      return p;
+    return null;
+  }
+  function crossingLinkClass(c) {
+    return crossingLatLng(c) ? " crossing-link" : "";
+  }
+  function crossingLinkAttrs(c) {
+    const p = crossingLatLng(c);
+    return p
+      ? ' data-lat="' +
+          p.latitude +
+          '" data-lng="' +
+          p.longitude +
+          '" title="Show on map"'
+      : "";
+  }
+
+  let crossingFlash = null;
+  function flashCrossing(latlng) {
+    if (crossingFlash) map.removeLayer(crossingFlash);
+    const ring = L.circleMarker(latlng, {
+      radius: 18,
+      color: "#facc15",
+      weight: 4,
+      fill: false,
+      interactive: false,
+    }).addTo(map);
+    crossingFlash = ring;
+    setTimeout(function () {
+      if (crossingFlash === ring) crossingFlash = null;
+      map.removeLayer(ring);
+    }, 2000);
+  }
+
   function clearRoutePane() {
+    clearPaneSelection();
     document.getElementById("route-warnings").innerHTML = "";
     document.getElementById("route-nodes").innerHTML = "";
     const emptyEl = document.getElementById("route-pane-empty");
@@ -7408,6 +7528,25 @@
   // ---- click node to expand/collapse leg details ----
   const routeNodesEl = document.getElementById("route-nodes");
   routeNodesEl.addEventListener("click", function (e) {
+    const link = e.target.closest(".crossing-link");
+    if (link) {
+      const lat = parseFloat(link.dataset.lat);
+      const lng = parseFloat(link.dataset.lng);
+      if (!isNaN(lat) && !isNaN(lng)) {
+        const ll = L.latLng(lat, lng);
+        map.setView(ll, Math.max(map.getZoom(), 15));
+        flashCrossing(ll);
+        // On the bottom-sheet layout the pane covers the map: lower it.
+        if (
+          window.matchMedia &&
+          window.matchMedia("(max-width: 700px), (max-height: 500px)").matches
+        ) {
+          document.getElementById("route-pane").classList.add("collapsed");
+          document.getElementById("route-pane-tab").textContent = "\u25b6";
+        }
+        return;
+      }
+    }
     const nodeEl = e.target.closest(".route-node");
     if (!nodeEl) return;
     const nextEl = nodeEl.nextElementSibling;
