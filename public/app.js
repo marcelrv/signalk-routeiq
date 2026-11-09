@@ -5378,6 +5378,17 @@
     return dedupeConsecutiveCoords(extractCoords(geoJson));
   }
 
+  /**
+   * Index of the route coordinate nearest to a position.
+   * @param {number[][]} coords Route coordinates as [lng, lat].
+   * @param {number} lat
+   * @param {number} lng
+   * @param {number} [fromIdx] Only search from this index on.
+   * @param {function(number): boolean} [accept] Only consider indices it
+   *   accepts.
+   * @returns {number} The nearest index; -1 only when `accept` rejected every
+   *   candidate, otherwise `fromIdx` (or 0) at worst.
+   */
   function closestCoordIndex(coords, lat, lng, fromIdx, accept) {
     // Apply a cosine-latitude correction so that 1° of longitude is weighted
     // correctly relative to 1° of latitude (especially important above ~50°N/S).
@@ -5399,10 +5410,16 @@
     return minI < 0 && !accept ? fromIdx || 0 : minI;
   }
 
-  // Coord index of each itinerary point. Nearest-point alone maps every
-  // pass of an out-and-back route (into a dead-end harbour and out again)
-  // to the first pass, so search forward from the previous point and prefer
-  // coords whose chainage matches the server's distanceFromStart.
+  /**
+   * Coord index of each itinerary point. Nearest-point alone maps every
+   * pass of an out-and-back route (into a dead-end harbour and out again)
+   * to the first pass, so search forward from the previous point and prefer
+   * coords whose chainage matches the server's distanceFromStart.
+   * @param {number[][]} coords Route coordinates as [lng, lat].
+   * @param {object[]} itinerary The server's `itinerary` points.
+   * @returns {number[]} One coord index per itinerary point, never
+   *   decreasing.
+   */
   function itineraryCoordIndices(coords, itinerary) {
     const chain = [0];
     for (let i = 1; i < coords.length; i++)
@@ -5551,6 +5568,10 @@
     }
   }
 
+  /**
+   * Restore every route segment's normal style, keeping the section the user
+   * picked on the route line (state.selectedRange) emphasised.
+   */
   function clearMapHighlight() {
     for (const seg of state.routeSegments) {
       seg.polyline.setStyle(seg.originalStyle);
@@ -5566,6 +5587,10 @@
     }
   }
 
+  /**
+   * Forget the picked route section: drop its pane highlight and its map
+   * emphasis.
+   */
   function clearPaneSelection() {
     state.selectedRange = null;
     document.querySelectorAll("#route-nodes .selected").forEach(function (el) {
@@ -5574,7 +5599,11 @@
     clearMapHighlight();
   }
 
-  // Click on the route line: pick the pane leg containing that route edge.
+  /**
+   * Click on the route line: pick the pane leg containing that route edge,
+   * open the pane and the leg, and keep the section emphasised on the map.
+   * @param {number} edgeIdx Index of the clicked edge's first coordinate.
+   */
   function selectPaneSectionAtEdge(edgeIdx) {
     const legs = document.querySelectorAll("#route-nodes .route-leg");
     let leg = null;
@@ -5685,6 +5714,11 @@
     if (p.distanceTo(segmentDrag.startPoint) > 5) segmentDrag.moved = true;
   }
 
+  /**
+   * End a press on the route line: a drag inserts a via at the drop point
+   * and reroutes, a plain press-release selects that section in the pane.
+   * @param {MouseEvent} domEvt The mouseup event.
+   */
   function onSegmentDragUp(domEvt) {
     document.removeEventListener("mousemove", onSegmentDragMove);
     document.removeEventListener("mouseup", onSegmentDragUp);
@@ -5756,6 +5790,13 @@
     });
   }
 
+  /**
+   * Let a press on a segment's grab line start a drag (to add a via) or a
+   * section pick; which one is decided on release by onSegmentDragUp.
+   * @param {L.Polyline} grabLine The wide invisible line over the segment.
+   * @param {number} segStartIdx First route coord index of the segment.
+   * @param {number} segEndIdx Last route coord index of the segment.
+   */
   function attachSegmentDragHandlers(grabLine, segStartIdx, segEndIdx) {
     grabLine.on("mousedown", function (e) {
       if (state.editMode) return;
@@ -5816,6 +5857,11 @@
     polyline.on("mouseout", clearBothHighlights);
   }
 
+  /**
+   * Draw the calculated route on the map, one styled polyline per segment
+   * with its hover and drag handlers. A new route clears the picked section.
+   * @param {object} geoJson The route FeatureCollection from the server.
+   */
   function renderCustomRoute(geoJson) {
     clearPaneSelection();
     state.routeLayers.clearLayers();
@@ -6768,6 +6814,13 @@
     return m.toFixed(1) + " m";
   }
 
+  /**
+   * Build the route pane (warnings, itinerary nodes and legs, crossings) from
+   * the server's route result. Also runs again on a speed change or late
+   * config; the picked route section is restored afterwards.
+   * @param {object|null} geoJson The route FeatureCollection; null clears the
+   *   pane.
+   */
   function renderRoutePane(geoJson) {
     const pane = document.getElementById("route-pane");
     const emptyEl = document.getElementById("route-pane-empty");
@@ -7534,7 +7587,12 @@
       .catch(function () {});
   }
 
-  // Crossings with a position can be clicked to pan the map to them.
+  /**
+   * Crossings with a position can be clicked to pan the map to them.
+   * @param {object} c An itinerary crossing.
+   * @returns {{latitude: number, longitude: number}|null} Its position, or
+   *   null when it has no usable one.
+   */
   function crossingLatLng(c) {
     const p = c && c.position;
     if (
@@ -7547,9 +7605,21 @@
       return p;
     return null;
   }
+  /**
+   * Extra class for a crossing element: " crossing-link" when it has a
+   * position, else "".
+   * @param {object} c An itinerary crossing.
+   * @returns {string}
+   */
   function crossingLinkClass(c) {
     return crossingLatLng(c) ? " crossing-link" : "";
   }
+  /**
+   * Data and accessibility attributes that make a crossing element a map
+   * link; "" when it has no position.
+   * @param {object} c An itinerary crossing.
+   * @returns {string} Attribute HTML, starting with a space.
+   */
   function crossingLinkAttrs(c) {
     const p = crossingLatLng(c);
     return p
@@ -7562,6 +7632,11 @@
   }
 
   let crossingFlash = null;
+  /**
+   * Briefly ring a crossing on the map after jumping to it, replacing any
+   * ring still showing.
+   * @param {L.LatLng} latlng
+   */
   function flashCrossing(latlng) {
     if (crossingFlash) map.removeLayer(crossingFlash);
     const ring = L.circleMarker(latlng, {
@@ -7578,6 +7653,10 @@
     }, 2000);
   }
 
+  /**
+   * Empty the route pane and drop the picked section, when the route is
+   * cleared or no longer complete.
+   */
   function clearRoutePane() {
     clearPaneSelection();
     document.getElementById("route-warnings").innerHTML = "";

@@ -1261,6 +1261,12 @@ function renderSummary(result) {
   $("summary").style.display = "block";
 }
 
+/**
+ * Render the server's itinerary as the panel's turn list: start, vias,
+ * turns and end, each with its leg's stats, waters, warnings and crossings.
+ * Positioned crossings centre the host chart on them.
+ * @param {object[]} itinerary The route result's `itinerary` points.
+ */
 function renderItinerary(itinerary) {
   const ol = $("itinerary");
   ol.innerHTML = "";
