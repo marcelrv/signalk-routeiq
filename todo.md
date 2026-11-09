@@ -124,6 +124,38 @@ turn text).
   over cumulative distance below the map, with the vessel's draft/air-draft
   as threshold lines, so shallow spots and low bridges are visible at a
   glance.
+- **Power-line icon for overhead cables ("hoogspanningslijn")** — cables are
+  drawn with the bridge symbol (`poiIcon` in `public/app.js` and
+  `plotterext/panel.js`) because the pipeline writes them as fixed bridges
+  with nothing to tell them apart. Needs a marker from the pipeline first
+  (`kind: "cable"` on the POI properties, tracked as Step 4 item 5 in
+  `signalk-router-pipeline/NEXT_PHASES.md`); then a power-line icon in both
+  `poiIcon` copies, falling back to the bridge icon when the marker is absent.
+- **Click a route section → select it in the route pane** — clicking a part
+  of the route line on the map should select and scroll to the matching
+  leg/section in the route pane (itinerary), and highlight it on the map.
+  Pure UI: use the server's `itinerary` legs / per-segment features to map the
+  click to a section (no client-side geometry or routing logic, see
+  AGENTS.md). Both the webapp and, where the host allows, the Freeboard panel.
+- **Click a bridge/lock/etc. in the route pane → pan the map to it** — the
+  crossings and other points listed in the route pane (itinerary
+  `crossings`, with lock/bridge/harbour POIs) should centre the map on that
+  POI when clicked, and open or flash its marker. The coordinates come from
+  the route result (`itinerary` / crossing entries); if a crossing lacks a
+  position, add it server-side rather than looking it up in the client. In
+  the Freeboard panel use the host's map capability (check
+  `client.hasCapability()` first, and add any new capability to the
+  manifest's `optional` list).
+- **Tide slider: GRIB and UTCEF (station) current layers behave differently**
+  (investigate before fixing; both are in `public/app.js`):
+  - *Live update:* the GRIB overlay redraws its arrows continuously while the
+    time slider is dragged, but the station (UTCEF) markers seem to update only
+    on mouse down/release. Make both follow the slider's `input` event (throttled
+    if the redraw is heavy), not just `change`/mousedown.
+  - *Hover box:* the GRIB tooltip is a neat box, the station one is not. The
+    station tooltip lacks the current direction, and probably the icons too.
+    Give both the same layout (speed, direction, time, source), ideally one
+    shared tooltip builder. Values come from the server; no client-side maths.
 - **Dynamic isochrones (reachability polygons)** — Dijkstra from the vessel's
   position out to a time budget, returned as a GeoJSON polygon boundary.
 - **Custom avoidance / no-go zones** — user-drawn polygons passed to
