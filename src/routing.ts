@@ -4014,10 +4014,17 @@ export class RoutingEngine {
     };
   }
 
-  // Human-readable span suffix for a bridge crossing, e.g. " (opening span)",
-  // " (opening, closed 6.6m)" or " (fixed, 18.4m)". S-57 gives every span of a
-  // bridge the same OBJNAM, so this is what lets a route report distinguish
-  // which span was crossed.
+  /**
+   * Human-readable span suffix for a bridge crossing, e.g. " (opening span)",
+   * " (opening, closed 6.6m)" or " (fixed, 18.4m)". S-57 gives every span of a
+   * bridge the same OBJNAM, so this is what lets a route report distinguish
+   * which span was crossed.
+   *
+   * @param subtype - POI `subtype`: "opening", "fixed", or unknown.
+   * @param height - Clearance of a fixed span in metres, when known.
+   * @param closedHeight - Closed clearance of an opening span in metres, when known.
+   * @returns The suffix, with a leading space, or "" for an unknown subtype.
+   */
   static formatSpanSuffix(
     subtype: string | undefined,
     height: number | undefined,
@@ -4036,18 +4043,31 @@ export class RoutingEngine {
     return "";
   }
 
-  // Grouping key for crossing detection: spans with the same key are one
-  // structure, so a route passing it lists only the span it went through. The
-  // prefixes keep a structure key from ever colliding with a POI name.
+  /**
+   * Grouping key for crossing detection: spans with the same key are one
+   * structure, so a route passing it lists only the span it went through. The
+   * prefixes keep a structure key from ever colliding with a POI name.
+   *
+   * @param poi - A POI with its parsed `properties`.
+   * @returns `s:<properties.structure>` when that is a non-empty string, else
+   *   `n:<name>` (databases without the key group spans by name).
+   */
   static structureKey(poi: { name: string; properties?: unknown }): string {
     const s = (poi.properties as Record<string, unknown> | undefined)
       ?.structure;
     return typeof s === "string" && s !== "" ? `s:${s}` : `n:${poi.name}`;
   }
 
-  // Metres from a point to the segment a-b ([lon, lat] each), on a local flat
-  // projection around the point: fine for the few hundred metres a crossing
-  // spans.
+  /**
+   * Metres from a point to the segment a-b, on a local flat projection around
+   * the point: fine for the few hundred metres a crossing spans.
+   *
+   * @param lat - Latitude of the point, degrees.
+   * @param lon - Longitude of the point, degrees.
+   * @param a - Segment start, [lon, lat].
+   * @param b - Segment end, [lon, lat].
+   * @returns Shortest distance from the point to the segment, metres.
+   */
   static pointSegmentMetres(
     lat: number,
     lon: number,
@@ -4066,6 +4086,14 @@ export class RoutingEngine {
     return Math.hypot(ax + t * dx, ay + t * dy);
   }
 
+  /**
+   * Bridges and locks a route passes: every structure with a span within
+   * 150 m of a route coordinate, one entry per passage, in route order,
+   * bridges first. Each entry names the span nearest the route line.
+   *
+   * @param coordinates - The route line, [lon, lat] per point.
+   * @returns The crossings; empty for an empty route.
+   */
   private async detectCrossings(
     coordinates: [number, number][],
   ): Promise<RouteCrossing[]> {
@@ -4136,17 +4164,23 @@ export class RoutingEngine {
 
     type Poi = (typeof bridgePois)[0];
 
-    // For a set of same-typed POIs: group by structure, then walk the route
-    // once per group. A POI's structure is its `properties.structure` key when
-    // the database writes one (sources such as the Dutch VNDS name every span
-    // of one bridge differently, so only that key ties them together), else its
-    // name (S-57 gives every span of one bridge/lock complex the same OBJNAM).
-    // At each coordinate within MAX_DIST, attach the *nearest* POI in the
-    // group. Consecutive in-range coordinates collapse into a single run (one
-    // physical crossing); runs that are close together along the route are
-    // merged too, so a cluster of spans near one crossing point never produces
-    // more than one entry. The span listed for a run is the one nearest the
-    // route line over that run (see below).
+    /**
+     * For a set of same-typed POIs: group by structure, then walk the route
+     * once per group. A POI's structure is its `properties.structure` key when
+     * the database writes one (sources such as the Dutch VNDS name every span
+     * of one bridge differently, so only that key ties them together), else its
+     * name (S-57 gives every span of one bridge/lock complex the same OBJNAM).
+     * At each coordinate within MAX_DIST, attach the *nearest* POI in the
+     * group. Consecutive in-range coordinates collapse into a single run (one
+     * physical crossing); runs that are close together along the route are
+     * merged too, so a cluster of spans near one crossing point never produces
+     * more than one entry. The span listed for a run is the one nearest the
+     * route line over that run (see below).
+     *
+     * @param groupPois - POIs of one type (bridges or locks).
+     * @param build - Makes the crossing entry for the span that is listed.
+     * @returns The crossings of this type, in route order.
+     */
     const detectForGroup = (
       groupPois: Poi[],
       build: (poi: Poi) => RouteCrossing,
@@ -4270,10 +4304,15 @@ export class RoutingEngine {
       return out.map((e) => e.crossing);
     };
 
-    // A database may carry a figure for a specific bridge or lock. Read it here
-    // so the configured default is only a fallback; nothing emits this field
-    // yet, but wiring it now means the pipeline can start to without a second
-    // change on this side.
+    /**
+     * A database may carry a figure for a specific bridge or lock. Read it here
+     * so the configured default is only a fallback; nothing emits this field
+     * yet, but wiring it now means the pipeline can start to without a second
+     * change on this side.
+     *
+     * @param props - The POI's parsed `properties`.
+     * @returns `typical_wait_minutes` when it is a finite number >= 0, else undefined.
+     */
     const poiWaitMinutes = (
       props?: Record<string, unknown>,
     ): number | undefined => {

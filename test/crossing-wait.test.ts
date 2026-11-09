@@ -332,7 +332,9 @@ describe('opening span low enough to pass closed', () => {
   };
   const pos = { latitude: 51, longitude: 4 };
   type C = Record<string, unknown>;
+  /** An opening-span crossing at the start of the route; `extra` overrides fields. */
   const opening = (extra = {}): C => ({ type: 'bridge', subtype: 'opening', name: 'Span', position: pos, distanceFromStart: 0, ...extra });
+  /** A lock crossing at the start of the route; `extra` overrides fields. */
   const lock = (extra = {}): C => ({ type: 'lock', name: 'Lock', position: pos, distanceFromStart: 0, ...extra });
   const margin = DEFAULT_CONFIG.safetyMarginAirDraft; // 1.5
 
@@ -499,9 +501,11 @@ describe('one crossing per bridge structure', () => {
   const FIXED_NAME = 'Doorvaartopening 1 (vast) Woubrugsebrug';
 
   type Poi = { id: number; name: string; lat: number; lon: number; properties: Record<string, unknown> };
+  /** The Woubrugsebrug opening span POI; `props` are added to its properties. */
   const openSpan = (props: Record<string, unknown> = {}, name = OPEN_NAME): Poi => ({
     id: 1, name, lat: LAT, lon: OPEN_LON, properties: { subtype: 'opening', ...props },
   });
+  /** The Woubrugsebrug fixed span POI, 2.61 m, ~15 m east of the opening. */
   const fixedSpan = (props: Record<string, unknown> = {}, name = FIXED_NAME): Poi => ({
     id: 2, name, lat: LAT, lon: FIXED_LON, properties: { subtype: 'fixed', height: 2.61, ...props },
   });
@@ -513,6 +517,7 @@ describe('one crossing per bridge structure', () => {
     return coords;
   };
 
+  /** Run detectCrossings for a route along `lon`, with `pois` as the database's bridges. */
   const detect = async (pois: Poi[], lon: number) => {
     const engine = Object.create(RoutingEngine.prototype) as any;
     engine._config = { ...DEFAULT_CONFIG };
