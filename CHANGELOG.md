@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: GRIB current arrows now follow the tide slider while you drag it,
+  instead of jumping only on release, and no longer blink while loading.
+- Changed: station and GRIB current markers share one hover box with speed,
+  set (direction) and time.
+
 ## 0.1.0-alpha.9 — 2026-10-31
 
 - Added: plan routes straight from the chart in Freeboard-SK 3.4+. Right-click
