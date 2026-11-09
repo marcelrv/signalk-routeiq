@@ -3262,13 +3262,21 @@
   const COMPASS_16 =
     "N NNE NE ENE E ESE SE SSE S SSW SW WSW W WNW NW NNW".split(" ");
 
-  // Shared hover card for current markers (UTCEF/harmonic stations and GRIB
-  // grid points): a two-line card, title + time offset, then speed · set.
-  // direction is the SET: degrees true the water flows TOWARDS (same as the
-  // arrow); null = slack / unknown. speedKn is shown as the server sends it —
-  // for harmonic stations it is signed along the flood/ebb axis (negative =
-  // ebb), for UTCEF/GRIB it is a plain magnitude. Pure formatting, no
-  // derivation.
+  /**
+   * Shared hover card for current markers (UTCEF/harmonic stations and GRIB
+   * grid points): a two-line card, title + time offset, then speed · set.
+   * Pure formatting, no derivation.
+   * @param {object} opts
+   * @param {string} opts.title Station name or point label; a trailing
+   *   "lat,lon" pair is dropped.
+   * @param {number} opts.speedKn Shown as the server sends it: signed along
+   *   the flood/ebb axis for harmonic stations (negative = ebb), a plain
+   *   magnitude for UTCEF/GRIB.
+   * @param {number|null} opts.direction The SET: degrees true the water flows
+   *   TOWARDS (same as the arrow); null = slack / unknown.
+   * @param {number} opts.timeMs Sample time, shown as an offset from now.
+   * @returns {string} Tooltip HTML.
+   */
   function currentTooltipHtml(opts) {
     const muted = "color:#5f7a9a";
     // Station names may carry a trailing "lat,lon" pair; drop it.
@@ -3324,6 +3332,11 @@
     );
   }
 
+  /**
+   * Move the station current arrows and their hover boxes to a scrubber
+   * position, from each station's already-fetched 15-minute timeline.
+   * @param {number} minutes Offset into the 24h window (scrubber value).
+   */
   function updateStationMarkers(minutes) {
     const t = stationsWindowStart + minutes * 60000;
     document.getElementById("time-scrubber-pill").textContent =
@@ -3430,16 +3443,20 @@
     fetchCurrentGrid();
   }
 
-  // GRIB gridded current field (if the plugin has one configured) sampled
-  // over the viewport at the currently-scrubbed time. Unlike station
-  // markers this has no per-point timeline to interpolate locally — it's
-  // refetched on viewport change, while dragging the scrubber (throttled,
-  // see scheduleGridFetch), on scrubber release, and on every tick while
-  // playing. gridFetchToken guards against an in-flight request resolving
-  // out of order (e.g. during playback) and drawing stale points over a
-  // newer frame. The previous arrows stay up until the new frame arrives
-  // so the layer doesn't blink while scrubbing.
+  // gridFetchToken guards against an in-flight request resolving out of
+  // order (e.g. during playback) and drawing stale points over a newer
+  // frame; hiding the overlay bumps it too.
   let gridFetchToken = 0;
+  /**
+   * Fetch the gridded current field (GRIB lattice plus stations, if the
+   * currents plugin has them) over the viewport at the currently-scrubbed
+   * time and redraw the grid arrows. Unlike station markers this has no
+   * per-point timeline to interpolate locally — it's refetched on viewport
+   * change, while dragging the scrubber (throttled, see scheduleGridFetch),
+   * on scrubber release, and on every tick while playing. The previous
+   * arrows stay up until the new frame arrives so the layer doesn't blink
+   * while scrubbing.
+   */
   function fetchCurrentGrid() {
     if (!stationsVisible) {
       currentGridLayer.clearLayers();
@@ -3486,12 +3503,14 @@
       });
   }
 
-  // Trailing throttle for fetchCurrentGrid while the scrubber is dragged:
-  // at most one request per GRID_THROTTLE_MS, and the last position always
-  // gets fetched (the trailing call), so the grid follows the slider live.
   const GRID_THROTTLE_MS = 250;
   let gridThrottleTimer = null;
   let gridLastFetch = 0;
+  /**
+   * Trailing throttle for fetchCurrentGrid while the scrubber is dragged:
+   * at most one request per GRID_THROTTLE_MS, and the last position always
+   * gets fetched (the trailing call), so the grid follows the slider live.
+   */
   function scheduleGridFetch() {
     if (gridThrottleTimer) return; // a trailing call is already pending
     const wait = Math.max(0, gridLastFetch + GRID_THROTTLE_MS - Date.now());
@@ -3501,6 +3520,7 @@
       fetchCurrentGrid();
     }, wait);
   }
+  /** Drop a pending throttled grid fetch; on release the caller fetches now. */
   function cancelScheduledGridFetch() {
     clearTimeout(gridThrottleTimer);
     gridThrottleTimer = null;
@@ -3607,6 +3627,11 @@
       return Math.min(max, Math.round((frac * max) / step) * step);
     }
 
+    /**
+     * Set the scrubber from the hour bar: station arrows follow at once, the
+     * grid through the throttle.
+     * @param {number} minutes Offset into the 24h window.
+     */
     function scrubTo(minutes) {
       input.value = minutes;
       updateStationMarkers(minutes);
