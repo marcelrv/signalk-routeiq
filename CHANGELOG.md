@@ -2,21 +2,29 @@
 
 ## 0.1.0-alpha.10 — 2026-11-09
 
-- Added: a vessel that fits under a closed opening span no longer waits for
-  it to open. The check is air draft plus the air-draft safety margin
-  against the span's closed height, which needs routing data that carries
-  it. The crossing then reads "passes closed, no wait".
-- Added: opening spans show their closed clearance in the crossing list and
-  on the map, e.g. "(opening, closed 6.6m)".
-- Fixed: a bridge is listed once, with the span the route actually goes
-  through, instead of once for every span. This needs routing data that
-  marks which spans belong to one bridge; without it, spans are grouped by
-  name as before, but the span shown is now the one the route line passes.
-- Fixed: GRIB current arrows now follow the tide slider while you drag it,
-  instead of jumping only on release, and no longer blink while loading.
-- Fixed: the route pane no longer shows the 999 m "no limit" air draft.
-- Changed: station and GRIB current markers share one hover box with speed,
-  set (direction) and time.
+### Added
+
+- A vessel that fits under a closed opening span no longer waits for it to
+  open. The check is air draft plus the air-draft safety margin against the
+  span's closed height, which needs routing data that carries it. The
+  crossing then reads "passes closed, no wait".
+- Opening spans show their closed clearance in the crossing list and on the
+  map, e.g. "(opening, closed 6.6m)".
+
+### Changed
+
+- Station and GRIB current markers share one hover box with speed, set
+  (direction) and time.
+
+### Fixed
+
+- A bridge is listed once, with the span the route actually goes through,
+  instead of once for every span. This needs routing data that marks which
+  spans belong to one bridge; without it, spans are grouped by name as
+  before, but the span shown is now the one the route line passes.
+- GRIB current arrows now follow the tide slider while you drag it, instead
+  of jumping only on release, and no longer blink while loading.
+- The route pane no longer shows the 999 m "no limit" air draft.
 
 ## 0.1.0-alpha.9 — 2026-10-31
 
