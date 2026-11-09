@@ -1382,7 +1382,8 @@ function renderItinerary(itinerary) {
       // span) — same presentation as the webapp's route leg details.
       const grouped = new Map();
       for (const c of p.leg.crossings || []) {
-        const key = c.name || c.type;
+        // Unnamed crossings stay separate: two unnamed locks are two places.
+        const key = c.name || c;
         if (!grouped.has(key)) grouped.set(key, []);
         grouped.get(key).push(c);
       }
@@ -1476,14 +1477,27 @@ function renderItinerary(itinerary) {
         ) {
           row.classList.add("crossing-link");
           row.title = "Show on map";
-          row.addEventListener("click", (ev) => {
+          row.tabIndex = 0;
+          row.setAttribute("role", "button");
+          // Not through run(): panning must not block the panel or drop a
+          // second click while the first is still in flight.
+          const showOnMap = (ev) => {
             ev.stopPropagation();
-            run(() =>
-              client.call("map.center", {
+            client
+              .call("map.center", {
                 position: [cpos.longitude, cpos.latitude],
                 zoom: 15,
-              }),
-            );
+              })
+              .catch((e) =>
+                setStatus("route-status", e?.message || String(e), "error"),
+              );
+          };
+          row.addEventListener("click", showOnMap);
+          row.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter" || ev.key === " ") {
+              ev.preventDefault();
+              showOnMap(ev);
+            }
           });
         }
         leg.appendChild(row);

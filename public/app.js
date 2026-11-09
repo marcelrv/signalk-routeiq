@@ -4263,6 +4263,7 @@
   // Map click: add-node mode or set start/dest
   map.on("click", function (e) {
     if (state.editAddMode === "node") {
+      clearPaneSelection();
       var lat = e.latlng.lat;
       var lon = e.latlng.lng;
       var latInt = Math.round(
@@ -4404,9 +4405,8 @@
         cancelAddMode();
       } else if (state.editMode && state.selectedItem) {
         clearEditorSelection();
-      } else if (state.selectedRange) {
-        clearPaneSelection();
       }
+      if (state.selectedRange) clearPaneSelection();
     }
     if (
       (e.key === "Delete" || e.key === "Backspace") &&
@@ -5378,13 +5378,14 @@
     return dedupeConsecutiveCoords(extractCoords(geoJson));
   }
 
-  function closestCoordIndex(coords, lat, lng) {
+  function closestCoordIndex(coords, lat, lng, fromIdx, accept) {
     // Apply a cosine-latitude correction so that 1° of longitude is weighted
     // correctly relative to 1° of latitude (especially important above ~50°N/S).
     const cosLat = Math.cos((lat * Math.PI) / 180);
     let minD = Infinity,
-      minI = 0;
-    for (let i = 0; i < coords.length; i++) {
+      minI = -1;
+    for (let i = fromIdx || 0; i < coords.length; i++) {
+      if (accept && !accept(i)) continue;
       const dlat = coords[i][1] - lat;
       const dlng = (coords[i][0] - lng) * cosLat;
       const d = dlat * dlat + dlng * dlng;
@@ -5393,7 +5394,48 @@
         minI = i;
       }
     }
-    return minI;
+    // -1 only when `accept` rejected every candidate; plain calls keep the
+    // old "index 0 at worst" behaviour.
+    return minI < 0 && !accept ? fromIdx || 0 : minI;
+  }
+
+  // Coord index of each itinerary point. Nearest-point alone maps every
+  // pass of an out-and-back route (into a dead-end harbour and out again)
+  // to the first pass, so search forward from the previous point and prefer
+  // coords whose chainage matches the server's distanceFromStart.
+  function itineraryCoordIndices(coords, itinerary) {
+    const chain = [0];
+    for (let i = 1; i < coords.length; i++)
+      chain.push(
+        chain[i - 1] +
+          haversineDist(
+            coords[i - 1][1],
+            coords[i - 1][0],
+            coords[i][1],
+            coords[i][0],
+          ),
+      );
+    let from = 0;
+    return itinerary.map(function (p) {
+      const d = p.distanceFromStart;
+      let idx = -1;
+      if (typeof d === "number") {
+        const tol = Math.max(250, d * 0.02);
+        idx = closestCoordIndex(
+          coords,
+          p.latitude,
+          p.longitude,
+          from,
+          function (i) {
+            return Math.abs(chain[i] - d) <= tol;
+          },
+        );
+      }
+      if (idx < 0)
+        idx = closestCoordIndex(coords, p.latitude, p.longitude, from);
+      from = idx;
+      return idx;
+    });
   }
 
   function getRouteCoords(geoJson) {
@@ -6782,11 +6824,12 @@
       Array.isArray(geoJson.itinerary) && geoJson.itinerary.length >= 2
         ? geoJson.itinerary
         : null;
+    // Local coord index for hover/highlight (webapp indexes the concatenated
+    // feature coords, which differs from server indexing)
+    const itinIdx = itinerary ? itineraryCoordIndices(coords, itinerary) : null;
     const nodes = itinerary
-      ? itinerary.map((p) => ({
-          // Local coord index for hover/highlight (webapp indexes the
-          // concatenated feature coords, which differs from server indexing)
-          index: closestCoordIndex(coords, p.latitude, p.longitude),
+      ? itinerary.map((p, k) => ({
+          index: itinIdx[k],
           lat: p.latitude,
           lng: p.longitude,
           cumDistKm: p.distanceFromStart / 1000,
@@ -7004,7 +7047,8 @@
           // Merge crossings with the same name (fixed + opening)
           const grouped = new Map();
           for (const c of legCrossings) {
-            const key = c.name;
+            // Unnamed crossings stay separate: two unnamed locks are two places.
+            const key = c.name || c;
             if (!grouped.has(key)) grouped.set(key, []);
             grouped.get(key).push(c);
           }
@@ -7029,12 +7073,14 @@
                 "</span>",
             );
             // If both fixed and opening exist, show the opening icon too
-            if (
-              entries.some((e) => e.subtype === "fixed") &&
-              entries.some((e) => e.subtype === "opening")
-            ) {
+            const opening = entries.find((e) => e.subtype === "opening");
+            if (opening && entries.some((e) => e.subtype === "fixed")) {
               icons.push(
-                '<span class="node-crossing-icon" style="background:#22c55e">' +
+                '<span class="node-crossing-icon' +
+                  crossingLinkClass(opening) +
+                  '"' +
+                  crossingLinkAttrs(opening) +
+                  ' style="background:#22c55e">' +
                   poiIcon("bridge", { subtype: "opening" }, 14) +
                   "</span>",
               );
@@ -7257,7 +7303,7 @@
           if (legCrossings.length > 0) {
             const grouped = new Map();
             for (const c of legCrossings) {
-              const key = c.name;
+              const key = c.name || c;
               if (!grouped.has(key)) grouped.set(key, []);
               grouped.get(key).push(c);
             }
@@ -7363,6 +7409,23 @@
       ".route-node.has-warn + .route-leg",
     );
     if (firstWarnLeg) firstWarnLeg.classList.add("expanded");
+
+    // A rebuild (speed change, late config) keeps the section picked on the
+    // route line; a new route clears it before rendering.
+    const sel = state.selectedRange;
+    if (sel) {
+      nodesEl.querySelectorAll(".route-leg").forEach(function (el) {
+        if (
+          parseInt(el.dataset.coordFrom, 10) === sel.fromIdx &&
+          parseInt(el.dataset.coordTo, 10) === sel.toIdx
+        ) {
+          el.classList.add("expanded", "selected");
+          const prev = el.previousElementSibling;
+          if (prev && prev.classList.contains("route-node"))
+            prev.classList.add("selected");
+        }
+      });
+    }
 
     enrichRoutePaneWithPoiNames(nodes, nodesEl);
     updateRouteTitle();
@@ -7494,7 +7557,7 @@
           p.latitude +
           '" data-lng="' +
           p.longitude +
-          '" title="Show on map"'
+          '" title="Show on map" tabindex="0" role="button"'
       : "";
   }
 
@@ -7553,6 +7616,14 @@
     if (nextEl && nextEl.classList.contains("route-leg")) {
       nextEl.classList.toggle("expanded");
     }
+  });
+  // Keyboard: Enter/Space on a focused crossing link acts like a click.
+  routeNodesEl.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const link = e.target.closest(".crossing-link");
+    if (!link) return;
+    e.preventDefault();
+    link.click();
   });
 
   // ---- hover: route pane node/leg ↔ map segments ----
