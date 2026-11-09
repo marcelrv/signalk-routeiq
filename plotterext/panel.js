@@ -1414,11 +1414,13 @@ function renderItinerary(itinerary) {
         const cn = document.createElement("span");
         cn.className = "cname";
         // Span info (subtype/height) is baked into c.name by the server when
-        // known (e.g. "... (opening span)" / "... (fixed, 18.4m)"). Only
-        // synthesize a separate suffix for older/raw data that lacks it.
-        const nameHasSpanInfo = /\((?:opening span|fixed(?:,[^)]*)?)\)/.test(
-          e0.name || "",
-        );
+        // known (e.g. "... (opening span)", "... (opening, closed 6.6m)" /
+        // "... (fixed, 18.4m)"). Only synthesize a separate suffix for
+        // older/raw data that lacks it.
+        const nameHasSpanInfo =
+          /\((?:opening(?: span|,[^)]*)|fixed(?:,[^)]*)?)\)/.test(
+            e0.name || "",
+          );
         let info = "";
         if (nameHasSpanInfo) {
           info = "";
@@ -1468,6 +1470,15 @@ function renderItinerary(itinerary) {
         }
         row.append(cn, cdist);
         leg.appendChild(row);
+        // A span low enough to pass closed charges no wait; the server says
+        // why, so the skipped wait stays visible.
+        for (const e of entries) {
+          if (!e.note) continue;
+          const note = document.createElement("div");
+          note.className = "cnote";
+          note.textContent = e.note;
+          leg.appendChild(note);
+        }
       }
       li.appendChild(leg);
     }

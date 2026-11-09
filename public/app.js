@@ -2880,7 +2880,12 @@
               if (props.height != null && props.height < 999)
                 label += " — " + props.height + "m";
             } else if (props.subtype === "opening") {
-              label += " (opening)";
+              // Closed clearance: below it you need not wait for an opening.
+              const ch = props.closed_height;
+              label +=
+                typeof ch === "number" && ch > 0 && ch < 999
+                  ? " (opening, closed " + ch + "m)"
+                  : " (opening)";
             }
           }
           const m = L.marker([p.lat, p.lon], {
@@ -7200,12 +7205,15 @@
                     ? "#ef4444"
                     : "#22c55e";
               // Span info (subtype/height) is baked into c.name by the server
-              // when known (e.g. "... (opening span)" / "... (fixed, 18.4m)").
+              // when known (e.g. "... (opening span)", "... (opening, closed
+              // 6.6m)" / "... (fixed, 18.4m)").
               // Only synthesize a separate badge for older/raw data that lacks it.
               let info = "";
               if (
                 e0.type === "bridge" &&
-                !/\((?:opening span|fixed(?:,[^)]*)?)\)/.test(e0.name)
+                !/\((?:opening(?: span|,[^)]*)|fixed(?:,[^)]*)?)\)/.test(
+                  e0.name,
+                )
               ) {
                 const fixedEntry = entries.find((e) => e.subtype === "fixed");
                 const hasOpening = entries.some((e) => e.subtype === "opening");
@@ -7239,6 +7247,15 @@
                     "</span>"
                   : "") +
                 "</div>";
+              // A span low enough to pass closed charges no wait; the server
+              // says why, so the skipped wait stays visible.
+              for (const e of entries) {
+                if (e.note)
+                  html +=
+                    '<div class="leg-crossing-note">' +
+                    escapeHtml(e.note) +
+                    "</div>";
+              }
             }
           }
 

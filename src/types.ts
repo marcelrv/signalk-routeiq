@@ -95,6 +95,13 @@ export interface RouteCrossing {
   name: string;
   subtype?: string; // 'opening' or 'fixed' for bridges
   height?: number; // vertical clearance (m) for fixed bridges
+  // Closed vertical clearance of an opening span, m; wait decision only. Not
+  // an air-draft limit: an opening span still opens for a taller vessel.
+  closedHeight?: number;
+  // Set when this opening span is low enough to pass without it opening, so
+  // it charges no wait; `note` says why, so the skipped wait stays visible.
+  passesClosed?: boolean;
+  note?: string;
   // The wait actually charged here, in seconds — set on the crossing that owns
   // an obstacle group, and left off the ones it absorbs, so the numbers add up
   // exactly once. Distinct from waitMinutes below, which is an input.
