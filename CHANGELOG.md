@@ -1,37 +1,69 @@
 # Changelog
 
+## 0.1.0-alpha.10 — 2026-11-09
+
+### Added
+
+- A vessel that fits under a closed opening span no longer waits for it to
+  open. The check is air draft plus the air-draft safety margin against the
+  span's closed height, which needs routing data that carries it. The
+  crossing then reads "passes closed, no wait".
+- Opening spans show their closed clearance in the crossing list and on the
+  map, e.g. "(opening, closed 6.6m)".
+
+### Changed
+
+- Station and GRIB current markers share one hover box with speed, set
+  (direction) and time.
+
+### Fixed
+
+- A bridge is listed once, with the span the route actually goes through,
+  instead of once for every span. This needs routing data that marks which
+  spans belong to one bridge; without it, spans are grouped by name as
+  before, but the span shown is now the one the route line passes.
+- GRIB current arrows now follow the tide slider while you drag it, instead
+  of jumping only on release, and no longer blink while loading.
+- The route pane no longer shows the 999 m "no limit" air draft.
+
 ## 0.1.0-alpha.9 — 2026-10-31
 
-- Added: plan routes straight from the chart in Freeboard-SK 3.4+. Right-click
+### Added
+
+- Plan routes straight from the chart in Freeboard-SK 3.4+. Right-click
   to set start, destination and vias in any order, or tap a route to optimise
   it or find the best departure time. The panel gets 📍 buttons for the same.
-
-- Added: the itinerary names the waters each leg runs through ("3.1 km Waal,
+- The itinerary names the waters each leg runs through ("3.1 km Waal,
   then 13.4 km Maas-Waalkanaal"), with warnings for uncharted depths and route
   notices. Needs routing data with water names; the published regions don't
   have them yet.
 
-- Fixed: Freeboard tide controls no longer need a vessel position.
-- Fixed: best departure time works with tidal current stations alone.
-- Fixed: a route reshaped in Freeboard keeps its start and end waypoints.
-- Fixed: a long itinerary leg now scrolls instead of being cut off.
-- Changed: a 999 m ("no limit") width, and in Freeboard air draft, is no
+### Changed
+
+- A 999 m ("no limit") width, and in Freeboard air draft, is no
   longer shown.
+
+### Fixed
+
+- Freeboard tide controls no longer need a vessel position.
+- Best departure time works with tidal current stations alone.
+- A route reshaped in Freeboard keeps its start and end waypoints.
+- A long itinerary leg now scrolls instead of being cut off.
 
 ## 0.1.0-alpha.8 — 2026-09-23
 
-- Added: hovering over a graph node or edge (with Show Nodes / Show Edges
+### Added
+
+- Hovering over a graph node or edge (with Show Nodes / Show Edges
   enabled) now shows a tooltip with its key info — for a node, depth and
   position; for an edge, distance, depth, traffic direction, air draft,
   width, and routing preference.
-
-- Added: S-57 vector chart layers now show place, water, and navaid names —
+- S-57 vector chart layers now show place, water, and navaid names —
   towns, seas, regions, and buoy/beacon names — instead of leaving them
   unlabeled, and buoys/beacons render with real IALA-ish shapes (triangle,
   square, diamond, circle) by mark type instead of every mark being an
   identical colored dot.
-
-- Added: chart layers in Settings > Charts can now be dragged to reorder,
+- Chart layers in Settings > Charts can now be dragged to reorder,
   with a keyboard fallback, and each layer has its own opacity slider. Order,
   enabled state, and opacity are saved together and restored on reload.
   Stacking order across every chart layer, built-in and server-provided
@@ -40,7 +72,9 @@
 
 ## 0.1.0-alpha.7 — 2026-08-19
 
-- Added: routes can now use water that is only deep enough for part of the day.
+### Added
+
+- Routes can now use water that is only deep enough for part of the day.
   Charted depths are referenced to the lowest astronomical tide, so the planner
   was treating every hour as low water and refusing channels that carry plenty
   under the keel an hour either side of high water. With tides switched on and a
@@ -57,8 +91,40 @@
   reverse — but this is estimated tidal data over charted soundings, not a
   survey, and the usual rule stands: verify against the chart before you rely
   on it.
+- When a route has to wait for a region's routing data to be read in
+  first, the planner now says which region it is waiting on instead of looking
+  frozen. With dynamic loading, the first route into an area loads that area's
+  data before it can answer, which takes seconds to the best part of a minute
+  on a large region — until now with nothing on screen to say why.
+- A route whose start or destination sits far from any charted waterway
+  now says so. The planner joins such a point to the nearest waterway with a
+  straight line, which is fine for the last few meters to a quay but is not a
+  navigable answer over kilometers — and that leg is not depth-checked, because
+  there is no charted water under it to check. Beyond 1.5 km it is reported as
+  a coverage gap, usually meaning the routing data does not cover that stretch.
+  Shorter connections are unchanged and stay out of the way. Previously both
+  were reported the same way and the web app hid them entirely, so a route
+  could quietly cross four kilometers of water nobody had charted.
+- An autoload/disabled switch for each installed routing database, in
+  Manage Routing Data. Disabling keeps the file on the device but stops the
+  plugin loading it, so you can swap which regions are in play without
+  deleting and re-downloading hundreds of megabytes. Switching takes effect
+  immediately — no server restart — and a disabled region is dropped from the
+  routing graph straight away rather than lingering until the next reboot.
+  Databases you had already disabled by hand, by renaming them to
+  `<name>.sqlite.disabled`, now show up in the list with a Disabled badge
+  instead of vanishing from it.
+- A downloaded routing database now has its checksum verified against
+  the catalog before it's installed, so a corrupted or interrupted download
+  is rejected instead of silently accepted. The catalog also gained support
+  for databases hosted as GitHub Release assets rather than committed to the
+  data repository, letting the data project host larger regions without
+  bloating its own history — installing and updating look the same either
+  way.
 
-- Fixed: the first route into a new area loaded far more routing data than the
+### Fixed
+
+- The first route into a new area loaded far more routing data than the
   route needed, which is why it took so long and why the "loading" message
   named regions nowhere near where you were going. A route reserved the widest
   search area it might ever have to fall back on — about 1100 km around the
@@ -70,22 +136,16 @@
   route now loads only the regions it is actually searching, and widens only if
   the search itself has to. Regions crossed on the way, without a waypoint in
   them, still load as before.
-- Fixed: a departure-time scan reloaded the same regions between every step it
+- A departure-time scan reloaded the same regions between every step it
   scanned, since each step counted as a finished route and released the data
   the next step immediately wanted back. The scan now holds its regions until
   it is done.
-
-- Added: when a route has to wait for a region's routing data to be read in
-  first, the planner now says which region it is waiting on instead of looking
-  frozen. With dynamic loading, the first route into an area loads that area's
-  data before it can answer, which takes seconds to the best part of a minute
-  on a large region — until now with nothing on screen to say why.
-- Fixed: such a route could also be given up on as failed while the server was
+- Such a route could also be given up on as failed while the server was
   still working. The planner waited 30 seconds regardless; a full-country
   region can take longer than that to load. It now allows a request that is
   demonstrably waiting on routing data considerably longer, and if it does
   time out, says so in those terms rather than as a routing failure.
-- Fixed: a correction you made to an edge in the graph editor was lost the next
+- A correction you made to an edge in the graph editor was lost the next
   time the routing data loaded. Changing a depth, width, headroom, cost or
   direction was saved to disk and applied straight away, but the region file's
   own figures came back on top of it at the next restart. Corrections now
@@ -98,18 +158,7 @@
   you had set, so they are only applied where they are stricter than the
   region file. Edits to a node's depth were never affected, and added and
   deleted edges were always kept correctly.
-
-- Added: a route whose start or destination sits far from any charted waterway
-  now says so. The planner joins such a point to the nearest waterway with a
-  straight line, which is fine for the last few meters to a quay but is not a
-  navigable answer over kilometers — and that leg is not depth-checked, because
-  there is no charted water under it to check. Beyond 1.5 km it is reported as
-  a coverage gap, usually meaning the routing data does not cover that stretch.
-  Shorter connections are unchanged and stay out of the way. Previously both
-  were reported the same way and the web app hid them entirely, so a route
-  could quietly cross four kilometers of water nobody had charted.
-
-- Fixed: where two neighboring routing databases overlap, every waterway they
+- Where two neighboring routing databases overlap, every waterway they
   both describe was held twice in memory — 24,506 duplicated connections on the
   Connecticut/Rhode Island pair alone, concentrated on exactly the crossings a
   route between the two regions has to use. They are now merged into one, and
@@ -117,18 +166,7 @@
   figure is kept. Nothing about which route you get changes; the planner just
   stops doing the same work twice at every regional boundary, and loading a
   second overlapping region is slightly faster than before.
-
-- Added: an autoload/disabled switch for each installed routing database, in
-  Manage Routing Data. Disabling keeps the file on the device but stops the
-  plugin loading it, so you can swap which regions are in play without
-  deleting and re-downloading hundreds of megabytes. Switching takes effect
-  immediately — no server restart — and a disabled region is dropped from the
-  routing graph straight away rather than lingering until the next reboot.
-  Databases you had already disabled by hand, by renaming them to
-  `<name>.sqlite.disabled`, now show up in the list with a Disabled badge
-  instead of vanishing from it.
-
-- Fixed: a route with a long open-water leg — the ocean-tiled US East Coast
+- A route with a long open-water leg — the ocean-tiled US East Coast
   data has some that take three to four hours at cruising speed — could run
   noticeably longer than its ETA if the tide changed partway across. The
   current was sampled once, at the moment the leg began, and held for the
@@ -136,16 +174,7 @@
   a current that turns foul partway through is caught instead of assumed
   away for hours. Short legs, the great majority, already took only one
   sample and are unaffected.
-
-- Added: a downloaded routing database now has its checksum verified against
-  the catalog before it's installed, so a corrupted or interrupted download
-  is rejected instead of silently accepted. The catalog also gained support
-  for databases hosted as GitHub Release assets rather than committed to the
-  data repository, letting the data project host larger regions without
-  bloating its own history — installing and updating look the same either
-  way.
-
-- Fixed: a route whose search had to reach unusually far — a long offshore
+- A route whose search had to reach unusually far — a long offshore
   leg, or a via point a long way from the rest — could load enough routing
   data into memory at once to crash the server, taking every other route
   request down with it until it restarted. The amount of data a single
@@ -155,29 +184,22 @@
   narrower instead — the same graceful fallback already used whenever a
   search comes up short for any other reason — rather than the server
   going down.
-
-- Fixed: clicking a point of interest could show two overlapping popups —
+- Clicking a point of interest could show two overlapping popups —
   the usual "Route from / Route to" one, plus a leftover hover label stuck
   on top of it, or occasionally a route silently starting from the clicked
   point underneath. Clicking a POI now cleanly shows just the one popup.
 
 ## 0.1.0-alpha.6 — 2026-08-07
 
-- Fixed: a lock could appear twice in the itinerary — once under its own name
-  with no waiting time against it, and once as a nameless "Lock" carrying the
-  hour. The name and the wait now sit on the same entry. The route's estimated
-  duration was always right; it was the list that did not add up on screen.
-- Fixed: the planner could hang on "Loading Routing Data" forever on older
-  tablets and chart plotters, without ever showing a connection retry. It now
-  connects and retries normally on those devices too.
-- Fixed: the planner needed internet just to start, because the map library it
-  draws on was loaded from the web. It's now bundled with the plugin, so the
-  app starts offline. Base map tiles still need a network; for offline charts,
-  use a Signal K chart provider.
-- Added: if something goes wrong during startup — an incompatible browser, a
+### Added
+
+- If something goes wrong during startup — an incompatible browser, a
   missing file — the loading screen now says what happened, with a button to
   dismiss it and carry on, instead of sitting on a spinner with no explanation.
-- Changed: a route result's `totalSeconds` now includes time spent waiting at
+
+### Changed
+
+- A route result's `totalSeconds` now includes time spent waiting at
   locks and opening bridges, not just time spent moving — so a client reading
   it as pure travel time will be off by roughly an hour for each lock or bridge
   crossed. `totalSecondsNoTide` includes the same waits, deliberately, so
@@ -185,9 +207,25 @@
   time is also broken out on its own, per leg as `leg.waitSeconds` and for the
   whole route as `totalWaitSeconds`.
 
+### Fixed
+
+- A lock could appear twice in the itinerary — once under its own name
+  with no waiting time against it, and once as a nameless "Lock" carrying the
+  hour. The name and the wait now sit on the same entry. The route's estimated
+  duration was always right; it was the list that did not add up on screen.
+- The planner could hang on "Loading Routing Data" forever on older
+  tablets and chart plotters, without ever showing a connection retry. It now
+  connects and retries normally on those devices too.
+- The planner needed internet just to start, because the map library it
+  draws on was loaded from the web. It's now bundled with the plugin, so the
+  app starts offline. Base map tiles still need a network; for offline charts,
+  use a Signal K chart provider.
+
 ## 0.1.0-alpha.5 — 2026-08-03
 
-- Added: routes now allow time for locks and opening bridges. A route through
+### Added
+
+- Routes now allow time for locks and opening bridges. A route through
   the Zeeland delta crosses four locks and eight opening spans, and was reported
   as if every one of them were standing open. Defaults of 60 and 30 minutes,
   set under Plugin Config and adjustable per route under ☰ → Routing, are
@@ -210,113 +248,80 @@
   far head is 316 m from the entry going north and 113 m going south, so a fixed
   radius charged an extra half hour in one direction only. Two locks never merge
   into one, however tightly they abut.
-- Added: the waiting time is shown where the travel time is. It appears in the
+- The waiting time is shown where the travel time is. It appears in the
   route summary, on each leg that has one, and against the lock or bridge that
   causes it. The summary, the turn list and the expanded leg detail now all take
   their times from the same source, so they agree with each other and with the
   total — previously the collapsed turn list was distance over average speed, so
   expanding a turn showed a different figure from the one above it.
-- Fixed: a routing-data directory holding databases built by different pipeline
-  versions could fail to load. Column availability was merged across every
-  loaded database and then applied to all of them, so a query naming a column
-  that only some of them have failed for the rest. Each database is now read
-  with its own columns.
-- Changed: the settings panel's tab body scrolls on every screen size, and its
-  close button no longer scrolls out of reach on narrow ones. Which tab
-  scrolled previously depended on how tall its content happened to be.
-- Changed: "Backend URL" moves out of the Routing settings into its own
-  "Advanced" section — it decides which server answers, not what is asked of it.
-- Added: the departure planner shows the distance of each departure. A
+- The departure planner shows the distance of each departure. A
   tide-aware scan can pick a different route at different times, so a row that
   is slower because its route is several miles longer used to look identical to
   one that is slower because the tide is against it.
-- Added: the travel-time column switches to arrival time, from the control above
+- The travel-time column switches to arrival time, from the control above
   it. Arrivals that land on a later day are marked (`06:41+1`) rather than
   showing a bare clock time that reads as arriving before departure. The choice
   is remembered.
 
+### Changed
+
+- The settings panel's tab body scrolls on every screen size, and its
+  close button no longer scrolls out of reach on narrow ones. Which tab
+  scrolled previously depended on how tall its content happened to be.
+- "Backend URL" moves out of the Routing settings into its own
+  "Advanced" section — it decides which server answers, not what is asked of it.
+
+### Fixed
+
+- A routing-data directory holding databases built by different pipeline
+  versions could fail to load. Column availability was merged across every
+  loaded database and then applied to all of them, so a query naming a column
+  that only some of them have failed for the rest. Each database is now read
+  with its own columns.
+
 ## 0.1.0-alpha.4 — 2026-08-01
 
-- Fixed: the settings panel could run off the bottom of the window with no way
-  to scroll it. The Charts tab is as long as the server has charts — with 18 of
-  them the panel ended 126 px below the viewport, and everything past that was
-  unreachable. It is now bounded to the window and the tab body scrolls, with
-  the header and its close button staying put. Narrow and short screens already
-  turned the panel into a scrolling side sheet; this is the same idea for a
-  desktop window.
-- Fixed: the App Store listing showed the raw `<img src="public/icon.svg" …>`
-  tag as text instead of the icon. Its README renderer does not allow inline
-  HTML; the icon is now a Markdown image, with an absolute raw URL so it also
-  resolves on npmjs.com where a relative path does not.
-- Fixed: the web app showed Signal K's own favicon in the browser tab, because
-  it declared none of its own and the browser fell back to the server root. It
-  now uses the RouteIQ icon. The title leads with the name too — a tab truncated
-  "SignalK RouteIQ Nautical Route Planner" down to "SignalK RouteIQ Nau…", so
-  the app looked like the server it runs on.
-- Fixed: the departure time used for tide-aware routing was the moment the page
-  was opened, not the current time. The field was filled in once, when the tide
-  panel first appeared, and then only ever refilled if it was empty — so ticking
-  "Consider tide" an hour later, planning a route, or scanning for the best
-  departure all worked from an hour in the past, silently. It now tracks the
-  clock until a departure is actually chosen, either by editing the field or by
-  picking a row in the departure planner. Affected the webapp and the
-  Freeboard-SK plotter panel alike.
-- Changed: the departure planner now fills in as it scans instead of showing a
+### Added
+
+- A fifth App Store screenshot, `img/webapp-departures.jpg` — the
+  departure planner mid-scan. Regenerate it with
+  `./scripts/screenshots.sh webapp-departures`.
+- The departure planner can be cancelled while it is still scanning,
+  keeping the departures found so far, and can page the window backwards and
+  forwards 12 hours at a time. Cancelling, paging, or closing the planner drops
+  the request, which is what stops the server calculating a window nobody is
+  looking at any more.
+
+### Changed
+
+- The departure planner now fills in as it scans instead of showing a
   spinner until every departure has been calculated. A scan is one full route
   calculation per hour of the window and can run for minutes on a long passage;
   `POST /route/departures` now streams each result as newline-delimited JSON to
   a client that asks for it (`Accept: application/x-ndjson`), and answers with
   the same single JSON document as before to one that does not.
-- Changed: the scan works coarse to fine — both ends of the window first, then
+- The scan works coarse to fine — both ends of the window first, then
   the midpoint of each interval, and so on — rather than hour by hour from the
   start. The shape of the day is legible after a handful of results, which is
   usually enough to see where the good departures are long before the scan ends.
   The colour ramp and the ★ re-scale as results land.
-- Added: a fifth App Store screenshot, `img/webapp-departures.jpg` — the
-  departure planner mid-scan. Regenerate it with
-  `./scripts/screenshots.sh webapp-departures`.
-- Fixed: the departure planner mixed clock formats in one dialog — its rows are
-  24 h, but the window it covers was rendered in whatever the locale preferred,
-  so an en-US browser put "08:50 PM" directly above a column reading "20:50".
-  The window heading and the row tooltips are now 24 h too, in the webapp and in
-  the plotter panel.
-- Fixed: saving a reshaped route from the Freeboard-SK plotter panel failed with
-  "Operation could not be completed" and a wall of schema errors. Signal K's
-  route schema requires every `coordinatesMeta` entry to carry a name or an
-  href, and the host builds one entry per waypoint from that waypoint's name —
-  so the unnamed points RouteIQ generated between start and destination became
-  empty objects the server rejected. Reshaping a route into dozens of graph
-  nodes made this certain rather than occasional. Generated waypoints are now
-  numbered `WP1` upwards, except that the start and destination keep whatever
-  the route already called them if they were named at all.
-- Changed: a route saved from the webapp now carries the same numbered waypoints
+- A route saved from the webapp now carries the same numbered waypoints
   as one saved from the plotter panel. The two save by different routes — the
   webapp posts to the plugin, which writes the resource itself, while the panel
   hands its points to Freeboard-SK, which writes its own — and the webapp's
   omitted waypoint names altogether. The same route saved from the two windows
   produced two different waypoint lists.
-- Changed: the Freeboard-SK plotter panel's departure list streams too, laying
+- The Freeboard-SK plotter panel's departure list streams too, laying
   the whole window out at once and filling it in coarse to fine as results
   arrive, instead of showing "Scanning departures…" until the last one lands.
   Hiding the list drops the request, which stops the server calculating the rest.
-- Changed: paging the departure window by 12 hours no longer recalculates the
+- Paging the departure window by 12 hours no longer recalculates the
   half it already has. A 24 h window moved half its own width overlaps itself by
   13 of its 25 steps — same route, same constraints, the same departure times to
   the millisecond — so only the 12 that are genuinely new are requested, and
   paging back to a window already seen calculates nothing at all. Kept results
   are discarded as soon as anything that would change a travel time changes.
-- Added: the departure planner can be cancelled while it is still scanning,
-  keeping the departures found so far, and can page the window backwards and
-  forwards 12 hours at a time. Cancelling, paging, or closing the planner drops
-  the request, which is what stops the server calculating a window nobody is
-  looking at any more.
-- Fixed: routing failed outright with "Invalid draft — expected a number in
-  meters" on a server whose vessel draft was set. Signal K's `design.draft` is
-  not a plain number — its value is an object (`{maximum, minimum, current}`) —
-  and the webapp forwarded it verbatim as a routing override whenever the plugin
-  had no draft of its own. A dimension is now read from that shape (and from a
-  draft stored as text, `"2"`), both in the plugin and in the webapp.
-- Changed: a draft, beam or air draft that still cannot be read no longer fails
+- A draft, beam or air draft that still cannot be read no longer fails
   the request. It is dropped and the route is planned against the dimensions
   configured on the server, with a `vessel_dimension_ignored` warning in the
   route result — shown in the planner's warnings and as a toast, and logged.
@@ -324,23 +329,7 @@
   draft, 4.0 m beam) keep the depth and air-draft constraints doing their job.
   `PUT /vessel`, where an admin writes the server-wide defaults by hand, still
   answers 400 — as does an unusable `minCoastDistance`.
-- Fixed: the "Consider tide" panel — including the "Best…" departure-planner
-  button — could be missing from the webapp entirely, while working fine in the
-  Freeboard-SK plotter extension for the same boat. The webapp checked tide
-  availability against the map's hardcoded placeholder center (`[45.5, -1.0]`)
-  at connect time, racing the vessel's actual position, which only arrives once
-  `fetchBoatData()`'s request resolves and re-centers the map moments later. If
-  the placeholder location happened to have no tide coverage, the whole panel
-  stayed hidden and was never re-checked. It now re-checks against the vessel's
-  real position as soon as that arrives. The plotter extension was unaffected —
-  it awaits the real position before its first check.
-- Fixed: a route being planned somewhere the boat isn't (a different cruising
-  ground entirely) kept the tide panel keyed to the vessel's position even
-  after routing elsewhere, so a route with tide coverage along it could still
-  show the panel hidden. Every (re)route now also re-checks tide availability
-  against the route's own midpoint, throttled to at most once per 5 nm of
-  movement so dragging a waypoint doesn't spam the check.
-- Changed: a release now chooses its npm dist-tag based on what is already
+- A release now chooses its npm dist-tag based on what is already
   published. While no stable version exists, a pre-release publishes as `latest`,
   so `npm install signalk-routeiq` and the Signal K App Store resolve to the
   current build rather than to whichever version happened to be tagged first.
@@ -353,78 +342,125 @@
   fails without publishing instead of guessing a tag it would be unable to move.
   Applies from the next release; `latest` for 0.1.0-alpha.3 was set by hand.
 
+### Fixed
+
+- The settings panel could run off the bottom of the window with no way
+  to scroll it. The Charts tab is as long as the server has charts — with 18 of
+  them the panel ended 126 px below the viewport, and everything past that was
+  unreachable. It is now bounded to the window and the tab body scrolls, with
+  the header and its close button staying put. Narrow and short screens already
+  turned the panel into a scrolling side sheet; this is the same idea for a
+  desktop window.
+- The App Store listing showed the raw `<img src="public/icon.svg" …>`
+  tag as text instead of the icon. Its README renderer does not allow inline
+  HTML; the icon is now a Markdown image, with an absolute raw URL so it also
+  resolves on npmjs.com where a relative path does not.
+- The web app showed Signal K's own favicon in the browser tab, because
+  it declared none of its own and the browser fell back to the server root. It
+  now uses the RouteIQ icon. The title leads with the name too — a tab truncated
+  "SignalK RouteIQ Nautical Route Planner" down to "SignalK RouteIQ Nau…", so
+  the app looked like the server it runs on.
+- The departure time used for tide-aware routing was the moment the page
+  was opened, not the current time. The field was filled in once, when the tide
+  panel first appeared, and then only ever refilled if it was empty — so ticking
+  "Consider tide" an hour later, planning a route, or scanning for the best
+  departure all worked from an hour in the past, silently. It now tracks the
+  clock until a departure is actually chosen, either by editing the field or by
+  picking a row in the departure planner. Affected the webapp and the
+  Freeboard-SK plotter panel alike.
+- The departure planner mixed clock formats in one dialog — its rows are
+  24 h, but the window it covers was rendered in whatever the locale preferred,
+  so an en-US browser put "08:50 PM" directly above a column reading "20:50".
+  The window heading and the row tooltips are now 24 h too, in the webapp and in
+  the plotter panel.
+- Saving a reshaped route from the Freeboard-SK plotter panel failed with
+  "Operation could not be completed" and a wall of schema errors. Signal K's
+  route schema requires every `coordinatesMeta` entry to carry a name or an
+  href, and the host builds one entry per waypoint from that waypoint's name —
+  so the unnamed points RouteIQ generated between start and destination became
+  empty objects the server rejected. Reshaping a route into dozens of graph
+  nodes made this certain rather than occasional. Generated waypoints are now
+  numbered `WP1` upwards, except that the start and destination keep whatever
+  the route already called them if they were named at all.
+- Routing failed outright with "Invalid draft — expected a number in
+  meters" on a server whose vessel draft was set. Signal K's `design.draft` is
+  not a plain number — its value is an object (`{maximum, minimum, current}`) —
+  and the webapp forwarded it verbatim as a routing override whenever the plugin
+  had no draft of its own. A dimension is now read from that shape (and from a
+  draft stored as text, `"2"`), both in the plugin and in the webapp.
+- The "Consider tide" panel — including the "Best…" departure-planner
+  button — could be missing from the webapp entirely, while working fine in the
+  Freeboard-SK plotter extension for the same boat. The webapp checked tide
+  availability against the map's hardcoded placeholder center (`[45.5, -1.0]`)
+  at connect time, racing the vessel's actual position, which only arrives once
+  `fetchBoatData()`'s request resolves and re-centers the map moments later. If
+  the placeholder location happened to have no tide coverage, the whole panel
+  stayed hidden and was never re-checked. It now re-checks against the vessel's
+  real position as soon as that arrives. The plotter extension was unaffected —
+  it awaits the real position before its first check.
+- A route being planned somewhere the boat isn't (a different cruising
+  ground entirely) kept the tide panel keyed to the vessel's position even
+  after routing elsewhere, so a route with tide coverage along it could still
+  show the panel hidden. Every (re)route now also re-checks tide availability
+  against the route's own midpoint, throttled to at most once per 5 nm of
+  movement so dragging a waypoint doesn't spam the check.
+
 ## 0.1.0-alpha.3 — 2026-07-27
 
-- Fixed: a first-time install could never reach the Data Manager, so there was
+### Fixed
+
+- A first-time install could never reach the Data Manager, so there was
   no way to download the first routing database. With none installed the app sat
   on "Loading Routing Data — Waiting for server..." indefinitely: it waited for
   an endpoint that only answers once a routing graph is loaded, which cannot
   happen before the first download. It now recognises the empty install and opens
   the Data Manager on the Available tab, one click from the first download.
-- Fixed: vessel dimensions stayed blank after that first download until the page
+- Vessel dimensions stayed blank after that first download until the page
   was reloaded, because they had been requested once at startup while the
   routing engine was still unavailable.
-- Fixed: `./scripts/screenshots.sh` could produce a passing screenshot of a
+- `./scripts/screenshots.sh` could produce a passing screenshot of a
   failed route — the waits for the route summary and the departure scan swallowed
   their own timeouts. They now fail the shot, which captures a `*.FAILED` image
   for diagnosis instead of publishing a misleading one.
 
 ## 0.1.0-alpha.2 — 2026-07-26
 
-- Fixed: saving the plugin configuration on a fresh install failed with a 404.
-  The API handler was only created in `start()`, so on an install that was not
-  yet enabled `registerWithRouter()` threw and Signal K never mounted the plugin
-  router — taking its own `POST /plugins/signalk-routeiq/config` route with it.
-- Fixed: saving the plugin configuration could leave routing unavailable until
-  the Signal K server was restarted, with every route request answering
-  "Routing engine not ready, still initializing". Signal K stops and restarts the
-  plugin on each save, and the two halves could overlap — the shutdown
-  discarding the routing database the restart had just finished loading.
-- Fixed: downloading or deleting a routing database while the plugin was still
-  starting up, or while another download was completing, could leave routing
-  unavailable the same way, and left the abandoned database's worker thread
-  running — one per occurrence — for as long as the server stayed up.
-- Fixed: route requests arriving while a routing database was being swapped in
-  (after a download or delete) could reach that database as it was closing,
-  instead of getting a plain "not ready" answer for the moment the swap takes.
-- Fixed: on Windows, re-downloading a routing database after a failed startup
-  reported an internal error instead of retrying the file replacement. The retry
-  path assumed a database was already open, which is exactly what is not true
-  when the download is meant to repair a broken one.
-- Changed: stopping or disabling the plugin now finishes closing its routing
-  database before Signal K moves on, so a stop immediately followed by a start
-  can no longer trip over itself, and a database left over from an earlier start
-  is always closed rather than abandoned.
-- Changed: routes to a destination that sits away from the routing network skip
-  a redundant nearest-waterway search, and opening a user-edits overlay now
-  prepares its queries once instead of once per edge. Both are faster, with
-  identical results.
-- Fixed: the Freeboard-SK plotter extension assets (`plotterext/`) were missing
-  from the published package, so the RouteIQ panel failed to load in Freeboard-SK
-  on an npm install.
-- Changed: routing databases now default to the plugin's own Signal K data
-  directory (`<config>/plugin-config-data/signalk-routeiq/routing-data`) instead of
-  `./data/` inside `node_modules`, where npm discarded them on every plugin
-  update. Existing configurations keep the directory they have.
-- Fixed: the App Store icon did not render. `public/icon.svg` declared only a
-  `viewBox`, so it had no intrinsic size; it now sets `width`/`height` as well.
-- Added: `signalk.recommends` lists `signalk-tidal-currents`, `signalk-tides`
+### Added
+
+- `signalk.recommends` lists `signalk-tidal-currents`, `signalk-tides`
   and `@signalk/freeboard-sk` so the App Store links the optional companions.
-- Added: four App Store screenshots under `img/`, declared in
+- Four App Store screenshots under `img/`, declared in
   `signalk.screenshots` and shipped via `files`. Regenerate them with
   `./scripts/screenshots.sh`.
-- Added: `repository`, `bugs`, `homepage` and `author` to `package.json`. The
+- `repository`, `bugs`, `homepage` and `author` to `package.json`. The
   App Store derives its GitHub and Issues links from these, and the registry
   clones the repository to run the test suite — without them a plugin scores
   zero for tests however many it actually has.
-- Changed: CI now calls the shared `SignalK/signalk-server` plugin-CI reusable
+
+### Changed
+
+- Stopping or disabling the plugin now finishes closing its routing
+  database before Signal K moves on, so a stop immediately followed by a start
+  can no longer trip over itself, and a database left over from an earlier start
+  is always closed rather than abandoned.
+- Routes to a destination that sits away from the routing network skip
+  a redundant nearest-waterway search, and opening a user-edits overlay now
+  prepares its queries once instead of once per edge. Both are faster, with
+  identical results.
+- Routing databases now default to the plugin's own Signal K data
+  directory (`<config>/plugin-config-data/signalk-routeiq/routing-data`) instead of
+  `./data/` inside `node_modules`, where npm discarded them on every plugin
+  update. Existing configurations keep the directory they have.
+- CI now calls the shared `SignalK/signalk-server` plugin-CI reusable
   workflow (with a separate lint job), which is what the App Store registry
   credits. armv7 is disabled there: it runs Node 20, which has no `node:sqlite`
   and rejects `--experimental-sqlite` outright.
-- Changed: `--experimental-sqlite` moved from CI's `NODE_OPTIONS` into the
+- `--experimental-sqlite` moved from CI's `NODE_OPTIONS` into the
   `test` script, so tests run identically on Windows and macOS runners.
-- Fixed: `signalK.url` pointed at the wrong GitHub owner.
-- Removed: the plugin router no longer serves the web UI under
+
+### Removed
+
+- The plugin router no longer serves the web UI under
   `/plugins/signalk-routeiq/`. The server gates all of `/plugins` behind admin
   auth, so that copy was invisible to read-only users — and broken for admins
   too, because the page derives its API base from its own URL and so requested
@@ -433,7 +469,39 @@
   `/signalk-routeiq/` by the `signalk-webapp` keyword and calls the public
   `/signalk/v1/api/router/...` endpoints. The admin-only API under
   `/plugins/signalk-routeiq/router/` is unchanged.
-- Docs: the tide settings and README no longer describe `signalk-tides` as
+
+### Fixed
+
+- Saving the plugin configuration on a fresh install failed with a 404.
+  The API handler was only created in `start()`, so on an install that was not
+  yet enabled `registerWithRouter()` threw and Signal K never mounted the plugin
+  router — taking its own `POST /plugins/signalk-routeiq/config` route with it.
+- Saving the plugin configuration could leave routing unavailable until
+  the Signal K server was restarted, with every route request answering
+  "Routing engine not ready, still initializing". Signal K stops and restarts the
+  plugin on each save, and the two halves could overlap — the shutdown
+  discarding the routing database the restart had just finished loading.
+- Downloading or deleting a routing database while the plugin was still
+  starting up, or while another download was completing, could leave routing
+  unavailable the same way, and left the abandoned database's worker thread
+  running — one per occurrence — for as long as the server stayed up.
+- Route requests arriving while a routing database was being swapped in
+  (after a download or delete) could reach that database as it was closing,
+  instead of getting a plain "not ready" answer for the moment the swap takes.
+- On Windows, re-downloading a routing database after a failed startup
+  reported an internal error instead of retrying the file replacement. The retry
+  path assumed a database was already open, which is exactly what is not true
+  when the download is meant to repair a broken one.
+- The Freeboard-SK plotter extension assets (`plotterext/`) were missing
+  from the published package, so the RouteIQ panel failed to load in Freeboard-SK
+  on an npm install.
+- The App Store icon did not render. `public/icon.svg` declared only a
+  `viewBox`, so it had no intrinsic size; it now sets `width`/`height` as well.
+- `signalK.url` pointed at the wrong GitHub owner.
+
+### Documentation
+
+- The tide settings and README no longer describe `signalk-tides` as
   required. Both tide sources are optional and independent — with neither
   installed, routes fall back to plain distance.
 

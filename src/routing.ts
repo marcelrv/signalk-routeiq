@@ -4014,10 +4014,17 @@ export class RoutingEngine {
     };
   }
 
-  // Human-readable span suffix for a bridge crossing, e.g. " (opening span)",
-  // " (opening, closed 6.6m)" or " (fixed, 18.4m)". S-57 gives every span of a
-  // bridge the same OBJNAM, so this is what lets a route report distinguish
-  // which span was crossed.
+  /**
+   * Human-readable span suffix for a bridge crossing, e.g. " (opening span)",
+   * " (opening, closed 6.6m)" or " (fixed, 18.4m)". S-57 gives every span of a
+   * bridge the same OBJNAM, so this is what lets a route report distinguish
+   * which span was crossed.
+   *
+   * @param subtype - POI `subtype`: "opening", "fixed", or unknown.
+   * @param height - Clearance of a fixed span in metres, when known.
+   * @param closedHeight - Closed clearance of an opening span in metres, when known.
+   * @returns The suffix, with a leading space, or "" for an unknown subtype.
+   */
   static formatSpanSuffix(
     subtype: string | undefined,
     height: number | undefined,
@@ -4036,6 +4043,57 @@ export class RoutingEngine {
     return "";
   }
 
+  /**
+   * Grouping key for crossing detection: spans with the same key are one
+   * structure, so a route passing it lists only the span it went through. The
+   * prefixes keep a structure key from ever colliding with a POI name.
+   *
+   * @param poi - A POI with its parsed `properties`.
+   * @returns `s:<properties.structure>` when that is a non-empty string, else
+   *   `n:<name>` (databases without the key group spans by name).
+   */
+  static structureKey(poi: { name: string; properties?: unknown }): string {
+    const s = (poi.properties as Record<string, unknown> | undefined)
+      ?.structure;
+    return typeof s === "string" && s !== "" ? `s:${s}` : `n:${poi.name}`;
+  }
+
+  /**
+   * Metres from a point to the segment a-b, on a local flat projection around
+   * the point: fine for the few hundred metres a crossing spans.
+   *
+   * @param lat - Latitude of the point, degrees.
+   * @param lon - Longitude of the point, degrees.
+   * @param a - Segment start, [lon, lat].
+   * @param b - Segment end, [lon, lat].
+   * @returns Shortest distance from the point to the segment, metres.
+   */
+  static pointSegmentMetres(
+    lat: number,
+    lon: number,
+    a: [number, number],
+    b: [number, number],
+  ): number {
+    const kx = 111320 * Math.cos((lat * Math.PI) / 180);
+    const ky = 110540;
+    const ax = (a[0] - lon) * kx;
+    const ay = (a[1] - lat) * ky;
+    const dx = (b[0] - lon) * kx - ax;
+    const dy = (b[1] - lat) * ky - ay;
+    const len2 = dx * dx + dy * dy;
+    const t =
+      len2 > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
+    return Math.hypot(ax + t * dx, ay + t * dy);
+  }
+
+  /**
+   * Bridges and locks a route passes: every structure with a span within
+   * 150 m of a route coordinate, one entry per passage, in route order,
+   * bridges first. Each entry names the span nearest the route line.
+   *
+   * @param coordinates - The route line, [lon, lat] per point.
+   * @returns The crossings; empty for an empty route.
+   */
   private async detectCrossings(
     coordinates: [number, number][],
   ): Promise<RouteCrossing[]> {
@@ -4090,10 +4148,10 @@ export class RoutingEngine {
     const bridgePois = pois.filter((p) => p.typeId === POI_TYPE_BRIDGE);
     const lockPois = pois.filter((p) => p.typeId === POI_TYPE_LOCK);
     const MAX_DIST = 150; // m: how close the route must pass to a POI to count as a crossing
-    const MERGE_ROUTE_DIST = 300; // m along-route: same-name events closer than this are one physical crossing
+    const MERGE_ROUTE_DIST = 300; // m along-route: same-structure events closer than this are one physical crossing
 
     // Cumulative along-route distance per coordinate, used only to decide
-    // whether two same-named hits are the same physical crossing or two
+    // whether two hits on one structure are the same physical crossing or two
     // distinct passages of a like-named feature further down the route.
     const cumDist: number[] = [0];
     for (let i = 1; i < coordinates.length; i++) {
@@ -4106,22 +4164,33 @@ export class RoutingEngine {
 
     type Poi = (typeof bridgePois)[0];
 
-    // For a set of same-typed POIs: group by name (S-57 gives every span of
-    // one bridge/lock complex the same OBJNAM), then walk the route once per
-    // name group. At each coordinate within MAX_DIST, attach the *nearest*
-    // POI in the group (nearest-span attachment). Consecutive in-range
-    // coordinates collapse into a single run (one physical crossing); runs
-    // that are close together along the route are merged too, so a cluster
-    // of spans near one crossing point never produces more than one entry.
+    /**
+     * For a set of same-typed POIs: group by structure, then walk the route
+     * once per group. A POI's structure is its `properties.structure` key when
+     * the database writes one (sources such as the Dutch VNDS name every span
+     * of one bridge differently, so only that key ties them together), else its
+     * name (S-57 gives every span of one bridge/lock complex the same OBJNAM).
+     * At each coordinate within MAX_DIST, attach the *nearest* POI in the
+     * group. Consecutive in-range coordinates collapse into a single run (one
+     * physical crossing); runs that are close together along the route are
+     * merged too, so a cluster of spans near one crossing point never produces
+     * more than one entry. The span listed for a run is the one nearest the
+     * route line over that run (see below).
+     *
+     * @param groupPois - POIs of one type (bridges or locks).
+     * @param build - Makes the crossing entry for the span that is listed.
+     * @returns The crossings of this type, in route order.
+     */
     const detectForGroup = (
       groupPois: Poi[],
       build: (poi: Poi) => RouteCrossing,
     ): RouteCrossing[] => {
-      const byName = new Map<string, Poi[]>();
+      const byStructure = new Map<string, Poi[]>();
       for (const poi of groupPois) {
-        const arr = byName.get(poi.name);
+        const key = RoutingEngine.structureKey(poi);
+        const arr = byStructure.get(key);
         if (arr) arr.push(poi);
-        else byName.set(poi.name, [poi]);
+        else byStructure.set(key, [poi]);
       }
 
       const out: Array<{
@@ -4129,9 +4198,16 @@ export class RoutingEngine {
         dist: number;
         coordIdx: number;
       }> = [];
-      for (const group of byName.values()) {
-        let current: { poi: Poi; dist: number; coordIdx: number } | null = null;
-        const runs: Array<{ poi: Poi; dist: number; coordIdx: number }> = [];
+      type Run = {
+        poi: Poi;
+        dist: number;
+        coordIdx: number;
+        first: number;
+        last: number;
+      };
+      for (const group of byStructure.values()) {
+        let current: Run | null = null;
+        const runs: Run[] = [];
         for (let i = 0; i < coordinates.length; i++) {
           const [lon, lat] = coordinates[i];
           let bestPoi: Poi | null = null;
@@ -4144,8 +4220,22 @@ export class RoutingEngine {
             }
           }
           if (bestPoi) {
-            if (!current || bestDist < current.dist)
-              current = { poi: bestPoi, dist: bestDist, coordIdx: i };
+            if (!current) {
+              current = {
+                poi: bestPoi,
+                dist: bestDist,
+                coordIdx: i,
+                first: i,
+                last: i,
+              };
+            } else {
+              current.last = i;
+              if (bestDist < current.dist) {
+                current.poi = bestPoi;
+                current.dist = bestDist;
+                current.coordIdx = i;
+              }
+            }
           } else if (current) {
             runs.push(current);
             current = null;
@@ -4153,9 +4243,9 @@ export class RoutingEngine {
         }
         if (current) runs.push(current);
 
-        // Merge runs *within this name group* that are close together along
-        // the route into one crossing, keeping the geometrically nearest span.
-        const merged: Array<{ poi: Poi; dist: number; coordIdx: number }> = [];
+        // Merge runs *within this structure group* that are close together
+        // along the route into one crossing, keeping the nearest vertex hit.
+        const merged: Run[] = [];
         for (const run of runs) {
           const prev =
             merged.length > 0 ? merged[merged.length - 1] : undefined;
@@ -4163,14 +4253,48 @@ export class RoutingEngine {
             prev &&
             cumDist[run.coordIdx] - cumDist[prev.coordIdx] < MERGE_ROUTE_DIST
           ) {
-            if (run.dist < prev.dist) merged[merged.length - 1] = run;
+            merged[merged.length - 1] = {
+              ...(run.dist < prev.dist ? run : prev),
+              first: prev.first,
+              last: run.last,
+            };
           } else {
             merged.push(run);
           }
         }
         for (const run of merged) {
+          // The span passed is the one nearest the route *line* over the run,
+          // not the one nearest a vertex: graph nodes can sit tens of metres
+          // before a bridge, where a side span's centroid may be the closer
+          // one (Woubrugsebrug: the node is 31 m from the fixed span and 33 m
+          // from the opening the edge goes through; the line is 8.2 m from the
+          // fixed span and 6.7 m from the opening).
+          const lo = Math.max(0, run.first - 1);
+          const hi = Math.min(coordinates.length - 1, run.last + 1);
+          let poi = run.poi;
+          if (group.length > 1 && hi > lo) {
+            let best = Infinity;
+            for (const p of group) {
+              let d = Infinity;
+              for (let i = lo; i < hi; i++) {
+                d = Math.min(
+                  d,
+                  RoutingEngine.pointSegmentMetres(
+                    p.lat,
+                    p.lon,
+                    coordinates[i],
+                    coordinates[i + 1],
+                  ),
+                );
+              }
+              if (d < best) {
+                best = d;
+                poi = p;
+              }
+            }
+          }
           out.push({
-            crossing: build(run.poi),
+            crossing: build(poi),
             dist: run.dist,
             coordIdx: run.coordIdx,
           });
@@ -4180,10 +4304,15 @@ export class RoutingEngine {
       return out.map((e) => e.crossing);
     };
 
-    // A database may carry a figure for a specific bridge or lock. Read it here
-    // so the configured default is only a fallback; nothing emits this field
-    // yet, but wiring it now means the pipeline can start to without a second
-    // change on this side.
+    /**
+     * A database may carry a figure for a specific bridge or lock. Read it here
+     * so the configured default is only a fallback; nothing emits this field
+     * yet, but wiring it now means the pipeline can start to without a second
+     * change on this side.
+     *
+     * @param props - The POI's parsed `properties`.
+     * @returns `typical_wait_minutes` when it is a finite number >= 0, else undefined.
+     */
     const poiWaitMinutes = (
       props?: Record<string, unknown>,
     ): number | undefined => {

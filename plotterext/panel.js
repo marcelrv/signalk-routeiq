@@ -1261,6 +1261,14 @@ function renderSummary(result) {
   $("summary").style.display = "block";
 }
 
+/**
+ * Fill the itinerary list: one item per route point (start, turns, vias,
+ * destination) with its running time, and under it the leg that follows:
+ * distance, time, the bridges and locks crossed with their waits, and the
+ * waters it runs through.
+ *
+ * @param {Array<object>} itinerary - The server's itinerary points, in route order.
+ */
 function renderItinerary(itinerary) {
   const ol = $("itinerary");
   ol.innerHTML = "";
