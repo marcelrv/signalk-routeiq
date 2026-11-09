@@ -2844,6 +2844,11 @@
     return { harbour: "⚓", fairway: "⛵", waterway: "💧" }[type] || "📍";
   }
 
+  /**
+   * Reload the POI markers for the current map view, when the POI layer is on.
+   * Bridges are coloured and labelled by span: a fixed span with its clearance,
+   * an opening span with its closed clearance when the database gives one.
+   */
   function fetchPois() {
     if (!poiVisible) return;
     poiLayer.clearLayers();
@@ -6664,6 +6669,14 @@
     return m.toFixed(1) + " m";
   }
 
+  /**
+   * Fill the route pane from a route result: warnings, then each route point
+   * with the leg after it (distance, time, the bridges and locks on that leg
+   * with their waits, and the waters it runs through). Clears the pane when
+   * there is no route.
+   *
+   * @param {object|null} geoJson - The route result as returned by the server.
+   */
   function renderRoutePane(geoJson) {
     const pane = document.getElementById("route-pane");
     const emptyEl = document.getElementById("route-pane-empty");
