@@ -704,9 +704,15 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   color: #9bb8da;
   padding: 1px 0;
 }
+.route-leg .leg-stat > span:first-child {
+  flex-shrink: 0;
+}
 .route-leg .leg-stat .leg-val {
   color: #b8d4f0;
   font-family: 'SF Mono', 'Cascadia Code', monospace;
+  /* a long value (Waters) wraps: keep it off the label and right-aligned */
+  margin-left: 8px;
+  text-align: right;
 }
 .route-leg .leg-warn {
   display: flex;
