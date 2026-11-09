@@ -3127,10 +3127,6 @@
     return sameDay ? "Today" : "Tomorrow";
   }
 
-  function fmtScrubTime(ms) {
-    return clockStr(ms) + " (" + scrubOffsetStr(ms) + ")";
-  }
-
   // Builds the 24h ruler: one segment per real clock hour (the edge
   // segments are partial when stationsWindowStart isn't itself on the
   // hour), alternating shading for readability, every hour labeled (a
@@ -3257,18 +3253,21 @@
     "N NNE NE ENE E ESE SE SSE S SSW SW WSW W WNW NW NNW".split(" ");
 
   // Shared hover card for current markers (UTCEF/harmonic stations and GRIB
-  // grid points), styled like tideTooltipHtml. direction is the SET: degrees
-  // true the water flows TOWARDS (same as the arrow); null = slack / unknown.
-  // speedKn is shown as the server sends it — for harmonic stations it is
-  // signed along the flood/ebb axis (negative = ebb), for UTCEF/GRIB it is a
-  // plain magnitude. Pure formatting, no derivation.
+  // grid points): a two-line card, title + time offset, then speed · set.
+  // direction is the SET: degrees true the water flows TOWARDS (same as the
+  // arrow); null = slack / unknown. speedKn is shown as the server sends it —
+  // for harmonic stations it is signed along the flood/ebb axis (negative =
+  // ebb), for UTCEF/GRIB it is a plain magnitude. Pure formatting, no
+  // derivation.
   function currentTooltipHtml(opts) {
-    const rowStyle = 'style="padding:0 8px 0 0;color:#5f7a9a"';
-    const row = function (label, value) {
-      return (
-        "<tr><td " + rowStyle + ">" + label + "</td><td>" + value + "</td></tr>"
-      );
-    };
+    const muted = "color:#5f7a9a";
+    // Station names may carry a trailing "lat,lon" pair; drop it.
+    let title = String(opts.title);
+    const stripped = title.replace(
+      /\s+-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?\s*$/,
+      "",
+    );
+    if (stripped) title = stripped;
     let dirHtml;
     if (typeof opts.direction === "number") {
       const deg = Math.round(opts.direction) % 360;
@@ -3280,22 +3279,32 @@
         "° " +
         COMPASS_16[Math.round(deg / 22.5) % 16];
     } else {
-      dirHtml = '<span style="color:#5f7a9a">slack / no direction</span>';
+      dirHtml = '<span style="' + muted + '">slack</span>';
     }
+    // Inline SVG wave rather than a glyph: old plotter fonts may lack 〰.
+    const waveIcon =
+      '<svg width="14" height="8" viewBox="0 0 14 8" style="vertical-align:middle;margin-right:3px">' +
+      '<path d="M1 4 Q4 0 7 4 T13 4" fill="none" stroke="#2563eb" stroke-width="1.6" stroke-linecap="round"/></svg>';
     const speedHtml =
+      waveIcon +
       opts.speedKn.toFixed(1) +
       " kn" +
-      (opts.speedKn < 0 ? ' <span style="color:#5f7a9a">(ebb)</span>' : "");
+      (opts.speedKn < 0 ? ' <span style="' + muted + '">(ebb)</span>' : "");
     return (
-      '<div style="font-weight:600;margin-bottom:2px">' +
-      escapeHtml(opts.title) +
-      "</div>" +
-      '<table style="border-collapse:collapse;font-size:11px">' +
-      row("Speed", speedHtml) +
-      row("Set", dirHtml) +
-      row("Time", fmtScrubTime(opts.timeMs)) +
-      row("Source", opts.source) +
-      "</table>"
+      '<div style="font-weight:600">' +
+      escapeHtml(title) +
+      '<span style="font-weight:normal;margin-left:6px;' +
+      muted +
+      '">' +
+      scrubOffsetStr(opts.timeMs) +
+      "</span></div>" +
+      '<div style="white-space:nowrap">' +
+      speedHtml +
+      '<span style="' +
+      muted +
+      '"> · </span>' +
+      dirHtml +
+      "</div>"
     );
   }
 
@@ -3320,7 +3329,6 @@
       entry.marker.setTooltipContent(
         currentTooltipHtml({
           title: entry.name,
-          source: "Station",
           speedKn: sample.speedKn,
           direction: sample.direction,
           timeMs: new Date(sample.time).getTime(),
@@ -3441,7 +3449,6 @@
             .bindTooltip(
               currentTooltipHtml({
                 title: "GRIB current",
-                source: "GRIB",
                 speedKn: p.speedKn,
                 direction: p.direction,
                 timeMs: t,
