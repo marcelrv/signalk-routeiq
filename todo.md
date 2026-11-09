@@ -150,6 +150,16 @@ turn text).
   (branch `fix/tide-slider-currents`). It was the other way round: stations
   already followed the drag, the GRIB grid only refetched on release. It now
   refetches throttled while dragging, and both share `currentTooltipHtml`.
+- **Current data source in the hover box — waiting on signalk-tidal-currents.**
+  The GRIB overlay should say where its data comes from ("BSH North Sea ·
+  forecast, run 9 Nov 00:00 UTC"). Today `/currents/grid` only tags points
+  `source: grib|utcef|station`, and the summary lists GRIB files by filename
+  only. Needs signalk-tidal-currents to expose per-dataset `provider`/`model`/
+  `runTime`/`kind` (from the GRIB2 header, not the filename) and a `datasetId`
+  per `/grid` point; then show it as a muted line in `currentTooltipHtml`.
+  Same change: `/grid` mixes GRIB and UTCEF points (50 of 122 in a Zeeland
+  view were UTCEF), but `fetchCurrentGrid` draws all of them blue as "GRIB
+  current" — use each point's `source` for the label and colour.
 - **Dynamic isochrones (reachability polygons)** — Dijkstra from the vessel's
   position out to a time budget, returned as a GeoJSON polygon boundary.
 - **Custom avoidance / no-go zones** — user-drawn polygons passed to
