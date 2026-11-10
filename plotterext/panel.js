@@ -1386,12 +1386,13 @@ function renderItinerary(itinerary) {
       // says about the waters.
       const legWarns = [];
       for (const lw of p.leg.warnings || [])
-        legWarns.push({ level: lw.level, text: lw.message });
+        legWarns.push({ level: lw.level, text: lw.message, at: lw.at || [] });
       for (const w of waters)
         for (const ww of w.warnings || [])
           legWarns.push({
             level: ww.level,
             text: (w.name ? w.name + ": " : "") + (ww.message || ww.type),
+            at: ww.at || [],
           });
       // Worst first, then dedupe by text so a repeat keeps its worst level.
       // Index tiebreak: Chrome 66's sort is unstable past 10 items.
@@ -1400,10 +1401,15 @@ function renderItinerary(itinerary) {
         (a, b) =>
           WARN_SEV_ORDER[a.level] - WARN_SEV_ORDER[b.level] || a.i - b.i,
       );
-      const seenWarn = new Set();
+      // A repeat's locations go to the one kept.
+      const seenWarn = new Map();
       const uniqueWarns = legWarns.filter((w) => {
-        if (seenWarn.has(w.text)) return false;
-        seenWarn.add(w.text);
+        const kept = seenWarn.get(w.text);
+        if (kept) {
+          kept.at = kept.at.concat(w.at);
+          return false;
+        }
+        seenWarn.set(w.text, w);
         return true;
       });
       for (const w of uniqueWarns) {
@@ -1412,6 +1418,12 @@ function renderItinerary(itinerary) {
         const text = document.createElement("span");
         text.textContent = w.text;
         warn.append(sevBadge(w.level), text);
+        // Where it applies, as the server located it; any warning type with
+        // a location links up the same way.
+        if (w.at.length > 0 && client.hasCapability("map")) {
+          const at = w.at;
+          makeMapLink(warn, () => showLocationsOnMap(at));
+        }
         details.appendChild(warn);
       }
       if (uniqueWarns.length > 0) {
@@ -1528,34 +1540,12 @@ function renderItinerary(itinerary) {
           typeof cpos.longitude === "number" &&
           client.hasCapability("map")
         ) {
-          row.classList.add("crossing-link");
-          row.title = "Show on map";
-          row.tabIndex = 0;
-          row.setAttribute("role", "button");
-          /**
-           * Centre the host chart on this crossing. Not through run():
-           * panning must not block the panel or drop a second click while
-           * the first is still in flight.
-           * @param {Event} ev The click or keydown that asked for it.
-           */
-          const showOnMap = (ev) => {
-            ev.stopPropagation();
-            client
-              .call("map.center", {
-                position: [cpos.longitude, cpos.latitude],
-                zoom: 15,
-              })
-              .catch((e) =>
-                setStatus("route-status", e?.message || String(e), "error"),
-              );
-          };
-          row.addEventListener("click", showOnMap);
-          row.addEventListener("keydown", (ev) => {
-            if (ev.key === "Enter" || ev.key === " ") {
-              ev.preventDefault();
-              showOnMap(ev);
-            }
-          });
+          makeMapLink(row, () =>
+            client.call("map.center", {
+              position: [cpos.longitude, cpos.latitude],
+              zoom: 15,
+            }),
+          );
         }
         details.appendChild(row);
         // A span low enough to pass closed charges no wait; the server says
@@ -1579,6 +1569,61 @@ function renderItinerary(itinerary) {
     }
     ol.appendChild(li);
   }
+}
+
+/**
+ * Make an itinerary row a "Show on map" link, by click or keyboard. Not
+ * through run(): panning must not block the panel or drop a second click
+ * while the first is still in flight. The event stops here so a link inside
+ * a point header or leg does not also fold it.
+ *
+ * @param {HTMLElement} el - The row.
+ * @param {() => Promise<unknown>} go - Moves the host chart.
+ */
+function makeMapLink(el, go) {
+  el.classList.add("crossing-link");
+  el.title = "Show on map";
+  el.tabIndex = 0;
+  el.setAttribute("role", "button");
+  const show = (ev) => {
+    ev.stopPropagation();
+    go().catch((e) =>
+      setStatus("route-status", e?.message || String(e), "error"),
+    );
+  };
+  el.addEventListener("click", show);
+  el.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      show(ev);
+    }
+  });
+}
+
+/**
+ * Move the host chart to a warning's server locations: centre on a single
+ * point, else fit the chart to all of them. The host has no call to
+ * highlight part of a route, so the stretch itself is not emphasised.
+ *
+ * @param {Array<object>} at - The warning's `at` locations.
+ * @returns {Promise<unknown>}
+ */
+function showLocationsOnMap(at) {
+  if (at.length === 1 && at[0].position) {
+    const { latitude, longitude } = at[0].position;
+    return client.call("map.center", {
+      position: [longitude, latitude],
+      zoom: 15,
+    });
+  }
+  let [w, s, e, n] = at[0].bounds;
+  for (const l of at) {
+    w = Math.min(w, l.bounds[0]);
+    s = Math.min(s, l.bounds[1]);
+    e = Math.max(e, l.bounds[2]);
+    n = Math.max(n, l.bounds[3]);
+  }
+  return client.call("map.fitBounds", { bounds: [w, s, e, n] });
 }
 
 // Display order of the server's warning levels, worst first.
