@@ -767,7 +767,8 @@
     destMode: "auto", // mode of the final leg into the destination
     manualMode: false, // toolbar toggle: new points connect with straight lines
     routeSegments: [], // { polyline, startIdx, endIdx, isWarning, originalStyle }
-    selectedRange: null, // { fromIdx, toIdx } of the pane section picked by clicking the route line
+    selectedRange: null, // { fromIdx, toIdx } of the pane section picked by clicking the route line, plus `ranges` to emphasise when a warning was picked
+    warnLocations: [], // per rendered warning link (data-warn): its server `at` locations
     junctionMarkers: null, // L.layerGroup for hover junction markers
     startPoiName: "", // POI name when start was set via search
     destPoiName: "", // POI name when destination was set via search
@@ -5549,18 +5550,14 @@
   }
 
   /**
-   * Index into getAllCoords(geoJson) of each server itinerary point. The
-   * server gives each point its vertex (`coordIndex`, feature k running from
-   * vertex k to k+1); this only follows getAllCoords' de-duplication, so a
-   * zero-length segment cannot shift the indices.
+   * Index into getAllCoords(geoJson) of each server route vertex (feature k
+   * running from vertex k to k+1). Follows getAllCoords' de-duplication, so
+   * a zero-length segment cannot shift the indices.
    * @param {object} geoJson The route FeatureCollection from the server.
-   * @returns {number[]|null} One coord index per itinerary point, or null
-   *   when the route has no usable itinerary (older server).
+   * @returns {number[]|null} Coord index per server vertex, or null when the
+   *   features do not join up.
    */
-  function itineraryCoordIndices(geoJson) {
-    const itinerary =
-      geoJson && Array.isArray(geoJson.itinerary) ? geoJson.itinerary : null;
-    if (!itinerary || itinerary.length < 2) return null;
+  function serverVertexIndex(geoJson) {
     const features =
       geoJson.type === "FeatureCollection" && Array.isArray(geoJson.features)
         ? geoJson.features
@@ -5598,6 +5595,22 @@
         return null;
       for (let j = 1; j < fc.length; j++) add(fc[j]);
     }
+    return vertexIdx;
+  }
+
+  /**
+   * Index into getAllCoords(geoJson) of each server itinerary point, from
+   * its vertex (`coordIndex`).
+   * @param {object} geoJson The route FeatureCollection from the server.
+   * @returns {number[]|null} One coord index per itinerary point, or null
+   *   when the route has no usable itinerary (older server).
+   */
+  function itineraryCoordIndices(geoJson) {
+    const itinerary =
+      geoJson && Array.isArray(geoJson.itinerary) ? geoJson.itinerary : null;
+    if (!itinerary || itinerary.length < 2) return null;
+    const vertexIdx = serverVertexIndex(geoJson);
+    if (!vertexIdx) return null;
     const out = [];
     for (const p of itinerary) {
       const idx = vertexIdx[p.coordIndex];
@@ -5728,15 +5741,39 @@
     for (const seg of state.routeSegments) {
       seg.polyline.setStyle(seg.originalStyle);
     }
-    // The clicked section stays emphasised once hover moves away.
+    // The clicked section (or the stretches of a picked warning) stays
+    // emphasised once hover moves away.
     const sel = state.selectedRange;
     if (sel) {
-      for (const seg of state.routeSegments) {
-        if (seg.startIdx >= sel.fromIdx && seg.endIdx <= sel.toIdx) {
-          seg.polyline.setStyle({ weight: 7, opacity: 1.0 });
+      for (const r of sel.ranges || [sel]) {
+        for (const seg of state.routeSegments) {
+          if (seg.startIdx >= r.fromIdx && seg.endIdx <= r.toIdx) {
+            seg.polyline.setStyle({ weight: 7, opacity: 1.0 });
+          }
         }
       }
     }
+  }
+
+  /**
+   * Every warning location (`at`) on the route's itinerary legs, as sent by
+   * the server: leg warnings and the warnings on each water.
+   * @param {object} geoJson The route FeatureCollection from the server.
+   * @returns {object[]} The locations, in no particular order.
+   */
+  function allWarningLocations(geoJson) {
+    const out = [];
+    const itinerary =
+      geoJson && Array.isArray(geoJson.itinerary) ? geoJson.itinerary : [];
+    const addAll = function (warnings) {
+      for (const w of warnings || []) for (const l of w.at || []) out.push(l);
+    };
+    for (const p of itinerary) {
+      if (!p.leg) continue;
+      addAll(p.leg.warnings);
+      for (const water of p.leg.waters || []) addAll(water.warnings);
+    }
+    return out;
   }
 
   /**
@@ -6168,6 +6205,18 @@
       extractMajorNodes(coords).map((n) => n.index);
     const splitSet = new Set([0]);
     for (const idx of nodeIdx) splitSet.add(idx);
+    // And at both ends of every warning stretch, so picking a warning in the
+    // pane emphasises exactly that stretch with the same whole-polyline
+    // highlight.
+    const vertexIdx = serverVertexIndex(geoJson);
+    if (vertexIdx) {
+      for (const l of allWarningLocations(geoJson)) {
+        const a = vertexIdx[l.coordIndex];
+        const b = vertexIdx[l.toCoordIndex];
+        if (a !== undefined) splitSet.add(a);
+        if (b !== undefined) splitSet.add(b);
+      }
+    }
     let prevWarn = warnIdx.has(0);
     for (let i = 1; i < coords.length; i++) {
       const curWarn = warnIdx.has(i);
@@ -7042,6 +7091,7 @@
       clearRoutePane();
       return;
     }
+    state.warnLocations = [];
 
     const totalDistM =
       geoJson.totalDistance ||
@@ -7448,6 +7498,7 @@
               legWarnings.push({
                 level: lw.level,
                 html: escapeHtml(lw.message),
+                at: lw.at || [],
               });
 
           const legKm = legDist / 1000;
@@ -7626,6 +7677,7 @@
                   html: escapeHtml(
                     (w.name ? w.name + ": " : "") + (ww.message || ww.type),
                   ),
+                  at: ww.at || [],
                 });
           }
 
@@ -7639,16 +7691,22 @@
               WARN_SEV_ORDER[a.level] - WARN_SEV_ORDER[b.level] || a.i - b.i
             );
           });
-          const seenWarn = new Set();
+          // A repeat's locations go to the one kept.
+          const seenWarn = new Map();
           const uniqueWarn = legWarnings.filter(function (w) {
-            if (seenWarn.has(w.html)) return false;
-            seenWarn.add(w.html);
+            const kept = seenWarn.get(w.html);
+            if (kept) {
+              kept.at = kept.at.concat(w.at);
+              return false;
+            }
+            seenWarn.set(w.html, w);
             return true;
           });
           for (const w of uniqueWarn)
             html +=
               '<div class="leg-warn lvl-' +
               w.level +
+              warnLinkAttrs(w.at) +
               '">' +
               sevBadge(w.level) +
               '<span class="leg-warn-text">' +
@@ -7888,6 +7946,87 @@
       : "";
   }
 
+  /**
+   * Closes a leg warning's class attribute: with locations from the server it
+   * becomes a map link (" warn-link"), remembered in state.warnLocations.
+   * Only the locations decide this, never the warning's type, so a new kind
+   * of server warning links up without a change here.
+   * @param {object[]} at The warning's `at` locations (may be empty).
+   * @returns {string} Class suffix and attributes, ending inside the open
+   *   class attribute's quote.
+   */
+  function warnLinkAttrs(at) {
+    if (!at || at.length === 0) return "";
+    state.warnLocations.push(at);
+    return (
+      ' warn-link" data-warn="' +
+      (state.warnLocations.length - 1) +
+      '" title="Show on map" tabindex="0" role="button'
+    );
+  }
+
+  /**
+   * On the bottom-sheet layout the pane covers the map: lower it after
+   * jumping to something on the map.
+   */
+  function lowerPaneOnSmallScreens() {
+    if (
+      window.matchMedia &&
+      window.matchMedia("(max-width: 700px), (max-height: 500px)").matches
+    ) {
+      document.getElementById("route-pane").classList.add("collapsed");
+      document.getElementById("route-pane-tab").textContent = "\u25b6";
+    }
+  }
+
+  /**
+   * Show a leg warning's server locations on the map: fit the map to them,
+   * keep the stretches emphasised as a picked section, ring the points.
+   * @param {object[]} at The warning's `at` locations.
+   * @param {HTMLElement} legEl The pane leg the warning is listed under.
+   */
+  function showWarningOnMap(at, legEl) {
+    const vertexIdx = serverVertexIndex(state.lastGeoJson);
+    let bounds = null;
+    const ranges = [];
+    const points = [];
+    for (const l of at) {
+      const b = l.bounds;
+      if (!b || b.length !== 4) continue;
+      const lb = L.latLngBounds([b[1], b[0]], [b[3], b[2]]);
+      bounds = bounds ? bounds.extend(lb) : lb;
+      if (l.position)
+        points.push(L.latLng(l.position.latitude, l.position.longitude));
+      else if (vertexIdx) {
+        const f = vertexIdx[l.coordIndex];
+        const t = vertexIdx[l.toCoordIndex];
+        if (f !== undefined && t !== undefined && t > f)
+          ranges.push({ fromIdx: f, toIdx: t });
+      }
+    }
+    if (!bounds) return;
+    if (ranges.length === 0 && points.length === 1)
+      map.setView(points[0], Math.max(map.getZoom(), 15));
+    else map.fitBounds(bounds, { padding: [40, 40], maxZoom: 16 });
+    points.forEach(flashCrossing);
+
+    // Picked like a section of the leg, so a rebuild keeps the leg open.
+    document.querySelectorAll("#route-nodes .selected").forEach(function (el) {
+      el.classList.remove("selected");
+    });
+    legEl.classList.add("selected");
+    const prev = legEl.previousElementSibling;
+    if (prev && prev.classList.contains("route-node"))
+      prev.classList.add("selected");
+    state.selectedRange = {
+      fromIdx: parseInt(legEl.dataset.coordFrom, 10),
+      toIdx: parseInt(legEl.dataset.coordTo, 10),
+      ranges: ranges,
+    };
+    clearMapHighlight();
+    lowerPaneOnSmallScreens();
+  }
+
   let crossingFlash = null;
   /**
    * Briefly ring a crossing on the map after jumping to it, replacing any
@@ -7935,16 +8074,16 @@
         const ll = L.latLng(lat, lng);
         map.setView(ll, Math.max(map.getZoom(), 15));
         flashCrossing(ll);
-        // On the bottom-sheet layout the pane covers the map: lower it.
-        if (
-          window.matchMedia &&
-          window.matchMedia("(max-width: 700px), (max-height: 500px)").matches
-        ) {
-          document.getElementById("route-pane").classList.add("collapsed");
-          document.getElementById("route-pane-tab").textContent = "\u25b6";
-        }
+        lowerPaneOnSmallScreens();
         return;
       }
+    }
+    const warnLink = e.target.closest(".warn-link");
+    if (warnLink) {
+      const at = state.warnLocations[parseInt(warnLink.dataset.warn, 10)];
+      const legEl = warnLink.closest(".route-leg");
+      if (at && legEl) showWarningOnMap(at, legEl);
+      return;
     }
     const nodeEl = e.target.closest(".route-node");
     if (!nodeEl) return;
@@ -7953,10 +8092,10 @@
       nextEl.classList.toggle("expanded");
     }
   });
-  // Keyboard: Enter/Space on a focused crossing link acts like a click.
+  // Keyboard: Enter/Space on a focused crossing or warning link acts like a click.
   routeNodesEl.addEventListener("keydown", function (e) {
     if (e.key !== "Enter" && e.key !== " ") return;
-    const link = e.target.closest(".crossing-link");
+    const link = e.target.closest(".crossing-link, .warn-link");
     if (!link) return;
     e.preventDefault();
     link.click();
