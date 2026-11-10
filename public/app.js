@@ -7250,14 +7250,8 @@
       if (!isLast) {
         const legCrossings = legCrossingsFor(i);
         if (legCrossings.length > 0) {
-          // Merge crossings with the same name (fixed + opening)
-          const grouped = new Map();
-          for (const c of legCrossings) {
-            // Unnamed crossings stay separate: two unnamed locks are two places.
-            const key = c.name || c;
-            if (!grouped.has(key)) grouped.set(key, []);
-            grouped.get(key).push(c);
-          }
+          // Merge crossings of one structure (fixed + opening)
+          const grouped = groupCrossingsByStructure(legCrossings);
           const icons = [];
           for (const [, entries] of grouped) {
             const e0 = entries[0];
@@ -7505,15 +7499,10 @@
               fmtHeight(maxAirDraft) +
               "</span></div>";
 
-          // Crossings on this leg (grouped by name)
+          // Crossings on this leg (grouped by structure)
           const legCrossings = legCrossingsFor(i);
           if (legCrossings.length > 0) {
-            const grouped = new Map();
-            for (const c of legCrossings) {
-              const key = c.name || c;
-              if (!grouped.has(key)) grouped.set(key, []);
-              grouped.get(key).push(c);
-            }
+            const grouped = groupCrossingsByStructure(legCrossings);
             for (const [, entries] of grouped) {
               const e0 = entries[0];
               // Color: fixed bridge = red, lock = yellow, opening = green
@@ -7753,6 +7742,22 @@
       .catch(function () {});
   }
 
+  /**
+   * Groups crossings by the server's `structure` id: entries sharing one are
+   * spans of the same physical structure. Entries without one each stay on
+   * their own, never merged by name (many bridges and locks share a name).
+   * @param {object[]} crossings Itinerary crossings, in route order.
+   * @returns {Map<*, object[]>} Groups in first-seen order.
+   */
+  function groupCrossingsByStructure(crossings) {
+    const grouped = new Map();
+    for (const c of crossings) {
+      const key = c.structure || c;
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(c);
+    }
+    return grouped;
+  }
   /**
    * Crossings with a position can be clicked to pan the map to them.
    * @param {object} c An itinerary crossing.

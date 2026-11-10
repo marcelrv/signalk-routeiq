@@ -120,6 +120,13 @@ export interface RouteCrossing {
    * databases mark the edges this can be derived from.
    */
   lockSpan?: [number, number];
+  /**
+   * The POI's `properties.structure`, passed through unchanged: entries with
+   * the same value are one physical structure. An opaque string, compared
+   * only for equality. Absent when the database does not write one; clients
+   * then treat the entry as a structure of its own, never grouping by name.
+   */
+  structure?: string;
 }
 
 // A point of the simplified, navigable route geometry (Douglas-Peucker with

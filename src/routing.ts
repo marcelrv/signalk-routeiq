@@ -4053,9 +4053,20 @@ export class RoutingEngine {
    *   `n:<name>` (databases without the key group spans by name).
    */
   static structureKey(poi: { name: string; properties?: unknown }): string {
+    const s = RoutingEngine.structureId(poi);
+    return s !== undefined ? `s:${s}` : `n:${poi.name}`;
+  }
+
+  /**
+   * The POI's `properties.structure` when it is a non-empty string.
+   *
+   * @param poi - A POI with its parsed `properties`.
+   * @returns The structure id, or undefined when the database writes none.
+   */
+  static structureId(poi: { properties?: unknown }): string | undefined {
     const s = (poi.properties as Record<string, unknown> | undefined)
       ?.structure;
-    return typeof s === "string" && s !== "" ? `s:${s}` : `n:${poi.name}`;
+    return typeof s === "string" && s !== "" ? s : undefined;
   }
 
   /**
@@ -4322,6 +4333,12 @@ export class RoutingEngine {
         : undefined;
     };
 
+    // Passed on so clients can tell structures apart without going by name.
+    const structureField = (poi: Poi): { structure?: string } => {
+      const structure = RoutingEngine.structureId(poi);
+      return structure !== undefined ? { structure } : {};
+    };
+
     const bridgeCrossings = detectForGroup(bridgePois, (poi) => {
       const props = poi.properties as Record<string, unknown>;
       const subtype = props?.subtype as string | undefined;
@@ -4343,6 +4360,7 @@ export class RoutingEngine {
         ...(closedHeight !== undefined ? { closedHeight } : {}),
         waitMinutes: poiWaitMinutes(props),
         position: { latitude: poi.lat, longitude: poi.lon },
+        ...structureField(poi),
       };
     });
     const lockCrossings = detectForGroup(lockPois, (poi) => ({
@@ -4350,6 +4368,7 @@ export class RoutingEngine {
       name: poi.name,
       waitMinutes: poiWaitMinutes(poi.properties as Record<string, unknown>),
       position: { latitude: poi.lat, longitude: poi.lon },
+      ...structureField(poi),
     }));
 
     return [...bridgeCrossings, ...lockCrossings];

@@ -525,7 +525,7 @@ describe('one crossing per bridge structure', () => {
     engine.db = {
       getPoisInBBox: async () => pois.map((p) => ({ ...p, typeId: POI_TYPE_BRIDGE })),
     };
-    return (await engine.detectCrossings(routeAlong(lon))) as Array<{ name: string; subtype?: string }>;
+    return (await engine.detectCrossings(routeAlong(lon))) as Array<{ name: string; subtype?: string; structure?: string }>;
   };
 
   it('lists only the opening span when the route goes through it', async () => {
@@ -542,6 +542,17 @@ describe('one crossing per bridge structure', () => {
   it('keeps two structures apart, each listed', async () => {
     const c = await detect([openSpan({ structure: '101' }), fixedSpan({ structure: '102' })], OPEN_LON);
     assert.strictEqual(c.length, 2);
+  });
+
+  it('passes the structure id on to the crossing, so clients need not group by name', async () => {
+    const c = await detect([openSpan({ structure: '101' }), fixedSpan({ structure: '102' })], OPEN_LON);
+    assert.deepStrictEqual(c.map((x) => x.structure).sort(), ['101', '102']);
+  });
+
+  it('leaves structure off a crossing whose POI has no usable key', async () => {
+    const c = await detect([openSpan({ structure: '' }), fixedSpan()], OPEN_LON);
+    assert.ok(c.length > 0);
+    for (const x of c) assert.ok(!('structure' in x));
   });
 
   it('without a structure key, differently named spans are listed each (unchanged)', async () => {

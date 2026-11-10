@@ -1387,12 +1387,13 @@ function renderItinerary(itinerary) {
         }
       }
 
-      // Group same-named crossings (a bridge can have a fixed and an opening
-      // span) — same presentation as the webapp's route leg details.
+      // Group crossings of one structure (a bridge can have a fixed and an
+      // opening span) — same presentation as the webapp's route leg details.
+      // Entries without the server's structure id stay separate: names are
+      // not unique, so two same-named locks are two places.
       const grouped = new Map();
       for (const c of p.leg.crossings || []) {
-        // Unnamed crossings stay separate: two unnamed locks are two places.
-        const key = c.name || c;
+        const key = c.structure || c;
         if (!grouped.has(key)) grouped.set(key, []);
         grouped.get(key).push(c);
       }
