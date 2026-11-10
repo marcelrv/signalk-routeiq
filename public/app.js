@@ -7458,7 +7458,7 @@
             // Tide covers it at passage: worth a look, not a hard stop.
             const tideCovers =
               minDepthAtPassage !== Infinity &&
-              minDepthAtPassage > shallowThreshold;
+              minDepthAtPassage >= shallowThreshold;
             legWarnings.push({
               level: tideCovers ? "caution" : "danger",
               html:
@@ -7656,22 +7656,22 @@
                 });
           }
 
-          // Dedupe by text (first wins), then worst first.
-          const seenWarn = {};
-          const sevOrder = { danger: 0, caution: 1, info: 2 };
-          const uniqueWarn = legWarnings
-            .filter(function (w) {
-              if (seenWarn[w.html]) return false;
-              seenWarn[w.html] = true;
-              return true;
-            })
-            .map(function (w, i) {
-              return { level: w.level, html: w.html, i: i };
-            })
-            // Index tiebreak: Chrome 66's sort is unstable past 10 items.
-            .sort(function (a, b) {
-              return sevOrder[a.level] - sevOrder[b.level] || a.i - b.i;
-            });
+          // Worst first, then dedupe by text so a repeat keeps its worst level.
+          legWarnings.forEach(function (w, i) {
+            w.i = i;
+          });
+          // Index tiebreak: Chrome 66's sort is unstable past 10 items.
+          legWarnings.sort(function (a, b) {
+            return (
+              WARN_SEV_ORDER[a.level] - WARN_SEV_ORDER[b.level] || a.i - b.i
+            );
+          });
+          const seenWarn = new Set();
+          const uniqueWarn = legWarnings.filter(function (w) {
+            if (seenWarn.has(w.html)) return false;
+            seenWarn.add(w.html);
+            return true;
+          });
           for (const w of uniqueWarn)
             html +=
               '<div class="leg-warn lvl-' +
@@ -7738,12 +7738,15 @@
   }
 
   // Display classification of a server water warning (no routing logic):
-  // notice severity 2 = depth problem, 1 = caution, 0 = info; depth_quality
-  // is informational; anything unknown stays a caution, never silently harmless.
+  // notice severity 3 = prohibited, 2 = depth problem, 1 = caution, 0 = info;
+  // depth_quality is informational unless the depth is unknown altogether;
+  // anything unknown stays a caution, never silently harmless.
+  const WARN_SEV_ORDER = { danger: 0, caution: 1, info: 2 };
   function waterWarnLevel(ww) {
-    if (ww.type === "depth_quality") return "info";
+    if (ww.type === "depth_quality")
+      return ww.quality === "unknown" ? "caution" : "info";
     if (ww.type === "notice") {
-      if (ww.severity === 2) return "danger";
+      if (ww.severity >= 2) return "danger";
       if (ww.severity === 0) return "info";
       return "caution";
     }
