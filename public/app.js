@@ -7194,7 +7194,7 @@
       summaryEl.style.display = "block";
       const waitStr =
         geoJson.totalWaitSeconds > 0
-          ? '  \u00b7  <span style="color:#f59e0b" title="Included above: time held at locks and opening bridges">\u23f3 ' +
+          ? '  \u00b7  <span style="color:#9bb8da" title="Included above: time held at locks and opening bridges">\u23f3 ' +
             formatTime(geoJson.totalWaitSeconds / 3600) +
             " waiting</span>"
           : "";
@@ -7376,6 +7376,8 @@
         legDiv.dataset.coordTo = nextNode.index;
 
         const legWarnings = [];
+        let legWorst = null;
+        let legWarnCount = 0;
 
         // Aggregate leg attributes: from the server itinerary when present,
         // else from the client-side segment→coord-range mapping (legacy).
@@ -7453,18 +7455,27 @@
             // Keep flagging shallow chart — that is what the survey says — but
             // if the tide covers it at the time you are there, say so on the
             // same line rather than leaving a bare 0.0 m to be alarmed at.
-            legWarnings.push(
-              minDepthAtPassage !== Infinity && minDepthAtPassage > minDepth
-                ? "Shallow (" +
+            // Tide covers it at passage: worth a look, not a hard stop.
+            const tideCovers =
+              minDepthAtPassage !== Infinity &&
+              minDepthAtPassage >= shallowThreshold;
+            legWarnings.push({
+              level: tideCovers ? "caution" : "danger",
+              html:
+                minDepthAtPassage !== Infinity && minDepthAtPassage > minDepth
+                  ? "Shallow (" +
                     minDepth.toFixed(1) +
                     "m charted, " +
                     minDepthAtPassage.toFixed(1) +
                     "m at passage)"
-                : "Shallow (" + minDepth.toFixed(1) + "m)",
-            );
+                  : "Shallow (" + minDepth.toFixed(1) + "m)",
+            });
           }
           if (minWidth !== Infinity && minWidth < 6)
-            legWarnings.push("Narrow (" + minWidth.toFixed(1) + "m)");
+            legWarnings.push({
+              level: "danger",
+              html: "Narrow (" + minWidth.toFixed(1) + "m)",
+            });
 
           const legKm = legDist / 1000;
           const legNm = legKm / 1.852;
@@ -7502,7 +7513,7 @@
               : 0;
           if (legWaitSeconds > 0) {
             html +=
-              '<div class="leg-stat"><span>Waiting</span><span class="leg-val" style="color:#f59e0b">' +
+              '<div class="leg-stat"><span>Waiting</span><span class="leg-val" style="color:#9bb8da">' +
               formatTime(legWaitSeconds / 3600) +
               "</span></div>";
           }
@@ -7637,16 +7648,41 @@
               "</span></div>";
             for (const w of waters)
               for (const ww of w.warnings || [])
-                legWarnings.push(
-                  escapeHtml(
+                legWarnings.push({
+                  level: waterWarnLevel(ww),
+                  html: escapeHtml(
                     (w.name ? w.name + ": " : "") + (ww.message || ww.type),
                   ),
-                );
+                });
           }
 
-          const unique = [...new Set(legWarnings)];
-          for (const w of unique)
-            html += '<div class="leg-warn">\u26a0 ' + w + "</div>";
+          // Worst first, then dedupe by text so a repeat keeps its worst level.
+          legWarnings.forEach(function (w, i) {
+            w.i = i;
+          });
+          // Index tiebreak: Chrome 66's sort is unstable past 10 items.
+          legWarnings.sort(function (a, b) {
+            return (
+              WARN_SEV_ORDER[a.level] - WARN_SEV_ORDER[b.level] || a.i - b.i
+            );
+          });
+          const seenWarn = new Set();
+          const uniqueWarn = legWarnings.filter(function (w) {
+            if (seenWarn.has(w.html)) return false;
+            seenWarn.add(w.html);
+            return true;
+          });
+          for (const w of uniqueWarn)
+            html +=
+              '<div class="leg-warn lvl-' +
+              w.level +
+              '">' +
+              sevBadge(w.level) +
+              '<span class="leg-warn-text">' +
+              w.html +
+              "</span></div>";
+          legWorst = uniqueWarn.length > 0 ? uniqueWarn[0].level : null;
+          legWarnCount = uniqueWarn.length;
 
           legDiv.innerHTML = html;
         } else {
@@ -7655,7 +7691,20 @@
         }
         nodesEl.appendChild(legDiv);
 
-        if (legWarnings.length > 0) nodeDiv.classList.add("has-warn");
+        if (legWorst) {
+          const row = nodeDiv.querySelector(".node-label-row");
+          if (row)
+            row.insertAdjacentHTML(
+              "beforeend",
+              sevBadge(
+                legWorst,
+                "node-warn",
+                legWarnCount + (legWarnCount === 1 ? " warning" : " warnings"),
+              ),
+            );
+          // Info-only legs stay collapsed: only danger/caution auto-expand.
+          if (legWorst !== "info") nodeDiv.classList.add("has-warn");
+        }
       }
     }
 
@@ -7686,6 +7735,34 @@
 
     enrichRoutePaneWithPoiNames(nodes, nodesEl);
     updateRouteTitle();
+  }
+
+  // Display classification of a server water warning (no routing logic):
+  // notice severity 3 = prohibited, 2 = depth problem, 1 = caution, 0 = info;
+  // depth_quality is informational unless the depth is unknown altogether;
+  // anything unknown stays a caution, never silently harmless.
+  const WARN_SEV_ORDER = { danger: 0, caution: 1, info: 2 };
+  function waterWarnLevel(ww) {
+    if (ww.type === "depth_quality")
+      return ww.quality === "unknown" ? "caution" : "info";
+    if (ww.type === "notice") {
+      if (ww.severity >= 2) return "danger";
+      if (ww.severity === 0) return "info";
+      return "caution";
+    }
+    return "caution";
+  }
+
+  // CSS-drawn severity badge (glyph comes from ::before, no emoji).
+  function sevBadge(level, extraClass, title) {
+    return (
+      '<span class="sev-badge lvl-' +
+      level +
+      (extraClass ? " " + extraClass : "") +
+      '"' +
+      (title ? ' title="' + escapeHtml(title) + '"' : "") +
+      "></span>"
+    );
   }
 
   function updateRouteTitle() {
