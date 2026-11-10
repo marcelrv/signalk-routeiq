@@ -1,6 +1,6 @@
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { buildManifest } from '../dist/plotterext.js';
+import { buildManifest, HIGHLIGHT_OVERLAY } from '../dist/plotterext.js';
 
 // The manifest is what a host chartplotter (Freeboard-SK) reads to decide
 // whether it can run the extension at all. An id it does not know in
@@ -47,6 +47,19 @@ describe('plotter extension manifest', () => {
         `action ${a.id} opens unknown panel ${a.action.panel}`,
       );
     }
+  });
+
+  it('declares the warning highlight as an optional data overlay', () => {
+    assert.ok(manifest.optional.includes('overlays.data'));
+    assert.ok(!(manifest.requires as string[]).includes('overlays.data'));
+    const [hl] = manifest.overlays;
+    assert.strictEqual(hl.id, HIGHLIGHT_OVERLAY);
+    assert.strictEqual(hl.type, 'data');
+    assert.strictEqual(hl.band, 'aboveResources');
+    assert.strictEqual(hl.style.version, 8);
+    // The panel fills source `hl`; the layers draw stretches and points.
+    assert.strictEqual(hl.style.sources.hl.type, 'geojson');
+    assert.deepStrictEqual(hl.style.layers.map((l) => [l.type, l.source]), [['line', 'hl'], ['circle', 'hl']]);
   });
 
   it('uses unique action ids', () => {

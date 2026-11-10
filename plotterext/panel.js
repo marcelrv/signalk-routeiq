@@ -92,6 +92,10 @@ const sessions = new Map();
 //   vias     — vias added before the draft existed
 //   routeId  — the draft once created
 let planning = null;
+// Route vertices ([lon, lat]) of the result on show, for drawing a warning's
+// stretch (`at` vertex ranges) on the host's highlight overlay.
+let routeVertices = [];
+let highlightShown = false;
 let pendingPick = null; // { pickId, actionId } of our map.pick in flight
 
 init().catch((e) => {
@@ -1206,6 +1210,14 @@ async function searchPois() {
 /* ---------- result summary + itinerary ---------- */
 
 function renderSummary(result) {
+  clearHighlight();
+  // Feature k runs from vertex k to k+1.
+  routeVertices = [];
+  for (const f of result.features || []) {
+    const c = f.geometry?.coordinates || [];
+    if (routeVertices.length === 0 && c.length > 0) routeVertices.push(c[0]);
+    if (c.length > 1) routeVertices.push(c[c.length - 1]);
+  }
   const distM = result.totalDistance || 0;
   const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 6;
   const tideActive =
@@ -1614,13 +1626,14 @@ function makeMapLink(el, go) {
 
 /**
  * Move the host chart to a warning's server locations: centre on a single
- * point, else fit the chart to all of them. The host has no call to
- * highlight part of a route, so the stretch itself is not emphasised.
+ * point, else fit the chart to all of them. With `overlays.data` the
+ * stretches (and points) are also drawn on RouteIQ's highlight overlay.
  *
  * @param {Array<object>} at - The warning's `at` locations.
  * @returns {Promise<unknown>}
  */
 function showLocationsOnMap(at) {
+  highlight(at);
   if (at.length === 1 && at[0].position) {
     const { latitude, longitude } = at[0].position;
     return client.call("map.center", {
@@ -1636,6 +1649,59 @@ function showLocationsOnMap(at) {
     n = Math.max(n, l.bounds[3]);
   }
   return client.call("map.fitBounds", { bounds: [w, s, e, n] });
+}
+
+/**
+ * Draw a warning's locations on the host's highlight overlay: a line along
+ * the route vertices of each stretch, a point for each point location. A
+ * failure only costs the highlight, never the chart move.
+ *
+ * @param {Array<object>} at - The warning's `at` locations.
+ */
+function highlight(at) {
+  if (!client.hasCapability("overlays.data")) return;
+  const features = [];
+  for (const l of at) {
+    if (l.position) {
+      features.push({
+        type: "Feature",
+        properties: {},
+        geometry: {
+          type: "Point",
+          coordinates: [l.position.longitude, l.position.latitude],
+        },
+      });
+      continue;
+    }
+    const line = routeVertices.slice(l.coordIndex, l.toCoordIndex + 1);
+    if (line.length > 1)
+      features.push({
+        type: "Feature",
+        properties: {},
+        geometry: { type: "LineString", coordinates: line },
+      });
+  }
+  highlightShown = features.length > 0;
+  client
+    .call("overlay.setData", {
+      overlayId: "highlight",
+      source: "hl",
+      data: { type: "FeatureCollection", features },
+    })
+    .catch(() => {});
+}
+
+/** Empty the highlight overlay, if anything is drawn on it. */
+function clearHighlight() {
+  if (!highlightShown || !client?.hasCapability("overlays.data")) return;
+  highlightShown = false;
+  client
+    .call("overlay.setData", {
+      overlayId: "highlight",
+      source: "hl",
+      data: { type: "FeatureCollection", features: [] },
+    })
+    .catch(() => {});
 }
 
 // Display order of the server's warning levels, worst first.
@@ -1692,6 +1758,7 @@ function makeLegToggle(head, leg, expanded) {
 
 function hideSummary() {
   $("summary").style.display = "none";
+  clearHighlight();
 }
 
 /* ---------- formatting ---------- */
