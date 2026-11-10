@@ -15,6 +15,7 @@ import {
   RouteDescriptionLeg,
   RouteDescriptionWarning,
   RouteWaterPart,
+  WarnLevel,
 } from "./types.js";
 
 /** What the worker knows about one edge sequence, enums already resolved. */
@@ -71,6 +72,22 @@ function addWarnings(
   }
 }
 
+/**
+ * Level of a NAVLINE notice by the pipeline's severity (hazards.py): 0 info,
+ * 1 caution, 2 depth, 3 prohibited. Depth and prohibited are dangers; any
+ * value the pipeline may add later reads as a caution, never as harmless.
+ */
+export function noticeLevel(severity: number): WarnLevel {
+  if (severity >= 2) return "danger";
+  if (severity === 0) return "info";
+  return "caution";
+}
+
+/** Depth not charted is worth knowing; depth not known at all is a caution. */
+export function depthQualityLevel(quality: string): WarnLevel {
+  return quality === "unknown" ? "caution" : "info";
+}
+
 /** Warnings for one edge sequence plus the notices on one pair. */
 function warningsFor(
   seq: DescribedSequence | undefined,
@@ -81,6 +98,7 @@ function warningsFor(
   if (seq?.depthQualityWarn) {
     out.push({
       type: "depth_quality",
+      level: depthQualityLevel(seq.depthQuality),
       quality: seq.depthQuality,
       message:
         seq.depthQuality === "unknown"
@@ -91,6 +109,8 @@ function warningsFor(
   if (seq?.originWarn) {
     out.push({
       type: "origin",
+      // Not surveyed or reviewed: check it, it is not known to be wrong.
+      level: "caution",
       origin: seq.origin,
       message: `This line is ${seq.origin}, not surveyed or reviewed as the charted ones`,
     });
@@ -100,6 +120,7 @@ function warningsFor(
     if (!n) continue;
     out.push({
       type: "notice",
+      level: noticeLevel(n.severity),
       severity: n.severity,
       text: n.text,
       ...(n.name ? { name: n.name } : {}),

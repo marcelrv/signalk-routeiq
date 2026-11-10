@@ -10,7 +10,10 @@ import { DEFAULT_CONFIG } from '../dist/types.js';
 import {
   attachWaters,
   buildRouteDescription,
+  depthQualityLevel,
+  noticeLevel,
 } from '../dist/route-description.js';
+import { legWarnings } from '../dist/itinerary.js';
 import {
   describePairs,
   detectDescribeFlags,
@@ -399,7 +402,7 @@ describe('buildRouteDescription / attachWaters (pure)', () => {
   it('drops slivers under 100 m without a warning and merges the water around them', () => {
     const w = (id: number | undefined, name: string | undefined, from: number, distance: number, warn = false) => ({
       distanceFromStart: from, distance, ...(id ? { waterBodyId: id } : {}), ...(name ? { name } : {}),
-      warnings: warn ? [{ type: 'origin' as const, origin: 'imported', message: 'm' }] : [],
+      warnings: warn ? [{ type: 'origin' as const, level: 'caution' as const, origin: 'imported', message: 'm' }] : [],
     });
     const itinerary = () => [
       { kind: 'start', distanceFromStart: 0, leg: { distance: 1000 } },
@@ -600,5 +603,87 @@ describe('real navline database', { skip: !fs.existsSync(REAL) }, () => {
     const names = (route.description ?? []).map(l => l.name ?? '');
     if (hasFr) assert.ok(names.some(n => /Meuse/.test(n)), `got ${names.join(', ')}`);
     else assert.ok(names.length > 0);
+  });
+});
+
+// Warning levels are decided server-side so every client shows the same; the
+// webapp renders `level` as sent.
+describe('warning levels', () => {
+  it('maps notice severities 0 info, 1 caution, 2 depth and 3 prohibited', () => {
+    assert.strictEqual(noticeLevel(0), 'info');
+    assert.strictEqual(noticeLevel(1), 'caution');
+    assert.strictEqual(noticeLevel(2), 'danger');
+    assert.strictEqual(noticeLevel(3), 'danger');
+    // A severity the pipeline adds later is never read as harmless.
+    assert.strictEqual(noticeLevel(-1), 'caution');
+    assert.strictEqual(noticeLevel(4), 'danger');
+  });
+
+  it('only an unknown depth quality is a caution', () => {
+    assert.strictEqual(depthQualityLevel('unknown'), 'caution');
+    assert.strictEqual(depthQualityLevel('estimated'), 'info');
+  });
+
+  it('puts a level on every description warning', () => {
+    const described = {
+      perPair: [{ seq: 1, notices: [100, 101, 102, 103] }],
+      sequences: {
+        '1': { waterBodyId: 7, origin: 'imported', originWarn: true, depthQuality: 'unknown', depthQualityWarn: true },
+      },
+      waterBodies: { '7': { name: 'Maas', kind: 'river' } },
+      notices: {
+        '100': { severity: 0, text: 'Ferry', name: null },
+        '101': { severity: 1, text: 'Works', name: null },
+        '102': { severity: 2, text: 'Silting', name: null },
+        '103': { severity: 3, text: 'No entry', name: null },
+      },
+    };
+    const d = buildRouteDescription([{ distance: 500 }], described)!;
+    assert.deepStrictEqual(
+      d[0].warnings.map((w) => [w.type, w.level]),
+      [['depth_quality', 'caution'], ['origin', 'caution'], ['notice', 'info'], ['notice', 'caution'], ['notice', 'danger'], ['notice', 'danger']],
+    );
+    // Purely additive: the existing fields are unchanged.
+    const n = d[0].warnings[5] as any;
+    assert.deepStrictEqual([n.severity, n.text, n.message], [3, 'No entry', 'No entry']);
+  });
+});
+
+describe('leg warnings', () => {
+  // draft 2.0 + margin 0.3, beam 4.0 + margin 2.0
+  const vessel = { requiredDepth: 2.3, beam: 4.0, requiredWidth: 6.0 };
+
+  it('nothing for a leg deep and wide enough, or without data', () => {
+    assert.deepStrictEqual(legWarnings({ minDepth: 2.3, minWidth: 6.0 }, vessel), []);
+    assert.deepStrictEqual(legWarnings({}, vessel), []);
+  });
+
+  it('shallow without tide is a danger', () => {
+    assert.deepStrictEqual(legWarnings({ minDepth: 1.5 }, vessel), [
+      { type: 'shallow', level: 'danger', minDepth: 1.5, requiredDepth: 2.3, message: 'Shallow (1.5m)' },
+    ]);
+    // A passage depth equal to the charted one means no tide was added.
+    assert.strictEqual(legWarnings({ minDepth: 1.5, minDepthAtPassage: 1.5 }, vessel)[0].message, 'Shallow (1.5m)');
+  });
+
+  it('shallow the tide covers is a caution, exactly at the threshold included', () => {
+    const [w] = legWarnings({ minDepth: 1.5, minDepthAtPassage: 2.3 }, vessel);
+    assert.strictEqual(w.level, 'caution');
+    assert.strictEqual(w.message, 'Shallow (1.5m charted, 2.3m at passage)');
+    assert.strictEqual((w as any).minDepthAtPassage, 2.3);
+    assert.strictEqual(legWarnings({ minDepth: 1.5, minDepthAtPassage: 2.2999 }, vessel)[0].level, 'danger');
+  });
+
+  it('narrower than the beam is a danger, within the margin a caution', () => {
+    assert.deepStrictEqual(legWarnings({ minWidth: 3.9 }, vessel), [
+      { type: 'narrow', level: 'danger', minWidth: 3.9, beam: 4.0, requiredWidth: 6.0, message: 'Narrow (3.9m)' },
+    ]);
+    assert.strictEqual(legWarnings({ minWidth: 4.0 }, vessel)[0].level, 'caution');
+    assert.strictEqual(legWarnings({ minWidth: 5.9 }, vessel)[0].level, 'caution');
+  });
+
+  it('lists the worst first', () => {
+    const ws = legWarnings({ minDepth: 1.5, minDepthAtPassage: 2.5, minWidth: 3 }, vessel);
+    assert.deepStrictEqual(ws.map((w) => [w.type, w.level]), [['narrow', 'danger'], ['shallow', 'caution']]);
   });
 });

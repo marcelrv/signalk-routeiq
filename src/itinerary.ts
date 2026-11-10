@@ -15,7 +15,12 @@
  *   bridge/lock crossings) computed from the exact graph edges.
  */
 
-import { ItineraryPoint, RouteCrossing, RouteWaypoint } from "./types.js";
+import {
+  ItineraryPoint,
+  LegWarning,
+  RouteCrossing,
+  RouteWaypoint,
+} from "./types.js";
 
 /** Subset of the per-edge segment attributes the itinerary needs. */
 export interface PathSegment {
@@ -185,6 +190,67 @@ export function closestCoordIndex(
   return best;
 }
 
+/** What the vessel the route was planned for needs, in meters. */
+export interface VesselNeeds {
+  requiredDepth: number; // draft + safetyMarginDraft
+  beam: number;
+  requiredWidth: number; // beam + safetyMarginBeam
+}
+
+/**
+ * Where a leg is tight for the vessel, worst first.
+ *
+ * Shallow: charted depth under `requiredDepth`. If the tide at the time of
+ * passage brings it back to `requiredDepth` or more, it is a caution (check
+ * the timing), else a danger. Narrow: under the beam itself is a danger,
+ * under beam + margin a caution.
+ *
+ * `minDepthAtPassage` is the leg's unrounded worst depth at passage, or
+ * undefined when no tide was applied.
+ */
+export function legWarnings(
+  agg: { minDepth?: number; minDepthAtPassage?: number; minWidth?: number },
+  vessel: VesselNeeds,
+): LegWarning[] {
+  const out: LegWarning[] = [];
+  const { minDepth, minDepthAtPassage, minWidth } = agg;
+  if (minDepth !== undefined && minDepth < vessel.requiredDepth) {
+    const tideAdds =
+      minDepthAtPassage !== undefined && minDepthAtPassage > minDepth;
+    out.push({
+      type: "shallow",
+      level:
+        tideAdds && minDepthAtPassage >= vessel.requiredDepth
+          ? "caution"
+          : "danger",
+      minDepth,
+      ...(tideAdds
+        ? { minDepthAtPassage: Math.round(minDepthAtPassage * 100) / 100 }
+        : {}),
+      requiredDepth: vessel.requiredDepth,
+      message: tideAdds
+        ? `Shallow (${minDepth.toFixed(1)}m charted, ${minDepthAtPassage.toFixed(1)}m at passage)`
+        : `Shallow (${minDepth.toFixed(1)}m)`,
+    });
+  }
+  if (minWidth !== undefined && minWidth < vessel.requiredWidth) {
+    out.push({
+      type: "narrow",
+      level: minWidth < vessel.beam ? "danger" : "caution",
+      minWidth,
+      beam: vessel.beam,
+      requiredWidth: vessel.requiredWidth,
+      message: `Narrow (${minWidth.toFixed(1)}m)`,
+    });
+  }
+  // Danger before caution; a stable sort keeps shallow before narrow.
+  return out.sort((a, b) => levelRank(a.level) - levelRank(b.level));
+}
+
+function levelRank(level: LegWarning["level"]): number {
+  return level === "danger" ? 0 : level === "caution" ? 1 : 2;
+}
+
 export interface ItineraryResult {
   waypoints: RouteWaypoint[];
   itinerary: ItineraryPoint[];
@@ -198,6 +264,8 @@ export interface ItineraryResult {
  * @param crossings  bridges/locks on the route (mutated: distanceFromStart is set)
  * @param via        the user's via points, marked as itinerary entries
  * @param toleranceM Douglas-Peucker tolerance for the navigable waypoints
+ * @param vessel     what the vessel needs; when given, legs too shallow or
+ *                   narrow for it carry `leg.warnings`
  */
 export function buildItinerary(
   coords: LonLat[],
@@ -205,6 +273,7 @@ export function buildItinerary(
   crossings: RouteCrossing[],
   via: Array<{ latitude: number; longitude: number }>,
   toleranceM: number,
+  vessel?: VesselNeeds,
 ): ItineraryResult {
   if (coords.length < 2) {
     return {
@@ -379,6 +448,17 @@ export function buildItinerary(
           : {}),
         ...(legCrossings.length > 0 ? { crossings: legCrossings } : {}),
       };
+      if (vessel) {
+        const warnings = legWarnings(
+          {
+            ...(minDepth < Infinity ? { minDepth } : {}),
+            ...(minDepthAtPassage < Infinity ? { minDepthAtPassage } : {}),
+            ...(minWidth < Infinity ? { minWidth } : {}),
+          },
+          vessel,
+        );
+        if (warnings.length > 0) point.leg.warnings = warnings;
+      }
     }
     return point;
   });

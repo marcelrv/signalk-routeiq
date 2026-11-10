@@ -414,6 +414,16 @@ describe('Itinerary', async () => {
     assert.strictEqual(turn.leg!.crossings, undefined);
   });
 
+  it('puts shallow/narrow warnings on legs only when the vessel is given', () => {
+    const vessel = { requiredDepth: 4.0, beam: 4.0, requiredWidth: 6.0 };
+    const { itinerary } = buildItinerary(coords, segments, [], [], 30, vessel);
+    // First leg has a known 3.5 m; the second has no depth at all.
+    assert.deepStrictEqual(itinerary[0].leg!.warnings!.map((w) => [w.type, w.level]), [['shallow', 'danger']]);
+    assert.strictEqual(itinerary[1].leg!.warnings, undefined);
+    const plain = buildItinerary(coords, segments, [], [], 30);
+    assert.strictEqual(plain.itinerary[0].leg!.warnings, undefined);
+  });
+
   it('marks via points with their request index', () => {
     const via = [{ latitude: 52.0, longitude: 4.03 }]; // coord index 3
     const { itinerary } = buildItinerary(coords, segments, [], via, 30);
