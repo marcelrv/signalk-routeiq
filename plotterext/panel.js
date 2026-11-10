@@ -1491,8 +1491,12 @@ function renderItinerary(itinerary) {
           row.title = "Show on map";
           row.tabIndex = 0;
           row.setAttribute("role", "button");
-          // Not through run(): panning must not block the panel or drop a
-          // second click while the first is still in flight.
+          /**
+           * Centre the host chart on this crossing. Not through run():
+           * panning must not block the panel or drop a second click while
+           * the first is still in flight.
+           * @param {Event} ev The click or keydown that asked for it.
+           */
           const showOnMap = (ev) => {
             ev.stopPropagation();
             client

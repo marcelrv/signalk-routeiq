@@ -5571,6 +5571,10 @@
     const vertexIdx = [];
     let kept = -1;
     let prev = null;
+    /**
+     * Record the de-duplicated index of the next server vertex.
+     * @param {number[]} c The vertex as [lng, lat].
+     */
     const add = function (c) {
       if (
         !prev ||
@@ -5927,13 +5931,25 @@
     );
   }
 
-  // Grab-line hover: highlight the route-pane section under the cursor (the
-  // one a click picks), and remember the via-to-via leg it lies in for drag
-  // and the context menu. Pane sections never cross a via, so that leg is
-  // unambiguous. mousemove too, because one grab line can span more than one
-  // section and mouseover only fires on entry.
+  // "from:to" of the range the grab-line hover last highlighted, so a
+  // mousemove within it does not redo the highlight.
   let hoveredRangeKey = null;
+
+  /**
+   * Grab-line hover: highlight the route-pane section under the cursor (the
+   * one a click picks), and remember the via-to-via leg it lies in for drag
+   * and the context menu. Pane sections never cross a via, so that leg is
+   * unambiguous. mousemove too, because one grab line can span more than one
+   * section and mouseover only fires on entry.
+   * @param {L.Polyline} grabLine The wide invisible line over the segment.
+   * @param {number} segStartIdx First route coord index of the segment.
+   * @param {number} segEndIdx Last route coord index of the segment.
+   */
   function attachLegHoverHandlers(grabLine, segStartIdx, segEndIdx) {
+    /**
+     * Highlight the pane section under the pointer, unless it already is.
+     * @param {L.LeafletMouseEvent} e The mouseover/mousemove event.
+     */
     function update(e) {
       if (segmentDrag) return; // don't re-highlight mid-drag
       const edgeIdx = nearestEdgeIdxInRange(e.latlng, segStartIdx, segEndIdx);
@@ -5997,6 +6013,13 @@
     });
   }
 
+  /**
+   * Right-click on a segment's grab line: highlight the whole via-to-via leg
+   * under the pointer and open the leg context menu for it.
+   * @param {L.Polyline} grabLine The wide invisible line over the segment.
+   * @param {number} segStartIdx First route coord index of the segment.
+   * @param {number} segEndIdx Last route coord index of the segment.
+   */
   function attachSegmentContextMenu(grabLine, segStartIdx, segEndIdx) {
     grabLine.on("contextmenu", function (e) {
       if (state.editMode) return;

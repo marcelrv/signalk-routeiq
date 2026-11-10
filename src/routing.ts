@@ -4333,7 +4333,13 @@ export class RoutingEngine {
         : undefined;
     };
 
-    // Passed on so clients can tell structures apart without going by name.
+    /**
+     * The crossing's `structure` field, passed on so clients can tell
+     * structures apart without going by name.
+     *
+     * @param poi - The POI the crossing is listed for.
+     * @returns `{ structure }`, or `{}` when the POI has no usable id.
+     */
     const structureField = (poi: Poi): { structure?: string } => {
       const structure = RoutingEngine.structureId(poi);
       return structure !== undefined ? { structure } : {};
