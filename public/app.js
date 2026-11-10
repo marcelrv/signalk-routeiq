@@ -4575,8 +4575,9 @@
 
   // Click on the drawn route inserts a via point at that spot (it sorts into
   // its position along the route). Suppressed right after a segment
-  // mousedown/mouseup cycle (item 1's drag-to-insert / plain-click-does-
-  // nothing on the grab line) so the same gesture isn't handled twice.
+  // mousedown/mouseup cycle on the grab line (drag inserts a via, a plain
+  // press-release picks the section in the route pane) so the same gesture
+  // isn't handled twice.
   routeLayers.on("click", function (e) {
     L.DomEvent.stopPropagation(e);
     if (suppressRouteClick) return;
@@ -5747,22 +5748,31 @@
   }
 
   /**
-   * Click on the route line: pick the pane leg containing that route edge,
-   * open the pane and the leg, and keep the section emphasised on the map.
-   * @param {number} edgeIdx Index of the clicked edge's first coordinate.
+   * The route-pane leg element containing a route edge: the leg whose coord
+   * range holds it, else the last leg starting before it.
+   * @param {number} edgeIdx Index of the edge's first coordinate.
+   * @returns {HTMLElement|null} null when the pane has no legs.
    */
-  function selectPaneSectionAtEdge(edgeIdx) {
-    const legs = document.querySelectorAll("#route-nodes .route-leg");
+  function paneLegAtEdge(edgeIdx) {
     let leg = null;
     let last = null;
-    legs.forEach(function (el) {
+    document.querySelectorAll("#route-nodes .route-leg").forEach(function (el) {
       const f = parseInt(el.dataset.coordFrom, 10);
       const t = parseInt(el.dataset.coordTo, 10);
       if (isNaN(f) || isNaN(t)) return;
       if (f <= edgeIdx) last = el;
       if (!leg && f <= edgeIdx && edgeIdx < t) leg = el;
     });
-    leg = leg || last;
+    return leg || last;
+  }
+
+  /**
+   * Click on the route line: pick the pane leg containing that route edge,
+   * open the pane and the leg, and keep the section emphasised on the map.
+   * @param {number} edgeIdx Index of the clicked edge's first coordinate.
+   */
+  function selectPaneSectionAtEdge(edgeIdx) {
+    const leg = paneLegAtEdge(edgeIdx);
     if (!leg) return;
     const pane = document.getElementById("route-pane");
     if (pane.classList.contains("collapsed")) {
@@ -5841,9 +5851,10 @@
   // ==================== drag-the-route-line to insert a via ====================
   // Google-Maps-style rubber-banding: press on the route, drag, release to
   // drop a new via point into whichever leg was grabbed. A plain press-
-  // release with no real movement intentionally does nothing (see
-  // suppressRouteClick), so it doesn't fight with the leg context menu
-  // (right-click) or the older click-to-add-via handler on routeLayers.
+  // release with no real movement picks that section in the route pane
+  // instead; suppressRouteClick keeps the click-to-add-via handler on
+  // routeLayers out of it, and a ctrl press-release is left to the leg
+  // context menu it opens on macOS.
   let segmentDrag = null; // { legIdx, ghost, startPoint, moved }
 
   // Briefly true right after a segment mousedown/mouseup cycle, so the
@@ -5879,8 +5890,10 @@
       insertViaIntoLeg(drag.legIdx, latlng);
       pushHistory();
       applyWaypoints();
-    } else {
+    } else if (!domEvt.ctrlKey) {
       // Plain press-release on the line: select that section in the pane.
+      // Not with ctrl: on macOS ctrl+click is a right-click, and the leg
+      // context menu it opens must not get the pane jumping behind it.
       selectPaneSectionAtEdge(
         nearestEdgeIdxInRange(
           map.mouseEventToLatLng(domEvt),
@@ -5914,18 +5927,27 @@
     );
   }
 
-  // Grab-line hover: highlight the whole LEG under the cursor (not just the
-  // rendered sub-segment) and remember it. mousemove too, because one grab
-  // line can span more than one leg and mouseover only fires on entry.
+  // Grab-line hover: highlight the route-pane section under the cursor (the
+  // one a click picks), and remember the via-to-via leg it lies in for drag
+  // and the context menu. Pane sections never cross a via, so that leg is
+  // unambiguous. mousemove too, because one grab line can span more than one
+  // section and mouseover only fires on entry.
+  let hoveredRangeKey = null;
   function attachLegHoverHandlers(grabLine, segStartIdx, segEndIdx) {
     function update(e) {
       if (segmentDrag) return; // don't re-highlight mid-drag
-      const legIdx = legIndexForEdgeIdx(
-        nearestEdgeIdxInRange(e.latlng, segStartIdx, segEndIdx),
-      );
-      if (legIdx === hoveredLegIdx) return;
-      hoveredLegIdx = legIdx;
-      const range = legCoordRange(legIdx);
+      const edgeIdx = nearestEdgeIdxInRange(e.latlng, segStartIdx, segEndIdx);
+      hoveredLegIdx = legIndexForEdgeIdx(edgeIdx);
+      const paneLeg = paneLegAtEdge(edgeIdx);
+      const range = paneLeg
+        ? {
+            fromIdx: parseInt(paneLeg.dataset.coordFrom, 10),
+            toIdx: parseInt(paneLeg.dataset.coordTo, 10),
+          }
+        : legCoordRange(hoveredLegIdx);
+      const key = range.fromIdx + ":" + range.toIdx;
+      if (key === hoveredRangeKey) return;
+      hoveredRangeKey = key;
       highlightMapByCoordRange(range.fromIdx, range.toIdx);
       highlightPaneByCoordRange(range.fromIdx, range.toIdx);
     }
@@ -5933,6 +5955,7 @@
     grabLine.on("mousemove", update);
     grabLine.on("mouseout", function () {
       hoveredLegIdx = null;
+      hoveredRangeKey = null;
       if (!segmentDrag) clearBothHighlights();
     });
   }
@@ -5981,6 +6004,11 @@
       L.DomEvent.preventDefault(e.originalEvent);
       const legIdx = legIdxForEventOnSegment(e.latlng, segStartIdx, segEndIdx);
       const range = legCoordRange(legIdx);
+      // Hover shows a pane section; the menu acts on the whole leg, so show
+      // that. The next hover move re-highlights the section.
+      hoveredRangeKey = null;
+      highlightMapByCoordRange(range.fromIdx, range.toIdx);
+      highlightPaneByCoordRange(range.fromIdx, range.toIdx);
       openContextMenu(
         e.latlng,
         e.originalEvent.clientX,
@@ -6015,6 +6043,7 @@
     state.routeSegments = [];
     // The old grab lines are gone, so their mouseout will never fire.
     hoveredLegIdx = null;
+    hoveredRangeKey = null;
     state.junctionMarkers = L.layerGroup().addTo(state.routeLayers);
     if (!geoJson) return;
 

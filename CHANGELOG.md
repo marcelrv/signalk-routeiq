@@ -19,6 +19,9 @@
   map link. Spans are combined only when they belong to the same structure.
 - A route section picked on the line now stays highlighted as a whole: the
   map line is split where the route list's legs begin and end.
+- Hovering the route line highlights the section a click selects, not the
+  whole stretch between vias; the leg context menu still shows the whole leg
+  it acts on.
 
 ## 0.1.0-alpha.10 — 2026-11-09
 
