@@ -775,6 +775,16 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   background: rgba(59, 143, 212, 0.08);
   border-left-color: #5c9bd5;
 }
+/* section picked by clicking the route line (sticky, unlike hover) */
+.route-node.selected,
+.route-leg.selected {
+  border-left-color: #facc15;
+  box-shadow: inset 3px 0 0 #facc15;
+}
+.route-node .node-crossing-icon.crossing-link,
+.route-leg .leg-crossing.crossing-link {
+  cursor: pointer;
+}
 
 /* severity badges (CSS-drawn so they look the same on old plotter browsers) */
 .sev-badge {

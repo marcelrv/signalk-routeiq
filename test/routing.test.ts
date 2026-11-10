@@ -141,6 +141,29 @@ describe('RoutingEngine', () => {
       assert.ok(route.totalDistance! > 0);
     });
 
+    it('ties each itinerary point to the feature it starts', async () => {
+      const route = await engine.calculateRoute({
+        start: { latitude: 52.0, longitude: 5.0 },
+        end: { latitude: 52.04, longitude: 5.04 },
+        minCoastDistance: 0,
+      });
+
+      // Feature k runs from vertex k to k+1; nothing may change the geometry
+      // after the itinerary is built, or these indices point at the wrong place.
+      const itinerary = route.itinerary!;
+      assert.ok(itinerary.length >= 2);
+      const n = route.features.length;
+      for (const p of itinerary) {
+        const vertex =
+          p.coordIndex < n
+            ? route.features[p.coordIndex].geometry.coordinates[0]
+            : route.features[n - 1].geometry.coordinates[1];
+        assert.deepStrictEqual(vertex, [p.longitude, p.latitude], `${p.kind} at ${p.coordIndex}`);
+      }
+      assert.strictEqual(itinerary[0].coordIndex, 0);
+      assert.strictEqual(itinerary[itinerary.length - 1].coordIndex, n);
+    });
+
     it('should return an error when no route exists', async () => {
       await assert.rejects(
         engine.calculateRoute({
@@ -368,6 +391,8 @@ describe('Itinerary', async () => {
     assert.strictEqual(start.kind, 'start');
     assert.strictEqual(turn.kind, 'turn');
     assert.strictEqual(end.kind, 'end');
+
+    assert.deepStrictEqual(itinerary.map((p) => p.coordIndex), [0, 10, coords.length - 1]);
 
     // Chainage from graph edge distances
     assert.strictEqual(start.distanceFromStart, 0);
