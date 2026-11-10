@@ -767,6 +767,7 @@
     destMode: "auto", // mode of the final leg into the destination
     manualMode: false, // toolbar toggle: new points connect with straight lines
     routeSegments: [], // { polyline, startIdx, endIdx, isWarning, originalStyle }
+    selectedRange: null, // { fromIdx, toIdx } of the pane section picked by clicking the route line
     junctionMarkers: null, // L.layerGroup for hover junction markers
     startPoiName: "", // POI name when start was set via search
     destPoiName: "", // POI name when destination was set via search
@@ -4413,6 +4414,7 @@
   // Map click: add-node mode or set start/dest
   map.on("click", function (e) {
     if (state.editAddMode === "node") {
+      clearPaneSelection();
       var lat = e.latlng.lat;
       var lon = e.latlng.lng;
       var latInt = Math.round(
@@ -4463,6 +4465,7 @@
       // A segment drag (item 1) or its trailing no-op click already handled
       // this gesture — don't also place a waypoint from the same click.
       if (suppressRouteClick) return;
+      clearPaneSelection();
       var ll = e.latlng;
       // Shift+tap always adds a straight-line ("manual") leg, regardless of
       // the manual-mode toolbar toggle — a quick one-off without switching
@@ -4554,6 +4557,7 @@
       } else if (state.editMode && state.selectedItem) {
         clearEditorSelection();
       }
+      if (state.selectedRange) clearPaneSelection();
     }
     if (
       (e.key === "Delete" || e.key === "Backspace") &&
@@ -4571,8 +4575,9 @@
 
   // Click on the drawn route inserts a via point at that spot (it sorts into
   // its position along the route). Suppressed right after a segment
-  // mousedown/mouseup cycle (item 1's drag-to-insert / plain-click-does-
-  // nothing on the grab line) so the same gesture isn't handled twice.
+  // mousedown/mouseup cycle on the grab line (drag inserts a via, a plain
+  // press-release picks the section in the route pane) so the same gesture
+  // isn't handled twice.
   routeLayers.on("click", function (e) {
     L.DomEvent.stopPropagation(e);
     if (suppressRouteClick) return;
@@ -5543,6 +5548,65 @@
     return minI;
   }
 
+  /**
+   * Index into getAllCoords(geoJson) of each server itinerary point. The
+   * server gives each point its vertex (`coordIndex`, feature k running from
+   * vertex k to k+1); this only follows getAllCoords' de-duplication, so a
+   * zero-length segment cannot shift the indices.
+   * @param {object} geoJson The route FeatureCollection from the server.
+   * @returns {number[]|null} One coord index per itinerary point, or null
+   *   when the route has no usable itinerary (older server).
+   */
+  function itineraryCoordIndices(geoJson) {
+    const itinerary =
+      geoJson && Array.isArray(geoJson.itinerary) ? geoJson.itinerary : null;
+    if (!itinerary || itinerary.length < 2) return null;
+    const features =
+      geoJson.type === "FeatureCollection" && Array.isArray(geoJson.features)
+        ? geoJson.features
+        : [];
+    // Server vertex k -> index after de-duplication, the same way
+    // dedupeConsecutiveCoords keeps a coordinate.
+    const EPS = 1e-9;
+    const vertexIdx = [];
+    let kept = -1;
+    let prev = null;
+    /**
+     * Record the de-duplicated index of the next server vertex.
+     * @param {number[]} c The vertex as [lng, lat].
+     */
+    const add = function (c) {
+      if (
+        !prev ||
+        Math.abs(c[0] - prev[0]) > EPS ||
+        Math.abs(c[1] - prev[1]) > EPS
+      ) {
+        kept++;
+        prev = c;
+      }
+      vertexIdx.push(kept);
+    };
+    for (let f = 0; f < features.length; f++) {
+      const fc = extractCoords(features[f] && features[f].geometry);
+      if (fc.length < 2) return null;
+      // Each feature starts where the previous one ended.
+      if (f === 0) add(fc[0]);
+      else if (
+        Math.abs(fc[0][0] - prev[0]) > EPS ||
+        Math.abs(fc[0][1] - prev[1]) > EPS
+      )
+        return null;
+      for (let j = 1; j < fc.length; j++) add(fc[j]);
+    }
+    const out = [];
+    for (const p of itinerary) {
+      const idx = vertexIdx[p.coordIndex];
+      if (typeof p.coordIndex !== "number" || idx === undefined) return null;
+      out.push(idx);
+    }
+    return out;
+  }
+
   function getRouteCoords(geoJson) {
     const coords = getAllCoords(geoJson);
     return coords.length >= 2 ? coords : null;
@@ -5656,10 +5720,82 @@
     }
   }
 
+  /**
+   * Restore every route segment's normal style, keeping the section the user
+   * picked on the route line (state.selectedRange) emphasised.
+   */
   function clearMapHighlight() {
     for (const seg of state.routeSegments) {
       seg.polyline.setStyle(seg.originalStyle);
     }
+    // The clicked section stays emphasised once hover moves away.
+    const sel = state.selectedRange;
+    if (sel) {
+      for (const seg of state.routeSegments) {
+        if (seg.startIdx >= sel.fromIdx && seg.endIdx <= sel.toIdx) {
+          seg.polyline.setStyle({ weight: 7, opacity: 1.0 });
+        }
+      }
+    }
+  }
+
+  /**
+   * Forget the picked route section: drop its pane highlight and its map
+   * emphasis.
+   */
+  function clearPaneSelection() {
+    state.selectedRange = null;
+    document.querySelectorAll("#route-nodes .selected").forEach(function (el) {
+      el.classList.remove("selected");
+    });
+    clearMapHighlight();
+  }
+
+  /**
+   * The route-pane leg element containing a route edge: the leg whose coord
+   * range holds it, else the last leg starting before it.
+   * @param {number} edgeIdx Index of the edge's first coordinate.
+   * @returns {HTMLElement|null} null when the pane has no legs.
+   */
+  function paneLegAtEdge(edgeIdx) {
+    let leg = null;
+    let last = null;
+    document.querySelectorAll("#route-nodes .route-leg").forEach(function (el) {
+      const f = parseInt(el.dataset.coordFrom, 10);
+      const t = parseInt(el.dataset.coordTo, 10);
+      if (isNaN(f) || isNaN(t)) return;
+      if (f <= edgeIdx) last = el;
+      if (!leg && f <= edgeIdx && edgeIdx < t) leg = el;
+    });
+    return leg || last;
+  }
+
+  /**
+   * Click on the route line: pick the pane leg containing that route edge,
+   * open the pane and the leg, and keep the section emphasised on the map.
+   * @param {number} edgeIdx Index of the clicked edge's first coordinate.
+   */
+  function selectPaneSectionAtEdge(edgeIdx) {
+    const leg = paneLegAtEdge(edgeIdx);
+    if (!leg) return;
+    const pane = document.getElementById("route-pane");
+    if (pane.classList.contains("collapsed")) {
+      pane.classList.remove("collapsed");
+      document.getElementById("route-pane-tab").textContent = "\u25c0";
+    }
+    document.querySelectorAll("#route-nodes .selected").forEach(function (el) {
+      el.classList.remove("selected");
+    });
+    leg.classList.add("expanded", "selected");
+    const prev = leg.previousElementSibling;
+    if (prev && prev.classList.contains("route-node"))
+      prev.classList.add("selected");
+    leg.scrollIntoView({ block: "nearest" });
+    state.selectedRange = {
+      fromIdx: parseInt(leg.dataset.coordFrom, 10),
+      toIdx: parseInt(leg.dataset.coordTo, 10),
+    };
+    clearMapHighlight();
   }
 
   function highlightPaneByCoordRange(fromIdx, toIdx) {
@@ -5719,9 +5855,10 @@
   // ==================== drag-the-route-line to insert a via ====================
   // Google-Maps-style rubber-banding: press on the route, drag, release to
   // drop a new via point into whichever leg was grabbed. A plain press-
-  // release with no real movement intentionally does nothing (see
-  // suppressRouteClick), so it doesn't fight with the leg context menu
-  // (right-click) or the older click-to-add-via handler on routeLayers.
+  // release with no real movement picks that section in the route pane
+  // instead; suppressRouteClick keeps the click-to-add-via handler on
+  // routeLayers out of it, and a ctrl press-release is left to the leg
+  // context menu it opens on macOS.
   let segmentDrag = null; // { legIdx, ghost, startPoint, moved }
 
   // Briefly true right after a segment mousedown/mouseup cycle, so the
@@ -5739,6 +5876,11 @@
     if (p.distanceTo(segmentDrag.startPoint) > 5) segmentDrag.moved = true;
   }
 
+  /**
+   * End a press on the route line: a drag inserts a via at the drop point
+   * and reroutes, a plain press-release selects that section in the pane.
+   * @param {MouseEvent} domEvt The mouseup event.
+   */
   function onSegmentDragUp(domEvt) {
     document.removeEventListener("mousemove", onSegmentDragMove);
     document.removeEventListener("mouseup", onSegmentDragUp);
@@ -5752,6 +5894,17 @@
       insertViaIntoLeg(drag.legIdx, latlng);
       pushHistory();
       applyWaypoints();
+    } else if (!domEvt.ctrlKey) {
+      // Plain press-release on the line: select that section in the pane.
+      // Not with ctrl: on macOS ctrl+click is a right-click, and the leg
+      // context menu it opens must not get the pane jumping behind it.
+      selectPaneSectionAtEdge(
+        nearestEdgeIdxInRange(
+          map.mouseEventToLatLng(domEvt),
+          drag.segStartIdx,
+          drag.segEndIdx,
+        ),
+      );
     }
     // Let the browser's own 'click' (which follows this mouseup) see the
     // flag as true so nothing else reacts to it, then clear on the next tick.
@@ -5778,18 +5931,39 @@
     );
   }
 
-  // Grab-line hover: highlight the whole LEG under the cursor (not just the
-  // rendered sub-segment) and remember it. mousemove too, because one grab
-  // line can span more than one leg and mouseover only fires on entry.
+  // "from:to" of the range the grab-line hover last highlighted, so a
+  // mousemove within it does not redo the highlight.
+  let hoveredRangeKey = null;
+
+  /**
+   * Grab-line hover: highlight the route-pane section under the cursor (the
+   * one a click picks), and remember the via-to-via leg it lies in for drag
+   * and the context menu. Pane sections never cross a via, so that leg is
+   * unambiguous. mousemove too, because one grab line can span more than one
+   * section and mouseover only fires on entry.
+   * @param {L.Polyline} grabLine The wide invisible line over the segment.
+   * @param {number} segStartIdx First route coord index of the segment.
+   * @param {number} segEndIdx Last route coord index of the segment.
+   */
   function attachLegHoverHandlers(grabLine, segStartIdx, segEndIdx) {
+    /**
+     * Highlight the pane section under the pointer, unless it already is.
+     * @param {L.LeafletMouseEvent} e The mouseover/mousemove event.
+     */
     function update(e) {
       if (segmentDrag) return; // don't re-highlight mid-drag
-      const legIdx = legIndexForEdgeIdx(
-        nearestEdgeIdxInRange(e.latlng, segStartIdx, segEndIdx),
-      );
-      if (legIdx === hoveredLegIdx) return;
-      hoveredLegIdx = legIdx;
-      const range = legCoordRange(legIdx);
+      const edgeIdx = nearestEdgeIdxInRange(e.latlng, segStartIdx, segEndIdx);
+      hoveredLegIdx = legIndexForEdgeIdx(edgeIdx);
+      const paneLeg = paneLegAtEdge(edgeIdx);
+      const range = paneLeg
+        ? {
+            fromIdx: parseInt(paneLeg.dataset.coordFrom, 10),
+            toIdx: parseInt(paneLeg.dataset.coordTo, 10),
+          }
+        : legCoordRange(hoveredLegIdx);
+      const key = range.fromIdx + ":" + range.toIdx;
+      if (key === hoveredRangeKey) return;
+      hoveredRangeKey = key;
       highlightMapByCoordRange(range.fromIdx, range.toIdx);
       highlightPaneByCoordRange(range.fromIdx, range.toIdx);
     }
@@ -5797,10 +5971,18 @@
     grabLine.on("mousemove", update);
     grabLine.on("mouseout", function () {
       hoveredLegIdx = null;
+      hoveredRangeKey = null;
       if (!segmentDrag) clearBothHighlights();
     });
   }
 
+  /**
+   * Let a press on a segment's grab line start a drag (to add a via) or a
+   * section pick; which one is decided on release by onSegmentDragUp.
+   * @param {L.Polyline} grabLine The wide invisible line over the segment.
+   * @param {number} segStartIdx First route coord index of the segment.
+   * @param {number} segEndIdx Last route coord index of the segment.
+   */
   function attachSegmentDragHandlers(grabLine, segStartIdx, segEndIdx) {
     grabLine.on("mousedown", function (e) {
       if (state.editMode) return;
@@ -5821,6 +6003,8 @@
         legIdx: legIdx,
         ghost: ghost,
         startPoint: map.latLngToContainerPoint(e.latlng),
+        segStartIdx: segStartIdx,
+        segEndIdx: segEndIdx,
         moved: false,
       };
 
@@ -5829,6 +6013,13 @@
     });
   }
 
+  /**
+   * Right-click on a segment's grab line: highlight the whole via-to-via leg
+   * under the pointer and open the leg context menu for it.
+   * @param {L.Polyline} grabLine The wide invisible line over the segment.
+   * @param {number} segStartIdx First route coord index of the segment.
+   * @param {number} segEndIdx Last route coord index of the segment.
+   */
   function attachSegmentContextMenu(grabLine, segStartIdx, segEndIdx) {
     grabLine.on("contextmenu", function (e) {
       if (state.editMode) return;
@@ -5836,6 +6027,11 @@
       L.DomEvent.preventDefault(e.originalEvent);
       const legIdx = legIdxForEventOnSegment(e.latlng, segStartIdx, segEndIdx);
       const range = legCoordRange(legIdx);
+      // Hover shows a pane section; the menu acts on the whole leg, so show
+      // that. The next hover move re-highlights the section.
+      hoveredRangeKey = null;
+      highlightMapByCoordRange(range.fromIdx, range.toIdx);
+      highlightPaneByCoordRange(range.fromIdx, range.toIdx);
       openContextMenu(
         e.latlng,
         e.originalEvent.clientX,
@@ -5859,11 +6055,18 @@
     polyline.on("mouseout", clearBothHighlights);
   }
 
+  /**
+   * Draw the calculated route on the map, one styled polyline per segment
+   * with its hover and drag handlers. A new route clears the picked section.
+   * @param {object} geoJson The route FeatureCollection from the server.
+   */
   function renderCustomRoute(geoJson) {
+    clearPaneSelection();
     state.routeLayers.clearLayers();
     state.routeSegments = [];
     // The old grab lines are gone, so their mouseout will never fire.
     hoveredLegIdx = null;
+    hoveredRangeKey = null;
     state.junctionMarkers = L.layerGroup().addTo(state.routeLayers);
     if (!geoJson) return;
 
@@ -5956,11 +6159,15 @@
       }
     }
 
-    // Split at major node boundaries, warn/no-warn transitions AND
-    // manual/auto transitions, so each polyline has one uniform style.
-    const nodes = extractMajorNodes(coords);
+    // Split at the route pane's leg boundaries (the server itinerary, else
+    // the legacy major nodes), warn/no-warn transitions AND manual/auto
+    // transitions, so each polyline has one uniform style and a pane leg is
+    // always made of whole polylines.
+    const nodeIdx =
+      itineraryCoordIndices(geoJson) ||
+      extractMajorNodes(coords).map((n) => n.index);
     const splitSet = new Set([0]);
-    for (const n of nodes) splitSet.add(n.index);
+    for (const idx of nodeIdx) splitSet.add(idx);
     let prevWarn = warnIdx.has(0);
     for (let i = 1; i < coords.length; i++) {
       const curWarn = warnIdx.has(i);
@@ -6814,7 +7021,8 @@
    * Fill the route pane from a route result: warnings, then each route point
    * with the leg after it (distance, time, the bridges and locks on that leg
    * with their waits, and the waters it runs through). Clears the pane when
-   * there is no route.
+   * there is no route. Also runs again on a speed change or late config;
+   * the section picked on the route line is restored afterwards.
    *
    * @param {object|null} geoJson - The route result as returned by the server.
    */
@@ -6870,15 +7078,13 @@
     // classification, chainage, per-leg aggregates and crossings all come from
     // the exact graph edges). Client-side extraction remains only as a
     // fallback for older servers reached via the API-URL override.
-    const itinerary =
-      Array.isArray(geoJson.itinerary) && geoJson.itinerary.length >= 2
-        ? geoJson.itinerary
-        : null;
+    // Local coord index for hover/highlight, from the server's own vertex
+    // index; an itinerary without one is treated as absent.
+    const itinIdx = itineraryCoordIndices(geoJson);
+    const itinerary = itinIdx ? geoJson.itinerary : null;
     const nodes = itinerary
-      ? itinerary.map((p) => ({
-          // Local coord index for hover/highlight (webapp indexes the
-          // concatenated feature coords, which differs from server indexing)
-          index: closestCoordIndex(coords, p.latitude, p.longitude),
+      ? itinerary.map((p, k) => ({
+          index: itinIdx[k],
           lat: p.latitude,
           lng: p.longitude,
           cumDistKm: p.distanceFromStart / 1000,
@@ -7093,13 +7299,8 @@
       if (!isLast) {
         const legCrossings = legCrossingsFor(i);
         if (legCrossings.length > 0) {
-          // Merge crossings with the same name (fixed + opening)
-          const grouped = new Map();
-          for (const c of legCrossings) {
-            const key = c.name;
-            if (!grouped.has(key)) grouped.set(key, []);
-            grouped.get(key).push(c);
-          }
+          // Merge crossings of one structure (fixed + opening)
+          const grouped = groupCrossingsByStructure(legCrossings);
           const icons = [];
           for (const [, entries] of grouped) {
             const e0 = entries[0];
@@ -7110,19 +7311,25 @@
                   ? "#ef4444"
                   : "#22c55e";
             icons.push(
-              '<span class="node-crossing-icon" style="background:' +
+              '<span class="node-crossing-icon' +
+                crossingLinkClass(e0) +
+                '"' +
+                crossingLinkAttrs(e0) +
+                ' style="background:' +
                 color +
                 '">' +
                 poiIcon(e0.type, { subtype: e0.subtype }, 14) +
                 "</span>",
             );
             // If both fixed and opening exist, show the opening icon too
-            if (
-              entries.some((e) => e.subtype === "fixed") &&
-              entries.some((e) => e.subtype === "opening")
-            ) {
+            const opening = entries.find((e) => e.subtype === "opening");
+            if (opening && entries.some((e) => e.subtype === "fixed")) {
               icons.push(
-                '<span class="node-crossing-icon" style="background:#22c55e">' +
+                '<span class="node-crossing-icon' +
+                  crossingLinkClass(opening) +
+                  '"' +
+                  crossingLinkAttrs(opening) +
+                  ' style="background:#22c55e">' +
                   poiIcon("bridge", { subtype: "opening" }, 14) +
                   "</span>",
               );
@@ -7341,15 +7548,10 @@
               fmtHeight(maxAirDraft) +
               "</span></div>";
 
-          // Crossings on this leg (grouped by name)
+          // Crossings on this leg (grouped by structure)
           const legCrossings = legCrossingsFor(i);
           if (legCrossings.length > 0) {
-            const grouped = new Map();
-            for (const c of legCrossings) {
-              const key = c.name;
-              if (!grouped.has(key)) grouped.set(key, []);
-              grouped.get(key).push(c);
-            }
+            const grouped = groupCrossingsByStructure(legCrossings);
             for (const [, entries] of grouped) {
               const e0 = entries[0];
               // Color: fixed bridge = red, lock = yellow, opening = green
@@ -7386,7 +7588,11 @@
                 0,
               );
               html +=
-                '<div class="leg-crossing">' +
+                '<div class="leg-crossing' +
+                crossingLinkClass(e0) +
+                '"' +
+                crossingLinkAttrs(e0) +
+                ">" +
                 '<span class="leg-crossing-icon" style="background:' +
                 color +
                 '">' +
@@ -7460,6 +7666,23 @@
       ".route-node.has-warn + .route-leg",
     );
     if (firstWarnLeg) firstWarnLeg.classList.add("expanded");
+
+    // A rebuild (speed change, late config) keeps the section picked on the
+    // route line; a new route clears it before rendering.
+    const sel = state.selectedRange;
+    if (sel) {
+      nodesEl.querySelectorAll(".route-leg").forEach(function (el) {
+        if (
+          parseInt(el.dataset.coordFrom, 10) === sel.fromIdx &&
+          parseInt(el.dataset.coordTo, 10) === sel.toIdx
+        ) {
+          el.classList.add("expanded", "selected");
+          const prev = el.previousElementSibling;
+          if (prev && prev.classList.contains("route-node"))
+            prev.classList.add("selected");
+        }
+      });
+    }
 
     enrichRoutePaneWithPoiNames(nodes, nodesEl);
     updateRouteTitle();
@@ -7568,7 +7791,94 @@
       .catch(function () {});
   }
 
+  /**
+   * Groups crossings by the server's `structure` id: entries sharing one are
+   * spans of the same physical structure. Entries without one each stay on
+   * their own, never merged by name (many bridges and locks share a name).
+   * @param {object[]} crossings Itinerary crossings, in route order.
+   * @returns {Map<*, object[]>} Groups in first-seen order.
+   */
+  function groupCrossingsByStructure(crossings) {
+    const grouped = new Map();
+    for (const c of crossings) {
+      const key = c.structure || c;
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(c);
+    }
+    return grouped;
+  }
+  /**
+   * Crossings with a position can be clicked to pan the map to them.
+   * @param {object} c An itinerary crossing.
+   * @returns {{latitude: number, longitude: number}|null} Its position, or
+   *   null when it has no usable one.
+   */
+  function crossingLatLng(c) {
+    const p = c && c.position;
+    if (
+      p &&
+      typeof p.latitude === "number" &&
+      typeof p.longitude === "number" &&
+      isFinite(p.latitude) &&
+      isFinite(p.longitude)
+    )
+      return p;
+    return null;
+  }
+  /**
+   * Extra class for a crossing element: " crossing-link" when it has a
+   * position, else "".
+   * @param {object} c An itinerary crossing.
+   * @returns {string}
+   */
+  function crossingLinkClass(c) {
+    return crossingLatLng(c) ? " crossing-link" : "";
+  }
+  /**
+   * Data and accessibility attributes that make a crossing element a map
+   * link; "" when it has no position.
+   * @param {object} c An itinerary crossing.
+   * @returns {string} Attribute HTML, starting with a space.
+   */
+  function crossingLinkAttrs(c) {
+    const p = crossingLatLng(c);
+    return p
+      ? ' data-lat="' +
+          p.latitude +
+          '" data-lng="' +
+          p.longitude +
+          '" title="Show on map" tabindex="0" role="button"'
+      : "";
+  }
+
+  let crossingFlash = null;
+  /**
+   * Briefly ring a crossing on the map after jumping to it, replacing any
+   * ring still showing.
+   * @param {L.LatLng} latlng
+   */
+  function flashCrossing(latlng) {
+    if (crossingFlash) map.removeLayer(crossingFlash);
+    const ring = L.circleMarker(latlng, {
+      radius: 18,
+      color: "#facc15",
+      weight: 4,
+      fill: false,
+      interactive: false,
+    }).addTo(map);
+    crossingFlash = ring;
+    setTimeout(function () {
+      if (crossingFlash === ring) crossingFlash = null;
+      map.removeLayer(ring);
+    }, 2000);
+  }
+
+  /**
+   * Empty the route pane and drop the picked section, when the route is
+   * cleared or no longer complete.
+   */
   function clearRoutePane() {
+    clearPaneSelection();
     document.getElementById("route-warnings").innerHTML = "";
     document.getElementById("route-nodes").innerHTML = "";
     const emptyEl = document.getElementById("route-pane-empty");
@@ -7580,12 +7890,39 @@
   // ---- click node to expand/collapse leg details ----
   const routeNodesEl = document.getElementById("route-nodes");
   routeNodesEl.addEventListener("click", function (e) {
+    const link = e.target.closest(".crossing-link");
+    if (link) {
+      const lat = parseFloat(link.dataset.lat);
+      const lng = parseFloat(link.dataset.lng);
+      if (!isNaN(lat) && !isNaN(lng)) {
+        const ll = L.latLng(lat, lng);
+        map.setView(ll, Math.max(map.getZoom(), 15));
+        flashCrossing(ll);
+        // On the bottom-sheet layout the pane covers the map: lower it.
+        if (
+          window.matchMedia &&
+          window.matchMedia("(max-width: 700px), (max-height: 500px)").matches
+        ) {
+          document.getElementById("route-pane").classList.add("collapsed");
+          document.getElementById("route-pane-tab").textContent = "\u25b6";
+        }
+        return;
+      }
+    }
     const nodeEl = e.target.closest(".route-node");
     if (!nodeEl) return;
     const nextEl = nodeEl.nextElementSibling;
     if (nextEl && nextEl.classList.contains("route-leg")) {
       nextEl.classList.toggle("expanded");
     }
+  });
+  // Keyboard: Enter/Space on a focused crossing link acts like a click.
+  routeNodesEl.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const link = e.target.closest(".crossing-link");
+    if (!link) return;
+    e.preventDefault();
+    link.click();
   });
 
   // ---- hover: route pane node/leg ↔ map segments ----

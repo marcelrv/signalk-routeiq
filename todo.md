@@ -131,21 +131,11 @@ turn text).
   (`kind: "cable"` on the POI properties, tracked as Step 4 item 5 in
   `signalk-router-pipeline/NEXT_PHASES.md`); then a power-line icon in both
   `poiIcon` copies, falling back to the bridge icon when the marker is absent.
-- **Click a route section → select it in the route pane** — clicking a part
-  of the route line on the map should select and scroll to the matching
-  leg/section in the route pane (itinerary), and highlight it on the map.
-  Pure UI: use the server's `itinerary` legs / per-segment features to map the
-  click to a section (no client-side geometry or routing logic, see
-  AGENTS.md). Both the webapp and, where the host allows, the Freeboard panel.
-- **Click a bridge/lock/etc. in the route pane → pan the map to it** — the
-  crossings and other points listed in the route pane (itinerary
-  `crossings`, with lock/bridge/harbour POIs) should centre the map on that
-  POI when clicked, and open or flash its marker. The coordinates come from
-  the route result (`itinerary` / crossing entries); if a crossing lacks a
-  position, add it server-side rather than looking it up in the client. In
-  the Freeboard panel use the host's map capability (check
-  `client.hasCapability()` first, and add any new capability to the
-  manifest's `optional` list).
+- ~~Click a route section → select it in the route pane~~ — **done** in the
+  webapp (branch `feat/route-pane-map-links`). Not possible in the Freeboard
+  panel: the host draws the route and sends no tap events for route lines.
+- ~~Click a bridge/lock in the route pane → pan the map to it~~ — **done** in
+  the webapp and the Freeboard panel (`map.center`), same branch.
 - ~~Tide slider: GRIB and UTCEF current layers behave differently~~ — **done**
   (branch `fix/tide-slider-currents`). It was the other way round: stations
   already followed the drag, the GRIB grid only refetched on release. It now
@@ -158,8 +148,8 @@ turn text).
   `runTime`/`kind` (from the GRIB2 header, not the filename) and a `datasetId`
   per `/grid` point; then show it as a muted line in `currentTooltipHtml`.
   Same change: `/grid` mixes GRIB and UTCEF points (50 of 122 in a Zeeland
-  view were UTCEF), but `fetchCurrentGrid` draws all of them blue as "GRIB
-  current" — use each point's `source` for the label and colour.
+  view were UTCEF). The hover title already follows each point's `source`;
+  the arrows are still all drawn in the grid colour.
 - **Dynamic isochrones (reachability polygons)** — Dijkstra from the vessel's
   position out to a time budget, returned as a GeoJSON polygon boundary.
 - **Custom avoidance / no-go zones** — user-drawn polygons passed to

@@ -285,6 +285,7 @@ export function buildItinerary(
       latitude: lat,
       longitude: lon,
       distanceFromStart: Math.round(cum[idx]),
+      coordIndex: idx,
     };
     if (viaIdxByCoord.has(idx)) point.viaIndex = viaIdxByCoord.get(idx);
 

@@ -1265,7 +1265,8 @@ function renderSummary(result) {
  * Fill the itinerary list: one item per route point (start, turns, vias,
  * destination) with its running time, and under it the leg that follows:
  * distance, time, the bridges and locks crossed with their waits, and the
- * waters it runs through.
+ * waters it runs through. Crossings with a position centre the host chart
+ * on them.
  *
  * @param {Array<object>} itinerary - The server's itinerary points, in route order.
  */
@@ -1386,11 +1387,13 @@ function renderItinerary(itinerary) {
         }
       }
 
-      // Group same-named crossings (a bridge can have a fixed and an opening
-      // span) — same presentation as the webapp's route leg details.
+      // Group crossings of one structure (a bridge can have a fixed and an
+      // opening span) — same presentation as the webapp's route leg details.
+      // Entries without the server's structure id stay separate: names are
+      // not unique, so two same-named locks are two places.
       const grouped = new Map();
       for (const c of p.leg.crossings || []) {
-        const key = c.name || c.type;
+        const key = c.structure || c;
         if (!grouped.has(key)) grouped.set(key, []);
         grouped.get(key).push(c);
       }
@@ -1477,6 +1480,42 @@ function renderItinerary(itinerary) {
             (cdist.textContent ? " · " : "") + "⏳ " + fmtDurationSec(waitS);
         }
         row.append(cn, cdist);
+        const cpos = e0.position;
+        if (
+          cpos &&
+          typeof cpos.latitude === "number" &&
+          typeof cpos.longitude === "number" &&
+          client.hasCapability("map")
+        ) {
+          row.classList.add("crossing-link");
+          row.title = "Show on map";
+          row.tabIndex = 0;
+          row.setAttribute("role", "button");
+          /**
+           * Centre the host chart on this crossing. Not through run():
+           * panning must not block the panel or drop a second click while
+           * the first is still in flight.
+           * @param {Event} ev The click or keydown that asked for it.
+           */
+          const showOnMap = (ev) => {
+            ev.stopPropagation();
+            client
+              .call("map.center", {
+                position: [cpos.longitude, cpos.latitude],
+                zoom: 15,
+              })
+              .catch((e) =>
+                setStatus("route-status", e?.message || String(e), "error"),
+              );
+          };
+          row.addEventListener("click", showOnMap);
+          row.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter" || ev.key === " ") {
+              ev.preventDefault();
+              showOnMap(ev);
+            }
+          });
+        }
         leg.appendChild(row);
         // A span low enough to pass closed charges no wait; the server says
         // why, so the skipped wait stays visible.

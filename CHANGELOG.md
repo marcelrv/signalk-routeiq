@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Click a bridge or lock in the route list to centre the map on it, in the
+  webapp and the Freeboard panel.
+- Click the route line to select and open that section in the route list;
+  it stays highlighted until Esc, a map click or a new route.
+- Route crossings carry the database's `structure` id, when it has one.
+- Itinerary points carry `coordIndex`, their vertex on the route geometry,
+  so a client can match legs to the route line without searching for them.
+
+### Fixed
+
+- Bridges or locks that share a name, such as two locks both called "Lock",
+  are no longer merged into one row in the route list. Each keeps its own
+  map link. Spans are combined only when they belong to the same structure.
+- A route section picked on the line now stays highlighted as a whole: the
+  map line is split where the route list's legs begin and end.
+- Hovering the route line highlights the section a click selects, not the
+  whole stretch between vias; the leg context menu still shows the whole leg
+  it acts on.
+
 ## 0.1.0-alpha.10 — 2026-11-09
 
 ### Added
