@@ -144,6 +144,12 @@ export interface ItineraryPoint {
   latitude: number;
   longitude: number;
   distanceFromStart: number; // meters along the route
+  // Index of this point among the route's vertices. Feature k of the result
+  // runs from vertex k to vertex k+1, so this point starts feature
+  // `coordIndex` (the end point: features.length), and a leg covers features
+  // coordIndex .. next.coordIndex - 1. Lets a client tie the itinerary to the
+  // geometry without matching positions itself.
+  coordIndex: number;
   courseToNext?: number; // degrees true, chord course to the next itinerary point
   turn?: number; // signed course change at this point (deg, + = starboard)
   viaIndex?: number; // 0-based index of the matching request via point

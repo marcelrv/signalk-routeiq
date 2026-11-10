@@ -5529,25 +5529,13 @@
     return dedupeConsecutiveCoords(extractCoords(geoJson));
   }
 
-  /**
-   * Index of the route coordinate nearest to a position.
-   * @param {number[][]} coords Route coordinates as [lng, lat].
-   * @param {number} lat
-   * @param {number} lng
-   * @param {number} [fromIdx] Only search from this index on.
-   * @param {function(number): boolean} [accept] Only consider indices it
-   *   accepts.
-   * @returns {number} The nearest index; -1 only when `accept` rejected every
-   *   candidate, otherwise `fromIdx` (or 0) at worst.
-   */
-  function closestCoordIndex(coords, lat, lng, fromIdx, accept) {
+  function closestCoordIndex(coords, lat, lng) {
     // Apply a cosine-latitude correction so that 1° of longitude is weighted
     // correctly relative to 1° of latitude (especially important above ~50°N/S).
     const cosLat = Math.cos((lat * Math.PI) / 180);
     let minD = Infinity,
-      minI = -1;
-    for (let i = fromIdx || 0; i < coords.length; i++) {
-      if (accept && !accept(i)) continue;
+      minI = 0;
+    for (let i = 0; i < coords.length; i++) {
       const dlat = coords[i][1] - lat;
       const dlng = (coords[i][0] - lng) * cosLat;
       const d = dlat * dlat + dlng * dlng;
@@ -5556,54 +5544,62 @@
         minI = i;
       }
     }
-    // -1 only when `accept` rejected every candidate; plain calls keep the
-    // old "index 0 at worst" behaviour.
-    return minI < 0 && !accept ? fromIdx || 0 : minI;
+    return minI;
   }
 
   /**
-   * Coord index of each itinerary point. Nearest-point alone maps every
-   * pass of an out-and-back route (into a dead-end harbour and out again)
-   * to the first pass, so search forward from the previous point and prefer
-   * coords whose chainage matches the server's distanceFromStart.
-   * @param {number[][]} coords Route coordinates as [lng, lat].
-   * @param {object[]} itinerary The server's `itinerary` points.
-   * @returns {number[]} One coord index per itinerary point, never
-   *   decreasing.
+   * Index into getAllCoords(geoJson) of each server itinerary point. The
+   * server gives each point its vertex (`coordIndex`, feature k running from
+   * vertex k to k+1); this only follows getAllCoords' de-duplication, so a
+   * zero-length segment cannot shift the indices.
+   * @param {object} geoJson The route FeatureCollection from the server.
+   * @returns {number[]|null} One coord index per itinerary point, or null
+   *   when the route has no usable itinerary (older server).
    */
-  function itineraryCoordIndices(coords, itinerary) {
-    const chain = [0];
-    for (let i = 1; i < coords.length; i++)
-      chain.push(
-        chain[i - 1] +
-          haversineDist(
-            coords[i - 1][1],
-            coords[i - 1][0],
-            coords[i][1],
-            coords[i][0],
-          ),
-      );
-    let from = 0;
-    return itinerary.map(function (p) {
-      const d = p.distanceFromStart;
-      let idx = -1;
-      if (typeof d === "number") {
-        const tol = Math.max(250, d * 0.02);
-        idx = closestCoordIndex(
-          coords,
-          p.latitude,
-          p.longitude,
-          from,
-          function (i) {
-            return Math.abs(chain[i] - d) <= tol;
-          },
-        );
+  function itineraryCoordIndices(geoJson) {
+    const itinerary =
+      geoJson && Array.isArray(geoJson.itinerary) ? geoJson.itinerary : null;
+    if (!itinerary || itinerary.length < 2) return null;
+    const features =
+      geoJson.type === "FeatureCollection" && Array.isArray(geoJson.features)
+        ? geoJson.features
+        : [];
+    // Server vertex k -> index after de-duplication, the same way
+    // dedupeConsecutiveCoords keeps a coordinate.
+    const EPS = 1e-9;
+    const vertexIdx = [];
+    let kept = -1;
+    let prev = null;
+    const add = function (c) {
+      if (
+        !prev ||
+        Math.abs(c[0] - prev[0]) > EPS ||
+        Math.abs(c[1] - prev[1]) > EPS
+      ) {
+        kept++;
+        prev = c;
       }
-      if (idx < 0)
-        idx = closestCoordIndex(coords, p.latitude, p.longitude, from);
-      from = idx;
-      return idx;
-    });
+      vertexIdx.push(kept);
+    };
+    for (let f = 0; f < features.length; f++) {
+      const fc = extractCoords(features[f] && features[f].geometry);
+      if (fc.length < 2) return null;
+      // Each feature starts where the previous one ended.
+      if (f === 0) add(fc[0]);
+      else if (
+        Math.abs(fc[0][0] - prev[0]) > EPS ||
+        Math.abs(fc[0][1] - prev[1]) > EPS
+      )
+        return null;
+      for (let j = 1; j < fc.length; j++) add(fc[j]);
+    }
+    const out = [];
+    for (const p of itinerary) {
+      const idx = vertexIdx[p.coordIndex];
+      if (typeof p.coordIndex !== "number" || idx === undefined) return null;
+      out.push(idx);
+    }
+    return out;
   }
 
   function getRouteCoords(geoJson) {
@@ -6111,11 +6107,15 @@
       }
     }
 
-    // Split at major node boundaries, warn/no-warn transitions AND
-    // manual/auto transitions, so each polyline has one uniform style.
-    const nodes = extractMajorNodes(coords);
+    // Split at the route pane's leg boundaries (the server itinerary, else
+    // the legacy major nodes), warn/no-warn transitions AND manual/auto
+    // transitions, so each polyline has one uniform style and a pane leg is
+    // always made of whole polylines.
+    const nodeIdx =
+      itineraryCoordIndices(geoJson) ||
+      extractMajorNodes(coords).map((n) => n.index);
     const splitSet = new Set([0]);
-    for (const n of nodes) splitSet.add(n.index);
+    for (const idx of nodeIdx) splitSet.add(idx);
     let prevWarn = warnIdx.has(0);
     for (let i = 1; i < coords.length; i++) {
       const curWarn = warnIdx.has(i);
@@ -7026,13 +7026,10 @@
     // classification, chainage, per-leg aggregates and crossings all come from
     // the exact graph edges). Client-side extraction remains only as a
     // fallback for older servers reached via the API-URL override.
-    const itinerary =
-      Array.isArray(geoJson.itinerary) && geoJson.itinerary.length >= 2
-        ? geoJson.itinerary
-        : null;
-    // Local coord index for hover/highlight (webapp indexes the concatenated
-    // feature coords, which differs from server indexing)
-    const itinIdx = itinerary ? itineraryCoordIndices(coords, itinerary) : null;
+    // Local coord index for hover/highlight, from the server's own vertex
+    // index; an itinerary without one is treated as absent.
+    const itinIdx = itineraryCoordIndices(geoJson);
+    const itinerary = itinIdx ? geoJson.itinerary : null;
     const nodes = itinerary
       ? itinerary.map((p, k) => ({
           index: itinIdx[k],
