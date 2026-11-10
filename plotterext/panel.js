@@ -1366,8 +1366,11 @@ function renderItinerary(itinerary) {
         .join(" · ");
       leg.appendChild(stats);
 
-      // Which waters the leg runs through and what the routing database says
-      // about them, as the server sent them.
+      // Waters, warnings and crossings fold away under the stats line; the
+      // point header toggles them.
+      const details = document.createElement("div");
+      details.className = "it-details";
+
       const waters = p.leg.waters || [];
       if (waters.length > 0) {
         const line = document.createElement("div");
@@ -1375,16 +1378,54 @@ function renderItinerary(itinerary) {
         line.textContent = waters
           .map((w) => fmtDistance(w.distance) + (w.name ? " " + w.name : ""))
           .join(", then ");
-        leg.appendChild(line);
-        for (const w of waters) {
-          for (const ww of w.warnings || []) {
-            const warn = document.createElement("div");
-            warn.className = "it-warn";
-            warn.textContent =
-              "⚠ " + (w.name ? w.name + ": " : "") + (ww.message || ww.type);
-            leg.appendChild(warn);
-          }
-        }
+        details.appendChild(line);
+      }
+
+      // The leg's warnings with the levels and messages the server decided:
+      // too shallow/narrow for the vessel, then what the routing database
+      // says about the waters.
+      const legWarns = [];
+      for (const lw of p.leg.warnings || [])
+        legWarns.push({ level: lw.level, text: lw.message });
+      for (const w of waters)
+        for (const ww of w.warnings || [])
+          legWarns.push({
+            level: ww.level,
+            text: (w.name ? w.name + ": " : "") + (ww.message || ww.type),
+          });
+      // Worst first, then dedupe by text so a repeat keeps its worst level.
+      // Index tiebreak: Chrome 66's sort is unstable past 10 items.
+      legWarns.forEach((w, k) => (w.i = k));
+      legWarns.sort(
+        (a, b) =>
+          WARN_SEV_ORDER[a.level] - WARN_SEV_ORDER[b.level] || a.i - b.i,
+      );
+      const seenWarn = new Set();
+      const uniqueWarns = legWarns.filter((w) => {
+        if (seenWarn.has(w.text)) return false;
+        seenWarn.add(w.text);
+        return true;
+      });
+      for (const w of uniqueWarns) {
+        const warn = document.createElement("div");
+        warn.className = "it-warn lvl-" + w.level;
+        const text = document.createElement("span");
+        text.textContent = w.text;
+        warn.append(sevBadge(w.level), text);
+        details.appendChild(warn);
+      }
+      if (uniqueWarns.length > 0) {
+        const n = uniqueWarns.length;
+        const badge = sevBadge(uniqueWarns[0].level);
+        badge.classList.add("it-point-warn");
+        // Danger and caution share the "!" glyph, so name the level too.
+        badge.title =
+          uniqueWarns[0].level +
+          ", " +
+          n +
+          (n === 1 ? " warning" : " warnings");
+        badge.setAttribute("aria-label", badge.title);
+        head.insertBefore(badge, meta);
       }
 
       // Group crossings of one structure (a bridge can have a fixed and an
@@ -1516,7 +1557,7 @@ function renderItinerary(itinerary) {
             }
           });
         }
-        leg.appendChild(row);
+        details.appendChild(row);
         // A span low enough to pass closed charges no wait; the server says
         // why, so the skipped wait stays visible.
         for (const e of entries) {
@@ -1524,13 +1565,72 @@ function renderItinerary(itinerary) {
           const note = document.createElement("div");
           note.className = "cnote";
           note.textContent = e.note;
-          leg.appendChild(note);
+          details.appendChild(note);
         }
+      }
+      if (details.childNodes.length > 0) {
+        leg.appendChild(details);
+        // Collapsed unless something on the leg needs attention: info-only
+        // legs stay folded.
+        const worst = uniqueWarns.length > 0 ? uniqueWarns[0].level : null;
+        makeLegToggle(head, leg, worst === "danger" || worst === "caution");
       }
       li.appendChild(leg);
     }
     ol.appendChild(li);
   }
+}
+
+// Display order of the server's warning levels, worst first.
+const WARN_SEV_ORDER = { danger: 0, caution: 1, info: 2 };
+
+/**
+ * A CSS-drawn severity badge (the glyph comes from ::before, no emoji, so it
+ * looks the same on old plotter browsers).
+ *
+ * @param {string} level - The server's level: "danger", "caution" or "info".
+ * @returns {HTMLElement} The badge, labelled with its level.
+ */
+function sevBadge(level) {
+  const b = document.createElement("span");
+  b.className = "sev-badge lvl-" + level;
+  // The glyph is CSS content, so give assistive tech the level itself.
+  b.setAttribute("role", "img");
+  b.setAttribute("aria-label", level);
+  b.title = level;
+  return b;
+}
+
+/**
+ * Let an itinerary point header fold and unfold the details of the leg that
+ * follows it, by click or keyboard.
+ *
+ * @param {HTMLElement} head - The point header that toggles.
+ * @param {HTMLElement} leg - The leg whose details fold.
+ * @param {boolean} expanded - Whether the leg starts unfolded.
+ */
+function makeLegToggle(head, leg, expanded) {
+  const chev = document.createElement("span");
+  chev.className = "it-chev";
+  chev.setAttribute("aria-hidden", "true");
+  head.appendChild(chev);
+  head.classList.add("it-toggle");
+  head.tabIndex = 0;
+  head.setAttribute("role", "button");
+  const set = (on) => {
+    leg.classList.toggle("collapsed", !on);
+    head.setAttribute("aria-expanded", String(on));
+    chev.textContent = on ? "▾" : "▸";
+  };
+  set(expanded);
+  const toggle = () => set(leg.classList.contains("collapsed"));
+  head.addEventListener("click", toggle);
+  head.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      toggle();
+    }
+  });
 }
 
 function hideSummary() {
