@@ -124,6 +124,23 @@ databases use the same sequence or water body id for different things, both
 still route, but the later file's description is switched off and
 `GET /databases` reports why in `descriptionError`.
 
+## Route API: warning levels
+
+Every warning on a leg carries a `level`: `danger`, `caution` or `info`. The
+server decides it, so every client shows the same; a client renders it as
+sent.
+
+- `itinerary[].leg.warnings`: where the leg is too tight for the vessel the
+  route was planned for (the request's draft/beam, else the configured ones),
+  worst first. `shallow` when the charted `minDepth` is under `requiredDepth`
+  (draft + `safetyMarginDraft`): a `danger`, or a `caution` when the tide at
+  the time of passage brings `minDepthAtPassage` up to `requiredDepth` or
+  more. `narrow` when `minWidth` is under `requiredWidth` (beam +
+  `safetyMarginBeam`): a `danger` under the beam itself, else a `caution`.
+- `leg.waters[].warnings[].level`: a `notice` is `info` at `severity` 0,
+  `caution` at 1 and `danger` at 2 (depth) and 3 (prohibited); `depth_quality`
+  is `info`, or `caution` when the depth is unknown; `origin` is a `caution`.
+
 ## License
 
 Apache License 2.0 - see LICENSE file for details

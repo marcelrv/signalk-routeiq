@@ -166,17 +166,50 @@ export interface ItineraryPoint {
     // The named waters this leg runs through, in route order, with the part of
     // the leg that lies in each. Only waters that have a name or a warning.
     waters?: RouteWaterPart[];
+    // Where the leg is tight for this vessel, worst first. Absent when none.
+    warnings?: LegWarning[];
   };
 }
+
+// How much a warning matters, decided here so every client shows the same:
+// danger = do not go unless you know better, caution = check before you go,
+// info = worth knowing. Clients render it as sent and never re-derive it.
+export type WarnLevel = "danger" | "caution" | "info";
+
+// A leg too tight for the vessel the route was planned for. `message` is
+// English; the numbers (meters) let a client word it itself.
+export type LegWarning =
+  | {
+      type: "shallow";
+      level: WarnLevel;
+      minDepth: number; // charted
+      minDepthAtPassage?: number; // charted + tide, when the tide added some
+      requiredDepth: number; // draft + safetyMarginDraft
+      message: string;
+    }
+  | {
+      type: "narrow";
+      level: WarnLevel;
+      minWidth: number;
+      beam: number;
+      requiredWidth: number; // beam + safetyMarginBeam
+      message: string;
+    };
 
 // A warning on a stretch of the route, from the routing database's metadata.
 // `message` is English; the structured fields let a client word it itself.
 export type RouteDescriptionWarning =
-  | { type: "depth_quality"; quality: string; message: string }
-  | { type: "origin"; origin: string; message: string }
+  | {
+      type: "depth_quality";
+      level: WarnLevel;
+      quality: string;
+      message: string;
+    }
+  | { type: "origin"; level: WarnLevel; origin: string; message: string }
   | {
       type: "notice";
-      severity: number; // 0 info, 1 caution, 2 depth
+      level: WarnLevel;
+      severity: number; // 0 info, 1 caution, 2 depth, 3 prohibited
       text: string;
       name?: string;
       message: string;

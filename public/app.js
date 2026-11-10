@@ -7441,41 +7441,14 @@
         }
 
         if (hasLegData) {
-          // Only warn if the depth/width is actually constraining for THIS vessel
-          const vesselDraft =
-            lastBoat && lastBoat.draft != null ? lastBoat.draft : 2.0;
-          const safetyMargin =
-            lastBoat &&
-            lastBoat.effectiveDraft != null &&
-            lastBoat.draft != null
-              ? lastBoat.effectiveDraft - lastBoat.draft
-              : 0.3;
-          const shallowThreshold = vesselDraft + safetyMargin;
-          if (minDepth !== Infinity && minDepth < shallowThreshold) {
-            // Keep flagging shallow chart — that is what the survey says — but
-            // if the tide covers it at the time you are there, say so on the
-            // same line rather than leaving a bare 0.0 m to be alarmed at.
-            // Tide covers it at passage: worth a look, not a hard stop.
-            const tideCovers =
-              minDepthAtPassage !== Infinity &&
-              minDepthAtPassage >= shallowThreshold;
-            legWarnings.push({
-              level: tideCovers ? "caution" : "danger",
-              html:
-                minDepthAtPassage !== Infinity && minDepthAtPassage > minDepth
-                  ? "Shallow (" +
-                    minDepth.toFixed(1) +
-                    "m charted, " +
-                    minDepthAtPassage.toFixed(1) +
-                    "m at passage)"
-                  : "Shallow (" + minDepth.toFixed(1) + "m)",
-            });
-          }
-          if (minWidth !== Infinity && minWidth < 6)
-            legWarnings.push({
-              level: "danger",
-              html: "Narrow (" + minWidth.toFixed(1) + "m)",
-            });
+          // Shallow / narrow for this vessel, level and text decided by the
+          // server against the dimensions the route was planned for.
+          if (node.leg && node.leg.warnings)
+            for (const lw of node.leg.warnings)
+              legWarnings.push({
+                level: lw.level,
+                html: escapeHtml(lw.message),
+              });
 
           const legKm = legDist / 1000;
           const legNm = legKm / 1.852;
@@ -7649,7 +7622,7 @@
             for (const w of waters)
               for (const ww of w.warnings || [])
                 legWarnings.push({
-                  level: waterWarnLevel(ww),
+                  level: ww.level,
                   html: escapeHtml(
                     (w.name ? w.name + ": " : "") + (ww.message || ww.type),
                   ),
@@ -7737,21 +7710,8 @@
     updateRouteTitle();
   }
 
-  // Display classification of a server water warning (no routing logic):
-  // notice severity 3 = prohibited, 2 = depth problem, 1 = caution, 0 = info;
-  // depth_quality is informational unless the depth is unknown altogether;
-  // anything unknown stays a caution, never silently harmless.
+  // Display order of the server's warning levels, worst first.
   const WARN_SEV_ORDER = { danger: 0, caution: 1, info: 2 };
-  function waterWarnLevel(ww) {
-    if (ww.type === "depth_quality")
-      return ww.quality === "unknown" ? "caution" : "info";
-    if (ww.type === "notice") {
-      if (ww.severity >= 2) return "danger";
-      if (ww.severity === 0) return "info";
-      return "caution";
-    }
-    return "caution";
-  }
 
   // CSS-drawn severity badge (glyph comes from ::before, no emoji).
   function sevBadge(level, extraClass, title) {

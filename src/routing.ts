@@ -468,7 +468,13 @@ export class RoutingEngine {
           request,
         );
         if (violationWarnings.length) navmeshRoute.warnings = violationWarnings;
-        await this.finalizeRoute(navmeshRoute, [], sameRegionEnv, request);
+        await this.finalizeRoute(
+          navmeshRoute,
+          effectiveDims,
+          [],
+          sameRegionEnv,
+          request,
+        );
         return navmeshRoute;
       }
     }
@@ -648,7 +654,7 @@ export class RoutingEngine {
         ...violationWarnings,
       ];
       if (result.warnings.length === 0) delete result.warnings;
-      await this.finalizeRoute(result, [], env, request);
+      await this.finalizeRoute(result, effectiveDims, [], env, request);
       return result;
     }
 
@@ -930,7 +936,8 @@ export class RoutingEngine {
       await this.connectUserPoint(start, route, "start");
       await this.connectUserPoint(end, route, "end");
 
-      if (finalize) await this.finalizeRoute(route, [], env, waitOverrides);
+      if (finalize)
+        await this.finalizeRoute(route, dims, [], env, waitOverrides);
       return route;
     }
 
@@ -1134,7 +1141,7 @@ export class RoutingEngine {
     // Connect only the overall end coordinate (start is handled per-segment above)
     await this.connectUserPoint(end, result, "end");
 
-    await this.finalizeRoute(result, via, env, waitOverrides);
+    await this.finalizeRoute(result, dims, via, env, waitOverrides);
     return result;
   }
 
@@ -3431,6 +3438,7 @@ export class RoutingEngine {
    */
   private async finalizeRoute(
     route: RouteResult,
+    dims: VesselDimensions,
     via: Array<{ latitude: number; longitude: number }> = [],
     env?: RouteEnv,
     waitOverrides?: WaitOverrides,
@@ -3472,6 +3480,11 @@ export class RoutingEngine {
       route.crossings || [],
       via,
       this.config.waypointTolerance ?? 30,
+      {
+        requiredDepth: this.requiredDepth(dims),
+        beam: dims.beam ?? 4.0,
+        requiredWidth: (dims.beam ?? 4.0) + this.config.safetyMarginBeam,
+      },
     );
     route.waypoints = waypoints;
     route.itinerary = itinerary;
