@@ -1418,7 +1418,13 @@ function renderItinerary(itinerary) {
         const n = uniqueWarns.length;
         const badge = sevBadge(uniqueWarns[0].level);
         badge.classList.add("it-point-warn");
-        badge.title = n + (n === 1 ? " warning" : " warnings");
+        // Danger and caution share the "!" glyph, so name the level too.
+        badge.title =
+          uniqueWarns[0].level +
+          ", " +
+          n +
+          (n === 1 ? " warning" : " warnings");
+        badge.setAttribute("aria-label", badge.title);
         head.insertBefore(badge, meta);
       }
 
@@ -1583,11 +1589,15 @@ const WARN_SEV_ORDER = { danger: 0, caution: 1, info: 2 };
  * looks the same on old plotter browsers).
  *
  * @param {string} level - The server's level: "danger", "caution" or "info".
- * @returns {HTMLElement} The badge.
+ * @returns {HTMLElement} The badge, labelled with its level.
  */
 function sevBadge(level) {
   const b = document.createElement("span");
   b.className = "sev-badge lvl-" + level;
+  // The glyph is CSS content, so give assistive tech the level itself.
+  b.setAttribute("role", "img");
+  b.setAttribute("aria-label", level);
+  b.title = level;
   return b;
 }
 
@@ -1602,6 +1612,7 @@ function sevBadge(level) {
 function makeLegToggle(head, leg, expanded) {
   const chev = document.createElement("span");
   chev.className = "it-chev";
+  chev.setAttribute("aria-hidden", "true");
   head.appendChild(chev);
   head.classList.add("it-toggle");
   head.tabIndex = 0;
