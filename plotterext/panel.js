@@ -1401,8 +1401,12 @@ function renderItinerary(itinerary) {
         (a, b) =>
           WARN_SEV_ORDER[a.level] - WARN_SEV_ORDER[b.level] || a.i - b.i,
       );
-      // A repeat's locations go to the one kept.
       const seenWarn = new Map();
+      /**
+       * Keep the first of each text; a repeat's locations go to it.
+       * @param {object} w - A leg warning entry.
+       * @returns {boolean} Whether to keep it.
+       */
       const uniqueWarns = legWarns.filter((w) => {
         const kept = seenWarn.get(w.text);
         if (kept) {
@@ -1585,6 +1589,10 @@ function makeMapLink(el, go) {
   el.title = "Show on map";
   el.tabIndex = 0;
   el.setAttribute("role", "button");
+  /**
+   * Move the chart; report a failure in the route status line.
+   * @param {Event} ev - The click or keydown that asked for it.
+   */
   const show = (ev) => {
     ev.stopPropagation();
     go().catch((e) =>
@@ -1592,6 +1600,10 @@ function makeMapLink(el, go) {
     );
   };
   el.addEventListener("click", show);
+  /**
+   * Enter or Space acts like a click.
+   * @param {KeyboardEvent} ev - The key press.
+   */
   el.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter" || ev.key === " ") {
       ev.preventDefault();

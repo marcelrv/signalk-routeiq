@@ -3502,6 +3502,7 @@ export class RoutingEngine {
           distance: number;
           seg: number;
         }> = [];
+        /** Add the graph edges of route segment `si`, tagged with `si`. */
         segments.forEach((seg, si) => {
           const n = seg.nodes;
           if (n && n.length >= 2) {

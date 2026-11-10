@@ -5765,6 +5765,10 @@
     const out = [];
     const itinerary =
       geoJson && Array.isArray(geoJson.itinerary) ? geoJson.itinerary : [];
+    /**
+     * Collect the locations of a list of warnings.
+     * @param {object[]|undefined} warnings Server warnings.
+     */
     const addAll = function (warnings) {
       for (const w of warnings || []) for (const l of w.at || []) out.push(l);
     };
@@ -7691,8 +7695,12 @@
               WARN_SEV_ORDER[a.level] - WARN_SEV_ORDER[b.level] || a.i - b.i
             );
           });
-          // A repeat's locations go to the one kept.
           const seenWarn = new Map();
+          /**
+           * Keep the first of each text; a repeat's locations go to it.
+           * @param {object} w A leg warning entry.
+           * @returns {boolean} Whether to keep it.
+           */
           const uniqueWarn = legWarnings.filter(function (w) {
             const kept = seenWarn.get(w.html);
             if (kept) {
@@ -7771,15 +7779,26 @@
   // Display order of the server's warning levels, worst first.
   const WARN_SEV_ORDER = { danger: 0, caution: 1, info: 2 };
 
-  // CSS-drawn severity badge (glyph comes from ::before, no emoji).
+  /**
+   * CSS-drawn severity badge (glyph comes from ::before, no emoji). Danger
+   * and caution share the "!" glyph, so the badge names its level for
+   * screen readers and in its tooltip.
+   * @param {string} level The server's level: "danger", "caution" or "info".
+   * @param {string} [extraClass] Extra class names.
+   * @param {string} [title] What else the badge stands for, after the level.
+   * @returns {string} The badge HTML.
+   */
   function sevBadge(level, extraClass, title) {
+    const label = escapeHtml(title ? level + ", " + title : level);
     return (
       '<span class="sev-badge lvl-' +
       level +
       (extraClass ? " " + extraClass : "") +
-      '"' +
-      (title ? ' title="' + escapeHtml(title) + '"' : "") +
-      "></span>"
+      '" role="img" aria-label="' +
+      label +
+      '" title="' +
+      label +
+      '"></span>'
     );
   }
 
@@ -8065,6 +8084,11 @@
 
   // ---- click node to expand/collapse leg details ----
   const routeNodesEl = document.getElementById("route-nodes");
+  /**
+   * Route pane clicks: a crossing or warning link moves the map to it; a
+   * point header folds or unfolds the leg after it.
+   * @param {MouseEvent} e
+   */
   routeNodesEl.addEventListener("click", function (e) {
     const link = e.target.closest(".crossing-link");
     if (link) {
@@ -8092,7 +8116,11 @@
       nextEl.classList.toggle("expanded");
     }
   });
-  // Keyboard: Enter/Space on a focused crossing or warning link acts like a click.
+  /**
+   * Keyboard: Enter/Space on a focused crossing or warning link acts like a
+   * click.
+   * @param {KeyboardEvent} e
+   */
   routeNodesEl.addEventListener("keydown", function (e) {
     if (e.key !== "Enter" && e.key !== " ") return;
     const link = e.target.closest(".crossing-link, .warn-link");

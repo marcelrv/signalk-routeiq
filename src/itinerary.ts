@@ -260,10 +260,15 @@ export class RunCollector {
   readonly out: RouteLocation[] = [];
   private first = -1;
   private last = -1;
+  /**
+   * @param coords route vertices as [lon, lat]
+   * @param cum    cumulative distance at every vertex
+   */
   constructor(
     private coords: LonLat[],
     private cum: number[],
   ) {}
+  /** Add a segment: extends the open run, or closes it and opens a new one. */
   add(seg: number): void {
     if (this.first >= 0 && (seg === this.last || seg === this.last + 1)) {
       this.last = seg;
@@ -272,6 +277,7 @@ export class RunCollector {
     this.close();
     this.first = this.last = seg;
   }
+  /** Close the open run, if any; returns every location collected. */
   close(): RouteLocation[] {
     if (this.first >= 0)
       this.out.push(
@@ -438,6 +444,10 @@ export function buildItinerary(
 
   const indices = [...entries.keys()].sort((a, b) => a - b);
 
+  /**
+   * One itinerary point at route vertex `idx`, with the aggregates (and the
+   * warnings, when the vessel is known) of the leg to the next point.
+   */
   const itinerary: ItineraryPoint[] = indices.map((idx, i) => {
     const [lon, lat] = coords[idx];
     const point: ItineraryPoint = {
