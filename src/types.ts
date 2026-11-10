@@ -176,44 +176,55 @@ export interface ItineraryPoint {
 // info = worth knowing. Clients render it as sent and never re-derive it.
 export type WarnLevel = "danger" | "caution" | "info";
 
-// A leg too tight for the vessel the route was planned for. `message` is
-// English; the numbers (meters) let a client word it itself.
+// Where on the route a warning applies, so a client can show it on the map
+// without working anything out from the geometry. Route vertices
+// coordIndex..toCoordIndex, numbered like ItineraryPoint.coordIndex (feature k
+// runs from vertex k to k+1). A point (a bridge, lock or other POI) has
+// coordIndex === toCoordIndex and a position.
+export interface RouteLocation {
+  coordIndex: number;
+  toCoordIndex: number;
+  distanceFromStart: number; // meters along the route
+  distance: number; // meters, 0 for a point
+  bounds: [number, number, number, number]; // [west, south, east, north]
+  position?: { latitude: number; longitude: number }; // points only
+}
+
+// What every leg warning has, whatever its type. A client can show any
+// warning, and link it to the map through `at`, without knowing the type.
+export interface WarningBase {
+  level: WarnLevel;
+  message: string; // English
+  at?: RouteLocation[]; // in route order; absent when the server cannot tell
+}
+
+// A leg too tight for the vessel the route was planned for. The numbers
+// (meters) let a client word it itself.
 export type LegWarning =
-  | {
+  | (WarningBase & {
       type: "shallow";
-      level: WarnLevel;
       minDepth: number; // charted
       minDepthAtPassage?: number; // charted + tide, when the tide added some
       requiredDepth: number; // draft + safetyMarginDraft
-      message: string;
-    }
-  | {
+    })
+  | (WarningBase & {
       type: "narrow";
-      level: WarnLevel;
       minWidth: number;
       beam: number;
       requiredWidth: number; // beam + safetyMarginBeam
-      message: string;
-    };
+    });
 
 // A warning on a stretch of the route, from the routing database's metadata.
-// `message` is English; the structured fields let a client word it itself.
+// The structured fields let a client word it itself.
 export type RouteDescriptionWarning =
-  | {
-      type: "depth_quality";
-      level: WarnLevel;
-      quality: string;
-      message: string;
-    }
-  | { type: "origin"; level: WarnLevel; origin: string; message: string }
-  | {
+  | (WarningBase & { type: "depth_quality"; quality: string })
+  | (WarningBase & { type: "origin"; origin: string })
+  | (WarningBase & {
       type: "notice";
-      level: WarnLevel;
       severity: number; // 0 info, 1 caution, 2 depth, 3 prohibited
       text: string;
       name?: string;
-      message: string;
-    };
+    });
 
 // One stretch of the route inside one water (consecutive stretches of the same
 // water are merged). Display only: never a routing cost.

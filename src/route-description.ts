@@ -10,10 +10,12 @@
  * Display only: nothing here feeds a routing cost.
  */
 
+import { clipLocation, RunCollector } from "./itinerary.js";
 import {
   ItineraryPoint,
   RouteDescriptionLeg,
   RouteDescriptionWarning,
+  RouteLocation,
   RouteWaterPart,
   WarnLevel,
 } from "./types.js";
@@ -50,6 +52,17 @@ export interface DescribeWorkerResult {
 /** The part of a route segment the description needs. */
 export interface DescribableSegment {
   distance?: number;
+  /** Index of the route segment (vertex seg to seg+1) this graph edge is part of. */
+  seg?: number;
+}
+
+/**
+ * The route geometry, for placing warnings (`at`): vertices as [lon, lat] and
+ * the cumulative distance at each (itinerary.ts cumulativeDistances).
+ */
+export interface RouteGeometry {
+  coords: Array<[number, number]>;
+  cum: number[];
 }
 
 function warningKey(w: RouteDescriptionWarning): string {
@@ -58,18 +71,55 @@ function warningKey(w: RouteDescriptionWarning): string {
   return `n:${w.severity}:${w.text}`;
 }
 
+/**
+ * Add the warnings of `more` that `into` does not have yet. A repeat adds its
+ * locations to the one already there (so `into`'s entries must be its own
+ * objects, never ones shared with another list).
+ */
 function addWarnings(
   into: RouteDescriptionWarning[],
   more: RouteDescriptionWarning[],
 ): void {
-  const seen = new Set(into.map(warningKey));
+  const byKey = new Map(into.map((w) => [warningKey(w), w]));
   for (const w of more) {
     const k = warningKey(w);
-    if (!seen.has(k)) {
-      seen.add(k);
+    const have = byKey.get(k);
+    if (!have) {
+      byKey.set(k, w);
       into.push(w);
+    } else if (w.at && w.at.length > 0) {
+      have.at = [...(have.at ?? []), ...w.at].sort(
+        (a, b) => a.coordIndex - b.coordIndex,
+      );
     }
   }
+}
+
+/**
+ * Copies of `warnings` with their locations cut down to route vertices
+ * from..to; a warning located only outside that range is left out. One
+ * without a location is kept as it is (copied).
+ */
+function clipWarnings(
+  warnings: RouteDescriptionWarning[],
+  from: number,
+  to: number,
+  geometry: RouteGeometry,
+): RouteDescriptionWarning[] {
+  const out: RouteDescriptionWarning[] = [];
+  for (const w of warnings) {
+    if (!w.at) {
+      out.push({ ...w });
+      continue;
+    }
+    const at: RouteLocation[] = [];
+    for (const loc of w.at) {
+      const c = clipLocation(geometry.coords, geometry.cum, loc, from, to);
+      if (c) at.push(c);
+    }
+    if (at.length > 0) out.push({ ...w, at });
+  }
+  return out;
 }
 
 /**
@@ -145,8 +195,11 @@ function warningsFor(
 export function buildRouteDescription(
   segments: DescribableSegment[],
   described: DescribeWorkerResult,
+  geometry?: RouteGeometry,
 ): RouteDescriptionLeg[] | undefined {
   const legs: RouteDescriptionLeg[] = [];
+  // Per leg, where each of its warnings (by key) applies, by route segment.
+  const runs: Array<Map<string, RunCollector>> = [];
   let chainage = 0;
   let last: number | null | undefined; // water body id of the open leg
   let any = false;
@@ -166,7 +219,21 @@ export function buildRouteDescription(
     const warnings = warningsFor(seq, info?.notices, described.notices);
     if (body?.name || warnings.length > 0) any = true;
 
-    if (legs.length > 0 && last === waterBodyId) {
+    const opensLeg = !(legs.length > 0 && last === waterBodyId);
+    if (opensLeg) runs.push(new Map());
+    const seg = segments[i].seg;
+    if (geometry && seg !== undefined) {
+      const legRuns = runs[runs.length - 1];
+      for (const w of warnings) {
+        const k = warningKey(w);
+        let r = legRuns.get(k);
+        if (!r)
+          legRuns.set(k, (r = new RunCollector(geometry.coords, geometry.cum)));
+        r.add(seg);
+      }
+    }
+
+    if (!opensLeg) {
       const leg = legs[legs.length - 1];
       leg.distance += dist;
       addWarnings(leg.warnings, warnings);
@@ -185,9 +252,14 @@ export function buildRouteDescription(
   }
 
   if (!any) return undefined;
-  for (const leg of legs) {
+  for (let l = 0; l < legs.length; l++) {
+    const leg = legs[l];
     leg.distanceFromStart = Math.round(leg.distanceFromStart);
     leg.distance = Math.round(leg.distance);
+    for (const w of leg.warnings) {
+      const at = runs[l].get(warningKey(w))?.close();
+      if (at && at.length > 0) w.at = at;
+    }
   }
   return legs;
 }
@@ -201,10 +273,14 @@ const MIN_WATER_PART_M = 100;
  * Only waters with a name or a warning are listed, and slivers under
  * MIN_WATER_PART_M without a warning are dropped; neighbours in the same water
  * (which a turn or a dropped sliver can separate) are merged again.
+ *
+ * With the route geometry, each warning's `at` is cut down to the itinerary
+ * leg, and a warning that applies only outside it is not listed there.
  */
 export function attachWaters(
   itinerary: ItineraryPoint[],
   description: RouteDescriptionLeg[],
+  geometry?: RouteGeometry,
 ): void {
   for (let i = 0; i < itinerary.length - 1; i++) {
     const point = itinerary[i];
@@ -218,22 +294,31 @@ export function attachWaters(
         Math.min(to, leg.distanceFromStart + leg.distance) -
         Math.max(from, leg.distanceFromStart);
       if (overlap < 1) continue;
+      // Copies: merging below adds locations to them.
+      const legWarnings = geometry
+        ? clipWarnings(
+            leg.warnings,
+            point.coordIndex,
+            itinerary[i + 1].coordIndex,
+            geometry,
+          )
+        : leg.warnings.map((w) => ({ ...w }));
       // A sliver is skipped without breaking the merge of its neighbours.
-      if (overlap < MIN_WATER_PART_M && leg.warnings.length === 0) continue;
-      if (!leg.name && leg.warnings.length === 0) {
+      if (overlap < MIN_WATER_PART_M && legWarnings.length === 0) continue;
+      if (!leg.name && legWarnings.length === 0) {
         lastLeg = undefined; // a gap: do not merge the waters either side of it
         continue;
       }
       if (lastLeg && lastLeg.waterBodyId === leg.waterBodyId && waters.length) {
         const prev = waters[waters.length - 1];
         prev.distance += Math.round(overlap);
-        addWarnings(prev.warnings, leg.warnings);
+        addWarnings(prev.warnings, legWarnings);
       } else {
         waters.push({
           ...(leg.name ? { name: leg.name } : {}),
           ...(leg.kind ? { kind: leg.kind } : {}),
           distance: Math.round(overlap),
-          warnings: [...leg.warnings],
+          warnings: legWarnings,
         });
       }
       lastLeg = leg;

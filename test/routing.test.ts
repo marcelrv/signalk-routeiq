@@ -424,6 +424,26 @@ describe('Itinerary', async () => {
     assert.strictEqual(plain.itinerary[0].leg!.warnings, undefined);
   });
 
+  it('locates each shallow/narrow run on the leg in `at`', () => {
+    const vessel = { requiredDepth: 4.0, beam: 4.0, requiredWidth: 6.0 };
+    // Shallow on segments 1-2 and 5, narrow on 7; all on the first leg.
+    const segs = segments.map((s, i) => ({
+      ...s,
+      minDepth: [1, 2, 5].includes(i) ? 2.0 : i < 10 ? 8.0 : -1,
+      minDepthKnown: i < 10,
+      minWidth: i === 7 ? 5.0 : 50,
+    }));
+    const { itinerary } = buildItinerary(coords, segs, [], [], 30, vessel);
+    const byType = Object.fromEntries(itinerary[0].leg!.warnings!.map((w) => [w.type, w]));
+    assert.deepStrictEqual(
+      byType.shallow.at!.map((l) => [l.coordIndex, l.toCoordIndex, l.distanceFromStart, l.distance]),
+      [[1, 3, 700, 1400], [5, 6, 3500, 700]],
+    );
+    assert.deepStrictEqual(byType.shallow.at![0].bounds, [4.01, 52.0, 4.03, 52.0]);
+    assert.deepStrictEqual(byType.narrow.at!.map((l) => [l.coordIndex, l.toCoordIndex]), [[7, 8]]);
+    assert.strictEqual(byType.narrow.at![0].position, undefined);
+  });
+
   it('marks via points with their request index', () => {
     const via = [{ latitude: 52.0, longitude: 4.03 }]; // coord index 3
     const { itinerary } = buildItinerary(coords, segments, [], via, 30);

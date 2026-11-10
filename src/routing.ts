@@ -3495,8 +3495,15 @@ export class RoutingEngine {
         // One unit per graph edge: an aggregated segment (collinear
         // compression, line-of-sight) spans several, and only edges are in
         // the databases' sequence tables.
-        const units: Array<{ from: number; to: number; distance: number }> = [];
-        for (const seg of segments) {
+        // `seg` ties each edge to its route segment, for warning locations.
+        const units: Array<{
+          from: number;
+          to: number;
+          distance: number;
+          seg: number;
+        }> = [];
+        /** Add the graph edges of route segment `si`, tagged with `si`. */
+        segments.forEach((seg, si) => {
           const n = seg.nodes;
           if (n && n.length >= 2) {
             for (let k = 0; k + 1 < n.length; k++) {
@@ -3504,6 +3511,7 @@ export class RoutingEngine {
                 from: n[k],
                 to: n[k + 1],
                 distance: this.db.getEdgeSync(n[k], n[k + 1])?.distance ?? 0,
+                seg: si,
               });
             }
           } else {
@@ -3511,17 +3519,22 @@ export class RoutingEngine {
               from: seg.from,
               to: seg.to,
               distance: seg.distance ?? 0,
+              seg: si,
             });
           }
-        }
+        });
         const described = await this.db.describeRoute(
           units,
           waitOverrides?.lang,
         );
-        const description = buildRouteDescription(units, described);
+        const geometry = {
+          coords: coords as Array<[number, number]>,
+          cum: cumulativeDistances(coords, segments),
+        };
+        const description = buildRouteDescription(units, described, geometry);
         if (description) {
           route.description = description;
-          attachWaters(itinerary, description);
+          attachWaters(itinerary, description, geometry);
         }
       } catch (e) {
         route.warnings = [

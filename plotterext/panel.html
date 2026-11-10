@@ -321,8 +321,12 @@
         margin-left: auto;
         white-space: nowrap;
       }
-      #itinerary .crossing.crossing-link {
+      #itinerary .crossing.crossing-link,
+      #itinerary .it-warn.crossing-link {
         cursor: pointer;
+      }
+      #itinerary .it-warn.crossing-link span:last-child {
+        text-decoration: underline dotted;
       }
       #itinerary .cnote {
         color: var(--muted);

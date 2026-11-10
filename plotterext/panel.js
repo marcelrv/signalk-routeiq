@@ -92,6 +92,10 @@ const sessions = new Map();
 //   vias     — vias added before the draft existed
 //   routeId  — the draft once created
 let planning = null;
+// Route vertices ([lon, lat]) of the result on show, for drawing a warning's
+// stretch (`at` vertex ranges) on the host's highlight overlay.
+let routeVertices = [];
+let highlightShown = false;
 let pendingPick = null; // { pickId, actionId } of our map.pick in flight
 
 init().catch((e) => {
@@ -1206,6 +1210,14 @@ async function searchPois() {
 /* ---------- result summary + itinerary ---------- */
 
 function renderSummary(result) {
+  clearHighlight();
+  // Feature k runs from vertex k to k+1.
+  routeVertices = [];
+  for (const f of result.features || []) {
+    const c = f.geometry?.coordinates || [];
+    if (routeVertices.length === 0 && c.length > 0) routeVertices.push(c[0]);
+    if (c.length > 1) routeVertices.push(c[c.length - 1]);
+  }
   const distM = result.totalDistance || 0;
   const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 6;
   const tideActive =
@@ -1386,12 +1398,13 @@ function renderItinerary(itinerary) {
       // says about the waters.
       const legWarns = [];
       for (const lw of p.leg.warnings || [])
-        legWarns.push({ level: lw.level, text: lw.message });
+        legWarns.push({ level: lw.level, text: lw.message, at: lw.at || [] });
       for (const w of waters)
         for (const ww of w.warnings || [])
           legWarns.push({
             level: ww.level,
             text: (w.name ? w.name + ": " : "") + (ww.message || ww.type),
+            at: ww.at || [],
           });
       // Worst first, then dedupe by text so a repeat keeps its worst level.
       // Index tiebreak: Chrome 66's sort is unstable past 10 items.
@@ -1400,10 +1413,19 @@ function renderItinerary(itinerary) {
         (a, b) =>
           WARN_SEV_ORDER[a.level] - WARN_SEV_ORDER[b.level] || a.i - b.i,
       );
-      const seenWarn = new Set();
+      const seenWarn = new Map();
+      /**
+       * Keep the first of each text; a repeat's locations go to it.
+       * @param {object} w - A leg warning entry.
+       * @returns {boolean} Whether to keep it.
+       */
       const uniqueWarns = legWarns.filter((w) => {
-        if (seenWarn.has(w.text)) return false;
-        seenWarn.add(w.text);
+        const kept = seenWarn.get(w.text);
+        if (kept) {
+          kept.at = kept.at.concat(w.at);
+          return false;
+        }
+        seenWarn.set(w.text, w);
         return true;
       });
       for (const w of uniqueWarns) {
@@ -1412,6 +1434,12 @@ function renderItinerary(itinerary) {
         const text = document.createElement("span");
         text.textContent = w.text;
         warn.append(sevBadge(w.level), text);
+        // Where it applies, as the server located it; any warning type with
+        // a location links up the same way.
+        if (w.at.length > 0 && client.hasCapability("map")) {
+          const at = w.at;
+          makeMapLink(warn, () => showLocationsOnMap(at));
+        }
         details.appendChild(warn);
       }
       if (uniqueWarns.length > 0) {
@@ -1528,34 +1556,12 @@ function renderItinerary(itinerary) {
           typeof cpos.longitude === "number" &&
           client.hasCapability("map")
         ) {
-          row.classList.add("crossing-link");
-          row.title = "Show on map";
-          row.tabIndex = 0;
-          row.setAttribute("role", "button");
-          /**
-           * Centre the host chart on this crossing. Not through run():
-           * panning must not block the panel or drop a second click while
-           * the first is still in flight.
-           * @param {Event} ev The click or keydown that asked for it.
-           */
-          const showOnMap = (ev) => {
-            ev.stopPropagation();
-            client
-              .call("map.center", {
-                position: [cpos.longitude, cpos.latitude],
-                zoom: 15,
-              })
-              .catch((e) =>
-                setStatus("route-status", e?.message || String(e), "error"),
-              );
-          };
-          row.addEventListener("click", showOnMap);
-          row.addEventListener("keydown", (ev) => {
-            if (ev.key === "Enter" || ev.key === " ") {
-              ev.preventDefault();
-              showOnMap(ev);
-            }
-          });
+          makeMapLink(row, () =>
+            client.call("map.center", {
+              position: [cpos.longitude, cpos.latitude],
+              zoom: 15,
+            }),
+          );
         }
         details.appendChild(row);
         // A span low enough to pass closed charges no wait; the server says
@@ -1579,6 +1585,123 @@ function renderItinerary(itinerary) {
     }
     ol.appendChild(li);
   }
+}
+
+/**
+ * Make an itinerary row a "Show on map" link, by click or keyboard. Not
+ * through run(): panning must not block the panel or drop a second click
+ * while the first is still in flight. The event stops here so a link inside
+ * a point header or leg does not also fold it.
+ *
+ * @param {HTMLElement} el - The row.
+ * @param {() => Promise<unknown>} go - Moves the host chart.
+ */
+function makeMapLink(el, go) {
+  el.classList.add("crossing-link");
+  el.title = "Show on map";
+  el.tabIndex = 0;
+  el.setAttribute("role", "button");
+  /**
+   * Move the chart; report a failure in the route status line.
+   * @param {Event} ev - The click or keydown that asked for it.
+   */
+  const show = (ev) => {
+    ev.stopPropagation();
+    go().catch((e) =>
+      setStatus("route-status", e?.message || String(e), "error"),
+    );
+  };
+  el.addEventListener("click", show);
+  /**
+   * Enter or Space acts like a click.
+   * @param {KeyboardEvent} ev - The key press.
+   */
+  el.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      show(ev);
+    }
+  });
+}
+
+/**
+ * Move the host chart to a warning's server locations: centre on a single
+ * point, else fit the chart to all of them. With `overlays.data` the
+ * stretches (and points) are also drawn on RouteIQ's highlight overlay.
+ *
+ * @param {Array<object>} at - The warning's `at` locations.
+ * @returns {Promise<unknown>}
+ */
+function showLocationsOnMap(at) {
+  highlight(at);
+  if (at.length === 1 && at[0].position) {
+    const { latitude, longitude } = at[0].position;
+    return client.call("map.center", {
+      position: [longitude, latitude],
+      zoom: 15,
+    });
+  }
+  let [w, s, e, n] = at[0].bounds;
+  for (const l of at) {
+    w = Math.min(w, l.bounds[0]);
+    s = Math.min(s, l.bounds[1]);
+    e = Math.max(e, l.bounds[2]);
+    n = Math.max(n, l.bounds[3]);
+  }
+  return client.call("map.fitBounds", { bounds: [w, s, e, n] });
+}
+
+/**
+ * Draw a warning's locations on the host's highlight overlay: a line along
+ * the route vertices of each stretch, a point for each point location. A
+ * failure only costs the highlight, never the chart move.
+ *
+ * @param {Array<object>} at - The warning's `at` locations.
+ */
+function highlight(at) {
+  if (!client.hasCapability("overlays.data")) return;
+  const features = [];
+  for (const l of at) {
+    if (l.position) {
+      features.push({
+        type: "Feature",
+        properties: {},
+        geometry: {
+          type: "Point",
+          coordinates: [l.position.longitude, l.position.latitude],
+        },
+      });
+      continue;
+    }
+    const line = routeVertices.slice(l.coordIndex, l.toCoordIndex + 1);
+    if (line.length > 1)
+      features.push({
+        type: "Feature",
+        properties: {},
+        geometry: { type: "LineString", coordinates: line },
+      });
+  }
+  highlightShown = features.length > 0;
+  client
+    .call("overlay.setData", {
+      overlayId: "highlight",
+      source: "hl",
+      data: { type: "FeatureCollection", features },
+    })
+    .catch(() => {});
+}
+
+/** Empty the highlight overlay, if anything is drawn on it. */
+function clearHighlight() {
+  if (!highlightShown || !client?.hasCapability("overlays.data")) return;
+  highlightShown = false;
+  client
+    .call("overlay.setData", {
+      overlayId: "highlight",
+      source: "hl",
+      data: { type: "FeatureCollection", features: [] },
+    })
+    .catch(() => {});
 }
 
 // Display order of the server's warning levels, worst first.
@@ -1635,6 +1758,7 @@ function makeLegToggle(head, leg, expanded) {
 
 function hideSummary() {
   $("summary").style.display = "none";
+  clearHighlight();
 }
 
 /* ---------- formatting ---------- */
