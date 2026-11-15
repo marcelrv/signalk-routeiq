@@ -2945,6 +2945,11 @@ export class RoutingEngine {
     return (dims.draft ?? 2.0) + this.config.safetyMarginDraft;
   }
 
+  /** Air draft plus mast clearance margin; an unknown air draft counts as 0. */
+  private requiredAirDraft(dims: VesselDimensions): number {
+    return (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft;
+  }
+
   /**
    * The depth under the keel at the moment the vessel is actually there:
    * charted depth plus however far the tide has risen. A charted depth is
@@ -3603,6 +3608,8 @@ export class RoutingEngine {
         requiredDepth: this.requiredDepth(dims),
         beam: dims.beam ?? 4.0,
         requiredWidth: (dims.beam ?? 4.0) + this.config.safetyMarginBeam,
+        // Same threshold as the via_constrained check in reportViolations.
+        requiredAirDraft: this.requiredAirDraft(dims),
       },
     );
     route.waypoints = waypoints;
@@ -4803,7 +4810,7 @@ export class RoutingEngine {
     const coords = result.features[0].geometry.coordinates;
     const segments = result.features[0].properties.segments!;
     const minDepth = this.requiredDepth(dims);
-    const airDraft = (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft;
+    const airDraft = this.requiredAirDraft(dims);
     // Beam is tested exactly as pathViolationMeters tests it. The two must
     // agree: that function decides a route is violating and may now be KEPT
     // anyway once maxPenaltyDetourRatio bounds the detour, so anything it
@@ -4889,17 +4896,17 @@ export class RoutingEngine {
         // exactly as it always has rather than acquiring unexplained wording.
         reasons.push(
           worstDepth - worstCharted >= RoutingEngine.TIDE_REPORT_MIN_RISE_M
-            ? `depth ${worstDepth.toFixed(1)}m at passage (${worstCharted.toFixed(1)}m charted) < required ${minDepth}m`
-            : `depth ${worstDepth.toFixed(1)}m < required ${minDepth}m`,
+            ? `depth ${worstDepth.toFixed(1)}m at passage (${worstCharted.toFixed(1)}m charted) < required ${minDepth.toFixed(1)}m`
+            : `depth ${worstDepth.toFixed(1)}m < required ${minDepth.toFixed(1)}m`,
         );
       }
       if (worstAirDraft < Infinity)
         reasons.push(
-          `air draft ${worstAirDraft.toFixed(1)}m < required ${airDraft}m`,
+          `air draft ${worstAirDraft.toFixed(1)}m < required ${airDraft.toFixed(1)}m`,
         );
       if (worstBeam < Infinity)
         reasons.push(
-          `width ${worstBeam.toFixed(1)}m < required beam ${minBeam}m`,
+          `width ${worstBeam.toFixed(1)}m < required beam ${minBeam.toFixed(1)}m`,
         );
       const distNm = totalViolationDist / 1852;
       warnings.push({

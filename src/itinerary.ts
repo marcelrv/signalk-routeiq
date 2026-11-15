@@ -306,6 +306,8 @@ export interface VesselNeeds {
   requiredDepth: number; // draft + safetyMarginDraft
   beam: number;
   requiredWidth: number; // beam + safetyMarginBeam
+  /** airDraft + safetyMarginAirDraft; absent: no clearance warnings. */
+  requiredAirDraft?: number;
 }
 
 /**
@@ -314,19 +316,31 @@ export interface VesselNeeds {
  * Shallow: charted depth under `requiredDepth`. If the tide at the time of
  * passage brings it back to `requiredDepth` or more, it is a caution (check
  * the timing), else a danger. Narrow: under the beam itself is a danger,
- * under beam + margin a caution.
+ * under beam + margin a caution. Low clearance: a fixed clearance under
+ * `requiredAirDraft` is a danger, the same test (and level) as shallow water
+ * the tide does not cure — the route-level `via_constrained` warning counts it
+ * exactly so.
  *
  * `minDepthAtPassage` is the leg's unrounded worst depth at passage, or
  * undefined when no tide was applied. `at` holds where on the leg each one
  * applies, attached as the warning's `at`.
  */
 export function legWarnings(
-  agg: { minDepth?: number; minDepthAtPassage?: number; minWidth?: number },
+  agg: {
+    minDepth?: number;
+    minDepthAtPassage?: number;
+    minWidth?: number;
+    maxAirDraft?: number;
+  },
   vessel: VesselNeeds,
-  at: { shallow?: RouteLocation[]; narrow?: RouteLocation[] } = {},
+  at: {
+    shallow?: RouteLocation[];
+    narrow?: RouteLocation[];
+    lowClearance?: RouteLocation[];
+  } = {},
 ): LegWarning[] {
   const out: LegWarning[] = [];
-  const { minDepth, minDepthAtPassage, minWidth } = agg;
+  const { minDepth, minDepthAtPassage, minWidth, maxAirDraft } = agg;
   if (minDepth !== undefined && minDepth < vessel.requiredDepth) {
     const tideAdds =
       minDepthAtPassage !== undefined && minDepthAtPassage > minDepth;
@@ -340,7 +354,7 @@ export function legWarnings(
       ...(tideAdds
         ? { minDepthAtPassage: Math.round(minDepthAtPassage * 100) / 100 }
         : {}),
-      requiredDepth: vessel.requiredDepth,
+      requiredDepth: round2(vessel.requiredDepth),
       message: tideAdds
         ? `Shallow (${minDepth.toFixed(1)}m charted, ${minDepthAtPassage.toFixed(1)}m at passage)`
         : `Shallow (${minDepth.toFixed(1)}m)`,
@@ -353,13 +367,35 @@ export function legWarnings(
       level: minWidth < vessel.beam ? "danger" : "caution",
       minWidth,
       beam: vessel.beam,
-      requiredWidth: vessel.requiredWidth,
+      requiredWidth: round2(vessel.requiredWidth),
       message: `Narrow (${minWidth.toFixed(1)}m)`,
       ...(at.narrow && at.narrow.length > 0 ? { at: at.narrow } : {}),
     });
   }
+  const requiredAirDraft = vessel.requiredAirDraft;
+  if (
+    requiredAirDraft !== undefined &&
+    maxAirDraft !== undefined &&
+    maxAirDraft < requiredAirDraft
+  ) {
+    out.push({
+      type: "low_clearance",
+      level: "danger",
+      maxAirDraft,
+      requiredAirDraft: round2(requiredAirDraft),
+      message: `Low clearance (${maxAirDraft.toFixed(1)}m, need ${requiredAirDraft.toFixed(1)}m)`,
+      ...(at.lowClearance && at.lowClearance.length > 0
+        ? { at: at.lowClearance }
+        : {}),
+    });
+  }
   // Danger before caution; a stable sort keeps shallow before narrow.
   return out.sort((a, b) => levelRank(a.level) - levelRank(b.level));
+}
+
+/** Margins are added in floating point (16.06 + 1 = 17.060000000000002). */
+function round2(m: number): number {
+  return Math.round(m * 100) / 100;
 }
 
 function levelRank(level: LegWarning["level"]): number {
@@ -380,7 +416,8 @@ export interface ItineraryResult {
  * @param via        the user's via points, marked as itinerary entries
  * @param toleranceM Douglas-Peucker tolerance for the navigable waypoints
  * @param vessel     what the vessel needs; when given, legs too shallow or
- *                   narrow for it carry `leg.warnings`
+ *                   narrow for it, or under a clearance too low, carry
+ *                   `leg.warnings`
  */
 export function buildItinerary(
   coords: LonLat[],
@@ -512,6 +549,7 @@ export function buildItinerary(
       // legWarnings applies to the leg minimum.
       const shallowRuns = new RunCollector(coords, cum);
       const narrowRuns = new RunCollector(coords, cum);
+      const lowClearanceRuns = new RunCollector(coords, cum);
       for (let s = idx; s < nextIdx && s < segments.length; s++) {
         const seg = segments[s];
         if (!seg) continue;
@@ -528,6 +566,13 @@ export function buildItinerary(
             seg.minWidth < vessel.requiredWidth
           )
             narrowRuns.add(s);
+          if (
+            vessel.requiredAirDraft !== undefined &&
+            typeof seg.maxAirDraft === "number" &&
+            seg.maxAirDraft >= 0 &&
+            seg.maxAirDraft < vessel.requiredAirDraft
+          )
+            lowClearanceRuns.add(s);
         }
         legDistance += seg.distance ?? 0;
         if (typeof seg.minDepth === "number" && seg.minDepthKnown) {
@@ -594,9 +639,14 @@ export function buildItinerary(
             ...(minDepth < Infinity ? { minDepth } : {}),
             ...(minDepthAtPassage < Infinity ? { minDepthAtPassage } : {}),
             ...(minWidth < Infinity ? { minWidth } : {}),
+            ...(maxAirDraft < Infinity ? { maxAirDraft } : {}),
           },
           vessel,
-          { shallow: shallowRuns.close(), narrow: narrowRuns.close() },
+          {
+            shallow: shallowRuns.close(),
+            narrow: narrowRuns.close(),
+            lowClearance: lowClearanceRuns.close(),
+          },
         );
         if (warnings.length > 0) point.leg.warnings = warnings;
       }

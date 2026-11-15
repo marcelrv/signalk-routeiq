@@ -752,6 +752,23 @@ describe('leg warnings', () => {
     assert.strictEqual(legWarnings({ minWidth: 5.9 }, vessel)[0].level, 'caution');
   });
 
+  it('a clearance under the air draft plus margin is a danger, like shallow water', () => {
+    // 16.06 + 1.0 in floating point: the payload carries it rounded.
+    const tall = { ...vessel, requiredAirDraft: 16.06 + 1.0 };
+    assert.deepStrictEqual(legWarnings({ maxAirDraft: 6.7 }, tall), [
+      {
+        type: 'low_clearance',
+        level: 'danger',
+        maxAirDraft: 6.7,
+        requiredAirDraft: 17.06,
+        message: 'Low clearance (6.7m, need 17.1m)',
+      },
+    ]);
+    assert.deepStrictEqual(legWarnings({ maxAirDraft: 17.06 + 0.01 }, tall), []);
+    // Without a required air draft there is nothing to test against.
+    assert.deepStrictEqual(legWarnings({ maxAirDraft: 6.7 }, vessel), []);
+  });
+
   it('lists the worst first', () => {
     const ws = legWarnings({ minDepth: 1.5, minDepthAtPassage: 2.5, minWidth: 3 }, vessel);
     assert.deepStrictEqual(ws.map((w) => [w.type, w.level]), [['narrow', 'danger'], ['shallow', 'caution']]);

@@ -214,6 +214,11 @@ export type LegWarning =
       minWidth: number;
       beam: number;
       requiredWidth: number; // beam + safetyMarginBeam
+    })
+  | (WarningBase & {
+      type: "low_clearance";
+      maxAirDraft: number; // lowest charted clearance on the leg
+      requiredAirDraft: number; // airDraft + safetyMarginAirDraft
     });
 
 // A warning on a stretch of the route, from the routing database's metadata.
