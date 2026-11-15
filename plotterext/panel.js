@@ -767,18 +767,23 @@ async function attachPassageProfile(params) {
   const session = params?.routeId ? sessions.get(params.routeId) : null;
   if (!session?.result || !params.href) return "";
   if (session.profiledRev === params.rev) return "";
-  session.profiledRev = params.rev;
   try {
     const resp = await fetch(API + "/route/profile", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ href: params.href, route: session.result }),
     });
+    // Only a final answer settles this rev; a failure is tried again on the
+    // next route.saved for it.
+    if (resp.ok || resp.status === 409) session.profiledRev = params.rev;
     if (resp.ok) return " with its passage timing";
     if (resp.status === 409)
       return " — timing not attached (route edited after calculation)";
-    if (resp.status === 404) return ""; // older server: no such endpoint
     const err = await resp.json().catch(() => ({}));
+    // A 404 without a reason is the endpoint itself missing: an older server.
+    if (resp.status === 404 && err.reason !== "routeNotFound") return "";
+    if (resp.status === 401 || resp.status === 403)
+      return " — timing not attached: log into Signal K with write access";
     return " — timing not attached: " + (err.error || resp.status);
   } catch (e) {
     return " — timing not attached: " + (e?.message || e);

@@ -975,8 +975,10 @@ export class ApiHandler {
   private async handleAttachPassageProfile(
     req: Request,
     res: Response,
-    next: NextFunction,
   ): Promise<void> {
+    // It rewrites a stored resource with the plugin's own rights, which skip
+    // the resources ACL, so the caller has to be allowed to write.
+    if (!this.requireWriteAuth(req, res)) return;
     try {
       const href: unknown = req.body?.href;
       const route: RouteResult | undefined = req.body?.route;
@@ -1012,7 +1014,11 @@ export class ApiHandler {
           any
         >;
       } catch {
-        res.status(404).json({ error: `Route ${id} not found` });
+        // `reason` tells this apart from a 404 for the endpoint itself (an
+        // older server), which the panel ignores.
+        res
+          .status(404)
+          .json({ error: `Route ${id} not found`, reason: "routeNotFound" });
         return;
       }
       const coords = stored?.feature?.geometry?.coordinates;
@@ -1048,7 +1054,8 @@ export class ApiHandler {
       res
         .status(500)
         .json({ error: `Failed to attach passage profile: ${message}` });
-      next(error);
+      // No next(error): the response is sent, and Express would drop the
+      // connection under it.
     }
   }
 
@@ -1325,6 +1332,27 @@ export class ApiHandler {
     }
     if (skReq.skPrincipal && skReq.skPrincipal.permissions !== "admin") {
       res.status(403).json({ error: "Admin permission required." });
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Auth check for writes to the user's own Signal K resources (a saved
+   * route): a logged-in user with write access, not necessarily an admin.
+   * Same middleware fields as requireAuth.
+   */
+  private requireWriteAuth(req: Request, res: Response): boolean {
+    const skReq = req as unknown as SkAuthedRequest;
+    if (skReq.skIsAuthenticated !== true) {
+      res.status(401).json({
+        error: "Authentication required. Please log into Signal K.",
+      });
+      return false;
+    }
+    const permissions = skReq.skPrincipal?.permissions;
+    if (permissions && permissions !== "admin" && permissions !== "readwrite") {
+      res.status(403).json({ error: "Write permission required." });
       return false;
     }
     return true;

@@ -147,8 +147,10 @@ export function buildPassageProfile(
   const bridgeMin = finiteOrNull(a?.bridgeWaitMinutes);
   const isoOrNull = (v: unknown): string | null =>
     typeof v === "string" && Number.isFinite(Date.parse(v)) ? v : null;
-  // Dated only when the server said both ends: a plan without a departure
-  // time is undated, not "leaving now".
+  // Dated only when the server said both ends. The server dates a plan only
+  // when it used tides, and then the times were worked out for that departure
+  // (the requested one, or the time of calculating when none was given); a
+  // plan without tides has no departure and is undated, not "leaving now".
   const departure = isoOrNull(route.departureTime);
   const arrival = departure ? isoOrNull(route.arrivalTime) : null;
 

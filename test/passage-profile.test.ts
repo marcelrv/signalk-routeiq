@@ -154,7 +154,13 @@ describe('POST /route/profile', () => {
     return { router, writes };
   }
 
-  function post(router: Router, body: unknown): Promise<{ status: number; body: any }> {
+  const writer = { skIsAuthenticated: true, skPrincipal: { permissions: 'readwrite' } };
+
+  function post(
+    router: Router,
+    body: unknown,
+    auth: object = writer,
+  ): Promise<{ status: number; body: any }> {
     return new Promise((resolve, reject) => {
       const url = '/route/profile';
       const res: any = {
@@ -169,7 +175,7 @@ describe('POST /route/profile', () => {
         end: () => resolve({ status: res.statusCode, body: undefined }),
       };
       (router as any)(
-        { method: 'POST', url, path: url, originalUrl: '/router' + url, headers: {}, query: {}, body },
+        { method: 'POST', url, path: url, originalUrl: '/router' + url, headers: {}, query: {}, body, ...auth },
         res,
         (err?: unknown) => reject(err instanceof Error ? err : new Error('no handler')),
       );
@@ -216,9 +222,26 @@ describe('POST /route/profile', () => {
 
   it('answers 404 for an unknown route and 400 for a bad href', async () => {
     const { router, writes } = setup(storedRoute(coordsOf(waypoints)));
-    assert.strictEqual((await post(router, { href: 'nope', route: calculated() })).status, 404);
+    const missing = await post(router, { href: 'nope', route: calculated() });
+    assert.strictEqual(missing.status, 404);
+    assert.strictEqual(missing.body.reason, 'routeNotFound', 'told apart from a missing endpoint');
     assert.strictEqual((await post(router, { href: '../x/y', route: calculated() })).status, 400);
     assert.strictEqual(writes.length, 0);
+  });
+
+  it('needs a logged-in user with write access', async () => {
+    const { router, writes } = setup(storedRoute(coordsOf(waypoints)));
+    const body = { href: 'r1', route: calculated() };
+    assert.strictEqual((await post(router, body, {})).status, 401);
+    assert.strictEqual(
+      (await post(router, body, { skIsAuthenticated: true, skPrincipal: { permissions: 'readonly' } })).status,
+      403,
+    );
+    assert.strictEqual(
+      (await post(router, body, { skIsAuthenticated: true, skPrincipal: { permissions: 'admin' } })).status,
+      200,
+    );
+    assert.strictEqual(writes.length, 1);
   });
 });
 

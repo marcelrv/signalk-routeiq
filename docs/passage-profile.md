@@ -97,7 +97,7 @@ If the result differs from `geometry.hash`, or `pointCount` differs from the num
 RouteIQ never writes a profile for geometry that is not its own calculation:
 
 - **Webapp**: `POST /signalk/v1/api/router/push` writes the route and its profile together, hashed over the coordinates it saves (the simplified waypoints).
-- **Freeboard-SK panel**: the host saves the route. When the host reports `route.saved`, the panel sends the calculated result to `POST /signalk/v1/api/router/route/profile` with `{ href, route }`. The server reads the stored route and attaches the profile only if the stored geometry matches the calculated one. Otherwise it answers `409` and leaves the resource unchanged. If the route is saved again after an edit, the host either drops the profile or keeps one whose hash no longer matches. Either way, a reader can tell.
+- **Freeboard-SK panel**: the host saves the route. When the host reports `route.saved`, the panel sends the calculated result to `POST /signalk/v1/api/router/route/profile` with `{ href, route }`. The server reads the stored route and attaches the profile only if the stored geometry matches the calculated one. Otherwise it answers `409` and leaves the resource unchanged. The caller must be logged in with write access (`401`/`403` otherwise), since the server writes the resource with its own rights. An unknown route answers `404` with `reason: "routeNotFound"`. If the route is saved again after an edit, the host either drops the profile or keeps one whose hash no longer matches. Either way, a reader can tell.
 
 A route without calculated times, such as one from an older RouteIQ version, has no `passageProfile`.
 
