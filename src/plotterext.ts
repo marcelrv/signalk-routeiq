@@ -53,6 +53,41 @@ function readPluginVersion(plugindir: string): string {
 // chosen target from its handshake or the action.invoked event.
 const OPEN_PANEL = { type: "openPanel", panel: "routeiq-panel" } as const;
 
+/** Id of the data overlay the panel draws a picked warning's stretch on. */
+export const HIGHLIGHT_OVERLAY = "highlight";
+
+// The panel fills the `hl` source (overlay.setData) with the stretches of the
+// warning the user picked: lines for stretches, points for a bridge or lock.
+// Same yellow as the webapp's picked-crossing ring.
+const HIGHLIGHT_STYLE = {
+  version: 8,
+  sources: {
+    hl: { type: "geojson", data: { type: "FeatureCollection", features: [] } },
+  },
+  layers: [
+    {
+      id: "hl-line",
+      type: "line",
+      source: "hl",
+      filter: ["==", ["geometry-type"], "LineString"],
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#facc15", "line-width": 8, "line-opacity": 0.85 },
+    },
+    {
+      id: "hl-point",
+      type: "circle",
+      source: "hl",
+      filter: ["==", ["geometry-type"], "Point"],
+      paint: {
+        "circle-radius": 14,
+        "circle-color": "rgba(0,0,0,0)",
+        "circle-stroke-color": "#facc15",
+        "circle-stroke-width": 4,
+      },
+    },
+  ],
+};
+
 export function buildManifest(version: string) {
   return {
     name: "RouteIQ",
@@ -66,7 +101,7 @@ export function buildManifest(version: string) {
     // Used when present, degraded gracefully when not. Unknown ids here are
     // ignored by a host, whereas an unknown id in `requires` would make the
     // extension incompatible — so every newer capability belongs here.
-    optional: ["map", "units", "actions", "map.pick"],
+    optional: ["map", "units", "actions", "map.pick", "overlays.data"],
     buttons: [
       {
         id: "open-routeiq",
@@ -85,6 +120,19 @@ export function buildManifest(version: string) {
         // keepAlive: route selection, last result and the revert buffer
         // survive closing/reopening the drawer.
         lifecycle: "keepAlive",
+      },
+    ],
+    // Where a warning picked in the panel applies (capability
+    // `overlays.data`; a host without it omits the overlay). Above routes, so
+    // the highlight shows over the route line it marks.
+    overlays: [
+      {
+        id: HIGHLIGHT_OVERLAY,
+        title: "RouteIQ highlight",
+        type: "data",
+        band: "aboveResources",
+        visible: true,
+        style: HIGHLIGHT_STYLE,
       },
     ],
     // Chart context-menu / popover commands (capability `actions`). They only

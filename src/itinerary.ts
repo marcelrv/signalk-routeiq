@@ -19,6 +19,7 @@ import {
   ItineraryPoint,
   LegWarning,
   RouteCrossing,
+  RouteLocation,
   RouteWaypoint,
 } from "./types.js";
 
@@ -190,6 +191,116 @@ export function closestCoordIndex(
   return best;
 }
 
+/** [west, south, east, north] of route vertices from..to (inclusive). */
+function vertexBounds(
+  coords: LonLat[],
+  from: number,
+  to: number,
+): [number, number, number, number] {
+  let w = Infinity,
+    s = Infinity,
+    e = -Infinity,
+    n = -Infinity;
+  for (let i = from; i <= to && i < coords.length; i++) {
+    const [lon, lat] = coords[i];
+    if (lon < w) w = lon;
+    if (lon > e) e = lon;
+    if (lat < s) s = lat;
+    if (lat > n) n = lat;
+  }
+  return [w, s, e, n];
+}
+
+/**
+ * The location of a run of route segments firstSeg..lastSeg (segment i spans
+ * vertex i to i+1), for a warning's `at`.
+ *
+ * @param cum cumulative distance at every vertex (cumulativeDistances)
+ */
+export function locationFromRun(
+  coords: LonLat[],
+  cum: number[],
+  firstSeg: number,
+  lastSeg: number,
+): RouteLocation {
+  const to = Math.min(lastSeg + 1, coords.length - 1);
+  return {
+    coordIndex: firstSeg,
+    toCoordIndex: to,
+    distanceFromStart: Math.round(cum[firstSeg]),
+    distance: Math.round(cum[to] - cum[firstSeg]),
+    bounds: vertexBounds(coords, firstSeg, to),
+  };
+}
+
+/**
+ * The part of `loc` between route vertices from..to, or null when they do not
+ * overlap. Used to cut a warning's location down to one itinerary leg.
+ *
+ * A point (coordIndex === toCoordIndex, a bridge or lock) cannot be cut: it
+ * is kept whole, with its `position`, on the leg it falls in. Like a
+ * crossing, a point on a leg boundary belongs to the leg it starts, so it is
+ * listed once — except at the route's last vertex, where there is no next
+ * leg to carry it.
+ */
+export function clipLocation(
+  coords: LonLat[],
+  cum: number[],
+  loc: RouteLocation,
+  from: number,
+  to: number,
+): RouteLocation | null {
+  if (loc.coordIndex === loc.toCoordIndex) {
+    const closedEnd = to >= coords.length - 1;
+    const inside =
+      loc.coordIndex >= from &&
+      (closedEnd ? loc.coordIndex <= to : loc.coordIndex < to);
+    return inside ? loc : null;
+  }
+  const a = Math.max(from, loc.coordIndex);
+  const b = Math.min(to, loc.toCoordIndex);
+  if (b <= a) return null;
+  if (a === loc.coordIndex && b === loc.toCoordIndex) return loc;
+  return locationFromRun(coords, cum, a, b - 1);
+}
+
+/**
+ * Collects runs of segment indices into locations. Call `add` with
+ * non-decreasing segment indices (a repeat is fine: several graph edges can
+ * make up one route segment); a gap closes the open run.
+ */
+export class RunCollector {
+  readonly out: RouteLocation[] = [];
+  private first = -1;
+  private last = -1;
+  /**
+   * @param coords route vertices as [lon, lat]
+   * @param cum    cumulative distance at every vertex
+   */
+  constructor(
+    private coords: LonLat[],
+    private cum: number[],
+  ) {}
+  /** Add a segment: extends the open run, or closes it and opens a new one. */
+  add(seg: number): void {
+    if (this.first >= 0 && (seg === this.last || seg === this.last + 1)) {
+      this.last = seg;
+      return;
+    }
+    this.close();
+    this.first = this.last = seg;
+  }
+  /** Close the open run, if any; returns every location collected. */
+  close(): RouteLocation[] {
+    if (this.first >= 0)
+      this.out.push(
+        locationFromRun(this.coords, this.cum, this.first, this.last),
+      );
+    this.first = this.last = -1;
+    return this.out;
+  }
+}
+
 /** What the vessel the route was planned for needs, in meters. */
 export interface VesselNeeds {
   requiredDepth: number; // draft + safetyMarginDraft
@@ -206,11 +317,13 @@ export interface VesselNeeds {
  * under beam + margin a caution.
  *
  * `minDepthAtPassage` is the leg's unrounded worst depth at passage, or
- * undefined when no tide was applied.
+ * undefined when no tide was applied. `at` holds where on the leg each one
+ * applies, attached as the warning's `at`.
  */
 export function legWarnings(
   agg: { minDepth?: number; minDepthAtPassage?: number; minWidth?: number },
   vessel: VesselNeeds,
+  at: { shallow?: RouteLocation[]; narrow?: RouteLocation[] } = {},
 ): LegWarning[] {
   const out: LegWarning[] = [];
   const { minDepth, minDepthAtPassage, minWidth } = agg;
@@ -231,6 +344,7 @@ export function legWarnings(
       message: tideAdds
         ? `Shallow (${minDepth.toFixed(1)}m charted, ${minDepthAtPassage.toFixed(1)}m at passage)`
         : `Shallow (${minDepth.toFixed(1)}m)`,
+      ...(at.shallow && at.shallow.length > 0 ? { at: at.shallow } : {}),
     });
   }
   if (minWidth !== undefined && minWidth < vessel.requiredWidth) {
@@ -241,6 +355,7 @@ export function legWarnings(
       beam: vessel.beam,
       requiredWidth: vessel.requiredWidth,
       message: `Narrow (${minWidth.toFixed(1)}m)`,
+      ...(at.narrow && at.narrow.length > 0 ? { at: at.narrow } : {}),
     });
   }
   // Danger before caution; a stable sort keeps shallow before narrow.
@@ -342,6 +457,10 @@ export function buildItinerary(
 
   const indices = [...entries.keys()].sort((a, b) => a - b);
 
+  /**
+   * One itinerary point at route vertex `idx`, with the aggregates (and the
+   * warnings, when the vessel is known) of the leg to the next point.
+   */
   const itinerary: ItineraryPoint[] = indices.map((idx, i) => {
     const [lon, lat] = coords[idx];
     const point: ItineraryPoint = {
@@ -386,9 +505,27 @@ export function buildItinerary(
       let hasSeconds = false;
       let currentWeighted = 0;
       let currentDist = 0;
+      // Where on the leg it is too shallow / too narrow, by the same tests
+      // legWarnings applies to the leg minimum.
+      const shallowRuns = new RunCollector(coords, cum);
+      const narrowRuns = new RunCollector(coords, cum);
       for (let s = idx; s < nextIdx && s < segments.length; s++) {
         const seg = segments[s];
         if (!seg) continue;
+        if (vessel) {
+          if (
+            typeof seg.minDepth === "number" &&
+            seg.minDepthKnown &&
+            seg.minDepth < vessel.requiredDepth
+          )
+            shallowRuns.add(s);
+          if (
+            typeof seg.minWidth === "number" &&
+            seg.minWidth >= 0 &&
+            seg.minWidth < vessel.requiredWidth
+          )
+            narrowRuns.add(s);
+        }
         legDistance += seg.distance ?? 0;
         if (typeof seg.minDepth === "number" && seg.minDepthKnown) {
           minDepth = Math.min(minDepth, seg.minDepth);
@@ -456,6 +593,7 @@ export function buildItinerary(
             ...(minWidth < Infinity ? { minWidth } : {}),
           },
           vessel,
+          { shallow: shallowRuns.close(), narrow: narrowRuns.close() },
         );
         if (warnings.length > 0) point.leg.warnings = warnings;
       }

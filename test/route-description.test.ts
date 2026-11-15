@@ -200,6 +200,13 @@ describe('route description from a routing database', () => {
       const notices = d[1].warnings.filter(w => w.type === 'notice');
       assert.strictEqual(notices.length, 1);
       assert.strictEqual((notices[0] as any).text, 'Shallow, depth unknown');
+      // Where each applies: the notice on the last edge only, the Meer's
+      // sequence-wide warnings on the whole of it.
+      const at = (w: any) => w.at.map((l: any) => [l.coordIndex, l.toCoordIndex]);
+      assert.deepStrictEqual(at(notices[0]), [[4, 5]]);
+      const quality = d[1].warnings.find(w => w.type === 'depth_quality')!;
+      assert.deepStrictEqual(at(quality), [[3, 5]]);
+      assert.deepStrictEqual(quality.at![0].bounds, [LONS[3], LAT, LONS[5], LAT]);
     } finally {
       await db.close();
     }
@@ -211,6 +218,15 @@ describe('route description from a routing database', () => {
       const legs = route.itinerary!.filter(p => p.leg);
       const waters = legs.flatMap(p => p.leg!.waters ?? []);
       assert.deepStrictEqual(waters.map(w => w.name), ['Kanaal', 'Meer']);
+      // Every warning on a water says where it is, inside its own leg.
+      for (const p of legs) {
+        const next = route.itinerary![route.itinerary!.indexOf(p) + 1];
+        for (const w of (p.leg!.waters ?? []).flatMap(x => x.warnings)) {
+          assert.ok(w.at && w.at.length > 0, `${w.type} has no location`);
+          for (const l of w.at!)
+            assert.ok(l.coordIndex >= p.coordIndex && l.toCoordIndex <= next.coordIndex);
+        }
+      }
       const sum = waters.reduce((t, w) => t + w.distance, 0);
       assert.ok(Math.abs(sum - route.totalDistance!) < 3);
     } finally {
@@ -421,6 +437,45 @@ describe('buildRouteDescription / attachWaters (pure)', () => {
     attachWaters(it, [w(1, 'Maas', 0, 400), w(undefined, undefined, 400, 100), w(1, 'Maas', 500, 500)]);
     assert.deepStrictEqual(it[0].leg.waters.map((x: any) => [x.name, x.distance]), [['Maas', 400], ['Maas', 500]]);
     // Top-level description is not touched by this.
+  });
+
+  it('locates warnings by route segment, splits at gaps, and clips them to each itinerary leg', () => {
+    // Six route segments along lat 52; graph edges: segment 1 is two edges.
+    const coords: Array<[number, number]> = [0, 1, 2, 3, 4, 5, 6].map(i => [5 + i * 0.01, 52]);
+    const cum = coords.map((_, i) => i * 100);
+    const units = [0, 1, 1, 2, 3, 4, 5].map(seg => ({ distance: seg === 1 ? 50 : 100, seg }));
+    const notice = { severity: 1, text: 'Mind the weir', name: null };
+    const described = {
+      perPair: [{ seq: 1 }, { seq: 1, notices: [9] }, { seq: 1, notices: [9] }, { seq: 1 }, { seq: 1, notices: [9] }, { seq: 1, notices: [9] }, { seq: 1 }],
+      sequences: { '1': { waterBodyId: 7, origin: 'pipeline', originWarn: false, depthQuality: 'charted', depthQualityWarn: false } },
+      waterBodies: { '7': { name: 'Maas', kind: 'river' } },
+      notices: { '9': notice },
+    };
+    const d = buildRouteDescription(units, described, { coords, cum })!;
+    const w = d[0].warnings[0];
+    // Segment 1 (both its edges), then a gap, then segments 3-4.
+    assert.deepStrictEqual(w.at!.map(l => [l.coordIndex, l.toCoordIndex, l.distanceFromStart, l.distance]), [[1, 2, 100, 100], [3, 5, 300, 200]]);
+
+    // Turn at vertex 4: the second stretch is cut in two, and neither part
+    // touches the stretch on the other leg.
+    const itinerary: any[] = [
+      { kind: 'start', distanceFromStart: 0, coordIndex: 0, leg: { distance: 400 } },
+      { kind: 'turn', distanceFromStart: 400, coordIndex: 4, leg: { distance: 200 } },
+      { kind: 'end', distanceFromStart: 600, coordIndex: 6 },
+    ];
+    attachWaters(itinerary, d, { coords, cum });
+    const at = (i: number) => itinerary[i].leg.waters[0].warnings[0].at.map((l: any) => [l.coordIndex, l.toCoordIndex]);
+    assert.deepStrictEqual(at(0), [[1, 2], [3, 4]]);
+    assert.deepStrictEqual(at(1), [[4, 5]]);
+    // The description itself is left whole.
+    assert.strictEqual(d[0].warnings[0].at!.length, 2);
+
+    // A warning located only on the first leg is not listed on the second.
+    const only = buildRouteDescription(units, { ...described, perPair: described.perPair.map((p, i) => (i < 3 ? p : { seq: 1 })) }, { coords, cum })!;
+    const it2: any[] = itinerary.map(p => ({ ...p, leg: p.leg && { distance: p.leg.distance } }));
+    attachWaters(it2, only, { coords, cum });
+    assert.strictEqual(it2[0].leg.waters[0].warnings.length, 1);
+    assert.strictEqual(it2[1].leg.waters[0].warnings.length, 0);
   });
 
   it('returns undefined when nothing has a name or a warning', () => {

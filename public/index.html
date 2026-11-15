@@ -782,8 +782,12 @@ html, body { height: 100%; font-family: 'Segoe UI', system-ui, -apple-system, sa
   box-shadow: inset 3px 0 0 #facc15;
 }
 .route-node .node-crossing-icon.crossing-link,
-.route-leg .leg-crossing.crossing-link {
+.route-leg .leg-crossing.crossing-link,
+.route-leg .leg-warn.warn-link {
   cursor: pointer;
+}
+.route-leg .leg-warn.warn-link .leg-warn-text {
+  text-decoration: underline dotted;
 }
 
 /* severity badges (CSS-drawn so they look the same on old plotter browsers) */

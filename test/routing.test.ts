@@ -353,7 +353,7 @@ describe('RoutingEngine', () => {
 });
 
 describe('Itinerary', async () => {
-  const { simplifyIndices, buildItinerary } = await import('../dist/itinerary.js');
+  const { simplifyIndices, buildItinerary, clipLocation } = await import('../dist/itinerary.js');
 
   // L-shaped route: 10 segments due east along lat 52.0 (lon 4.00→4.10),
   // then 5 segments due north along lon 4.10 (lat 52.00→52.05).
@@ -422,6 +422,50 @@ describe('Itinerary', async () => {
     assert.strictEqual(itinerary[1].leg!.warnings, undefined);
     const plain = buildItinerary(coords, segments, [], [], 30);
     assert.strictEqual(plain.itinerary[0].leg!.warnings, undefined);
+  });
+
+  it('locates each shallow/narrow run on the leg in `at`', () => {
+    const vessel = { requiredDepth: 4.0, beam: 4.0, requiredWidth: 6.0 };
+    // Shallow on segments 1-2 and 5, narrow on 7; all on the first leg.
+    const segs = segments.map((s, i) => ({
+      ...s,
+      minDepth: [1, 2, 5].includes(i) ? 2.0 : i < 10 ? 8.0 : -1,
+      minDepthKnown: i < 10,
+      minWidth: i === 7 ? 5.0 : 50,
+    }));
+    const { itinerary } = buildItinerary(coords, segs, [], [], 30, vessel);
+    const byType = Object.fromEntries(itinerary[0].leg!.warnings!.map((w) => [w.type, w]));
+    assert.deepStrictEqual(
+      byType.shallow.at!.map((l) => [l.coordIndex, l.toCoordIndex, l.distanceFromStart, l.distance]),
+      [[1, 3, 700, 1400], [5, 6, 3500, 700]],
+    );
+    assert.deepStrictEqual(byType.shallow.at![0].bounds, [4.01, 52.0, 4.03, 52.0]);
+    assert.deepStrictEqual(byType.narrow.at!.map((l) => [l.coordIndex, l.toCoordIndex]), [[7, 8]]);
+    assert.strictEqual(byType.narrow.at![0].position, undefined);
+  });
+
+  it('keeps a point location whole when it is clipped to a leg', () => {
+    // A point (a bridge, lock or other POI): coordIndex === toCoordIndex, so
+    // there is nothing to cut. It belongs to the leg it starts, once.
+    const cum = coords.map((_, i) => i * 100);
+    const bridge = {
+      coordIndex: 4,
+      toCoordIndex: 4,
+      distanceFromStart: 400,
+      distance: 0,
+      bounds: [coords[4][0], coords[4][1], coords[4][0], coords[4][1]] as [number, number, number, number],
+      position: { latitude: coords[4][1], longitude: coords[4][0] },
+    };
+    // Inside the leg, and at the vertex the leg starts from.
+    assert.strictEqual(clipLocation(coords, cum, bridge, 2, 7), bridge);
+    assert.strictEqual(clipLocation(coords, cum, bridge, 4, 7), bridge);
+    // At the far end it belongs to the next leg, not this one...
+    assert.strictEqual(clipLocation(coords, cum, bridge, 0, 4), null);
+    assert.strictEqual(clipLocation(coords, cum, bridge, 5, 9), null);
+    // ...unless that end is the route's last vertex, where there is no next.
+    const last = coords.length - 1;
+    const end = { ...bridge, coordIndex: last, toCoordIndex: last };
+    assert.strictEqual(clipLocation(coords, cum, end, last - 3, last), end);
   });
 
   it('marks via points with their request index', () => {

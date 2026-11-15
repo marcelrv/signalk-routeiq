@@ -141,6 +141,25 @@ sent.
   `caution` at 1 and `danger` at 2 (depth) and 3 (prohibited); `depth_quality`
   is `info`, or `caution` when the depth is unknown; `origin` is a `caution`.
 
+### Where a warning applies: `at`
+
+Any of these warnings may also carry `at`, a list of route locations in
+route order, so a client can show it on the map without working anything out
+from the geometry:
+
+```json
+{ "coordIndex": 12, "toCoordIndex": 15, "distanceFromStart": 8420,
+  "distance": 610, "bounds": [5.71, 51.84, 5.72, 51.85] }
+```
+
+`coordIndex`..`toCoordIndex` are route vertices, numbered like the itinerary's
+`coordIndex` (feature k runs from vertex k to k+1); `bounds` is
+`[west, south, east, north]`. A point, such as a bridge, has
+`coordIndex === toCoordIndex` and a `position`. A shallow or narrow warning
+lists each run of the leg that is too shallow or too narrow; a water warning
+lists the part of the leg its sequence or notice covers. Both bundled UIs make
+any warning with `at` clickable, whatever its `type`.
+
 ## License
 
 Apache License 2.0 - see LICENSE file for details
