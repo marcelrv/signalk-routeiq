@@ -537,7 +537,7 @@ describe('one crossing per whole (parent_id grouping)', () => {
   };
   /** Run detectRouteStructures (an unknown stretch: the geometric fallback) for a route along `lon`, with `parts` and `wholes` as the database holds them. */
   const detect = async (parts: Part[], wholes: Whole[], lon: number) => {
-    const engine = Object.create(RoutingEngine.prototype) as any;
+    const engine = Object.create(RoutingEngine.prototype) as StubEngine;
     engine._config = { ...DEFAULT_CONFIG };
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
     engine.db = {
@@ -628,7 +628,7 @@ describe('one crossing per whole (parent_id grouping)', () => {
       { id: 1, name: 'opening', lat: 52.16674, lon: 4.63913, typeId: 6, parentId: 7, properties: { subtype: 'opening' }, info: {} },
       { id: 2, name: 'fixed', lat: 52.16678, lon: 4.63934, typeId: 6, parentId: 7, properties: { subtype: 'fixed' }, info: { height: 2.61 } },
     ];
-    const engine = Object.create(RoutingEngine.prototype) as any;
+    const engine = Object.create(RoutingEngine.prototype) as StubEngine;
     engine._config = { ...DEFAULT_CONFIG };
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
     engine.db = {
@@ -643,12 +643,21 @@ describe('one crossing per whole (parent_id grouping)', () => {
   });
 });
 
+/** The private parts of RoutingEngine these tests reach into, on an engine built without a constructor. */
+interface StubEngine {
+  _config: unknown;
+  toRadians: (d: number) => number;
+  db: unknown;
+  detectRouteStructures: (coords: unknown[], segs: unknown[]) => Promise<Array<{ name: string }>>;
+  crossingWaitSchedule: (coords: unknown[], segs: unknown[], crossings: unknown[]) => Array<{ seconds: number }>;
+}
+
 describe('synthetic lock entry from the edges', () => {
   const run = (db: unknown) => {
-    const engine = Object.create(RoutingEngine.prototype) as any;
+    const engine = Object.create(RoutingEngine.prototype) as StubEngine;
     engine._config = { ...DEFAULT_CONFIG };
     engine.db = db;
-    const crossings: any[] = [];
+    const crossings: Array<{ name: string; waitMinutes?: number }> = [];
     const segs = [{ distance: 100, lockIds: [100] }, { distance: 100 }];
     const sched = engine.crossingWaitSchedule([[4, 51], [4.001, 51], [4.002, 51]], segs, crossings);
     return { crossings, sched };
@@ -656,11 +665,11 @@ describe('synthetic lock entry from the edges', () => {
 
   it('takes the whole\'s name and typical_wait_minutes', () => {
     const whole = { id: 100, type_id: 1, parent_id: null, name: 'Big Lock', properties: '{"typical_wait_minutes":10}' };
-    const { crossings, sched } = run({ getPoiRow: () => whole, poiDisplayName: (r: any) => r.name });
+    const { crossings, sched } = run({ getPoiRow: () => whole, poiDisplayName: (r: { name: string }) => r.name });
     assert.strictEqual(crossings.length, 1);
     assert.strictEqual(crossings[0].name, 'Big Lock');
     assert.strictEqual(crossings[0].waitMinutes, 10);
-    assert.strictEqual(sched.reduce((t: number, w: any) => t + w.seconds, 0), 600);
+    assert.strictEqual(sched.reduce((t: number, w: { seconds: number }) => t + w.seconds, 0), 600);
   });
 
   it('keeps "Lock" and the configured default when the whole is unknown or gives no wait', () => {
@@ -668,8 +677,8 @@ describe('synthetic lock entry from the edges', () => {
     assert.strictEqual(a.crossings[0].name, 'Lock');
     assert.strictEqual(a.crossings[0].waitMinutes, undefined);
     const whole = { id: 100, type_id: 1, parent_id: null, name: '', properties: '{}' };
-    const b = run({ getPoiRow: () => whole, poiDisplayName: (r: any) => r.name });
+    const b = run({ getPoiRow: () => whole, poiDisplayName: (r: { name: string }) => r.name });
     assert.strictEqual(b.crossings[0].name, 'Lock');
-    assert.strictEqual(b.sched.reduce((t: number, w: any) => t + w.seconds, 0), 3600);
+    assert.strictEqual(b.sched.reduce((t: number, w: { seconds: number }) => t + w.seconds, 0), 3600);
   });
 });

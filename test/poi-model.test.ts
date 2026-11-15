@@ -18,7 +18,7 @@ import * as os from 'os';
 import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { RoutingDatabase } from '../dist/database.js';
 import { RoutingEngine } from '../dist/routing.js';
 import { DEFAULT_CONFIG } from '../dist/types.js';
@@ -57,7 +57,7 @@ const json = (v: PoiSpec['properties']) => (v === undefined || v === null ? null
 
 function buildFile(file: string, spec: FileSpec): void {
   const db = new DatabaseSync(file, { open: true });
-  const run = (sql: string, params: unknown[] = []) => db.prepare(sql).run(...(params as any[]));
+  const run = (sql: string, params: unknown[] = []) => db.prepare(sql).run(...(params as SQLInputValue[]));
   run(`CREATE TABLE metadata (id INTEGER PRIMARY KEY AUTOINCREMENT, country TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
        description TEXT, last_update_date TEXT NOT NULL, bounding_box TEXT)`);
   run(`INSERT INTO metadata (country, name, description, last_update_date, bounding_box) VALUES (?, ?, 'fixture', '2026-01-01T00:00:00Z', ?)`,
@@ -245,7 +245,6 @@ describe('files that are not in the POI model are refused', () => {
 describe('POIs: wholes, parts, info on demand', () => {
   let dir: string;
   let db: RoutingDatabase;
-  const BBOX: [number, number, number, number] = [51.95, 4.95, 52.05, 5.1];
 
   before(async () => {
     dir = tmpDir();
@@ -426,7 +425,7 @@ describe('a route reports the whole and uses the part', () => {
 
   it('marks the segments that pass a chamber, or a span over a lock head, with the lock\'s id', async () => {
     const path1 = [1, 2, 3, 4, 5];
-    const result = await (engine as any).buildRouteResult(path1, path1, 0);
+    const result = await (engine as unknown as EngineProbe).buildRouteResult(path1, path1, 0);
     const segs = result.features[0].properties.segments as Array<{ lockIds?: number[] }>;
     assert.deepStrictEqual(segs.map((s) => s.lockIds ?? null), [
       null, // 1-2: only a bridge span of a bridge whole
@@ -439,7 +438,7 @@ describe('a route reports the whole and uses the part', () => {
   it('gives a span over a lock head the lock, from edge_pois alone', async () => {
     // Direction does not matter: pairs are normalised.
     const seg: { from: number; to: number; nodes: number[]; lockIds?: number[] } = { from: 3, to: 4, nodes: [4, 3] };
-    await (engine as any).detectRouteStructures([[lonOf(3), LAT], [lonOf(4), LAT]], [seg]);
+    await (engine as unknown as EngineProbe).detectRouteStructures([[lonOf(3), LAT], [lonOf(4), LAT]], [seg]);
     assert.deepStrictEqual(seg.lockIds, [100]);
   });
 
@@ -515,13 +514,29 @@ describe('edge_pois of several files are united', () => {
   });
 });
 
+/** Private RoutingEngine methods these tests call. */
+interface EngineProbe {
+  buildRouteResult(
+    path: number[],
+    pathCopy: number[],
+    n: number,
+  ): Promise<{ features: Array<{ properties: { segments: unknown } }> }>;
+  detectRouteStructures(coords: [number, number][], segs: unknown[]): Promise<unknown[]>;
+}
+/** RoutingDatabase with its edge lookup and message channel replaced. */
+interface DbProbe {
+  getEdgeSync: (a: number, b: number) => object | null;
+  sendMessage: (t: string, p: { pairs: Array<{ dbIndexes: number[] | null }> }) => Promise<unknown[]>;
+  getRoutePois(pairs: Array<[number, number]>): Promise<unknown>;
+}
+
 describe('POI lookups: direction and ground distance', () => {
   it('getRoutePois asks the files of both directions, and every file when one is untagged', async () => {
     const sent: Array<{ pairs: Array<{ dbIndexes: number[] | null }> }> = [];
     const edges = new Map<string, object>();
-    const db = Object.create(RoutingDatabase.prototype) as any;
+    const db = Object.create(RoutingDatabase.prototype) as DbProbe;
     db.getEdgeSync = (a: number, b: number) => edges.get(`${a}>${b}`) ?? null;
-    db.sendMessage = async (_t: string, p: any) => {
+    db.sendMessage = async (_t: string, p: { pairs: Array<{ dbIndexes: number[] | null }> }) => {
       sent.push(p);
       return [];
     };

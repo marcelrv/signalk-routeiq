@@ -405,6 +405,77 @@ describe("route structures: locks", () => {
   });
 });
 
+describe("route structures: a chamber midway along a long edge", () => {
+  let fx: Fixture;
+  before(async () => {
+    // Edge 2-3 is 4 km long and the chamber sits 2 km from either end, so it is
+    // listed only because edge_pois links it (the 50 m line rule cannot see it).
+    fx = await openFixture([
+      {
+        country: "AAA",
+        nodes: [
+          { id: 1, x: 0, y: 0 },
+          { id: 2, x: 200, y: 0 },
+          { id: 3, x: 4200, y: 0 },
+          { id: 4, x: 4400, y: 0 },
+        ],
+        edges: [
+          [1, 2],
+          [2, 3],
+          [3, 4],
+        ],
+        pois: [
+          {
+            id: 300,
+            type: LOCK,
+            name: "Long Lock",
+            properties: { typical_wait_minutes: 60 },
+            x: 2200,
+            y: 0,
+          },
+          {
+            id: 301,
+            type: CHAMBER,
+            parent: 300,
+            name: "Long chamber",
+            properties: { typical_wait_minutes: 7 },
+            x: 2200,
+            y: 0,
+          },
+        ],
+        edgePois: [[2, 3, 301]],
+      },
+    ]);
+  });
+  after(() => fx.close());
+
+  it("lists the chamber with its whole, though it is far from every route vertex", async () => {
+    const { crossings } = await detect(fx, [1, 2, 3, 4]);
+    assert.deepStrictEqual(
+      crossings.map((c) => [c.type, c.structure, c.partId]),
+      [["lock", "300", 301]],
+    );
+  });
+
+  it("charges the chamber's own wait once in a calculated route", async () => {
+    const r = await fx.engine.calculateRoute({
+      start: { latitude: pos(0, 0)[1], longitude: pos(0, 0)[0] },
+      end: { latitude: pos(4400, 0)[1], longitude: pos(4400, 0)[0] },
+      minCoastDistance: 0,
+    });
+    const locks = (r.crossings ?? []).filter((c) => c.type === "lock");
+    assert.deepStrictEqual(
+      locks.map((c) => c.structure),
+      ["300"],
+    );
+    assert.strictEqual(
+      r.totalWaitSeconds,
+      7 * 60,
+      "7 minutes, not the whole's 60",
+    );
+  });
+});
+
 describe("route structures: a stretch no file knows uses the 50 m line rule", () => {
   let fx: Fixture;
   before(async () => {
