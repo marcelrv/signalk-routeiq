@@ -342,11 +342,15 @@ export const ENDPOINT_WATER_REACH_M = 500;
  * none of their own: the nearest named point of interest (`poiName`, given
  * the end's position), else the named water the route starts or ends in.
  * An end that gets neither is left without a name.
+ *
+ * `connectors` are the metres of straight line from each end to the graph
+ * (in no water at all): the water reach is counted from where they join it.
  */
 export function nameEndpoints(
   itinerary: ItineraryPoint[],
   description: RouteDescriptionLeg[] | undefined,
   poiName: (latitude: number, longitude: number) => string | undefined,
+  connectors: { start: number; end: number } = { start: 0, end: 0 },
 ): void {
   if (itinerary.length < 2) return;
   const start = itinerary[0];
@@ -354,12 +358,14 @@ export function nameEndpoints(
   const total = end.distanceFromStart;
   const named = (description ?? []).filter((l) => l.name);
   const startWater = named.find(
-    (l) => l.distanceFromStart <= ENDPOINT_WATER_REACH_M,
+    (l) => l.distanceFromStart <= connectors.start + ENDPOINT_WATER_REACH_M,
   )?.name;
   const endWater = [...named]
     .reverse()
     .find(
-      (l) => l.distanceFromStart + l.distance >= total - ENDPOINT_WATER_REACH_M,
+      (l) =>
+        l.distanceFromStart + l.distance >=
+        total - connectors.end - ENDPOINT_WATER_REACH_M,
     )?.name;
   for (const [point, water] of [
     [start, startWater],

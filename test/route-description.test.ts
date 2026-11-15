@@ -807,6 +807,16 @@ describe('nameEndpoints', () => {
     assert.deepStrictEqual([near[1].name, near[1].nameSource], ['Rivier', 'water']);
   });
 
+  it('counts the reach from where the connector to the graph ends', () => {
+    const it = ends(10000);
+    // 900 m of connector at each end, then 300 m of unnamed water.
+    const d = [leg(0, 1200), leg(1200, 7600, 'IJmeer'), leg(8800, 1200)];
+    nameEndpoints(it, d, () => undefined);
+    assert.ok(it.every(p => p.name === undefined), 'beyond the reach without the connectors');
+    nameEndpoints(it, d, () => undefined, { start: 900, end: 900 });
+    assert.deepStrictEqual(it.map(p => p.name), ['IJmeer', 'IJmeer']);
+  });
+
   it('leaves both ends unnamed without POIs or a description', () => {
     const it = ends(5000);
     nameEndpoints(it, undefined, () => undefined);

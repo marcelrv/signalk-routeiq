@@ -3654,8 +3654,24 @@ export class RoutingEngine {
     // What to call the two ends, for clients that have no name for them.
     // Skipped with the description: a departure scan reads only times.
     if (waitOverrides?.describe !== false) {
-      nameEndpoints(itinerary, route.description, (lat, lon) =>
-        this.db.nearestPoiName(lat, lon, ENDPOINT_POI_RADIUS_M),
+      // The straight connectors from the user's points to the graph
+      // (connectUserPoint: from -1 at the start, to -1 at the end) lie in no
+      // water, so the water reach is counted from where the route joins it.
+      let startConnector = 0;
+      for (const seg of segments) {
+        if (seg.from !== -1) break;
+        startConnector += seg.distance ?? 0;
+      }
+      let endConnector = 0;
+      for (let k = segments.length - 1; k >= 0; k--) {
+        if (segments[k].to !== -1 || segments[k].from === -1) break;
+        endConnector += segments[k].distance ?? 0;
+      }
+      nameEndpoints(
+        itinerary,
+        route.description,
+        (lat, lon) => this.db.nearestPoiName(lat, lon, ENDPOINT_POI_RADIUS_M),
+        { start: startConnector, end: endConnector },
       );
     }
 
