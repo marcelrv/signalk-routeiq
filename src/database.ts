@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { BBox, PoiResult, OVERLAY_EDITABLE_COLUMNS } from "./types.js";
@@ -654,12 +654,12 @@ export class RoutingDatabase {
       // model) were never opened; list them with their message instead.
       const formatErrors: Record<string, string> = schema.formatErrors ?? {};
       const refusedPaths = dbPaths.filter(
-        (p) => (p.split("/").pop() ?? "") in formatErrors,
+        (p) => basename(p.replace(/\\/g, "/")) in formatErrors,
       );
       this.bulkFileList = dbPaths
         .filter((p) => !refusedPaths.includes(p))
         .map((p, i) => ({
-          filename: filenames[i] || p.split("/").pop() || "",
+          filename: filenames[i] || basename(p.replace(/\\/g, "/")),
           path: p,
         }));
       // Bulk mode never opens disabled files, but the Data Manager still has
@@ -982,7 +982,7 @@ export class RoutingDatabase {
       console.warn(`[routeiq] Could not peek refused database(s): ${e}`);
     }
     return paths.map((path) => {
-      const filename = path.split("/").pop() ?? path;
+      const filename = basename(path.replace(/\\/g, "/")) || path;
       const p = peeked.find((x) => x.path === path);
       return {
         filename,
