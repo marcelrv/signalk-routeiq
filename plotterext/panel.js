@@ -963,6 +963,7 @@ async function calculate(forcedRequestPoints, known) {
     requestPoints,
     generated: newPoints,
     revertPoints: session?.revertPoints ?? points,
+    suggestedName: routeNameFor(firstName, lastName),
   });
   await client.call("route.replace", { routeId, points: newPoints });
   // Tide probes sit on the request points, so only a changed request (a new
@@ -989,6 +990,33 @@ function isPlaceholderName(name) {
   return !name || /^(Start|Destination|Via \d+|WP\d+)$/.test(name.trim());
 }
 
+/**
+ * The route name the webapp shows (its updateRouteTitle): "A → B", else
+ * "Route to B" or "From A", from the ends' real names.
+ * @param {string} [startName] The first point's name.
+ * @param {string} [endName] The last point's name.
+ * @returns {string} The name, or "" when neither end has a real name.
+ */
+function routeNameFor(startName, endName) {
+  const sn = isPlaceholderName(startName) ? "" : startName.trim();
+  const dn = isPlaceholderName(endName) ? "" : endName.trim();
+  if (sn && dn) return sn + " → " + dn;
+  if (dn) return "Route to " + dn;
+  if (sn) return "From " + sn;
+  return "";
+}
+
+/**
+ * Whether a route's name is a stand-in this panel or the host gave it, so a
+ * name built from the route's ends may replace it on save. A name the user
+ * typed is kept.
+ * @param {string|null} [name] The route's current name.
+ * @returns {boolean} True when the name may be replaced.
+ */
+function isPlaceholderRouteName(name) {
+  return !name || !name.trim() || /^RouteIQ to /i.test(name.trim());
+}
+
 async function revert() {
   const session = sessions.get(selectedId);
   if (!session?.revertPoints) return;
@@ -1009,8 +1037,15 @@ async function save() {
   const r = selectedRoute();
   if (!r) return;
   // dialog:true → the host prompts for name/description (its Route Details
-  // dialog in Freeboard-SK) and persists through the user's session.
-  await client.call("route.save", { routeId: r.routeId, dialog: true });
+  // dialog in Freeboard-SK, filled in with `name`) and persists through the
+  // user's session. A stand-in name ("RouteIQ to destination") is replaced
+  // by one built from the route's ends, as the webapp names its routes.
+  const params = { routeId: r.routeId, dialog: true };
+  const suggested = sessions.get(r.routeId)?.suggestedName;
+  if (suggested && isPlaceholderRouteName(r.name)) params.name = suggested;
+  // The call stays open until the user answers that dialog, so the bus's
+  // default 10 s call timeout must not apply (0 = no timeout).
+  await client.call("route.save", params, { timeoutMs: 0 });
 }
 
 /* ---------- route creation ---------- */
