@@ -3442,8 +3442,11 @@ export class RoutingEngine {
         owner.waitMinutes ??
         (owner.type === "lock" ? lockDefault : bridgeDefault);
       if (minutes <= 0) continue;
-      owner.waitSeconds = minutes * 60;
-      schedule.push({ atMetres: at, seconds: minutes * 60 });
+      // Whole seconds, like the route total: the per-structure waits must add
+      // up to totalWaitSeconds (and the saved profile's duration.waiting).
+      const seconds = Math.round(minutes * 60);
+      owner.waitSeconds = seconds;
+      schedule.push({ atMetres: at, seconds });
     }
     return schedule.sort((a, b) => a.atMetres - b.atMetres);
   }

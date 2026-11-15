@@ -65,6 +65,13 @@ describe('crossing wait time', () => {
     assert.strictEqual(waitSeconds(route), 2 * 3600 + 3 * 1800);
   });
 
+  it('charges whole seconds, so the waits add up to the rounded total (#50)', () => {
+    const route = apart(lock, lock);
+    const waits = schedule(route, { lockWaitMinutes: 1.001 });
+    assert.deepStrictEqual(waits.map((w) => w.seconds), [60, 60]);
+    assert.deepStrictEqual(route.map((c) => (c as { waitSeconds?: number }).waitSeconds), [60, 60]);
+  });
+
   it('follows the configured values', () => {
     assert.strictEqual(waitSeconds([lock()], { lockWaitMinutes: 20 }), 1200);
     assert.strictEqual(waitSeconds([opening()], { bridgeWaitMinutes: 5 }), 300);
