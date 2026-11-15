@@ -1496,8 +1496,26 @@ export class RoutingEngine {
   /**
    * Connect a user-requested point to the nearest route coordinate.
    * Prepends/appends the user point and adds a connecting segment + warning.
+   * When that changes the geometry, crossings detected before are dropped:
+   * the connector may pass a bridge or lock, and every chainage shifts, so
+   * the next consumer detects them again on the final line.
    */
   private async connectUserPoint(
+    userPoint: { latitude: number; longitude: number },
+    route: RouteResult,
+    position: "start" | "end",
+  ): Promise<void> {
+    const shape = (): string => {
+      const coords = route.features[0].geometry.coordinates;
+      return `${coords.length}:${coords[0]}:${coords[coords.length - 1]}`;
+    };
+    const before = shape();
+    await this.attachUserPoint(userPoint, route, position);
+    if (shape() !== before) delete route.crossings;
+  }
+
+  /** The geometry work of connectUserPoint. */
+  private async attachUserPoint(
     userPoint: { latitude: number; longitude: number },
     route: RouteResult,
     position: "start" | "end",
@@ -4232,20 +4250,12 @@ export class RoutingEngine {
     }
     const found = pairs.length > 0 ? await this.db.getRoutePois(pairs) : [];
 
-    // Per segment: the parts linked to it, and whether any of its edges is
-    // unknown to every file (then the geometric fallback covers it).
+    // Per segment: the parts linked to it. Per edge: whether every file is
+    // unknown to it (then the geometric fallback covers that edge's stretch).
     type Poi = Omit<PoiBBoxResult, "info" | "displayName">;
-    // A coordinate span with no segment (fewer segments than spans) has no
-    // edge data at all: unknown.
-    const unknownSeg: boolean[] = Array.from(
-      { length: nSegs },
-      (_v, si) => si >= segments.length,
-    );
     const poiById = new Map<number, Poi>();
     const linkedSegs = new Map<number, Set<number>>(); // part id -> segments
     found.forEach((r, idx) => {
-      for (const si of owners[idx])
-        if (!r.known && si < nSegs) unknownSeg[si] = true;
       for (const poiId of r.poiIds) {
         const row = this.db.getPoiRow(poiId);
         if (!row) continue;
@@ -4267,56 +4277,90 @@ export class RoutingEngine {
       }
     });
 
-    // The fallback's POIs: only those near the unknown stretches. Walk each
-    // contiguous run of unknown segments in fixed-size chunks and query each
-    // chunk's own small bbox (consecutive chunks share their boundary point).
-    // Every vertex of an unknown segment lies in some chunk, and the query box
-    // is the chunk's extent expanded by MARGIN >= FALLBACK_MAX_DIST, so any
-    // part within that distance of such a segment is fetched.
-    const unknownSegs: number[] = [];
-    for (let si = 0; si < nSegs; si++) if (unknownSeg[si]) unknownSegs.push(si);
-    for (let r = 0; r < unknownSegs.length; ) {
-      let rEnd = r;
+    // The stretches no file knows, each a line (a, b) of [lon, lat] on
+    // segment `si`. An unknown edge is its own stretch, not its whole
+    // segment: in an aggregated segment (line-of-sight, collinear, a funnel
+    // polyline) the known edges keep their links and only the unknown one is
+    // judged by distance. It is drawn between its two nodes when the segment
+    // spans several edges, else as the segment itself. A coordinate span with
+    // no segment (fewer segments than spans) has no edge data: one stretch.
+    type Stretch = { si: number; a: [number, number]; b: [number, number] };
+    const unitsPerSeg = new Map<number, number>();
+    for (const u of units)
+      unitsPerSeg.set(u.seg, (unitsPerSeg.get(u.seg) ?? 0) + 1);
+    const segLine = (si: number): Stretch => ({
+      si,
+      a: coordinates[si],
+      b: coordinates[si + 1],
+    });
+    const stretches: Stretch[] = [];
+    units.forEach((u) => {
+      if (u.seg >= nSegs) return;
+      const r =
+        found[
+          indexOf.get(`${Math.min(u.from, u.to)}:${Math.max(u.from, u.to)}`)!
+        ];
+      if (r?.known) return;
+      if ((unitsPerSeg.get(u.seg) ?? 0) <= 1) {
+        stretches.push(segLine(u.seg));
+        return;
+      }
+      const a = this.db.getNodeSync(u.from);
+      const b = this.db.getNodeSync(u.to);
+      stretches.push(
+        a && b
+          ? { si: u.seg, a: [a.lon, a.lat], b: [b.lon, b.lat] }
+          : segLine(u.seg),
+      );
+    });
+    for (let si = segments.length; si < nSegs; si++)
+      stretches.push(segLine(si));
+    stretches.sort((x, y) => x.si - y.si);
+
+    // The fallback's POIs: only those near the unknown stretches. Query in
+    // chunks of at most CHUNK stretches on consecutive segments, each over the
+    // chunk's own small bbox: the chunk's extent expanded by MARGIN >=
+    // FALLBACK_MAX_DIST, so any part within that distance of a stretch is
+    // fetched.
+    for (let i = 0; i < stretches.length; ) {
+      let end = i + 1;
       while (
-        rEnd + 1 < unknownSegs.length &&
-        unknownSegs[rEnd + 1] === unknownSegs[rEnd] + 1
+        end < stretches.length &&
+        end - i < CHUNK &&
+        stretches[end].si <= stretches[end - 1].si + 1
       )
-        rEnd++;
-      const first = unknownSegs[r];
-      const last = unknownSegs[rEnd] + 1; // last vertex of the run
-      r = rEnd + 1;
-      for (let i = first; i < last; i += CHUNK) {
-        const end = Math.min(i + CHUNK, last);
-        let cMinLat = Infinity,
-          cMaxLat = -Infinity,
-          cMinLon = Infinity,
-          cMaxLon = -Infinity;
-        for (let j = i; j <= end; j++) {
-          const [lon, lat] = coordinates[j];
+        end++;
+      let cMinLat = Infinity,
+        cMaxLat = -Infinity,
+        cMinLon = Infinity,
+        cMaxLon = -Infinity;
+      for (let j = i; j < end; j++) {
+        for (const [lon, lat] of [stretches[j].a, stretches[j].b]) {
           if (lat < cMinLat) cMinLat = lat;
           if (lat > cMaxLat) cMaxLat = lat;
           if (lon < cMinLon) cMinLon = lon;
           if (lon > cMaxLon) cMaxLon = lon;
         }
-        // A degree of longitude shrinks with latitude: widen the margin so it
-        // stays at least ~111 m wide (clamped near the poles).
-        const lonMargin =
-          MARGIN /
-          Math.max(0.2, Math.cos((((cMinLat + cMaxLat) / 2) * Math.PI) / 180));
-        const chunkPois = await this.db.getPoisInBBox(
-          cMinLat - MARGIN,
-          cMinLon - lonMargin,
-          cMaxLat + MARGIN,
-          cMaxLon + lonMargin,
-          // Parts only, uncapped, and no info: the map's 500 cap must never
-          // hide a span or chamber from a route; info is read below for the
-          // parts that are listed.
-          Number.MAX_SAFE_INTEGER,
-          { types: ROUTE_PART_TYPES, includeInfo: false },
-        );
-        for (const poi of chunkPois)
-          if (!poiById.has(poi.id)) poiById.set(poi.id, poi);
       }
+      i = end;
+      // A degree of longitude shrinks with latitude: widen the margin so it
+      // stays at least ~111 m wide (clamped near the poles).
+      const lonMargin =
+        MARGIN /
+        Math.max(0.2, Math.cos((((cMinLat + cMaxLat) / 2) * Math.PI) / 180));
+      const chunkPois = await this.db.getPoisInBBox(
+        cMinLat - MARGIN,
+        cMinLon - lonMargin,
+        cMaxLat + MARGIN,
+        cMaxLon + lonMargin,
+        // Parts only, uncapped, and no info: the map's 500 cap must never
+        // hide a span or chamber from a route; info is read below for the
+        // parts that are listed.
+        Number.MAX_SAFE_INTEGER,
+        { types: ROUTE_PART_TYPES, includeInfo: false },
+      );
+      for (const poi of chunkPois)
+        if (!poiById.has(poi.id)) poiById.set(poi.id, poi);
     }
     const pois = [...poiById.values()];
 
@@ -4329,14 +4373,25 @@ export class RoutingEngine {
     // Cumulative along-route distance per coordinate, used only to decide
     // whether two hits on one structure are the same physical crossing or two
     // distinct passages of a like-named feature further down the route.
-    const cumDist: number[] = [0];
-    for (let i = 1; i < coordinates.length; i++) {
-      const [lon1, lat1] = coordinates[i - 1];
-      const [lon2, lat2] = coordinates[i];
-      cumDist.push(
-        cumDist[i - 1] + this.haversineDistance(lat1, lon1, lat2, lon2),
-      );
+    // The same basis as crossingWaitSchedule and buildItinerary (segment
+    // distance, else haversine), so the chainage a crossing carries matches
+    // theirs.
+    const cumDist = cumulativeDistances(coordinates, segments);
+
+    // The directed graph edges of each segment, to tell a turn-around (the
+    // route coming back over an edge it just took) from one passage that
+    // spans consecutive segments.
+    const segEdges = new Map<number, string[]>();
+    for (const u of units) {
+      const list = segEdges.get(u.seg);
+      if (list) list.push(`${u.from}>${u.to}`);
+      else segEdges.set(u.seg, [`${u.from}>${u.to}`]);
     }
+    const turnsBack = (seen: Set<string>, si: number): boolean =>
+      (segEdges.get(si) ?? []).some((k) => {
+        const [a, b] = k.split(">");
+        return seen.has(`${b}>${a}`);
+      });
 
     /**
      * For a set of same-typed parts: group by whole (`parent_id`), then walk
@@ -4369,7 +4424,9 @@ export class RoutingEngine {
       }
 
       const out: Array<{ crossing: RouteCrossing; chain: number }> = [];
-      type Run = { poi: Poi; dist: number; chain: number };
+      // `afterTurn`: the run starts where the route came back over the edges
+      // of the previous one, a passage of its own that is never merged back.
+      type Run = { poi: Poi; dist: number; chain: number; afterTurn?: boolean };
       for (const group of byStructure.values()) {
         // Where each part can hit: its linked segments, and the unknown ones
         // within reach (a cheap box test first, the exact distance after).
@@ -4406,10 +4463,10 @@ export class RoutingEngine {
           const dLon =
             FALLBACK_MAX_DIST /
             (111320 * Math.cos((poi.lat * Math.PI) / 180) || 1);
-          for (const si of unknownSegs) {
+          for (const { si, a, b } of stretches) {
             if (linked?.has(si)) continue;
-            const [lonA, latA] = coordinates[si];
-            const [lonB, latB] = coordinates[si + 1];
+            const [lonA, latA] = a;
+            const [lonB, latB] = b;
             if (
               poi.lat < Math.min(latA, latB) - dLat ||
               poi.lat > Math.max(latA, latB) + dLat ||
@@ -4417,19 +4474,29 @@ export class RoutingEngine {
               poi.lon > Math.max(lonA, lonB) + dLon
             )
               continue;
-            const d = segDist(poi, si);
-            if (d.dist <= FALLBACK_MAX_DIST) add(si, poi, d);
+            // Judged against the unknown edge itself; placed along the route
+            // by where the segment passes it.
+            const { dist } = RoutingEngine.pointSegmentProjection(
+              poi.lat,
+              poi.lon,
+              a,
+              b,
+            );
+            if (dist <= FALLBACK_MAX_DIST)
+              add(si, poi, { dist, chain: segDist(poi, si).chain });
           }
         }
         const hitSegs = [...reach.keys()].sort((a, b) => a - b);
 
         const runs: Run[] = [];
         let current: Run | null = null;
+        let seen = new Set<string>(); // directed edges of the current run
         let prevSi = -2;
         for (const si of hitSegs) {
           let best = reach.get(si)![0];
           for (const c of reach.get(si)!) if (c.dist < best.dist) best = c;
-          if (current && si === prevSi + 1) {
+          const turned: boolean = current !== null && turnsBack(seen, si);
+          if (current && si === prevSi + 1 && !turned) {
             if (best.dist < current.dist) {
               current.poi = best.poi;
               current.dist = best.dist;
@@ -4437,26 +4504,48 @@ export class RoutingEngine {
             }
           } else {
             if (current) runs.push(current);
-            current = { poi: best.poi, dist: best.dist, chain: best.chain };
+            current = {
+              poi: best.poi,
+              dist: best.dist,
+              chain: best.chain,
+              ...(turned && si === prevSi + 1 ? { afterTurn: true } : {}),
+            };
+            seen = new Set();
           }
+          for (const k of segEdges.get(si) ?? []) seen.add(k);
           prevSi = si;
         }
         if (current) runs.push(current);
 
         // Merge runs *within this structure group* that are close together
-        // along the route into one crossing, keeping the nearest hit.
+        // along the route into one crossing, keeping the nearest hit. "Close"
+        // is measured from the previous run itself, not from the hit kept for
+        // the merged entry, so whether runs merge never depends on which of
+        // them happened to be nearest.
         const merged: Run[] = [];
+        let prevChain = -Infinity;
         for (const run of runs) {
           const prev =
             merged.length > 0 ? merged[merged.length - 1] : undefined;
-          if (prev && run.chain - prev.chain < MERGE_ROUTE_DIST) {
+          if (
+            prev &&
+            !run.afterTurn &&
+            run.chain - prevChain < MERGE_ROUTE_DIST
+          ) {
             merged[merged.length - 1] = run.dist < prev.dist ? run : prev;
           } else {
             merged.push(run);
           }
+          prevChain = run.chain;
         }
-        for (const run of merged)
-          out.push({ crossing: build(run.poi), chain: run.chain });
+        for (const run of merged) {
+          // build's object itself (it is keyed for the info lookup below).
+          const crossing = build(run.poi);
+          // Where the line passes the part, not the nearest route vertex:
+          // two structures on one long edge must not share a chainage.
+          crossing.distanceFromStart = Math.round(run.chain);
+          out.push({ crossing, chain: run.chain });
+        }
       }
       out.sort((a, b) => a.chain - b.chain);
       return out.map((e) => e.crossing);

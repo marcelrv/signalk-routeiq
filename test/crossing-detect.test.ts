@@ -164,6 +164,7 @@ async function openFixture(files: FileSpec[]): Promise<Fixture> {
 
 type Found = {
   name: string;
+  distanceFromStart?: number;
   type: string;
   structure?: string;
   partId?: number;
@@ -258,6 +259,10 @@ describe("route structures: a bridge on a crossing canal is not on the route (#5
             x: 300,
             y: 60,
           },
+          // On the start connector of the calculated-route case only (west of
+          // node 1, where no file has an edge).
+          { id: 320, type: BRIDGE, name: "Bridge W", x: -75, y: 0 },
+          { id: 321, type: SPAN, parent: 320, x: -75, y: 0 },
         ],
         edgePois: [
           [2, 3, 301],
@@ -305,6 +310,38 @@ describe("route structures: a bridge on a crossing canal is not on the route (#5
     assert.deepStrictEqual(
       crossings.map((c) => [c.structure, c.partId, c.height]),
       [["310", 311, 2.4]],
+    );
+  });
+
+  it("lists X twice, at the chainage of each passage, when the route turns back under it", async () => {
+    // 1-2-3 and back 3-2-1: X (x = 300) is passed at 300 m and again at 500 m.
+    const { crossings } = await detect(fx, [1, 2, 3, 2, 1]);
+    assert.deepStrictEqual(
+      crossings.map((c) => c.structure),
+      ["300", "300"],
+    );
+    // Within a metre or two: the fixture's edge lengths and node positions
+    // round differently.
+    const at = crossings.map((c) => c.distanceFromStart ?? NaN);
+    assert.ok(
+      Math.abs(at[0] - 300) <= 2 && Math.abs(at[1] - 500) <= 2,
+      `${at}`,
+    );
+  });
+
+  it("detects again on the final line after the start connector is added", async () => {
+    // The user starts 150 m west of node 1; Bridge W sits on that connector.
+    const r = await fx.engine.calculateRoute({
+      start: { latitude: pos(-150, 0)[1], longitude: pos(-150, 0)[0] },
+      end: { latitude: pos(800, 0)[1], longitude: pos(800, 0)[0] },
+      minCoastDistance: 0,
+    });
+    assert.deepStrictEqual(
+      (r.crossings ?? []).map((c) => [c.structure, c.distanceFromStart]),
+      [
+        ["320", 75],
+        ["300", 450],
+      ],
     );
   });
 });
@@ -736,6 +773,9 @@ describe("route structures: stretches the files do not hold", () => {
           ...span(2, 62, 900, 20),
           ...span(3, 63, 100, 20),
         ],
+        // One link, so the file vouches for its edges (a file without any
+        // edge_pois row has no say, see below).
+        edgePois: [[1, 2, 3]],
       },
     ]);
     // A navmesh-style synthetic edge: in memory only, tagged with the dbIndex of
@@ -801,6 +841,97 @@ describe("route structures: stretches the files do not hold", () => {
       found.map((c) => c.structure),
       ["63", "61", "62"],
       "x = 100, 300, 900",
+    );
+  });
+});
+
+describe("route structures: a file that links nothing", () => {
+  let fx: Fixture;
+  before(async () => {
+    // Route 1-2-3 (200 m legs) over a file with POIs but no edge_pois row at
+    // all: it never linked its parts, so it cannot say an edge passes none.
+    // Bridge X sits on the line at x = 300; bridge Y is 80 m off it.
+    fx = await openFixture([
+      {
+        country: "AAA",
+        nodes: line(3, 200),
+        edges: [
+          [1, 2],
+          [2, 3],
+        ],
+        pois: [
+          { id: 70, type: BRIDGE, name: "Bridge X", x: 300, y: 0 },
+          { id: 71, type: SPAN, parent: 70, x: 300, y: 0 },
+          { id: 80, type: BRIDGE, name: "Bridge Y", x: 300, y: 80 },
+          { id: 81, type: SPAN, parent: 80, x: 300, y: 80 },
+        ],
+      },
+    ]);
+  });
+  after(() => fx.close());
+
+  it("leaves its edges unknown, so its bridges are found by the 50 m rule", async () => {
+    assert.deepStrictEqual(
+      (
+        await fx.db.getRoutePois([
+          [1, 2],
+          [2, 3],
+        ])
+      ).map((r) => r.known),
+      [false, false],
+    );
+    const { crossings } = await detect(fx, [1, 2, 3]);
+    assert.deepStrictEqual(
+      crossings.map((c) => c.structure),
+      ["70"],
+    );
+  });
+});
+
+describe("route structures: an aggregated segment with one unknown edge", () => {
+  let fx: Fixture;
+  before(async () => {
+    // Nodes 1-2-3-4 on a line, 200 m apart. The file holds 1-2 and 2-3 (and
+    // links bridge X under 1-2), but not 3-4. Bridge Y is 30 m off the known
+    // edge 2-3 and unlinked; bridge Z is 20 m off the unknown edge 3-4.
+    const span = (
+      id: number,
+      whole: number,
+      x: number,
+      y: number,
+    ): PoiSpec[] => [
+      { id: whole, type: BRIDGE, name: `Bridge ${whole}`, x, y },
+      { id, type: SPAN, parent: whole, properties: { subtype: "fixed" }, x, y },
+    ];
+    fx = await openFixture([
+      {
+        country: "AAA",
+        nodes: [...line(4, 200), { id: 9, x: 600, y: 300 }],
+        edges: [
+          [1, 2],
+          [2, 3],
+          [4, 9],
+        ],
+        pois: [
+          ...span(1, 91, 100, 0),
+          ...span(2, 92, 300, 30),
+          ...span(3, 93, 500, 20),
+        ],
+        edgePois: [[1, 2, 1]],
+      },
+    ]);
+  });
+  after(() => fx.close());
+
+  it("judges only the unknown edge by distance: X and Z, not Y beside the known edge", async () => {
+    const seg = { from: 1, to: 4, nodes: [1, 2, 3, 4] };
+    const found = (await (fx.engine as any).detectRouteStructures(
+      [pos(0, 0), pos(600, 0)],
+      [seg],
+    )) as Found[];
+    assert.deepStrictEqual(
+      found.map((c) => c.structure),
+      ["91", "93"],
     );
   });
 });
