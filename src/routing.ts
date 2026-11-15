@@ -1505,21 +1505,21 @@ export class RoutingEngine {
     route: RouteResult,
     position: "start" | "end",
   ): Promise<void> {
-    const shape = (): string => {
-      const coords = route.features[0].geometry.coordinates;
-      return `${coords.length}:${coords[0]}:${coords[coords.length - 1]}`;
-    };
-    const before = shape();
-    await this.attachUserPoint(userPoint, route, position);
-    if (shape() !== before) delete route.crossings;
+    if (await this.attachUserPoint(userPoint, route, position))
+      delete route.crossings;
   }
 
-  /** The geometry work of connectUserPoint. */
+  /**
+   * The geometry work of connectUserPoint.
+   *
+   * @returns Whether the route's line changed (false when the point was
+   *   already on it, or the route is empty).
+   */
   private async attachUserPoint(
     userPoint: { latitude: number; longitude: number },
     route: RouteResult,
     position: "start" | "end",
-  ): Promise<void> {
+  ): Promise<boolean> {
     const coords = route.features[0].geometry.coordinates;
     const segments = route.features[0].properties.segments!;
 
@@ -1542,7 +1542,7 @@ export class RoutingEngine {
         seg.crossesLand = true;
       }
     };
-    if (coords.length === 0) return;
+    if (coords.length === 0) return false;
 
     if (position === "start") {
       const firstCoord = coords[0];
@@ -1552,7 +1552,7 @@ export class RoutingEngine {
         firstCoord[1],
         firstCoord[0],
       );
-      if (directDist <= 1) return;
+      if (directDist <= 1) return false;
 
       // Project user onto the first route edge (coords[0] → coords[1])
       // and split the edge at that point so the connection doesn't backtrack.
@@ -1680,7 +1680,7 @@ export class RoutingEngine {
         lastCoord[1],
         lastCoord[0],
       );
-      if (directDist <= 1) return;
+      if (directDist <= 1) return false;
 
       // ── Try truncation: project end point onto the last graph edge ─────
       // If the last route segment's edge passes close to the end point, we
@@ -1882,6 +1882,7 @@ export class RoutingEngine {
         );
       }
     }
+    return true;
   }
 
   /**
@@ -2745,15 +2746,16 @@ export class RoutingEngine {
     const minBeam = (dims.beam ?? 4.0) + this.config.safetyMarginBeam;
 
     const coords = result.features[0]?.geometry.coordinates ?? [];
-    // Reuse crossings this same result already carries, rather than a fresh
-    // lookup — never true today (nothing sets `result.crossings` before this
-    // runs), kept for symmetry with addViolationWarnings and so a future
-    // caller that does pre-populate it pays nothing extra. Never detected at
-    // all with tides off, matching truePassageTimes' own early-out.
+    // Reuse crossings this same result already carries (buildRouteResult
+    // sets them; a splice or connector that changes the line drops them),
+    // and keep fresh ones on it for the next consumer, as
+    // addViolationWarnings does. Never detected at all with tides off,
+    // matching truePassageTimes' own early-out.
     const crossings = env
       ? (result.crossings ??
         (await this.detectRouteStructures(coords, segments)))
       : [];
+    if (env && !result.crossings) result.crossings = crossings;
     const times = await this.truePassageTimes(
       coords,
       segments,
@@ -3524,8 +3526,7 @@ export class RoutingEngine {
     // Crossings first: a lock or an opening span costs time to get through,
     // and the totals below have to include it.
     if (!route.crossings) {
-      const detected = await this.detectRouteStructures(coords, segments);
-      if (detected.length > 0) route.crossings = detected;
+      route.crossings = await this.detectRouteStructures(coords, segments);
     }
 
     // Where the route has to stop, and for how long. Built before the times
@@ -4114,7 +4115,9 @@ export class RoutingEngine {
 
     return {
       type: "FeatureCollection",
-      crossings: crossings.length > 0 ? crossings : undefined,
+      // Kept even when empty: "none" is a result, and an undefined here
+      // would make every later `result.crossings ??` detect again.
+      crossings,
       features: [
         {
           type: "Feature",
@@ -4208,7 +4211,10 @@ export class RoutingEngine {
    * with the index of its segment. An aggregated segment (collinear
    * compression, line-of-sight) spans several edges and names them in
    * `nodes`; one without goes from `from` to `to`. Shared by finalizeRoute's
-   * description and detectRouteStructures, so both see the same edges.
+   * description and detectRouteStructures. They differ only on a funnel
+   * edge whose polyline does not match its graph nodes: detection passes
+   * the recorded hops (every sub-segment gets the whole edge's nodes, so a
+   * lock spans its full length), the description reads `nodes`.
    *
    * @param segments - The route's segments.
    * @param nodesOf - The node sequence of a segment, when it differs from
@@ -4411,9 +4417,15 @@ export class RoutingEngine {
 
     // The directed graph edges of each segment, to tell a turn-around (the
     // route coming back over an edge it just took) from one passage that
-    // spans consecutive segments.
+    // spans consecutive segments. Only real graph edges: a connector's
+    // synthetic edge (-1 to -1) reversed is itself, and two connector
+    // segments in a row (the end connector adds two) are one passage.
     const segEdges = new Map<number, string[]>();
+    const synthetic = new Set<number>(); // segments with no graph edge
+    for (const u of units) synthetic.add(u.seg);
     for (const u of units) {
+      if (u.from < 0 || u.to < 0 || u.from === u.to) continue;
+      synthetic.delete(u.seg);
       const list = segEdges.get(u.seg);
       if (list) list.push(`${u.from}>${u.to}`);
       else segEdges.set(u.seg, [`${u.from}>${u.to}`]);
@@ -4478,9 +4490,13 @@ export class RoutingEngine {
       // `line`: the distance to the segment's own line, which breaks a tie in
       // `dist` (sub-segments sharing one unknown edge are all as far from it).
       type Hit = { poi: Poi; dist: number; line: number; chain: number };
+      // `first`/`last`: the chainage of the run's first and latest hit, so
+      // runs merge by the gap between them, not between their nearest hits.
       type Run = Hit & {
         afterTurn?: boolean;
         dir?: [number, number];
+        first: number;
+        last: number;
       };
       const nearer = (a: Hit, b: Hit): boolean =>
         a.dist < b.dist || (a.dist === b.dist && a.line < b.line);
@@ -4556,9 +4572,12 @@ export class RoutingEngine {
         for (const si of hitSegs) {
           let best = reach.get(si)![0];
           for (const c of reach.get(si)!) if (nearer(c, best)) best = c;
-          const dir = segDir(si);
+          // A connector segment is never a turn: it has no graph edge to
+          // retrace, and its heading is the way to the user's point.
+          const dir = synthetic.has(si) ? undefined : segDir(si);
           const turned: boolean =
             current !== null &&
+            !synthetic.has(si) &&
             (turnsBack(seen, si) || opposes(current.dir, dir));
           if (current && si === prevSi + 1 && !turned) {
             if (nearer(best, current)) {
@@ -4568,10 +4587,13 @@ export class RoutingEngine {
               current.chain = best.chain;
             }
             if (dir) current.dir = dir;
+            current.last = Math.max(current.last, best.chain);
           } else {
             if (current) runs.push(current);
             current = {
               ...best,
+              first: best.chain,
+              last: best.chain,
               ...(dir ? { dir } : {}),
               ...(turned ? { afterTurn: true } : {}),
             };
@@ -4584,24 +4606,24 @@ export class RoutingEngine {
 
         // Merge runs *within this structure group* that are close together
         // along the route into one crossing, keeping the nearest hit. "Close"
-        // is measured from the previous run itself, not from the hit kept for
-        // the merged entry, so whether runs merge never depends on which of
-        // them happened to be nearest.
+        // is the gap from the previous run's latest hit to this run's first,
+        // so a long run (a lock over several edges) is measured from where it
+        // ends, and whether runs merge never depends on which hit was nearest.
         const merged: Run[] = [];
-        let prevChain = -Infinity;
+        let prevLast = -Infinity;
         for (const run of runs) {
           const prev =
             merged.length > 0 ? merged[merged.length - 1] : undefined;
           if (
             prev &&
             !run.afterTurn &&
-            run.chain - prevChain < MERGE_ROUTE_DIST
+            run.first - prevLast < MERGE_ROUTE_DIST
           ) {
             merged[merged.length - 1] = nearer(run, prev) ? run : prev;
           } else {
             merged.push(run);
           }
-          prevChain = run.chain;
+          prevLast = run.last;
         }
         for (const run of merged) {
           // build's object itself (it is keyed for the info lookup below).

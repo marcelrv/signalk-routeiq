@@ -1070,3 +1070,81 @@ describe("route structures: the fallback box far north", () => {
     assert.ok((maxLon - line[1][0]) * mPerDeg >= 50, "east margin");
   });
 });
+
+describe("route structures: connector segments are never a turn-back", () => {
+  let fx: Fixture;
+  before(async () => {
+    // A file that vouches for its edges, and a bridge beside nothing it holds.
+    fx = await openFixture([
+      {
+        country: "AAA",
+        nodes: line(2, 200),
+        edges: [[1, 2]],
+        pois: [
+          { id: 81, type: BRIDGE, name: "Bridge 81", x: 2000, y: 10 },
+          { id: 8, type: SPAN, parent: 81, x: 2000, y: 10 },
+          { id: 82, type: BRIDGE, name: "Bridge 82", x: 100, y: 300 },
+          { id: 9, type: SPAN, parent: 82, x: 100, y: 300 },
+        ],
+        edgePois: [[1, 2, 9]],
+      },
+    ]);
+  });
+  after(() => fx.close());
+
+  it("lists a bridge once when the end connector's two -1 to -1 segments both pass it, heading back", async () => {
+    // As connectUserPoint's end connector: along the snapped edge, then back
+    // toward the user's point. Both within 50 m of the bridge.
+    const coords = [pos(1800, 0), pos(2020, 0), pos(1985, 35)];
+    const found = (await (fx.engine as any).detectRouteStructures(coords, [
+      { from: -1, to: -1 },
+      { from: -1, to: -1 },
+    ])) as Found[];
+    assert.deepStrictEqual(
+      found.map((c) => c.structure),
+      ["81"],
+    );
+  });
+});
+
+describe("route structures: a long lock with an unlinked edge in it", () => {
+  let fx: Fixture;
+  before(async () => {
+    // Chamber 7 is linked to edges 1-2, 2-3, 4-5 and 5-6, not 3-4 (the file
+    // holds it, so it is known and passes nothing). Its point sits at the
+    // lock's west end: the second stretch's hits are 360 m from it (past
+    // MERGE_ROUTE_DIST), but only 240 m after the first stretch's last hit.
+    fx = await openFixture([
+      {
+        country: "AAA",
+        nodes: line(6, 120),
+        edges: [
+          [1, 2],
+          [2, 3],
+          [3, 4],
+          [4, 5],
+          [5, 6],
+        ],
+        pois: [
+          { id: 71, type: LOCK, name: "Lock 71", x: 0, y: 5 },
+          { id: 7, type: CHAMBER, parent: 71, x: 0, y: 5 },
+        ],
+        edgePois: [
+          [1, 2, 7],
+          [2, 3, 7],
+          [4, 5, 7],
+          [5, 6, 7],
+        ],
+      },
+    ]);
+  });
+  after(() => fx.close());
+
+  it("is one passage: the gap is measured from where the first stretch ends", async () => {
+    const { crossings } = await detect(fx, [1, 2, 3, 4, 5, 6]);
+    assert.deepStrictEqual(
+      crossings.map((c) => c.structure),
+      ["71"],
+    );
+  });
+});
