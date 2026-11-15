@@ -46,6 +46,12 @@ const Y = { lat: 52.0, lon: 4.995 };
 const NODE_H = 1, NODE_K = 2, NODE_D = 3, NODE_I1 = 4, NODE_I2 = 5;
 const NODE_M = 6, NODE_M2 = 7, NODE_M3 = 8, NODE_Y = 9;
 
+// Deep water nearer than M (~260 m from H) that reaches D only across land:
+// C == deep == C2 ~~ land ~~ D.
+const C = { lat: 51.998, lon: 4.998 };
+const C2 = { lat: 51.99, lon: 4.99 };
+const NODE_C = 10, NODE_C2 = 11;
+
 interface FixtureOptions {
   /** Deep water M joined to D by a long loop. */
   otherWater?: boolean;
@@ -53,6 +59,8 @@ interface FixtureOptions {
   landToOtherWater?: boolean;
   /** K-H one-way K→H, plus shallow H-Y: H is reached from K but does not lead to it. */
   oneWayApproach?: boolean;
+  /** Deep C-C2, nearer than M, joined to D only by a land-crossing edge C2-D. */
+  landLockedDeep?: boolean;
 }
 
 function metres(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
@@ -111,6 +119,10 @@ function buildFixture(dir: string, opts: FixtureOptions = {}): void {
     nodes.push([NODE_M, M], [NODE_M2, M2], [NODE_M3, M3]);
     links.push([NODE_M, NODE_M2, 10.0], [NODE_M2, NODE_M3, 10.0], [NODE_M3, NODE_D, 10.0]);
     if (opts.landToOtherWater) links.push([NODE_H, NODE_M, 10.0, { land: true }]);
+  }
+  if (opts.landLockedDeep) {
+    nodes.push([NODE_C, C], [NODE_C2, C2]);
+    links.push([NODE_C, NODE_C2, 10.0], [NODE_C2, NODE_D, 10.0, { land: true }]);
   }
   const pos = new Map(nodes);
   for (const [id, p] of nodes) {
@@ -269,6 +281,32 @@ describe('start-node better-depth swap past a land-crossing edge', () => {
   it('does not count an edge across land as the harbour leading into the other water', async () => {
     const route = await makeEngine(db).calculateRoute(request);
     assert.ok(passes(route, M), 'the route starts in the other, deep water at M');
+  });
+});
+
+describe('start-node better-depth swap past deep water that leads on only across land', () => {
+  const dir = './test/fixtures/start-node-swap-landlocked';
+  let db: RoutingDatabase;
+
+  before(async () => {
+    buildFixture(dir, { otherWater: true, landLockedDeep: true });
+    db = new RoutingDatabase(dir);
+    await db.init();
+    await db.loadGraph();
+  });
+
+  after(async () => {
+    await db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not count an edge across land as leading somewhere', async () => {
+    // C is the nearest deep node and reaches D, but only across land, which
+    // A* never sails. Taking it failed the search and fell back to the
+    // shallow H-K route; the usable deep water at M is the better start.
+    const route = await makeEngine(db).calculateRoute(request);
+    assert.ok(passes(route, M), 'the route starts in the other, deep water at M');
+    assert.ok(!passes(route, C) && !passes(route, C2), 'the route never touches the land-locked water');
   });
 });
 

@@ -2864,8 +2864,9 @@ export class RoutingDatabase {
   }
 
   /**
-   * Whether `startNode` leads anywhere: a forward search (the same edge
-   * rules as getReachableNodes) that reaches one of `targets`, or visits
+   * Whether `startNode` leads anywhere: a forward search over the edges
+   * A* can sail (no wrong-way one-way edge, none across land or an
+   * obstacle) that reaches one of `targets`, or visits
    * more than `maxNodes` nodes, says yes; running out of nodes first says
    * it sits in a small island of its own. Bounded, so the common "yes" on a
    * big graph costs at most `maxNodes` visits.
@@ -2883,6 +2884,7 @@ export class RoutingDatabase {
       if (!edges) continue;
       for (const edge of edges) {
         if (edge.traffic_mode === TRAFFIC_ONE_WAY_REV) continue;
+        if (edge.crosses_land === 1 || edge.crosses_obstacle === 1) continue;
         if (visited.has(edge.target)) continue;
         if (targets.has(edge.target)) return true;
         visited.add(edge.target);
