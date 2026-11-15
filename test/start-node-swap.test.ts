@@ -253,6 +253,27 @@ describe('start-node better-depth swap', () => {
     assert.strictEqual(calls, 2);
   });
 
+  it('keeps a route already found when a wider box fails to load a region', async () => {
+    const engine = makeEngine(db) as any;
+    const anyDb = db as any;
+    const origEnsure = anyDb.ensureRegionsForBbox;
+    let loads = 0;
+    anyDb.ensureRegionsForBbox = async () => {
+      loads++;
+      if (loads > 1) throw new Error('synthetic load failure');
+    };
+    // A penalized first route makes the box widen; the wider box's
+    // region load then fails.
+    engine.pathViolationMeters = async () => 100;
+    try {
+      const route = await engine.calculateRoute(request);
+      assert.ok(passes(route, H), 'the route from the first box is returned');
+      assert.strictEqual(loads, 2);
+    } finally {
+      anyDb.ensureRegionsForBbox = origEnsure;
+    }
+  });
+
   it('puts the last A* error in the message of a route with via points', async () => {
     const engine = makeEngine(db) as any;
     engine.astarSearch = async () => {

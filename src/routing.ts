@@ -628,9 +628,10 @@ export class RoutingEngine {
       // the first, routingBBoxMargin-sized attempt; the wider boxes only
       // exist for the ones that don't, and now only load regions when the
       // search actually widens to look at them.
-      await this.db.ensureRegionsForBbox(bbox);
-
       try {
+        // Inside the try: a region that fails to load on a wider box must
+        // not throw away a route an earlier box already found.
+        await this.db.ensureRegionsForBbox(bbox);
         const result = await this.astarSearch(
           start.latitude,
           start.longitude,
@@ -1288,9 +1289,9 @@ export class RoutingEngine {
       // the caller-supplied box (routeViaPoints' adaptiveMargin one), which
       // is dropped on the first retry (`bbox = undefined` below) so later
       // attempts fall through to the expanding bboxFromPoints box.
-      await this.db.ensureRegionsForBbox(segmentBbox);
-
       try {
+        // Inside the try, as in calculateRouteImpl.
+        await this.db.ensureRegionsForBbox(segmentBbox);
         const result = await this.astarSearch(
           startLat,
           startLon,
