@@ -329,6 +329,16 @@ describe("route structures: a bridge on a crossing canal is not on the route (#5
     );
   });
 
+  it("lists X twice when the route turns back a little past it, over an edge in between", async () => {
+    // 1-2-3-4 then back 4-3-2: X (x = 300) is passed at 300 m and at 500 m,
+    // less than the 300 m merge distance apart, with the turn on edge 3-4.
+    const { crossings } = await detect(fx, [1, 2, 3, 4, 3, 2]);
+    assert.deepStrictEqual(
+      crossings.map((c) => c.structure),
+      ["300", "300"],
+    );
+  });
+
   it("detects again on the final line after the start connector is added", async () => {
     // The user starts 150 m west of node 1; Bridge W sits on that connector.
     const r = await fx.engine.calculateRoute({

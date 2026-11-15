@@ -2084,6 +2084,9 @@ export class RoutingEngine {
    * connectUserPoint's synthetic-segment convention (from/to: -1 for the
    * off-graph endpoint) — and makes connectUserPoint itself a no-op afterward,
    * since coords[0]/coords[last] already exactly equal the user's point.
+   * Crossings detected on the graph-only line are dropped: a prefix shifts
+   * every chainage, and a structure on the spliced stretches was never looked
+   * for. The next consumer detects them again on the final line.
    */
   private splicePrefixSuffix(
     result: RouteResult,
@@ -2092,6 +2095,7 @@ export class RoutingEngine {
   ): void {
     const feature = result.features[0];
     if (!feature) return;
+    delete result.crossings;
     const coords = feature.geometry.coordinates;
     const segments = feature.properties.segments!;
 
@@ -4508,7 +4512,7 @@ export class RoutingEngine {
               poi: best.poi,
               dist: best.dist,
               chain: best.chain,
-              ...(turned && si === prevSi + 1 ? { afterTurn: true } : {}),
+              ...(turned ? { afterTurn: true } : {}),
             };
             seen = new Set();
           }
