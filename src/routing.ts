@@ -18,6 +18,7 @@ import {
   POI_TYPE_LOCK_CHAMBER,
   TRAFFIC_TWO_WAY,
   TRAFFIC_ONE_WAY_REV,
+  isSailableEdge,
 } from "./database.js";
 import type { FunnelResult, NavmeshRegion } from "./navmesh.js";
 import { attachWaters, buildRouteDescription } from "./route-description.js";
@@ -681,8 +682,16 @@ export class RoutingEngine {
         previousAttempt = { violatingMeters, cost, distance };
         currentMargin = newMargin;
       } catch (e) {
-        // Only an A* failure is worth a wider box; anything else is a bug.
-        if (!(e instanceof RouteSearchError)) throw e;
+        // Only an A* failure is worth a wider box. Anything else is a bug:
+        // it propagates, unless an earlier box already found a route, which
+        // is kept rather than thrown away.
+        if (!(e instanceof RouteSearchError)) {
+          if (candidates.length === 0) throw e;
+          console.error(
+            `[routeiq] Route search failed after a route was found; keeping that route: ${e instanceof Error ? e.message : String(e)}`,
+          );
+          break;
+        }
         lastSearchError = e;
         // Expand bounding box and retry
         if (currentMargin < maxMargin) {
@@ -1155,6 +1164,7 @@ export class RoutingEngine {
     }
 
     let finalResult: RouteResult | null;
+    const finalFailure: { reason?: string } = {};
     if (endMode === "manual") {
       // Final leg drawn by hand — end exactly at the user's destination
       // (no node snapping; there is no following leg to pick up from it).
@@ -1181,11 +1191,15 @@ export class RoutingEngine {
         finalBbox,
         env ? { ...env, offsetSec: elapsedSec } : undefined,
         waitOverrides,
+        finalFailure,
       );
     }
 
     if (!finalResult) {
-      throw new Error("No route found to destination");
+      throw new Error(
+        "No route found to destination" +
+          (finalFailure.reason ? `: ${finalFailure.reason}` : ""),
+      );
     }
 
     // Snap the final segment's start to currentStart (last via point or start if no vias)
@@ -1245,6 +1259,8 @@ export class RoutingEngine {
     bbox?: BBox,
     env?: RouteEnv,
     waitOverrides?: WaitOverrides,
+    // Filled with why the segment failed when this returns null.
+    failure: { reason?: string } = {},
   ): Promise<RouteResult | null> {
     const label = viaIndex >= 0 ? `Via point ${viaIndex + 1}` : "Destination";
     const startPt = { latitude: startLat, longitude: startLon };
@@ -1260,6 +1276,8 @@ export class RoutingEngine {
       distance: number;
     } | null = null;
     let retriedForPenalty = false;
+    // The last A* failure, for the fallback's message when no box finds a path.
+    let lastSearchError: RouteSearchError | undefined;
 
     while (currentMargin <= segmentMaxMargin) {
       const segmentBbox = bbox ?? bboxFromPoints(startPt, endPt, currentMargin);
@@ -1323,7 +1341,16 @@ export class RoutingEngine {
         previousAttempt = { violatingMeters, cost, distance };
         currentMargin = newMargin;
       } catch (e) {
-        if (!(e instanceof RouteSearchError)) throw e;
+        // As in calculateRouteImpl: widen only on an A* failure; a bug
+        // propagates unless a route was already found.
+        if (!(e instanceof RouteSearchError)) {
+          if (candidates.length === 0) throw e;
+          console.error(
+            `[routeiq] Route search for ${label} failed after a route was found; keeping that route: ${e instanceof Error ? e.message : String(e)}`,
+          );
+          break;
+        }
+        lastSearchError = e;
         bbox = undefined;
         if (currentMargin >= segmentMaxMargin) break;
         const newMargin = Math.min(currentMargin * 2, segmentMaxMargin);
@@ -1380,16 +1407,20 @@ export class RoutingEngine {
           // merged route is scheduled once, as a whole.
           undefined,
           false,
+          lastSearchError,
         );
         if (fallback.warnings) {
           warnings.push(...fallback.warnings);
           fallback.warnings = undefined;
         }
         return fallback;
-      } catch {
+      } catch (e) {
+        failure.reason = e instanceof Error ? e.message : String(e);
+        console.log(`[routeiq] ${label}: ${failure.reason}`);
         return null;
       }
     }
+    failure.reason = lastSearchError?.message;
     return null;
   }
 
@@ -2360,13 +2391,8 @@ export class RoutingEngine {
       // shallow harbour exit failed outright instead of routing with a
       // depth warning. Reaching the node being replaced or the other
       // endpoint, or a few thousand nodes, counts as leading somewhere.
-      const localReach = await this.localGraphReach(
-        node,
-        nodePos.lat,
-        nodePos.lon,
-        radius * 2,
-        label === "Start" ? "from" : "to",
-      );
+      // Computed only once a deep candidate turns up: most calls find none.
+      let localReach: Set<number> | null = null;
       const other = label === "Start" ? endNode : startNode;
       const targets = new Set<number>([node]);
       if (other !== null) targets.add(other);
@@ -2377,12 +2403,21 @@ export class RoutingEngine {
         if (c.id === node) continue;
         const cEdges = await this.db.getOutgoingEdges(c.id);
         if (cEdges.length === 0) continue; // skip dead-end candidates for start node
-        if (localReach.has(c.id)) continue;
         const hasDeep = cEdges.some((e) => {
           const d = depthOf(e, c.lat, c.lon);
           return !depthKnownOf(e) || d >= minDepth;
         });
         if (!hasDeep) continue;
+        if (!localReach) {
+          localReach = await this.localGraphReach(
+            node,
+            nodePos.lat,
+            nodePos.lon,
+            radius * 2,
+            label === "Start" ? "from" : "to",
+          );
+        }
+        if (localReach.has(c.id)) continue;
         if (!this.db.leadsAnywhere(c.id, targets, IMPROVE_NODE_MIN_REACH)) {
           continue;
         }
@@ -2743,17 +2778,24 @@ export class RoutingEngine {
       console.log(
         `[routeiq] No path from the better-depth endpoint(s) — retrying from the nearest nodes`,
       );
-      return this.astarSearch(
-        startLat,
-        startLon,
-        endLat,
-        endLon,
-        minCoastDistanceMeters,
-        dims,
-        bbox,
-        env,
-        false,
-      );
+      try {
+        return await this.astarSearch(
+          startLat,
+          startLon,
+          endLat,
+          endLon,
+          minCoastDistanceMeters,
+          dims,
+          bbox,
+          env,
+          false,
+        );
+      } catch (e) {
+        if (!(e instanceof RouteSearchError)) throw e;
+        throw new RouteSearchError(
+          `${e.message} [retried from the nearest nodes after the better-depth endpoint(s) found no path]`,
+        );
+      }
     }
 
     if (!goalReached || reachedNode === null) {
@@ -3183,11 +3225,6 @@ export class RoutingEngine {
     maxDistance: number,
     direction: "from" | "to",
   ): Promise<Set<number>> {
-    const sailable = (e: EdgeRow): boolean =>
-      e.traffic_mode !== TRAFFIC_ONE_WAY_REV &&
-      e.crosses_land !== 1 &&
-      e.crosses_obstacle !== 1;
-
     // The graph only indexes outgoing edges. Every node on a path of at
     // most maxDistance lies within maxDistance of `node` as the crow flies,
     // so the incoming edges that matter come from the nodes in that circle.
@@ -3200,7 +3237,7 @@ export class RoutingEngine {
       ids.add(node);
       for (const id of ids) {
         for (const e of await this.db.getOutgoingEdges(id)) {
-          if (!ids.has(e.target) || !sailable(e)) continue;
+          if (!ids.has(e.target) || !isSailableEdge(e)) continue;
           let list = incoming.get(e.target);
           if (!list) incoming.set(e.target, (list = []));
           list.push({ id, distance: e.distance });
@@ -3212,7 +3249,7 @@ export class RoutingEngine {
     ): Promise<Array<{ id: number; distance: number }>> => {
       if (incoming) return incoming.get(id) ?? [];
       return (await this.db.getOutgoingEdges(id))
-        .filter(sailable)
+        .filter(isSailableEdge)
         .map((e) => ({ id: e.target, distance: e.distance }));
     };
 

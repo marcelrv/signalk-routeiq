@@ -237,6 +237,34 @@ describe('start-node better-depth swap', () => {
     await assert.rejects(engine.calculateRoute(request), /synthetic bug/);
     assert.strictEqual(calls, 1, 'no retry with a wider box after a bug');
   });
+
+  it('keeps a route already found when a later, wider box hits a bug', async () => {
+    const engine = makeEngine(db) as any;
+    let calls = 0;
+    // The first box finds a penalized route (so the box widens); the
+    // second attempt then hits a bug. The first route must survive.
+    engine.pathViolationMeters = async () => {
+      calls++;
+      if (calls === 1) return 100;
+      throw new TypeError('synthetic bug');
+    };
+    const route = await engine.calculateRoute(request);
+    assert.ok(passes(route, H), 'the route from the first box is returned');
+    assert.strictEqual(calls, 2);
+  });
+
+  it('puts the last A* error in the message of a route with via points', async () => {
+    const engine = makeEngine(db) as any;
+    engine.astarSearch = async () => {
+      throw new RouteSearchError('No route found between the given points — synthetic via cause');
+    };
+    const viaRequest = { ...request, via: [{ latitude: K.lat, longitude: K.lon }] };
+    await assert.rejects(engine.calculateRoute(viaRequest), (e: Error) => {
+      assert.match(e.message, /No route found to destination/);
+      assert.match(e.message, /Last search error: .*synthetic via cause/);
+      return true;
+    });
+  });
 });
 
 describe('start-node better-depth swap into other water', () => {
