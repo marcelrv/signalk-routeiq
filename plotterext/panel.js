@@ -766,8 +766,12 @@ async function refreshRoutes(autoSelectId) {
     selectedId = null;
   } else {
     for (const r of routes) {
+      // An unsaved stand-in name shows the name Save will suggest.
+      const suggested = sessions.get(r.routeId)?.suggestedName;
+      const name =
+        suggested && isPlaceholderRouteName(r.name) ? suggested : r.name;
       const label =
-        (r.name || "Unnamed route") +
+        (name || "Unnamed route") +
         " (" +
         r.pointCount +
         " pts" +
@@ -964,6 +968,12 @@ async function calculate(forcedRequestPoints, known) {
     generated: newPoints,
     revertPoints: session?.revertPoints ?? points,
     suggestedName: routeNameFor(firstName, lastName),
+    suggestedDescription: routeDescriptionFor(
+      { ...first, name: firstName },
+      requestPoints.slice(1, -1),
+      { ...last, name: lastName },
+      result,
+    ),
   });
   await client.call("route.replace", { routeId, points: newPoints });
   // Tide probes sit on the request points, so only a changed request (a new
@@ -1006,6 +1016,31 @@ function routeNameFor(startName, endName) {
   return "";
 }
 
+/** Last line of the descriptions we write, so a re-save can tell ours from
+ * the user's. */
+const DESCRIPTION_MARK = "Planned with RouteIQ";
+
+/**
+ * A plain-text route description for the host's save dialog, like the top of
+ * the webapp's route pane: start, destination and vias (name and position),
+ * then the distance/time line shown in this panel.
+ * @param {{position: number[], name?: string}} start The first request point.
+ * @param {{position: number[], name?: string}[]} vias The via request points.
+ * @param {{position: number[], name?: string}} end The last request point.
+ * @param {object} result The route result.
+ * @returns {string} The description.
+ */
+function routeDescriptionFor(start, vias, end, result) {
+  const pos = (p) => p.position[1].toFixed(4) + ", " + p.position[0].toFixed(4);
+  const named = (p) =>
+    isPlaceholderName(p.name) ? pos(p) : p.name.trim() + "  ·  " + pos(p);
+  const lines = ["Start: " + named(start), "Destination: " + named(end)];
+  if (vias.length) lines.push("Via: " + vias.map(named).join("  |  "));
+  lines.push(summaryLine(result));
+  lines.push(DESCRIPTION_MARK);
+  return lines.join("\n");
+}
+
 /**
  * Whether a route's name is a stand-in this panel or the host gave it, so a
  * name built from the route's ends may replace it on save. A name the user
@@ -1041,8 +1076,17 @@ async function save() {
   // user's session. A stand-in name ("RouteIQ to destination") is replaced
   // by one built from the route's ends, as the webapp names its routes.
   const params = { routeId: r.routeId, dialog: true };
-  const suggested = sessions.get(r.routeId)?.suggestedName;
-  if (suggested && isPlaceholderRouteName(r.name)) params.name = suggested;
+  const session = sessions.get(r.routeId);
+  if (session?.suggestedName && isPlaceholderRouteName(r.name))
+    params.name = session.suggestedName;
+  // A route with no description, or with one we wrote for an earlier
+  // calculation, gets the current one; the user's own text is kept.
+  if (session?.suggestedDescription) {
+    const current = (await client.call("route.get", { routeId: r.routeId }))
+      ?.description;
+    if (!current?.trim() || current.trim().endsWith(DESCRIPTION_MARK))
+      params.description = session.suggestedDescription;
+  }
   // The call stays open until the user answers that dialog, so the bus's
   // default 10 s call timeout must not apply (0 = no timeout).
   await client.call("route.save", params, { timeoutMs: 0 });
@@ -1273,15 +1317,13 @@ async function searchPois() {
 
 /* ---------- result summary + itinerary ---------- */
 
-function renderSummary(result) {
-  clearHighlight();
-  // Feature k runs from vertex k to k+1.
-  routeVertices = [];
-  for (const f of result.features || []) {
-    const c = f.geometry?.coordinates || [];
-    if (routeVertices.length === 0 && c.length > 0) routeVertices.push(c[0]);
-    if (c.length > 1) routeVertices.push(c[c.length - 1]);
-  }
+/**
+ * The route's distance/time line: distance, total time at the configured
+ * speed, waiting, and the tide effect when tides were used.
+ * @param {object} result The route result.
+ * @returns {string} The line.
+ */
+function summaryLine(result) {
   const distM = result.totalDistance || 0;
   const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 6;
   const tideActive =
@@ -1319,7 +1361,19 @@ function renderSummary(result) {
       }
     }
   }
-  $("sum-line").textContent = line;
+  return line;
+}
+
+function renderSummary(result) {
+  clearHighlight();
+  // Feature k runs from vertex k to k+1.
+  routeVertices = [];
+  for (const f of result.features || []) {
+    const c = f.geometry?.coordinates || [];
+    if (routeVertices.length === 0 && c.length > 0) routeVertices.push(c[0]);
+    if (c.length > 1) routeVertices.push(c[c.length - 1]);
+  }
+  $("sum-line").textContent = summaryLine(result);
 
   const warnings = $("warnings");
   warnings.innerHTML = "";
