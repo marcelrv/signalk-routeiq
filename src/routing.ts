@@ -3268,8 +3268,10 @@ export class RoutingEngine {
     const claimedPois = new Set<RouteCrossing>();
     // Chainage order, not Map insertion order, so which span reaches for
     // which POI cannot depend on the order lock ids happened to be inserted.
-    const spans = [...lockSpans.values()].sort((a, b) => a[0] - b[0]);
-    for (const [from, to] of spans) {
+    const spans = [...lockSpans.entries()]
+      .map(([id, span]) => ({ id, from: span[0], to: span[1] }))
+      .sort((a, b) => a.from - b.from);
+    for (const { id: lockId, from, to } of spans) {
       // The charted POI and the traversed edges rarely land on the same
       // metre, so allow the usual grouping tolerance at each end of the span.
       const lo = from - RoutingEngine.CROSSING_GROUP_METRES;
@@ -3304,9 +3306,21 @@ export class RoutingEngine {
       let idx = 0;
       while (idx < cum.length - 1 && cum[idx] < at) idx++;
       const coord = coords[Math.min(idx, coords.length - 1)];
+      // `lockIds` holds the whole, so a chamber's own wait override is not
+      // available here; linked chambers normally appear as crossings
+      // themselves and claim the span above.
+      const whole = this.db?.getPoiRow(lockId);
+      const wholeWait = whole
+        ? parsePoiJson(whole.properties).typical_wait_minutes
+        : undefined;
       crossings.push({
         type: "lock",
-        name: "Lock",
+        name: (whole && this.db.poiDisplayName(whole)) || "Lock",
+        ...(typeof wholeWait === "number" &&
+        Number.isFinite(wholeWait) &&
+        wholeWait >= 0
+          ? { waitMinutes: wholeWait }
+          : {}),
         position: coord
           ? { latitude: coord[1], longitude: coord[0] }
           : { latitude: 0, longitude: 0 },

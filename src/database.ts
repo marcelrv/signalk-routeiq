@@ -2985,15 +2985,23 @@ export class RoutingDatabase {
   ): Promise<Array<{ poiIds: number[]; known: boolean }>> {
     if (pairs.length === 0) return [];
     const request = pairs.map(([a, b]) => {
-      const edge = this.getEdgeSync(a, b) ?? this.getEdgeSync(b, a);
-      const dbIndexes =
-        edge === null || edge === undefined
-          ? []
-          : edge.dbIndex === undefined
-            ? null // bulk mode leaves file edges untagged: the worker looks
-            : [edge.dbIndex, ...(edge.extraDbIndexes ?? [])].filter(
-                (i) => i >= 0,
-              );
+      // Both directions: each directed edge may be held by different files,
+      // and edge_pois is keyed by the unordered pair.
+      const edges = [this.getEdgeSync(a, b), this.getEdgeSync(b, a)].filter(
+        (e) => e !== null && e !== undefined,
+      );
+      let dbIndexes: number[] | null;
+      if (edges.some((e) => e.dbIndex === undefined)) {
+        dbIndexes = null; // bulk mode leaves file edges untagged: the worker checks every file
+      } else {
+        const set = new Set<number>();
+        for (const e of edges) {
+          for (const i of [e.dbIndex as number, ...(e.extraDbIndexes ?? [])]) {
+            if (i >= 0) set.add(i);
+          }
+        }
+        dbIndexes = [...set];
+      }
       return { lo: Math.min(a, b), hi: Math.max(a, b), dbIndexes };
     });
     return this.sendMessage("routePois", { pairs: request });
@@ -3286,7 +3294,11 @@ export class RoutingDatabase {
     if (rows.length > cap) {
       const cLat = (minLat + maxLat) / 2;
       const cLon = (minLon + maxLon) / 2;
-      const d2 = (r: PoiRow) => (r.lat - cLat) ** 2 + (r.lon - cLon) ** 2;
+      // Longitude degrees shrink with latitude: scale them so the ranking is
+      // by ground distance (still a cheap squared distance).
+      const cosLat = Math.max(0.01, Math.cos((cLat * Math.PI) / 180));
+      const d2 = (r: PoiRow) =>
+        (r.lat - cLat) ** 2 + ((r.lon - cLon) * cosLat) ** 2;
       rows.sort((a, b) => d2(a) - d2(b));
       rows.length = cap;
     }

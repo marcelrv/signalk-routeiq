@@ -635,3 +635,34 @@ describe('one crossing per whole (parent_id grouping)', () => {
     assert.deepStrictEqual(c.map((x: { name: string }) => x.name), [`${BRIDGE} (opening span)`]);
   });
 });
+
+describe('synthetic lock entry from the edges', () => {
+  const run = (db: unknown) => {
+    const engine = Object.create(RoutingEngine.prototype) as any;
+    engine._config = { ...DEFAULT_CONFIG };
+    engine.db = db;
+    const crossings: any[] = [];
+    const segs = [{ distance: 100, lockIds: [100] }, { distance: 100 }];
+    const sched = engine.crossingWaitSchedule([[4, 51], [4.001, 51], [4.002, 51]], segs, crossings);
+    return { crossings, sched };
+  };
+
+  it('takes the whole\'s name and typical_wait_minutes', () => {
+    const whole = { id: 100, type_id: 1, parent_id: null, name: 'Big Lock', properties: '{"typical_wait_minutes":10}' };
+    const { crossings, sched } = run({ getPoiRow: () => whole, poiDisplayName: (r: any) => r.name });
+    assert.strictEqual(crossings.length, 1);
+    assert.strictEqual(crossings[0].name, 'Big Lock');
+    assert.strictEqual(crossings[0].waitMinutes, 10);
+    assert.strictEqual(sched.reduce((t: number, w: any) => t + w.seconds, 0), 600);
+  });
+
+  it('keeps "Lock" and the configured default when the whole is unknown or gives no wait', () => {
+    const a = run({ getPoiRow: () => undefined, poiDisplayName: () => '' });
+    assert.strictEqual(a.crossings[0].name, 'Lock');
+    assert.strictEqual(a.crossings[0].waitMinutes, undefined);
+    const whole = { id: 100, type_id: 1, parent_id: null, name: '', properties: '{}' };
+    const b = run({ getPoiRow: () => whole, poiDisplayName: (r: any) => r.name });
+    assert.strictEqual(b.crossings[0].name, 'Lock');
+    assert.strictEqual(b.sched.reduce((t: number, w: any) => t + w.seconds, 0), 3600);
+  });
+});

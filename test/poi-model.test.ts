@@ -514,3 +514,45 @@ describe('edge_pois of several files are united', () => {
     assert.deepStrictEqual(db.getPoiChildren(100).map((p) => p.id).sort(), [101, 102]);
   });
 });
+
+describe('POI lookups: direction and ground distance', () => {
+  it('getRoutePois asks the files of both directions, and every file when one is untagged', async () => {
+    const sent: Array<{ pairs: Array<{ dbIndexes: number[] | null }> }> = [];
+    const edges = new Map<string, object>();
+    const db = Object.create(RoutingDatabase.prototype) as any;
+    db.getEdgeSync = (a: number, b: number) => edges.get(`${a}>${b}`) ?? null;
+    db.sendMessage = async (_t: string, p: any) => {
+      sent.push(p);
+      return [];
+    };
+    edges.set('1>2', { dbIndex: 0 });
+    edges.set('2>1', { dbIndex: 1, extraDbIndexes: [2, -1, 0] });
+    edges.set('3>4', { dbIndex: 3 });
+    edges.set('5>6', { dbIndex: 0 });
+    edges.set('6>5', {}); // untagged (bulk mode)
+    await db.getRoutePois([[1, 2], [3, 4], [4, 3], [5, 6], [8, 9]]);
+    const idx = sent[0].pairs.map((p) => (p.dbIndexes ? [...p.dbIndexes].sort() : null));
+    assert.deepStrictEqual(idx, [[0, 1, 2], [3], [3], null, []]);
+  });
+
+  it('over the cap, the POI nearest in metres is kept, not in degrees', async () => {
+    const d = tmpDir();
+    try {
+      buildFile(path.join(d, 'a.sqlite'), {
+        country: 'CAP', nodes: [1, 2], edges: [[1, 2]],
+        pois: [
+          { id: 1, type: 0, name: 'North', lat: 52.01, lon: 5.0 }, // 1.11 km
+          { id: 2, type: 0, name: 'East', lat: 52.0, lon: 5.012 }, // 0.82 km at 52N
+        ],
+      });
+      const db = new RoutingDatabase(d, false);
+      await db.init();
+      await db.loadGraph();
+      const r = await db.getPoisInBBox(51.9, 4.9, 52.1, 5.1, 1, { includeInfo: false });
+      assert.deepStrictEqual(r.map((p) => p.id), [2]);
+      await db.close();
+    } finally {
+      fs.rmSync(d, { recursive: true, force: true });
+    }
+  });
+});
