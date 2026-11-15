@@ -236,6 +236,12 @@ export function locationFromRun(
 /**
  * The part of `loc` between route vertices from..to, or null when they do not
  * overlap. Used to cut a warning's location down to one itinerary leg.
+ *
+ * A point (coordIndex === toCoordIndex, a bridge or lock) cannot be cut: it
+ * is kept whole, with its `position`, on the leg it falls in. Like a
+ * crossing, a point on a leg boundary belongs to the leg it starts, so it is
+ * listed once — except at the route's last vertex, where there is no next
+ * leg to carry it.
  */
 export function clipLocation(
   coords: LonLat[],
@@ -244,6 +250,13 @@ export function clipLocation(
   from: number,
   to: number,
 ): RouteLocation | null {
+  if (loc.coordIndex === loc.toCoordIndex) {
+    const closedEnd = to >= coords.length - 1;
+    const inside =
+      loc.coordIndex >= from &&
+      (closedEnd ? loc.coordIndex <= to : loc.coordIndex < to);
+    return inside ? loc : null;
+  }
   const a = Math.max(from, loc.coordIndex);
   const b = Math.min(to, loc.toCoordIndex);
   if (b <= a) return null;

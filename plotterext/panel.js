@@ -1641,12 +1641,29 @@ function showLocationsOnMap(at) {
       zoom: 15,
     });
   }
-  let [w, s, e, n] = at[0].bounds;
+  // Only locations the server gave a box: a location without one cannot be
+  // fitted to, and reading it would throw out of here instead of reaching
+  // the caller's catch.
+  let w = Infinity,
+    s = Infinity,
+    e = -Infinity,
+    n = -Infinity;
   for (const l of at) {
-    w = Math.min(w, l.bounds[0]);
-    s = Math.min(s, l.bounds[1]);
-    e = Math.max(e, l.bounds[2]);
-    n = Math.max(n, l.bounds[3]);
+    const b = l.bounds;
+    if (!b || b.length !== 4) continue;
+    w = Math.min(w, b[0]);
+    s = Math.min(s, b[1]);
+    e = Math.max(e, b[2]);
+    n = Math.max(n, b[3]);
+  }
+  if (w === Infinity) {
+    // No box anywhere: centre on the first point that has a position.
+    const p = at.find((l) => l.position);
+    if (!p) return Promise.resolve();
+    return client.call("map.center", {
+      position: [p.position.longitude, p.position.latitude],
+      zoom: 15,
+    });
   }
   return client.call("map.fitBounds", { bounds: [w, s, e, n] });
 }
