@@ -95,6 +95,12 @@ export interface RouteCrossing {
   name: string;
   subtype?: string; // 'opening' or 'fixed' for bridges
   height?: number; // vertical clearance (m) for fixed bridges
+  // Bridge crossings: the structure kind (`info.kind` of the span, else of its
+  // bridge whole): "bridge", "cable" (overhead power line), "weir", ... Absent
+  // when the database does not say; clients take absent as a bridge.
+  kind?: string;
+  // The source has no usable height: `height`, if set, is an estimate.
+  heightUnknown?: boolean;
   // Closed vertical clearance of an opening span, m; wait decision only. Not
   // an air-draft limit: an opening span still opens for a taller vessel.
   closedHeight?: number;

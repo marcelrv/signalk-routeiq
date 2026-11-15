@@ -469,6 +469,21 @@ describe('opening span low enough to pass closed', () => {
     assert.strictEqual(RoutingEngine.formatSpanSuffix('opening', undefined), ' (opening span)');
     assert.strictEqual(RoutingEngine.formatSpanSuffix('fixed', 7.2), ' (fixed, 7.2m)');
   });
+
+  it('names a structure that is not a bridge by its kind, and marks an estimated height', () => {
+    const f = RoutingEngine.formatSpanSuffix;
+    assert.strictEqual(f('fixed', 38.8, undefined, { kind: 'cable' }), ' (power line, 38.8m)');
+    assert.strictEqual(f('fixed', 25.5, undefined, { kind: 'cable', heightUnknown: true }), ' (power line, ~25.5m)');
+    assert.strictEqual(f('fixed', undefined, undefined, { kind: 'cable', heightUnknown: true }), ' (power line, height unknown)');
+    assert.strictEqual(f('fixed', undefined, undefined, { kind: 'cable' }), ' (power line)');
+    assert.strictEqual(f('opening', undefined, undefined, { kind: 'flood_barrier' }), ' (flood barrier, opening span)');
+    assert.strictEqual(f(undefined, 4, undefined, { kind: 'weir' }), ' (weir, 4.0m)');
+    // a bridge, said or not, reads as before
+    assert.strictEqual(f('fixed', 7.2, undefined, { kind: 'bridge' }), ' (fixed, 7.2m)');
+    assert.strictEqual(f('fixed', 7.2, undefined, {}), ' (fixed, 7.2m)');
+    assert.strictEqual(f('fixed', undefined, undefined, { kind: 'bridge', heightUnknown: true }), ' (fixed, height unknown)');
+    assert.strictEqual(f(undefined, 7.2, undefined, { kind: 'bridge' }), '');
+  });
 });
 
 describe('a wait moves the tide clock, not just the total', () => {
@@ -599,6 +614,8 @@ describe('one crossing per whole (parent_id grouping)', () => {
       getPoiInfo: async (ids: number[]) =>
         Object.fromEntries(parts.filter((p) => ids.includes(p.id) && Object.keys(p.info).length > 0).map((p) => [String(p.id), p.info])),
       getPoiParent: (row: { parent_id: number | null }) => wholes.find((w) => w.id === row.parent_id),
+      withSpanKindSources: (ids: number[]) => ids,
+      spanKind: () => undefined,
     };
     const coords = routeAlong(lon);
     return (await engine.detectRouteStructures(coords, chain(coords))) as Found[];
@@ -687,6 +704,8 @@ describe('one crossing per whole (parent_id grouping)', () => {
       getPoisInBBox: async () => parts.map((p) => ({ ...p, info: {} })),
       getPoiInfo: async () => ({}),
       getPoiParent: () => bridgeWhole(7),
+      withSpanKindSources: (ids: number[]) => ids,
+      spanKind: () => undefined,
     };
     const line: [number, number][] = [[4.63942, 52.1665], [4.63861, 52.16757]];
     const c = await engine.detectRouteStructures(line, chain(line));

@@ -574,3 +574,65 @@ describe('POI lookups: direction and ground distance', () => {
     }
   });
 });
+
+describe('structure kind: a power line is told apart from a bridge', () => {
+  let dir: string;
+  let db: RoutingDatabase;
+  let engine: RoutingEngine;
+
+  // The producer writes `kind` on the whole; the spans usually carry none.
+  const KIND_POIS: PoiSpec[] = [
+    { id: 500, type: 2, name: 'Hoogspanningslijn', info: { kind: 'cable' }, lon: lonOf(2) },
+    { id: 501, type: 6, parent: 500, name: 'Hoogspanningslijn span', properties: { subtype: 'fixed' }, info: { height: 25.5, height_unknown: true }, lon: lonOf(2) },
+    { id: 600, type: 2, name: 'Old Bridge', lon: lonOf(3) },
+    { id: 601, type: 6, parent: 600, name: 'Old Bridge span', properties: { subtype: 'fixed' }, info: { height: 7.2 }, lon: lonOf(3) },
+    { id: 700, type: 2, name: 'Mixed', info: { kind: 'bridge' }, lon: lonOf(4) },
+    { id: 701, type: 6, parent: 700, name: 'Mixed span', properties: { subtype: 'fixed' }, info: { kind: 'cable', height: 30 }, lon: lonOf(4) },
+  ];
+
+  before(async () => {
+    dir = tmpDir();
+    buildFile(path.join(dir, 'k.sqlite'), {
+      country: 'KND',
+      nodes: [1, 2, 3, 4, 5],
+      edges: [[1, 2], [2, 3], [3, 4], [4, 5]],
+      pois: KIND_POIS,
+      edgePois: [[1, 2, 501], [2, 3, 601], [3, 4, 701]],
+    });
+    db = new RoutingDatabase(dir, false);
+    await db.init();
+    await db.loadGraph();
+    engine = new RoutingEngine(db, DEFAULT_CONFIG);
+    engine.setVesselDimensions({ draft: 1.0, beam: 3.0, airDraft: 5.0 });
+  });
+  after(async () => {
+    await db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('the map gives a span its whole\'s kind, its own when it has one, and none when no file says', async () => {
+    const pois = await db.getPoisInBBox(LAT - 0.01, 5.0, LAT + 0.01, 5.05);
+    const kindOf = (id: number) => pois.find((p) => p.id === id)!;
+    assert.strictEqual(kindOf(501).kind, 'cable');
+    assert.deepStrictEqual(kindOf(501).info, { height: 25.5, height_unknown: true }, 'info stays the span\'s own');
+    assert.strictEqual('kind' in kindOf(601), false);
+    assert.strictEqual(kindOf(701).kind, 'cable', 'the span\'s own kind wins over the whole\'s');
+  });
+
+  it('a route crossing carries the kind and an estimated height, and names the power line', async () => {
+    const r = await engine.calculateRoute({
+      start: { latitude: LAT, longitude: lonOf(1) },
+      end: { latitude: LAT, longitude: lonOf(5) },
+      minCoastDistance: 0,
+    });
+    const by = (s: string) => (r.crossings ?? []).find((c) => c.structure === s)!;
+    assert.ok(by('500'), `got ${JSON.stringify(r.crossings)}`);
+    assert.strictEqual(by('500').kind, 'cable');
+    assert.strictEqual(by('500').heightUnknown, true);
+    assert.strictEqual(by('500').height, 25.5);
+    assert.strictEqual(by('500').name, 'Hoogspanningslijn (power line, ~25.5m)');
+    assert.strictEqual(by('600').kind, undefined);
+    assert.strictEqual(by('600').name, 'Old Bridge (fixed, 7.2m)');
+    assert.strictEqual(by('700').kind, 'cable');
+  });
+});

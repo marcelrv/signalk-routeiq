@@ -2824,9 +2824,30 @@
     return POI_TYPE_NAMES[poi.typeId] || null;
   }
 
+  /** Marker colour of an overhead power line (bridge POI of kind "cable"). */
+  const CABLE_COLOR = "#64748b";
+
+  /** Words for a structure kind that is not a bridge: "cable" is a power line,
+   *  others are shown as the producer names them ("flood_barrier" → "flood
+   *  barrier"). */
+  function kindLabel(kind) {
+    return kind === "cable" ? "power line" : String(kind).replace(/_/g, " ");
+  }
+
   function poiIcon(type, props, size) {
     size = size || 22;
     if (type === "bridge") {
+      // An overhead power line (`kind` "cable", sent by the server; absent
+      // means a bridge) gets a pylon, whatever its subtype.
+      if (props.kind === "cable") {
+        return (
+          '<svg width="' +
+          size +
+          '" height="' +
+          size +
+          '" viewBox="0 0 22 22"><polyline points="7,19 11,3 15,19" stroke="white" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/><line x1="5" y1="7" x2="17" y2="7" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="8.7" y1="12.5" x2="13.3" y2="12.5" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M5 7 Q3 11 1 11 M17 7 Q19 11 21 11" stroke="white" stroke-width="1.2" fill="none" stroke-linecap="round"/></svg>'
+        );
+      }
       if (props.subtype === "opening") {
         return (
           '<svg width="' +
@@ -2889,18 +2910,30 @@
           const info = p.info || {};
           const t = poiTypeName(p);
           if (!t) continue;
+          // The structure kind of a span (server-resolved, whole's if the
+          // span has none); absent means a bridge.
+          const kind = p.kind;
           const subtypeColors = subtypeColor[t];
           let color =
-            subtypeColors && props.subtype
-              ? subtypeColors[props.subtype]
-              : typeColor[t] || "#6d96c0";
-          const iconHtml = poiIcon(t, props);
+            t === "bridge" && kind === "cable"
+              ? CABLE_COLOR
+              : subtypeColors && props.subtype
+                ? subtypeColors[props.subtype]
+                : typeColor[t] || "#6d96c0";
+          const iconHtml = poiIcon(t, { subtype: props.subtype, kind: kind });
           let label = p.displayName || p.name || "POI";
           if (t === "bridge") {
+            if (kind && kind !== "bridge")
+              label += " (" + kindLabel(kind) + ")";
             if (props.subtype === "fixed") {
-              if (info.height_unknown === true) label += " — height unknown";
-              else if (typeof info.height === "number" && info.height < 999)
-                label += " — " + info.height + "m";
+              const hasHeight =
+                typeof info.height === "number" && info.height < 999;
+              // height_unknown: any height given is only an estimate.
+              if (info.height_unknown === true)
+                label += hasHeight
+                  ? " — ~" + info.height + "m"
+                  : " — height unknown";
+              else if (hasHeight) label += " — " + info.height + "m";
             } else if (props.subtype === "opening") {
               // Closed clearance: below it you need not wait for an opening.
               const ch = props.closed_height;
@@ -6739,9 +6772,16 @@
               props = {};
             }
           }
-          var color = getSearchColor(t, props);
-          var iconHtml = poiIcon(t, props, 16);
-          var typeLabel = t.charAt(0).toUpperCase() + t.slice(1);
+          // Search returns wholes, which carry their kind in `info`.
+          var kind = item.info && item.info.kind;
+          var color =
+            t === "bridge" && kind === "cable"
+              ? CABLE_COLOR
+              : getSearchColor(t, props);
+          var iconHtml = poiIcon(t, { subtype: props.subtype, kind: kind }, 16);
+          var typeName =
+            t === "bridge" && kind && kind !== "bridge" ? kindLabel(kind) : t;
+          var typeLabel = typeName.charAt(0).toUpperCase() + typeName.slice(1);
           html +=
             '<div class="search-result-item" data-idx="' +
             i +
@@ -7397,9 +7437,11 @@
             const color =
               e0.type === "lock"
                 ? "#f59e0b"
-                : entries.some((e) => e.subtype === "fixed")
-                  ? "#ef4444"
-                  : "#22c55e";
+                : e0.kind === "cable"
+                  ? CABLE_COLOR
+                  : entries.some((e) => e.subtype === "fixed")
+                    ? "#ef4444"
+                    : "#22c55e";
             icons.push(
               '<span class="node-crossing-icon' +
                 crossingLinkClass(e0) +
@@ -7408,7 +7450,7 @@
                 ' style="background:' +
                 color +
                 '">' +
-                poiIcon(e0.type, { subtype: e0.subtype }, 14) +
+                poiIcon(e0.type, { subtype: e0.subtype, kind: e0.kind }, 14) +
                 "</span>",
             );
             // If both fixed and opening exist, show the opening icon too
@@ -7633,16 +7675,21 @@
               const color =
                 e0.type === "lock"
                   ? "#f59e0b"
-                  : entries.some((e) => e.subtype === "fixed")
-                    ? "#ef4444"
-                    : "#22c55e";
+                  : e0.kind === "cable"
+                    ? CABLE_COLOR
+                    : entries.some((e) => e.subtype === "fixed")
+                      ? "#ef4444"
+                      : "#22c55e";
               // Span info (subtype/height) is baked into c.name by the server
               // when known (e.g. "... (opening span)", "... (opening, closed
               // 6.6m)" / "... (fixed, 18.4m)").
               // Only synthesize a separate badge for older/raw data that lacks it.
               let info = "";
+              // A crossing with a non-bridge `kind` always has its suffix
+              // ("(power line, 38.8m)") from the server.
               if (
                 e0.type === "bridge" &&
+                !(e0.kind && e0.kind !== "bridge") &&
                 !/\((?:opening(?: span|,[^)]*)|fixed(?:,[^)]*)?)\)/.test(
                   e0.name,
                 )
@@ -7671,7 +7718,7 @@
                 '<span class="leg-crossing-icon" style="background:' +
                 color +
                 '">' +
-                poiIcon(e0.type, { subtype: e0.subtype }, 16) +
+                poiIcon(e0.type, { subtype: e0.subtype, kind: e0.kind }, 16) +
                 "</span>" +
                 escapeHtml(e0.name) +
                 (info
