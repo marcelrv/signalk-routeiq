@@ -425,8 +425,11 @@ describe('a route reports the whole and uses the part', () => {
 
   it('marks the segments that pass a chamber, or a span over a lock head, with the lock\'s id', async () => {
     const path1 = [1, 2, 3, 4, 5];
-    const result = await (engine as unknown as EngineProbe).buildRouteResult(path1, path1, 0);
+    const probe = engine as unknown as EngineProbe;
+    const result = await probe.buildRouteResult(path1, path1, 0);
     const segs = result.features[0].properties.segments as Array<{ lockIds?: number[] }>;
+    // Set by detection, which the first consumer of the route runs.
+    await probe.detectRouteStructures(path1.map((n) => [lonOf(n), LAT]), segs);
     assert.deepStrictEqual(segs.map((s) => s.lockIds ?? null), [
       null, // 1-2: only a bridge span of a bridge whole
       [100], // 2-3: chamber 101 of Test Lock

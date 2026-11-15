@@ -276,6 +276,30 @@ const ROUTE_PART_TYPES: ReadonlySet<number> = new Set([
 const segmentHops = new WeakMap<object, number[]>();
 
 /**
+ * Hand a segment's graph edges and lock ids on to the piece of it that
+ * replaces it when a connector cuts the edge at the user's point: the piece
+ * still runs along those edges, so its links (`edge_pois`) and lock span
+ * must not turn into an unknown stretch.
+ */
+function keepSegmentEdges(
+  old:
+    | { from: number; to: number; nodes?: number[]; lockIds?: number[] }
+    | undefined,
+  piece: { lockIds?: number[] },
+): void {
+  if (!old) return;
+  const hops =
+    segmentHops.get(old) ??
+    (old.nodes && old.nodes.length >= 2
+      ? old.nodes
+      : old.from >= 0 && old.to >= 0
+        ? [old.from, old.to]
+        : undefined);
+  if (hops) segmentHops.set(piece, hops);
+  if (old.lockIds) piece.lockIds = [...old.lockIds];
+}
+
+/**
  * How close (m) a route stretch no database knows must pass to a bridge span
  * or lock chamber for it to count as a crossing. Known stretches use the
  * `edge_pois` links instead. Lowered from 150 m (measured from route vertices)
@@ -1595,6 +1619,7 @@ export class RoutingEngine {
             trafficMode: firstSeg?.trafficMode ?? TRAFFIC_TWO_WAY,
             edgeTypeId: firstSeg?.edgeTypeId,
           };
+          keepSegmentEdges(firstSeg, segments[0]);
           // Prepend over-land segment user → P
           segments.unshift({
             from: -1,
@@ -1726,6 +1751,7 @@ export class RoutingEngine {
                 trafficMode: lastSeg.trafficMode,
                 edgeTypeId: lastSeg.edgeTypeId,
               };
+              keepSegmentEdges(lastSeg, segments[lastSegIdx]);
 
               segments.push({
                 from: -1,
@@ -2746,8 +2772,8 @@ export class RoutingEngine {
     const minBeam = (dims.beam ?? 4.0) + this.config.safetyMarginBeam;
 
     const coords = result.features[0]?.geometry.coordinates ?? [];
-    // Reuse crossings this same result already carries (buildRouteResult
-    // sets them; a splice or connector that changes the line drops them),
+    // Reuse crossings this same result already carries (an earlier consumer
+    // set them; a splice or connector that changes the line drops them),
     // and keep fresh ones on it for the next consumer, as
     // addViolationWarnings does. Never detected at all with tides off,
     // matching truePassageTimes' own early-out.
@@ -3479,17 +3505,35 @@ export class RoutingEngine {
     // a passage of its own with its own wait, however close.
     const passageKey = (c: RouteCrossing): string | undefined =>
       c.structure === undefined ? undefined : `${c.type}:${c.structure}`;
+    // Except inside a locking: the bridges over both heads of a long lock
+    // share the lock's id and are one passage. Per structure, the end of the
+    // group's lock span for it (with the usual tolerance, as span claiming).
     let groupKeys = new Set<string>();
-    const firstKey = passageKey(sorted[0]);
-    if (firstKey) groupKeys.add(firstKey);
+    let lockEnds = new Map<string, number>();
+    const note = (c: RouteCrossing) => {
+      const key = passageKey(c);
+      if (key) groupKeys.add(key);
+      if (c.lockSpan && c.structure !== undefined)
+        lockEnds.set(
+          c.structure,
+          Math.max(lockEnds.get(c.structure) ?? -Infinity, c.lockSpan[1]),
+        );
+    };
+    note(sorted[0]);
     for (let i = 1; i < sorted.length; i++) {
       const c = sorted[i];
       const [start, end] = extent(c);
       const from = c.lockSpan ? groupEndPoint : groupEndSpan;
       const key = passageKey(c);
+      const inLock =
+        c.type !== "lock" &&
+        c.structure !== undefined &&
+        (c.distanceFromStart ?? 0) <=
+          (lockEnds.get(c.structure) ?? -Infinity) +
+            RoutingEngine.CROSSING_GROUP_METRES;
       if (
         start - from <= RoutingEngine.CROSSING_GROUP_METRES &&
-        !(key && groupKeys.has(key))
+        !(key && groupKeys.has(key) && !inLock)
       ) {
         groups[groups.length - 1].push(c);
         groupEndSpan = Math.max(groupEndSpan, end);
@@ -3499,8 +3543,9 @@ export class RoutingEngine {
         groupEndSpan = end;
         groupEndPoint = c.distanceFromStart ?? 0;
         groupKeys = new Set();
+        lockEnds = new Map();
       }
-      if (key) groupKeys.add(key);
+      note(c);
     }
     return [...groups, ...unplaced];
   }
@@ -4111,13 +4156,12 @@ export class RoutingEngine {
       if (node) coordinates.push([node.lon, node.lat]);
     }
 
-    const crossings = await this.detectRouteStructures(coordinates, segments);
-
+    // Crossings (and segments' lockIds) are not detected here: a connector
+    // or splice usually changes the line next, which would throw them away.
+    // The first consumer detects them (`result.crossings ?? detect`) and
+    // keeps them on the result, empty included.
     return {
       type: "FeatureCollection",
-      // Kept even when empty: "none" is a result, and an undefined here
-      // would make every later `result.crossings ??` detect again.
-      crossings,
       features: [
         {
           type: "Feature",
@@ -4272,6 +4316,7 @@ export class RoutingEngine {
     const pairs: Array<[number, number]> = [];
     const owners: number[][] = [];
     const indexOf = new Map<string, number>();
+    const pairOf: number[] = []; // per unit: its index in pairs
     for (const u of units) {
       const lo = Math.min(u.from, u.to);
       const hi = Math.max(u.from, u.to);
@@ -4284,6 +4329,7 @@ export class RoutingEngine {
         owners.push([]);
       }
       if (!owners[idx].includes(u.seg)) owners[idx].push(u.seg);
+      pairOf.push(idx);
     }
     const found = pairs.length > 0 ? await this.db.getRoutePois(pairs) : [];
 
@@ -4331,12 +4377,9 @@ export class RoutingEngine {
       b: coordinates[si + 1],
     });
     const stretches: Stretch[] = [];
-    units.forEach((u) => {
+    units.forEach((u, ui) => {
       if (u.seg >= nSegs) return;
-      const r =
-        found[
-          indexOf.get(`${Math.min(u.from, u.to)}:${Math.max(u.from, u.to)}`)!
-        ];
+      const r = found[pairOf[ui]];
       if (r?.known) return;
       if ((unitsPerSeg.get(u.seg) ?? 0) <= 1) {
         stretches.push(segLine(u.seg));
@@ -4435,22 +4478,22 @@ export class RoutingEngine {
         const [a, b] = k.split(">");
         return seen.has(`${b}>${a}`);
       });
-    // The direction of travel along segment si (east, north in metres), or
-    // undefined for a zero-length one.
-    const segDir = (si: number): [number, number] | undefined => {
+    // The bearing of travel along segment si (degrees true), or undefined
+    // for a zero-length one.
+    const segDir = (si: number): number | undefined => {
       const [lon1, lat1] = coordinates[si];
       const [lon2, lat2] = coordinates[si + 1];
-      const dx =
-        (lon2 - lon1) * Math.cos((((lat1 + lat2) / 2) * Math.PI) / 180);
-      const dy = lat2 - lat1;
-      const len = Math.hypot(dx, dy);
-      return len > 0 ? [dx / len, dy / len] : undefined;
+      return lon1 === lon2 && lat1 === lat2
+        ? undefined
+        : bearingDeg(lat1, lon1, lat2, lon2);
     };
-    /** True when u and v head more than 120 degrees apart: coming back. */
-    const opposes = (
-      u: [number, number] | undefined,
-      v: [number, number] | undefined,
-    ): boolean => !!u && !!v && u[0] * v[0] + u[1] * v[1] < -0.5;
+    /** True when bearings u and v are more than 150 degrees apart: coming
+     *  back. Not 120: a hard turn under a bridge at a junction is one
+     *  passage. */
+    const opposes = (u: number | undefined, v: number | undefined): boolean =>
+      u !== undefined &&
+      v !== undefined &&
+      Math.abs(((v - u + 540) % 360) - 180) > 150;
 
     /**
      * For a set of same-typed parts: group by whole (`parent_id`), then walk
@@ -4494,7 +4537,7 @@ export class RoutingEngine {
       // runs merge by the gap between them, not between their nearest hits.
       type Run = Hit & {
         afterTurn?: boolean;
-        dir?: [number, number];
+        dir?: number;
         first: number;
         last: number;
       };
@@ -4586,7 +4629,7 @@ export class RoutingEngine {
               current.line = best.line;
               current.chain = best.chain;
             }
-            if (dir) current.dir = dir;
+            if (dir !== undefined) current.dir = dir;
             current.last = Math.max(current.last, best.chain);
           } else {
             if (current) runs.push(current);
@@ -4594,7 +4637,7 @@ export class RoutingEngine {
               ...best,
               first: best.chain,
               last: best.chain,
-              ...(dir ? { dir } : {}),
+              ...(dir !== undefined ? { dir } : {}),
               ...(turned ? { afterTurn: true } : {}),
             };
             seen = new Set();

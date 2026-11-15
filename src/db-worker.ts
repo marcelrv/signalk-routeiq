@@ -1054,6 +1054,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             lo: number;
             hi: number;
             dbIndexes: number[] | null;
+            verify?: boolean;
           }>;
         };
         // Statements are prepared once per handle; a handle whose edge_pois
@@ -1093,13 +1094,18 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
           for (const i of candidates) {
             if (!handles[i]) continue;
             const st = stmtsOf(i);
-            // A tagged edge can still be in memory only (navmesh funnel and
-            // anchor edges carry their region's dbIndex): the file must hold it.
             // A file without a single edge_pois row has not linked its POIs to
             // its edges, so it cannot say an edge passes nothing: it has no say,
             // and on its own the pair stays unknown (geometric fallback).
             if (st.empty) continue;
-            if (!st.holds.get(p.lo, p.hi, p.hi, p.lo)) continue;
+            // An untagged pair is asked of every file, and a navmesh boundary
+            // edge can be in memory only (funnel and anchor edges carry their
+            // region's dbIndex; `verify`): there the file must hold it.
+            if (
+              (p.dbIndexes === null || p.verify) &&
+              !st.holds.get(p.lo, p.hi, p.hi, p.lo)
+            )
+              continue;
             known = true;
             for (const r of st.rows.all(p.lo, p.hi) as unknown as Array<{
               poi_id: number;

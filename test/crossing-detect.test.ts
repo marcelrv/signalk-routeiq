@@ -800,6 +800,7 @@ describe("route structures: stretches the files do not hold", () => {
       distance_to_land: 9999,
       edge_type_id: 1,
       traffic_mode: 0,
+      edge_kind_id: 1, // navmesh boundary, as addFunnelShortcutEdge makes them
       dbIndex: 0,
     };
     for (const [s, t] of [
@@ -1146,5 +1147,110 @@ describe("route structures: a long lock with an unlinked edge in it", () => {
       crossings.map((c) => c.structure),
       ["71"],
     );
+  });
+});
+
+describe("route structures: a hard turn at a bridge is one passage", () => {
+  let fx: Fixture;
+  // Bridge X sits where the route bends, at (100, 5). The route is on no
+  // file's edges (ids 11..13 are off-graph), so both legs are judged by the
+  // 50 m fallback and both pass the span.
+  const bend = (deg: number): Record<number, [number, number]> => {
+    const r = (deg * Math.PI) / 180;
+    return {
+      11: [0, 0],
+      12: [100, 0],
+      13: [100 + 100 * Math.cos(r), 100 * Math.sin(r)],
+    };
+  };
+  before(async () => {
+    fx = await openFixture([
+      {
+        country: "AAA",
+        nodes: [
+          { id: 1, x: 0, y: -2000 },
+          { id: 2, x: 200, y: -2000 },
+        ],
+        edges: [[1, 2]],
+        pois: [
+          { id: 500, type: BRIDGE, name: "Bridge X", x: 100, y: 5 },
+          {
+            id: 501,
+            type: SPAN,
+            parent: 500,
+            properties: { subtype: "opening" },
+            x: 100,
+            y: 5,
+          },
+        ],
+      },
+    ]);
+  });
+  after(() => fx.close());
+
+  it("lists the bridge once when the route turns 130 degrees under it", async () => {
+    const { crossings } = await detect(fx, [11, 12, 13], bend(130));
+    assert.deepStrictEqual(
+      crossings.map((c) => c.structure),
+      ["500"],
+    );
+  });
+
+  it("still lists it twice when the route comes straight back (170 degrees)", async () => {
+    const { crossings } = await detect(fx, [11, 12, 13], bend(170));
+    assert.deepStrictEqual(
+      crossings.map((c) => c.structure),
+      ["500", "500"],
+    );
+  });
+});
+
+describe("route structures: a connector that cuts the first edge keeps its links", () => {
+  let fx: Fixture;
+  before(async () => {
+    // Route 1-2-3 (200 m steps). Edge 1-2 runs through chamber 81 of lock 80;
+    // the chamber's point sits 80 m off the line, beyond the 50 m fallback,
+    // so only the edge_pois link can find it.
+    fx = await openFixture([
+      {
+        country: "AAA",
+        nodes: line(3, 200),
+        edges: [
+          [1, 2],
+          [2, 3],
+        ],
+        pois: [
+          { id: 80, type: LOCK, name: "Lock 80", x: 100, y: 80 },
+          { id: 81, type: CHAMBER, parent: 80, x: 100, y: 80 },
+        ],
+        edgePois: [[1, 2, 81]],
+      },
+    ]);
+  });
+  after(() => fx.close());
+
+  it("still lists the lock and marks the cut segment with it", async () => {
+    const engine = fx.engine as any;
+    const route = await engine.buildRouteResult([1, 2, 3], [1, 2, 3], 0);
+    // The user starts 30 m south of the first edge, 60 m along it: the
+    // connector projects onto the edge and replaces its first segment.
+    const [lon, lat] = pos(60, -30);
+    await engine.connectUserPoint(
+      { latitude: lat, longitude: lon },
+      route,
+      "start",
+    );
+    const coords = route.features[0].geometry.coordinates;
+    const segments = route.features[0].properties.segments as Seg[];
+    assert.strictEqual(segments[1].from, -1, "fixture: the edge was cut");
+    const crossings = (await engine.detectRouteStructures(
+      coords,
+      segments,
+    )) as Found[];
+    assert.deepStrictEqual(
+      crossings.filter((c) => c.type === "lock").map((c) => c.structure),
+      ["80"],
+    );
+    assert.deepStrictEqual(segments[1].lockIds, [80]);
   });
 });
