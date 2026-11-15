@@ -3459,11 +3459,24 @@ export class RoutingEngine {
     // a head and the edge data has already said they are distinct.
     let groupEndSpan = extent(sorted[0])[1];
     let groupEndPoint = sorted[0].distanceFromStart ?? 0;
+    // Detection lists one crossing per passage per structure, so the same
+    // structure (of the same type: a lock and the bridge over its head share
+    // the lock's id) twice is the route passing it again, after turning back:
+    // a passage of its own with its own wait, however close.
+    const passageKey = (c: RouteCrossing): string | undefined =>
+      c.structure === undefined ? undefined : `${c.type}:${c.structure}`;
+    let groupKeys = new Set<string>();
+    const firstKey = passageKey(sorted[0]);
+    if (firstKey) groupKeys.add(firstKey);
     for (let i = 1; i < sorted.length; i++) {
       const c = sorted[i];
       const [start, end] = extent(c);
       const from = c.lockSpan ? groupEndPoint : groupEndSpan;
-      if (start - from <= RoutingEngine.CROSSING_GROUP_METRES) {
+      const key = passageKey(c);
+      if (
+        start - from <= RoutingEngine.CROSSING_GROUP_METRES &&
+        !(key && groupKeys.has(key))
+      ) {
         groups[groups.length - 1].push(c);
         groupEndSpan = Math.max(groupEndSpan, end);
         groupEndPoint = Math.max(groupEndPoint, c.distanceFromStart ?? 0);
@@ -3471,7 +3484,9 @@ export class RoutingEngine {
         groups.push([c]);
         groupEndSpan = end;
         groupEndPoint = c.distanceFromStart ?? 0;
+        groupKeys = new Set();
       }
+      if (key) groupKeys.add(key);
     }
     return [...groups, ...unplaced];
   }

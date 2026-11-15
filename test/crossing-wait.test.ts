@@ -123,6 +123,22 @@ describe('crossing wait time', () => {
     );
   });
 
+  it('charges each passage under one opening bridge when the route turns back under it', () => {
+    // The same structure listed twice is two passages (detection lists one per
+    // passage), however close: out under it at 300 m, back under it at 500 m.
+    const twice = [
+      opening({ structure: '300', distanceFromStart: 300 }),
+      opening({ structure: '300', distanceFromStart: 500 }),
+    ];
+    assert.strictEqual(waitSeconds(twice), 2 * 1800);
+    // A lock and the bridge over its head share the lock's id: still one obstacle.
+    const lockAndHead = [
+      lock({ structure: '100', distanceFromStart: 0 }),
+      opening({ structure: '100', distanceFromStart: 60 }),
+    ];
+    assert.strictEqual(waitSeconds(lockAndHead), 3600);
+  });
+
   it('groups a run of fixed spans into no wait at all', () => {
     const stack = [0, 0, 0].map((m) => fixed({ distanceFromStart: m }));
     assert.strictEqual(waitSeconds(stack), 0);
