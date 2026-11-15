@@ -286,6 +286,15 @@ export interface RouteResult {
   totalSecondsNoTide?: number; // same route without current — UIs show the delta
   departureTime?: string; // ISO, echoed/defaulted from the request when tides active
   arrivalTime?: string; // ISO, departure + totalSeconds
+  // When the times above were worked out, and from what. The route goes back
+  // to the server on Save to Signal K long after the request is gone, so the
+  // saved passage profile (src/passage-profile.ts) reads its assumptions here.
+  calculatedAt?: string; // ISO
+  timingAssumptions?: {
+    averageSpeedKnots: number; // speed through the water used for every leg
+    lockWaitMinutes: number; // default wait per lock (a POI may carry its own)
+    bridgeWaitMinutes: number; // default wait per opening span (likewise)
+  };
   tide?: {
     enabled: boolean;
     estimated: boolean; // true = model/community-data predictions, not measurements

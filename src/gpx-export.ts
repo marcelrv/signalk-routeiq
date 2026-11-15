@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { RouteResult } from "./types.js";
+import { buildPassageProfile } from "./passage-profile.js";
 
 export class GpxExporter {
   /**
@@ -108,6 +109,9 @@ export class GpxExporter {
     // waypoint lists depending on which window it was saved from.
     const coordinatesMeta = coordinates.map((_, i) => ({ name: `WP${i + 1}` }));
 
+    // The calculated times, tied to exactly these coordinates (issue #50).
+    const passageProfile = buildPassageProfile(route, coordinates);
+
     return {
       name,
       description: `Route calculated by SignalK RouteIQ Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m`,
@@ -121,6 +125,7 @@ export class GpxExporter {
         properties: {
           totalCost,
           coordinatesMeta,
+          ...(passageProfile ? { passageProfile } : {}),
           ...(waypoints
             ? {}
             : {

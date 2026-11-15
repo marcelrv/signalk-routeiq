@@ -3648,6 +3648,16 @@ export class RoutingEngine {
 
     route.totalSeconds = Math.round(totalSec);
     if (waitSec > 0) route.totalWaitSeconds = Math.round(waitSec);
+    // What those times rest on, from the same sources annotateSegmentTimes and
+    // crossingWaitSchedule read — the saved passage profile reports them.
+    route.calculatedAt = new Date().toISOString();
+    route.timingAssumptions = {
+      averageSpeedKnots: Math.max(0.5, this.config.averageSpeedKnots),
+      lockWaitMinutes:
+        waitOverrides?.lockWaitMinutes ?? this.config.lockWaitMinutes ?? 60,
+      bridgeWaitMinutes:
+        waitOverrides?.bridgeWaitMinutes ?? this.config.bridgeWaitMinutes ?? 30,
+    };
     if (env) {
       const totalDistance =
         feature.properties.totalDistance ??
