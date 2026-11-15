@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase } from '../dist/database.js';
 import { RoutingEngine } from '../dist/routing.js';
 import { DEFAULT_CONFIG } from '../dist/types.js';
+import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 describe('RoutingEngine', () => {
   let db: RoutingDatabase;
@@ -90,6 +91,7 @@ describe('RoutingEngine', () => {
       (2, 'Marina Amsterdam', 0, NULL, 52.3676, 4.9041),
       (3, 'Lock Merwede', 1, NULL, 51.8833, 5.0333)`);
 
+    upgradeToPoiModel(raw);
     raw.close();
 
     // Small land polygon used by the manual-leg land-crossing warning test

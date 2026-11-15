@@ -3,9 +3,12 @@ import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { RoutingDatabase, POI_TYPE_HARBOUR, POI_TYPE_LOCK, POI_TYPE_BRIDGE } from '../dist/database.js';
+import {
+  RoutingDatabase, POI_TYPE_HARBOUR, POI_TYPE_LOCK, POI_TYPE_BRIDGE, POI_TYPE_LOCK_CHAMBER, POI_TYPE_BRIDGE_SPAN,
+} from '../dist/database.js';
 import { RoutingEngine } from '../dist/routing.js';
 import { DEFAULT_CONFIG } from '../dist/types.js';
+import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // §4a — dynamic database loading (PHASE_4_DESIGN.md). Covers:
 //  (a) non-dynamic mode is unaffected — already covered by every other
@@ -100,9 +103,15 @@ const REGION_B_BBOX = { min_lat: 49.9, min_lon: 49.9, max_lat: 50.1, max_lon: 50
 // is exactly what the fixture builder below inserts into the pois tables),
 // used to brute-force an expected getPoisInBBox/getNearestPoi answer without
 // touching the private poiGrid/pois fields.
-const POI_A1 = { id: 9001, name: 'Region A Harbour', typeId: POI_TYPE_HARBOUR, lat: 10.3, lon: 10.7 };
-const POI_A2 = { id: 9002, name: 'Region A Lock', typeId: POI_TYPE_LOCK, lat: 10.85, lon: 10.15 };
-const POI_B1 = { id: 9101, name: 'Region B Bridge', typeId: POI_TYPE_BRIDGE, lat: 50.004, lon: 50.006 };
+// Wholes and parts (spec §2.10): a lock and a bridge are wholes with one part
+// each. The map and bounding-box queries show parts and harbours, never the
+// wholes, so the expected answer is KNOWN_POIS (parts + harbour) while the
+// files hold the wholes as well.
+const POI_A1 = { id: 9001, name: 'Region A Harbour', typeId: POI_TYPE_HARBOUR, parentId: null as number | null, lat: 10.3, lon: 10.7 };
+const POI_A2_WHOLE = { id: 9002, name: 'Region A Lock', typeId: POI_TYPE_LOCK, parentId: null as number | null, lat: 10.85, lon: 10.15 };
+const POI_A2 = { id: 9003, name: 'Region A Lock chamber', typeId: POI_TYPE_LOCK_CHAMBER, parentId: 9002 as number | null, lat: 10.85, lon: 10.15 };
+const POI_B1_WHOLE = { id: 9101, name: 'Region B Bridge', typeId: POI_TYPE_BRIDGE, parentId: null as number | null, lat: 50.004, lon: 50.006 };
+const POI_B1 = { id: 9102, name: 'Region B Bridge span', typeId: POI_TYPE_BRIDGE_SPAN, parentId: 9101 as number | null, lat: 50.004, lon: 50.006 };
 const KNOWN_POIS = [POI_A1, POI_A2, POI_B1];
 
 function bruteForcePoisInBBox(minLat: number, minLon: number, maxLat: number, maxLon: number): typeof KNOWN_POIS {
@@ -217,6 +226,7 @@ function buildPlainRegion(
     [idA, idB, d]);
   run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES (?, ?, ?, 5.0, 20.0, 10.0, 1.0, 500, 0, 0, 0)`,
     [idB, idA, d]);
+  upgradeToPoiModel(sdb);
   sdb.close();
 }
 
@@ -281,11 +291,12 @@ describe('§4a dynamic database loading', () => {
       JSON.stringify(TRIANGLES),
       JSON.stringify(REGION_A_NODE_IDS),
     ]);
-    runA(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
-    for (const p of [POI_A1, POI_A2]) {
-      runA(`INSERT INTO pois (id, name, type_id, properties, lat, lon) VALUES (?, ?, ?, NULL, ?, ?)`,
-        [p.id, p.name, p.typeId, p.lat, p.lon]);
+    runA(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, parent_id INTEGER, properties TEXT, info TEXT, lat REAL, lon REAL)`);
+    for (const p of [POI_A1, POI_A2_WHOLE, POI_A2]) {
+      runA(`INSERT INTO pois (id, name, type_id, parent_id, properties, lat, lon) VALUES (?, ?, ?, ?, NULL, ?, ?)`,
+        [p.id, p.name, p.typeId, p.parentId, p.lat, p.lon]);
     }
+    upgradeToPoiModel(a);
     a.close();
 
     const b = new DatabaseSync(regionBPath, { open: true });
@@ -315,9 +326,12 @@ describe('§4a dynamic database loading', () => {
       [cId, dId, dCD]);
     runB(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES (?, ?, ?, 5.0, 20.0, 10.0, 1.0, 500, 0, 0, 0)`,
       [dId, cId, dCD]);
-    runB(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
-    runB(`INSERT INTO pois (id, name, type_id, properties, lat, lon) VALUES (?, ?, ?, NULL, ?, ?)`,
-      [POI_B1.id, POI_B1.name, POI_B1.typeId, POI_B1.lat, POI_B1.lon]);
+    runB(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, parent_id INTEGER, properties TEXT, info TEXT, lat REAL, lon REAL)`);
+    for (const p of [POI_B1_WHOLE, POI_B1]) {
+      runB(`INSERT INTO pois (id, name, type_id, parent_id, properties, lat, lon) VALUES (?, ?, ?, ?, NULL, ?, ?)`,
+        [p.id, p.name, p.typeId, p.parentId, p.lat, p.lon]);
+    }
+    upgradeToPoiModel(b);
     b.close();
   }
 
@@ -356,10 +370,10 @@ describe('§4a dynamic database loading', () => {
     it('peekMetadata reports real node/edge/POI counts for not-yet-loaded databases', () => {
       const status = dynDb.getCoverageStatus();
       const byFilename = new Map(status.map(s => [s.filename, s]));
-      // Region A: 4 perimeter nodes, 8 directed edges (4 pairs x 2 directions), 2 POIs.
-      assert.deepStrictEqual(byFilename.get('region-a.sqlite')?.stats, { nodes: 4, edges: 8, pois: 2 });
-      // Region B: 2 nodes, 2 directed edges (C->D and D->C), 1 POI.
-      assert.deepStrictEqual(byFilename.get('region-b.sqlite')?.stats, { nodes: 2, edges: 2, pois: 1 });
+      // Region A: 4 perimeter nodes, 8 directed edges (4 pairs x 2 directions), 3 POI rows (harbour, lock, chamber).
+      assert.deepStrictEqual(byFilename.get('region-a.sqlite')?.stats, { nodes: 4, edges: 8, pois: 3 });
+      // Region B: 2 nodes, 2 directed edges (C->D and D->C), 2 POI rows (bridge, span).
+      assert.deepStrictEqual(byFilename.get('region-b.sqlite')?.stats, { nodes: 2, edges: 2, pois: 2 });
     });
 
     it('a route request inside region A triggers an inline on-demand load, and matches the non-dynamic route', async () => {
@@ -1012,6 +1026,7 @@ describe('§4a dynamic database loading', () => {
         // min_depth 1.0 against a 2.0 m draft request -- a genuine violation.
         run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES (?, ?, ?, 1.0, 20.0, 10.0, 1.0, 500, 0, 0, 0)`, [idA, idB, d]);
         run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES (?, ?, ?, 1.0, 20.0, 10.0, 1.0, 500, 0, 0, 0)`, [idB, idA, d]);
+        upgradeToPoiModel(sdb);
         sdb.close();
 
         buildPlainRegion(farPath, 'EFAR', FAR_BBOX, [10.4, 12.1], [10.6, 12.1]);

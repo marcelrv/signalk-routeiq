@@ -11,7 +11,11 @@ import { pipeline } from "node:stream/promises";
 import { Readable, Transform } from "node:stream";
 import { ServerAPI } from "@signalk/server-api";
 import { NextFunction, Request, Response, Router } from "express";
-import { DISABLED_SUFFIX, RoutingDatabase } from "./database.js";
+import {
+  DISABLED_SUFFIX,
+  MAX_POIS_IN_BBOX,
+  RoutingDatabase,
+} from "./database.js";
 import { GpxExporter } from "./gpx-export.js";
 import { RoutingEngine } from "./routing.js";
 import {
@@ -1485,7 +1489,10 @@ export class ApiHandler {
     }
     try {
       const bbox = req.query.bbox as string;
-      const limit = parseInt(req.query.limit as string) || 2000;
+      const requested = parseInt(req.query.limit as string);
+      const limit = Number.isNaN(requested)
+        ? MAX_POIS_IN_BBOX
+        : Math.max(1, Math.min(MAX_POIS_IN_BBOX, requested));
       if (!bbox) {
         res.status(400).json({
           error: "Missing bbox parameter (minLon,minLat,maxLon,maxLat)",
@@ -1630,6 +1637,7 @@ export class ApiHandler {
         filenames: [],
         available: 0,
         loading: [],
+        unsupported: 0,
         initError: this.initError,
       });
       return;

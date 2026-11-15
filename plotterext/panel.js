@@ -12,7 +12,16 @@
 import { connectExtension } from "./bus/extension.js";
 
 const API = "/signalk/v1/api/router";
-const POI_TYPES = ["harbour", "lock", "bridge", "fairway", "waterway"];
+// The routing database's POI model: wholes (0 harbour, 1 lock, 2 bridge) and
+// parts (5 lock_chamber, 6 bridge_span, drawn with the lock / bridge icon).
+// An unknown type is skipped, never shown as a harbour.
+const POI_TYPES = {
+  0: "harbour",
+  1: "lock",
+  2: "bridge",
+  5: "lock",
+  6: "bridge",
+};
 const CROSSING_COLORS = {
   lock: "#f59e0b",
   fixed: "#ef4444",
@@ -1163,9 +1172,10 @@ async function searchPois() {
     return;
   }
   for (const poi of data.results) {
+    const t = POI_TYPES[poi.typeId];
+    if (!t) continue;
     const li = document.createElement("li");
     const props = poi.properties || {};
-    const t = POI_TYPES[poi.typeId] || "harbour";
     const color =
       t === "bridge" && props.subtype === "opening"
         ? CROSSING_COLORS.opening
@@ -1174,7 +1184,7 @@ async function searchPois() {
     const name = document.createElement("span");
     name.className = "name";
     name.textContent = poi.name || "Unnamed";
-    name.title = (POI_TYPES[poi.typeId] || "poi") + " — " + poi.name;
+    name.title = t + " — " + poi.name;
     li.appendChild(name);
 
     if (client.hasCapability("map")) {

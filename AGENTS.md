@@ -24,7 +24,7 @@
 ## Data Pipeline (moved out of this repo)
 - The chart-ingestion/graph-generation pipeline (`enc_preprocessor.py`, `nautical_routing_pipeline.py`, `add_pois_to_db.py`, `deploy_to_data_repo.py`, `generate_coastline.py`) no longer lives here — it moved to its own repo, **signalk-router-pipeline** (local checkout: `/home/node/signalkdev/signalk-router-pipeline`). This repo (`routeiq`) now only contains the **runtime consumer** of the compiled `.sqlite` databases.
 - For pipeline architecture, usage, and data sources, see that repo's `README.md`. For the database schema this runtime must read (including fields not yet consumed here, like `source_tier`/`navmesh_regions`), see `signalk-router-data`'s `specs/routing-database-format-specification.md`.
-- Sections below (SQLite Schema, Deterministic Node IDs, Config) describe what the current runtime (`src/database.ts`, `src/routing.ts`) actually reads today — check the format spec for anything newer the pipeline may start emitting.
+- Sections below (SQLite Schema, POI Model, Deterministic Node IDs, Config) describe what the current runtime (`src/database.ts`, `src/routing.ts`) actually reads today — check the format spec for anything newer the pipeline may start emitting.
 
 ## Bounding-Box A* Search (runtime)
 - `routing.ts:astarSearch()` accepts an optional `bbox` parameter that prunes nodes outside the box.
@@ -39,15 +39,26 @@
 - Fits within `Number.MAX_SAFE_INTEGER` (53 bits). Allows merging multiple regional `.sqlite` files without ID collisions.
 - On the TypeScript side, use `getNodeTypeInt(id)` (`Math.floor(id / 648000000000000)`) to extract the type (0=coastal, 1=inland) without loading a string column.
 - No `node_type` column in SQLite — the ID encodes the type at all times.
-- POI IDs use a deterministic MD5 hash of `"{poi_type}_{round(lat,5)}_{round(lon,5)}"` truncated to 13 hex chars.
+- POI ids are opaque: the producer keeps them stable across builds and they are no longer recomputable from the position. Compare them only for equality; ids are comparable only between files of one producer.
 
 ## SQLite Schema
-- **`metadata`** table: `country`, `name`, `description`, `last_update_date`, `tags` (JSON array), `bounding_box` (JSON), `boundary_geometry` (GeoJSON), `schema_version` (default 3), `contributor`, `url` — describes the data source. `country` is no longer UNIQUE (a country may have multiple region databases).
+- **`metadata`** table: `country`, `name`, `description`, `last_update_date`, `tags` (JSON array), `bounding_box` (JSON), `boundary_geometry` (GeoJSON), `schema_version` (4 for the POI model), `format_generation` (0 for now), `contributor`, `url` — describes the data source. `country` is no longer UNIQUE (a country may have multiple region databases).
 - **`edge_type_enum`** table: `(id, description)` — `0=coastal, 1=inland`.
-- **`poi_type_enum`** table: `(id, description)` — `0=harbour, 1=lock, 2=bridge, 3=fairway, 4=waterway`.
+- **`poi_type_enum`** table: `(id, description)` — `0=harbour, 1=lock, 2=bridge, 5=lock_chamber, 6=bridge_span` (the enum table may list more ids; routeiq handles only these five, see POI Model).
 - **`nodes`** table: includes `region_id INTEGER REFERENCES metadata(id)` for per-region replacement. No `node_type` column — type is encoded in the node ID (see above).
 - **`edges`**: uses `edge_type_id INTEGER` (FK to `edge_type_enum`) and `traffic_mode INTEGER` (`0=two-way, 1=one-way fwd, 2=one-way rev`). No `direction_penalty`, `edge_type` TEXT, `is_one_way`, or `traffic_dir` columns. No region-level column needed (edges follow their source node's region).
-- **`pois`**: uses `type_id INTEGER` (FK to `poi_type_enum`). `INSERT OR IGNORE` handles duplicate POI IDs from overlapping regions (uses deterministic hash based on type+coords, ignoring name variations).
+- **`pois`**: `(id, type_id, name, lat, lon, parent_id, properties JSON, info JSON, region_id)`. The same whole or part can be in several files with the same id and content; routeiq keeps one entry per id.
+- **`edge_pois`**: `(source, target, poi_id)`, `source < target`: the parts (chambers, spans) an edge passes. Read for the edges of a found route, never at start-up.
+- `edges.lock_id` and `properties.structure` no longer exist.
+
+## POI Model (spec §1.1, §2.10, §2.14; routeiq reads nothing else)
+- **No legacy path.** A file is refused at open (`formatRefusal` in `src/db-worker.ts`) when `metadata.format_generation` is not in the supported set `{0}` (missing column = 0), or when it predates the model: `schema_version` < 4, no `pois.parent_id` column, or no `edge_pois` table. The refusal is per file and never fatal for the others: `GET /databases` lists it with `state: "unsupported"` and a `formatError` message ("rebuild it with the factory"), like `descriptionError` for the description; it is skipped by every region-selection path. `loadDatabaseGraph` of such a file rejects with the message. There are no fallbacks: do not read display keys from `properties`, do not reintroduce `lock_id`.
+- **Wholes and parts.** Types: `0` harbour, `1` lock (whole), `2` bridge (whole), `5` lock_chamber (part), `6` bridge_span (part). A part's `parent_id` is its whole (one level); a bridge_span can have a lock as parent (a span over a lock head). A route passes parts and is reported as passing the whole. A part whose parent is not loaded is treated as a whole of its own. Rows of any other `type_id` are dropped at load. Constants and the `KNOWN_POI_TYPES`/`POI_PART_TYPES`/`POI_WHOLE_TYPES` sets are in `src/database.ts`; `getPoiParent`/`getPoiChildren` give the parent and child maps.
+- **`properties` (routing keys only)**: `subtype`, `closed_height`, `typical_wait_minutes`, `opening_hours`, `clearance_reference`, `underside_nap`, `mhw_nap`. `typical_wait_minutes` is on wholes; also on a chamber (overrides the lock's value, `0` is a real value) and on a span whose parent is a lock; a span under a bridge whole reads the whole's. Loaded for every POI at start-up; every `JSON.parse` of it goes through `parsePoiJson` (a bad row reads as `{}`).
+- **`info` (display keys)**: `kind`, `height`, `height_unknown`, `height_source`, `chart_height`, `refs`, `sources`. Never loaded at start-up: the worker message `poiInfo {ids}` reads it on demand; `getPoisInBBox` (at most 500 results), `searchPois`, `getNearestPoi` and the crossings carry it as its own `info` field beside `properties`. Server and UI read heights and kinds from `info` only.
+- **Map and search.** The map (`GET /pois`) returns parts and harbours (with `displayName`: the whole's name for a chamber or a span of a bridge); search returns wholes and harbours. Neither shows a thing twice.
+- **Crossings.** `detectCrossings` still finds parts geometrically (within 150 m of a route vertex; replacing that with `edge_pois` is a later phase) but groups by `parent_id`. A crossing carries the whole's name, `structure` = the whole's id as a string, and `partId` = the chamber or span used. The wait is the part's own value where the spec lets it carry one, else the whole's.
+- **Lock spans.** After the search, `fillLockIds` (`buildRouteResult`) asks the worker message `routePois {pairs}` (pairs normalised to (min, max); the union of `edge_pois` over every file that holds the pair, with a `known` flag) and sets `segments[].lockIds` to the lock whole of each chamber, or of a span whose parent is a lock. `crossingWaitSchedule` turns those into lock spans.
 
 ## Config
 - `routingDataDir` (was `routingDatabase`): path to a **directory** containing one or more `.sqlite` routing graph files.

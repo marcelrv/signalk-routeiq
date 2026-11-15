@@ -20,6 +20,7 @@ import {
   findDescribeCollision,
   languageChain,
 } from '../dist/route-metadata.js';
+import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // Route description: water names and warnings along a found route, read from
 // the edge sequence / water body tables of the routing database
@@ -139,6 +140,7 @@ function buildDb(dbPath: string, country: string, fx: Fixture = {}): void {
       }
     }
   }
+  upgradeToPoiModel(db);
   db.close();
 }
 
@@ -594,7 +596,20 @@ describe('id collisions between regional files', () => {
 // Real data: a navline build from the pipeline (never the live data dir, and
 // never the provenance database). Skipped when the file is not there.
 const REAL = process.env.ROUTEIQ_NAVLINES_DB ?? '/tmp/nl_build/nl_navlines.sqlite';
-describe('real navline database', { skip: !fs.existsSync(REAL) }, () => {
+/** Whether `file` is a build in the current format (POI model). routeiq refuses
+ *  older builds, so a test that routes over one is skipped, not failed. */
+function isCurrentFormat(file: string): boolean {
+  if (!fs.existsSync(file)) return false;
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    const poiCols = (db.prepare("PRAGMA table_info('pois')").all() as Array<{ name: string }>).map(c => c.name);
+    const edgePois = db.prepare("PRAGMA table_info('edge_pois')").all();
+    return poiCols.includes('parent_id') && edgePois.length > 0;
+  } finally {
+    db.close();
+  }
+}
+describe('real navline database', { skip: !isCurrentFormat(REAL) }, () => {
   let dir: string;
   before(() => {
     dir = tmpDir();

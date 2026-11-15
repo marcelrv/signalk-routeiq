@@ -4,6 +4,7 @@ import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase } from '../dist/database.js';
+import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // Graph-editor edits to an *existing* edge did not survive a reload.
 //
@@ -86,6 +87,7 @@ describe('user edits survive a reload (overlay edited_fields)', () => {
       }
     }
     run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
+    upgradeToPoiModel(db);
     db.close();
   }
 
@@ -123,6 +125,7 @@ describe('user edits survive a reload (overlay edited_fields)', () => {
         [nodeIdFor(from.lat, from.lon), nodeIdFor(to.lat, to.lon)]);
     }
     run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
+    upgradeToPoiModel(db);
     db.close();
   }
 
