@@ -533,9 +533,14 @@ function onPicked(_name, picked) {
   onAction({ actionId, target: picked.target });
 }
 
-function fmtPoint(p) {
-  if (p.name && p.name !== "Start" && p.name !== "Destination") return p.name;
+/** A point's position as "lat, lon". */
+function fmtPos(p) {
   return p.position[1].toFixed(4) + ", " + p.position[0].toFixed(4);
+}
+
+/** A point's real name, else its position. */
+function fmtPoint(p) {
+  return isPlaceholderName(p.name) ? fmtPos(p) : p.name.trim();
 }
 
 /** The Plan section (pick hosts only) mirrors `planning` until the draft has
@@ -951,13 +956,24 @@ async function calculate(forcedRequestPoints, known) {
     last = requestPoints[requestPoints.length - 1];
   // An end the user never named (blank, or a placeholder this panel gave it)
   // takes the server's name for it: a nearby POI, else the water it is in.
+  // A name an earlier calculation took from the server counts as unnamed
+  // too, so an end moved on the chart is named afresh instead of keeping
+  // the name of where it was.
   const itin = result.itinerary || [];
-  const firstName = isPlaceholderName(first.name)
-    ? (itin.length > 1 && itin[0].name) || first.name
-    : first.name;
-  const lastName = isPlaceholderName(last.name)
-    ? (itin.length > 1 && itin[itin.length - 1].name) || last.name
-    : last.name;
+  const endName = (p, auto, i) => {
+    const own = auto && p.name === auto.name ? auto.was : p.name;
+    const fromServer = isPlaceholderName(own)
+      ? (itin.length > 1 && itin[i].name) || undefined
+      : undefined;
+    return {
+      name: fromServer || own,
+      auto: fromServer ? { name: fromServer, was: own } : undefined,
+    };
+  };
+  const firstEnd = endName(first, session?.autoNames?.first, 0);
+  const lastEnd = endName(last, session?.autoNames?.last, itin.length - 1);
+  const firstName = firstEnd.name;
+  const lastName = lastEnd.name;
   if (firstName) newPoints[0].name = firstName;
   if (lastName) newPoints[newPoints.length - 1].name = lastName;
   if (first.href) newPoints[0].href = first.href;
@@ -967,6 +983,7 @@ async function calculate(forcedRequestPoints, known) {
     requestPoints,
     generated: newPoints,
     revertPoints: session?.revertPoints ?? points,
+    autoNames: { first: firstEnd.auto, last: lastEnd.auto },
     suggestedName: routeNameFor(firstName, lastName),
     suggestedDescription: routeDescriptionFor(
       { ...first, name: firstName },
@@ -1031,9 +1048,8 @@ const DESCRIPTION_MARK = "Planned with RouteIQ";
  * @returns {string} The description.
  */
 function routeDescriptionFor(start, vias, end, result) {
-  const pos = (p) => p.position[1].toFixed(4) + ", " + p.position[0].toFixed(4);
   const named = (p) =>
-    isPlaceholderName(p.name) ? pos(p) : p.name.trim() + "  ·  " + pos(p);
+    isPlaceholderName(p.name) ? fmtPos(p) : p.name.trim() + "  ·  " + fmtPos(p);
   const lines = ["Start: " + named(start), "Destination: " + named(end)];
   if (vias.length) lines.push("Via: " + vias.map(named).join("  |  "));
   lines.push(summaryLine(result));

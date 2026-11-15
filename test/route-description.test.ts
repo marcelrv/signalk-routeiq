@@ -159,7 +159,15 @@ function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'routeiq-desc-'));
 }
 
-async function routeAcross(dir: string, lang?: string, opts: { loadAll?: string[] } = {}) {
+async function routeAcross(
+  dir: string,
+  lang?: string,
+  opts: {
+    loadAll?: string[];
+    start?: { latitude: number; longitude: number };
+    end?: { latitude: number; longitude: number };
+  } = {},
+) {
   const db = new RoutingDatabase(dir, true);
   await db.init();
   await db.loadGraph();
@@ -168,8 +176,8 @@ async function routeAcross(dir: string, lang?: string, opts: { loadAll?: string[
   engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
   try {
     const route = await engine.calculateRoute({
-      start: { latitude: LAT, longitude: LONS[0] },
-      end: { latitude: LAT, longitude: LONS[5] },
+      start: opts.start ?? { latitude: LAT, longitude: LONS[0] },
+      end: opts.end ?? { latitude: LAT, longitude: LONS[5] },
       minCoastDistance: 0,
       ...(lang ? { lang } : {}),
     });
@@ -224,6 +232,25 @@ describe('route description from a routing database', () => {
       const end = it[it.length - 1];
       assert.deepStrictEqual([end.name, end.nameSource], ['Meer', 'water']);
       assert.ok(it.slice(1, -1).every(p => p.name === undefined), 'only the ends are named');
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('counts the water reach at both ends from where the connector joins the graph', async () => {
+    // Both points about 700 m off the graph: longer than the reach on its
+    // own, so the ends are named only if the connectors are left out.
+    const off = 700 / 111320;
+    const { db, route } = await routeAcross(dir, undefined, {
+      loadAll: ['a_navlines.sqlite'],
+      start: { latitude: LAT + off, longitude: LONS[0] },
+      end: { latitude: LAT + off, longitude: LONS[5] },
+    });
+    try {
+      const it = route.itinerary!;
+      assert.deepStrictEqual([it[0].name, it[0].nameSource], ['Kanaal', 'water']);
+      const end = it[it.length - 1];
+      assert.deepStrictEqual([end.name, end.nameSource], ['Meer', 'water']);
     } finally {
       await db.close();
     }

@@ -772,6 +772,10 @@
     junctionMarkers: null, // L.layerGroup for hover junction markers
     startPoiName: "", // POI name when start was set via search
     destPoiName: "", // POI name when destination was set via search
+    // Nearest POI looked up for each end ({lat, lng, name}), kept apart from
+    // the picked names above: only used while that end is still there, and
+    // only when the route result gives no name for it (see endName).
+    nearPoi: { start: null, dest: null },
     routeName: "", // computed route name for display/export
     // Graph editor state
     editMode: false,
@@ -6404,13 +6408,13 @@
 
   // ---- update info panel ----
   function updateInfo() {
+    const sn = endName("start");
+    const dn = endName("dest");
     const fmtStart = state.startLatLng
-      ? (state.startPoiName ? state.startPoiName + "  ·  " : "") +
-        fmtLatLng(state.startLatLng)
+      ? (sn ? sn + "  ·  " : "") + fmtLatLng(state.startLatLng)
       : "—";
     const fmtDest = state.destLatLng
-      ? (state.destPoiName ? state.destPoiName + "  ·  " : "") +
-        fmtLatLng(state.destLatLng)
+      ? (dn ? dn + "  ·  " : "") + fmtLatLng(state.destLatLng)
       : "—";
     document.getElementById("start-info").querySelector(".coords").textContent =
       fmtStart;
@@ -6536,8 +6540,9 @@
       })
       .then(function (data) {
         if (data && data.poi) {
-          if (endpoint === "start") state.startPoiName = data.poi.name;
-          else state.destPoiName = data.poi.name;
+          // Not a picked name: it ranks below the server's name for the end
+          // (endName), which reads a bridge span or chamber as its whole.
+          state.nearPoi[endpoint] = { lat: lat, lng: lng, name: data.poi.name };
           updateRouteTitle();
           updateInfo();
         }
@@ -7838,17 +7843,35 @@
     );
   }
 
+  /**
+   * What to call one end of the route: a name the user picked (search, a POI
+   * on the map) wins; else the server's name for that end of the route (a
+   * nearby POI or the water it is in); else the nearest POI looked up for
+   * the end where it is now.
+   *
+   * @param {"start"|"dest"} which - The end.
+   * @returns {string} The name, or "" when there is none.
+   */
+  function endName(which) {
+    const picked = which === "start" ? state.startPoiName : state.destPoiName;
+    if (picked) return picked;
+    const itin = (state.lastGeoJson && state.lastGeoJson.itinerary) || [];
+    if (itin.length > 1) {
+      const p = which === "start" ? itin[0] : itin[itin.length - 1];
+      if (p.name) return p.name;
+    }
+    const near = state.nearPoi[which];
+    const at = which === "start" ? state.startLatLng : state.destLatLng;
+    if (near && near.name && at && near.lat === at.lat && near.lng === at.lng)
+      return near.name;
+    return "";
+  }
+
   function updateRouteTitle() {
     const titleEl = document.querySelector("#route-pane-inner .panel-title");
     if (!titleEl) return;
-    // A name the user picked (search, nearest POI) wins; else the server's
-    // name for that end of the route (a nearby POI or the water it is in).
-    const itin = (state.lastGeoJson && state.lastGeoJson.itinerary) || [];
-    const sn = state.startPoiName || (itin.length > 1 && itin[0].name) || "";
-    const dn =
-      state.destPoiName ||
-      (itin.length > 1 && itin[itin.length - 1].name) ||
-      "";
+    const sn = endName("start");
+    const dn = endName("dest");
     if (sn && dn) {
       state.routeName = sn + " → " + dn;
       titleEl.textContent = sn + " → " + dn;

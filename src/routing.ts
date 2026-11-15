@@ -280,6 +280,13 @@ const ROUTE_PART_TYPES: ReadonlySet<number> = new Set([
  *  it spans several). Read by detectRouteStructures. */
 const segmentHops = new WeakMap<object, number[]>();
 
+/** The straight legs connectUserPoint draws from a user's point to where the
+ *  route joins the graph (over land or open water, in no charted water body).
+ *  Recorded where they are built, because their from/to (-1) look the same
+ *  as the cut edge pieces next to them. Read by finalizeRoute to count the
+ *  water reach of the end names from where the route joins the graph. */
+const connectorLegs = new WeakSet<object>();
+
 /**
  * Hand a segment's graph edges and lock ids on to the piece of it that
  * replaces it when a connector cuts the edge at the user's point: the piece
@@ -1559,9 +1566,10 @@ export class RoutingEngine {
       toLon: number,
       toLat: number,
     ) => {
-      if (!this.config.lineOfSightSearchRadius) return;
       const seg = segments[segIdx];
       if (!seg) return;
+      connectorLegs.add(seg);
+      if (!this.config.lineOfSightSearchRadius) return;
       if (this.db.isLineCrossingLand(fromLat, fromLon, toLat, toLon, 5)) {
         seg.minDepth = 0;
         seg.minDepthKnown = true;
@@ -3655,16 +3663,18 @@ export class RoutingEngine {
     // Skipped with the description: a departure scan reads only times.
     if (waitOverrides?.describe !== false) {
       // The straight connectors from the user's points to the graph
-      // (connectUserPoint: from -1 at the start, to -1 at the end) lie in no
-      // water, so the water reach is counted from where the route joins it.
+      // (connectorLegs, drawn by connectUserPoint) lie in no water, so the
+      // water reach is counted from where the route joins it. The cut edge
+      // piece next to a connector also has from/to -1 but is water, so it is
+      // not counted.
       let startConnector = 0;
       for (const seg of segments) {
-        if (seg.from !== -1) break;
+        if (!connectorLegs.has(seg)) break;
         startConnector += seg.distance ?? 0;
       }
       let endConnector = 0;
       for (let k = segments.length - 1; k >= 0; k--) {
-        if (segments[k].to !== -1 || segments[k].from === -1) break;
+        if (!connectorLegs.has(segments[k])) break;
         endConnector += segments[k].distance ?? 0;
       }
       nameEndpoints(
