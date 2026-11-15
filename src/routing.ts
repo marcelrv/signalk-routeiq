@@ -2345,13 +2345,14 @@ export class RoutingEngine {
       );
       // The nearest candidate with a deep edge, with two exclusions.
       //
-      // A node this one already reaches along the waterway close by is no
-      // better entry: the vessel has to sail that stretch anyway, and A*
-      // from here takes it and reports its depth. Swapping would only cut
-      // the shallow stretch out of the route and put an unchecked straight
-      // connector in its place — a 1.5 km harbour channel became a
-      // "coverage gap" with no depth warning. So the swap is only for
-      // water this node does not lead into nearby.
+      // A node joined to this one along the waterway close by is no better
+      // endpoint: the vessel has to sail that stretch anyway, and A* takes
+      // it and reports its depth. Swapping would only cut the shallow
+      // stretch out of the route and put an unchecked straight connector
+      // in its place — a 1.5 km harbour channel became a "coverage gap"
+      // with no depth warning. For the start that is a node this one leads
+      // to; for the end, a node that leads to this one (the approach). So
+      // the swap is only for water not joined to this node nearby.
       //
       // A node that leads nowhere is no entry at all: a small island of its
       // own (a stray overlay edit, an unconnected basin) has a deep edge
@@ -2359,7 +2360,13 @@ export class RoutingEngine {
       // shallow harbour exit failed outright instead of routing with a
       // depth warning. Reaching the node being replaced or the other
       // endpoint, or a few thousand nodes, counts as leading somewhere.
-      const localReach = await this.localGraphReach(node, radius * 2);
+      const localReach = await this.localGraphReach(
+        node,
+        nodePos.lat,
+        nodePos.lon,
+        radius * 2,
+        label === "Start" ? "from" : "to",
+      );
       const other = label === "Start" ? endNode : startNode;
       const targets = new Set<number>([node]);
       if (other !== null) targets.add(other);
@@ -3163,14 +3170,52 @@ export class RoutingEngine {
   }
 
   /**
-   * Nodes reachable from `node` within `maxDistance` metres of sailing
-   * (edge lengths, a bounded Dijkstra; wrong-way one-way edges are not
-   * followed).
+   * Nodes joined to `node` within `maxDistance` metres of sailing (edge
+   * lengths, a bounded Dijkstra): the ones it leads to (`"from"`) or the
+   * ones that lead to it (`"to"`). Only edges A* could sail in that
+   * direction count — not a wrong-way one-way edge, not one that crosses
+   * land or an obstacle.
    */
   private async localGraphReach(
     node: number,
+    lat: number,
+    lon: number,
     maxDistance: number,
+    direction: "from" | "to",
   ): Promise<Set<number>> {
+    const sailable = (e: EdgeRow): boolean =>
+      e.traffic_mode !== TRAFFIC_ONE_WAY_REV &&
+      e.crosses_land !== 1 &&
+      e.crosses_obstacle !== 1;
+
+    // The graph only indexes outgoing edges. Every node on a path of at
+    // most maxDistance lies within maxDistance of `node` as the crow flies,
+    // so the incoming edges that matter come from the nodes in that circle.
+    let incoming: Map<number, Array<{ id: number; distance: number }>> | null =
+      null;
+    if (direction === "to") {
+      incoming = new Map();
+      const near = await this.db.getNodesInRadius(lat, lon, maxDistance);
+      const ids = new Set<number>(near.map((n) => n.id));
+      ids.add(node);
+      for (const id of ids) {
+        for (const e of await this.db.getOutgoingEdges(id)) {
+          if (!ids.has(e.target) || !sailable(e)) continue;
+          let list = incoming.get(e.target);
+          if (!list) incoming.set(e.target, (list = []));
+          list.push({ id, distance: e.distance });
+        }
+      }
+    }
+    const neighbours = async (
+      id: number,
+    ): Promise<Array<{ id: number; distance: number }>> => {
+      if (incoming) return incoming.get(id) ?? [];
+      return (await this.db.getOutgoingEdges(id))
+        .filter(sailable)
+        .map((e) => ({ id: e.target, distance: e.distance }));
+    };
+
     const dist = new Map<number, number>([[node, 0]]);
     const done = new Set<number>();
     const heap = new MinHeap<{ id: number; d: number }>((x) => x.d);
@@ -3179,14 +3224,13 @@ export class RoutingEngine {
       const { id, d } = heap.pop()!;
       if (done.has(id)) continue;
       done.add(id);
-      for (const e of await this.db.getOutgoingEdges(id)) {
-        if (e.traffic_mode === TRAFFIC_ONE_WAY_REV) continue;
-        const nd = d + e.distance;
+      for (const n of await neighbours(id)) {
+        const nd = d + n.distance;
         if (nd > maxDistance) continue;
-        const known = dist.get(e.target);
+        const known = dist.get(n.id);
         if (known === undefined || nd < known) {
-          dist.set(e.target, nd);
-          heap.push({ id: e.target, d: nd });
+          dist.set(n.id, nd);
+          heap.push({ id: n.id, d: nd });
         }
       }
     }

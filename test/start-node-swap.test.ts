@@ -33,14 +33,27 @@ const K = { lat: 52.0, lon: 5.01 };
 const D = { lat: 52.0, lon: 5.05 };
 const I1 = { lat: 51.996, lon: 5.0 };
 const I2 = { lat: 51.993, lon: 5.0 };
-// "Other water": M, 333 m north of H, joins D only by a loop far longer than
+// "Other water": M, ~340 m north of H, joins D only by a loop far longer than
 // the 4 km the swap looks along the waterway, so H does not lead into it.
-const M = { lat: 52.003, lon: 5.0 };
+// Slightly west, so a deep H-M edge does not point toward D (which would keep H).
+const M = { lat: 52.003, lon: 4.998 };
 const M2 = { lat: 52.03, lon: 5.0 };
 const M3 = { lat: 52.03, lon: 5.05 };
 
+// West of H, for the destination case: H's only way out is shallow H-Y.
+const Y = { lat: 52.0, lon: 4.995 };
+
 const NODE_H = 1, NODE_K = 2, NODE_D = 3, NODE_I1 = 4, NODE_I2 = 5;
-const NODE_M = 6, NODE_M2 = 7, NODE_M3 = 8;
+const NODE_M = 6, NODE_M2 = 7, NODE_M3 = 8, NODE_Y = 9;
+
+interface FixtureOptions {
+  /** Deep water M joined to D by a long loop. */
+  otherWater?: boolean;
+  /** A land-crossing edge H-M (needs otherWater). */
+  landToOtherWater?: boolean;
+  /** K-H one-way K→H, plus shallow H-Y: H is reached from K but does not lead to it. */
+  oneWayApproach?: boolean;
+}
 
 function metres(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
   const R = 6371000;
@@ -51,7 +64,7 @@ function metres(a: { lat: number; lon: number }, b: { lat: number; lon: number }
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
-function buildFixture(dir: string, withOtherWater: boolean): void {
+function buildFixture(dir: string, opts: FixtureOptions = {}): void {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   for (const f of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, f));
 
@@ -72,35 +85,45 @@ function buildFixture(dir: string, withOtherWater: boolean): void {
     source INTEGER, target INTEGER, distance REAL,
     min_depth REAL, max_air_draft REAL, min_width REAL,
     cost_factor REAL DEFAULT 1.0, distance_to_land REAL,
-    edge_type_id INTEGER DEFAULT 1, traffic_mode INTEGER DEFAULT 0
+    edge_type_id INTEGER DEFAULT 1, traffic_mode INTEGER DEFAULT 0,
+    crosses_land INTEGER DEFAULT 0
   )`);
   run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
 
   const nodes: Array<[number, { lat: number; lon: number }]> = [
     [NODE_H, H], [NODE_K, K], [NODE_D, D], [NODE_I1, I1], [NODE_I2, I2],
   ];
-  // Both directions of each link; inland (edge_type_id 1) so the coastal
-  // distance rule never applies — depth is the only constraint in play.
-  const links: Array<[number, number, number]> = [
-    [NODE_H, NODE_K, 2.0],
+  // [from, to, depth, flags]. Both directions unless oneWay; inland
+  // (edge_type_id 1) so the coastal distance rule never applies — depth is
+  // the only constraint in play.
+  type Link = [number, number, number, { oneWay?: boolean; land?: boolean }?];
+  const links: Link[] = [
     [NODE_K, NODE_D, 10.0],
     [NODE_I1, NODE_I2, 10.0],
   ];
-  if (withOtherWater) {
+  if (opts.oneWayApproach) {
+    nodes.push([NODE_Y, Y]);
+    links.push([NODE_K, NODE_H, 2.0, { oneWay: true }], [NODE_H, NODE_Y, 2.0]);
+  } else {
+    links.push([NODE_H, NODE_K, 2.0]);
+  }
+  if (opts.otherWater) {
     nodes.push([NODE_M, M], [NODE_M2, M2], [NODE_M3, M3]);
     links.push([NODE_M, NODE_M2, 10.0], [NODE_M2, NODE_M3, 10.0], [NODE_M3, NODE_D, 10.0]);
+    if (opts.landToOtherWater) links.push([NODE_H, NODE_M, 10.0, { land: true }]);
   }
   const pos = new Map(nodes);
   for (const [id, p] of nodes) {
     run(`INSERT INTO nodes (id, lat, lon, region_id) VALUES (?, ?, ?, 1)`, [id, p.lat, p.lon]);
   }
-  for (const [a, b, depth] of links) {
+  for (const [a, b, depth, flags] of links) {
     const dist = metres(pos.get(a)!, pos.get(b)!);
-    for (const [s, t] of [[a, b], [b, a]]) {
+    const dirs = flags?.oneWay ? [[a, b]] : [[a, b], [b, a]];
+    for (const [s, t] of dirs) {
       run(
-        `INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode)
-         VALUES (?, ?, ?, ?, 20.0, 50.0, 1.0, 5000, 1, 0)`,
-        [s, t, dist, depth],
+        `INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, crosses_land)
+         VALUES (?, ?, ?, ?, 20.0, 50.0, 1.0, 5000, 1, 0, ?)`,
+        [s, t, dist, depth, flags?.land ? 1 : 0],
       );
     }
   }
@@ -139,7 +162,7 @@ describe('start-node better-depth swap', () => {
   let db: RoutingDatabase;
 
   before(async () => {
-    buildFixture(dir, false);
+    buildFixture(dir);
     db = new RoutingDatabase(dir);
     await db.init();
     await db.loadGraph();
@@ -209,7 +232,7 @@ describe('start-node better-depth swap into other water', () => {
   let db: RoutingDatabase;
 
   before(async () => {
-    buildFixture(dir, true);
+    buildFixture(dir, { otherWater: true });
     db = new RoutingDatabase(dir);
     await db.init();
     await db.loadGraph();
@@ -224,5 +247,62 @@ describe('start-node better-depth swap into other water', () => {
     const route = await makeEngine(db).calculateRoute(request);
     assert.ok(passes(route, M), 'the route starts in the other, deep water at M');
     assert.ok(!passes(route, I1), 'the route never touches the island');
+  });
+});
+
+describe('start-node better-depth swap past a land-crossing edge', () => {
+  const dir = './test/fixtures/start-node-swap-land';
+  let db: RoutingDatabase;
+
+  before(async () => {
+    buildFixture(dir, { otherWater: true, landToOtherWater: true });
+    db = new RoutingDatabase(dir);
+    await db.init();
+    await db.loadGraph();
+  });
+
+  after(async () => {
+    await db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not count an edge across land as the harbour leading into the other water', async () => {
+    const route = await makeEngine(db).calculateRoute(request);
+    assert.ok(passes(route, M), 'the route starts in the other, deep water at M');
+  });
+});
+
+describe('end-node better-depth swap with a one-way approach', () => {
+  // Routing D → H: H's only outgoing edge (H-Y) is shallow, so the end swap
+  // looks for a deeper node. K leads into H (one-way K→H) though H does not
+  // lead to K, so a forward-only check let the swap end the route at K and
+  // drop the shallow K→H approach from it.
+  const dir = './test/fixtures/start-node-swap-oneway';
+  let db: RoutingDatabase;
+
+  before(async () => {
+    buildFixture(dir, { oneWayApproach: true });
+    db = new RoutingDatabase(dir);
+    await db.init();
+    await db.loadGraph();
+  });
+
+  after(async () => {
+    await db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keeps the shallow approach into the destination, with a depth warning', async () => {
+    const route = await makeEngine(db).calculateRoute({
+      start: { latitude: D.lat, longitude: D.lon },
+      end: { latitude: H.lat, longitude: H.lon },
+      minCoastDistance: 0,
+    });
+    assert.ok(passes(route, K) && passes(route, H), 'the route ends at H via the K→H approach');
+    assert.ok(!passes(route, I1), 'the route never touches the island');
+    const depth = (route.warnings ?? []).find(
+      (w: any) => w.type === 'via_constrained' && /depth/.test(w.message),
+    );
+    assert.ok(depth, `expected a shallow-depth warning, got ${JSON.stringify(route.warnings)}`);
   });
 });
