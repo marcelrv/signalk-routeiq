@@ -3002,7 +3002,13 @@ export class RoutingDatabase {
         }
         dbIndexes = [...set];
       }
-      return { lo: Math.min(a, b), hi: Math.max(a, b), dbIndexes };
+      // A navmesh boundary edge may be a synthetic funnel/anchor edge that
+      // carries its region's dbIndex but is in no file: the worker must check
+      // the file holds it. Other tagged edges came from those files.
+      const verify = edges.some(
+        (e) => e.edge_kind_id === EDGE_KIND_NAVMESH_BOUNDARY,
+      );
+      return { lo: Math.min(a, b), hi: Math.max(a, b), dbIndexes, verify };
     });
     return this.sendMessage("routePois", { pairs: request });
   }

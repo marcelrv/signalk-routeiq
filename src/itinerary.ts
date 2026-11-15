@@ -404,8 +404,11 @@ export function buildItinerary(
   const totalKm = cum[cum.length - 1] / 1000;
   const kept = simplifyIndices(coords, toleranceM);
 
-  // Annotate crossings with chainage along the route.
+  // Annotate crossings with chainage along the route, keeping one the
+  // detector already placed (where the line passes the structure, which on a
+  // long edge or a route that turns back is not the nearest vertex).
   for (const c of crossings) {
+    if (typeof c.distanceFromStart === "number") continue;
     const idx = closestCoordIndex(
       coords,
       c.position.latitude,

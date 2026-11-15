@@ -881,8 +881,9 @@ describe("tide-informed depth", () => {
       engine.toRadians = (d: number) => (d * Math.PI) / 180;
       // A lock sitting exactly at the route's start, so its chainage is 0 and
       // the wait is spent before segment 0 even begins -- no real database
-      // needed, detectCrossings only touches this one method.
+      // needed, detectRouteStructures only touches this one method.
       engine.db = {
+        getRoutePois: async (pairs: unknown[]) => pairs.map(() => ({ poiIds: [], known: false })),
         getPoisInBBox: async () => [
           {
             id: 1,
@@ -994,7 +995,7 @@ describe("tide-informed depth", () => {
       const engine = Object.create(RoutingEngine.prototype) as any;
       engine._config = { ...DEFAULT_CONFIG };
       engine.toRadians = (d: number) => (d * Math.PI) / 180;
-      engine.db = { getPoisInBBox: async () => [] }; // no lock this time
+      engine.db = { getRoutePois: async (pairs: unknown[]) => pairs.map(() => ({ poiIds: [], known: false })), getPoisInBBox: async () => [] }; // no lock this time
       const meters = await engine.pathViolationMeters(
         result(),
         { draft: DRAFT, beam: 4.0 },
@@ -1013,6 +1014,7 @@ describe("tide-informed depth", () => {
       engine._config = { ...DEFAULT_CONFIG };
       engine.toRadians = (d: number) => (d * Math.PI) / 180;
       engine.db = {
+        getRoutePois: async (pairs: unknown[]) => pairs.map(() => ({ poiIds: [], known: false })),
         getPoisInBBox: async () => {
           calls++;
           return [

@@ -123,6 +123,57 @@ describe('crossing wait time', () => {
     );
   });
 
+  it('charges each passage under one opening bridge when the route turns back under it', () => {
+    // The same structure listed twice is two passages (detection lists one per
+    // passage), however close: out under it at 300 m, back under it at 500 m.
+    const twice = [
+      opening({ structure: '300', distanceFromStart: 300 }),
+      opening({ structure: '300', distanceFromStart: 500 }),
+    ];
+    assert.strictEqual(waitSeconds(twice), 2 * 1800);
+    // A lock and the bridge over its head share the lock's id: still one obstacle.
+    const lockAndHead = [
+      lock({ structure: '100', distanceFromStart: 0 }),
+      opening({ structure: '100', distanceFromStart: 60 }),
+    ];
+    assert.strictEqual(waitSeconds(lockAndHead), 3600);
+  });
+
+  it('lets a long lock absorb the bridges over both its heads, though they share its id', () => {
+    // A 400 m lock whose two heads each carry an opening span parented to the
+    // lock: detection lists the lock's bridge twice, once per head, more than
+    // its 300 m merge distance apart. Both open with the locking.
+    const crossings = [
+      opening({ structure: '7', distanceFromStart: 0 }),
+      lock({ structure: '7', distanceFromStart: 200 }),
+      opening({ structure: '7', distanceFromStart: 400 }),
+    ];
+    assert.strictEqual(waitSeconds(crossings, {}, [{ distance: 400, lockIds: [7] }]), 3600);
+  });
+
+  it('gives each passage through a lock its own span when the route turns back far beyond it', () => {
+    // Through lock 7 (0..100 m), on 3 km to an opening bridge, back 3 km and
+    // through lock 7 again (6100..6200 m). One span over both passages would
+    // swallow the bridge between them into the lock's group.
+    const crossings: Array<Record<string, unknown>> = [
+      lock({ structure: '7', distanceFromStart: 50 }),
+      opening({ distanceFromStart: 3100 }),
+      lock({ structure: '7', distanceFromStart: 6150 }),
+    ];
+    const segments = [
+      { distance: 100, lockIds: [7] },
+      { distance: 3000 },
+      { distance: 3000 },
+      { distance: 100, lockIds: [7] },
+    ];
+    assert.strictEqual(waitSeconds(crossings, {}, segments), 2 * 3600 + 1800);
+    assert.deepStrictEqual(
+      crossings.filter((c) => c.type === 'lock').map((c) => c.lockSpan),
+      [[0, 100], [6100, 6200]],
+      'each passage claims its own POI with its own span',
+    );
+  });
+
   it('groups a run of fixed spans into no wait at all', () => {
     const stack = [0, 0, 0].map((m) => fixed({ distanceFromStart: m }));
     assert.strictEqual(waitSeconds(stack), 0);
@@ -528,16 +579,20 @@ describe('one crossing per whole (parent_id grouping)', () => {
     return coords;
   };
 
+  /** One segment per coordinate pair, from node i to i + 1 (no edge in any file). */
+  const chain = (coords: [number, number][]) => coords.slice(1).map((_c, i) => ({ from: i, to: i + 1 }));
+
   type Found = {
     name: string; type: string; subtype?: string; structure?: string; partId?: number;
     waitMinutes?: number; height?: number;
   };
-  /** Run detectCrossings for a route along `lon`, with `parts` and `wholes` as the database holds them. */
+  /** Run detectRouteStructures (an unknown stretch: the geometric fallback) for a route along `lon`, with `parts` and `wholes` as the database holds them. */
   const detect = async (parts: Part[], wholes: Whole[], lon: number) => {
-    const engine = Object.create(RoutingEngine.prototype) as any;
+    const engine = Object.create(RoutingEngine.prototype) as StubEngine;
     engine._config = { ...DEFAULT_CONFIG };
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
     engine.db = {
+      getRoutePois: async (pairs: unknown[]) => pairs.map(() => ({ poiIds: [], known: false })),
       // Route building asks for parts without info (includeInfo false)...
       getPoisInBBox: async () => parts.map((p) => ({ ...p, info: {} })),
       // ...and reads it only for the spans it lists.
@@ -545,7 +600,8 @@ describe('one crossing per whole (parent_id grouping)', () => {
         Object.fromEntries(parts.filter((p) => ids.includes(p.id) && Object.keys(p.info).length > 0).map((p) => [String(p.id), p.info])),
       getPoiParent: (row: { parent_id: number | null }) => wholes.find((w) => w.id === row.parent_id),
     };
-    return (await engine.detectCrossings(routeAlong(lon))) as Found[];
+    const coords = routeAlong(lon);
+    return (await engine.detectRouteStructures(coords, chain(coords))) as Found[];
   };
 
   it('lists only the opening span when the route goes through it', async () => {
@@ -623,25 +679,36 @@ describe('one crossing per whole (parent_id grouping)', () => {
       { id: 1, name: 'opening', lat: 52.16674, lon: 4.63913, typeId: 6, parentId: 7, properties: { subtype: 'opening' }, info: {} },
       { id: 2, name: 'fixed', lat: 52.16678, lon: 4.63934, typeId: 6, parentId: 7, properties: { subtype: 'fixed' }, info: { height: 2.61 } },
     ];
-    const engine = Object.create(RoutingEngine.prototype) as any;
+    const engine = Object.create(RoutingEngine.prototype) as StubEngine;
     engine._config = { ...DEFAULT_CONFIG };
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
     engine.db = {
+      getRoutePois: async (pairs: unknown[]) => pairs.map(() => ({ poiIds: [], known: false })),
       getPoisInBBox: async () => parts.map((p) => ({ ...p, info: {} })),
       getPoiInfo: async () => ({}),
       getPoiParent: () => bridgeWhole(7),
     };
-    const c = await engine.detectCrossings([[4.63942, 52.1665], [4.63861, 52.16757]]);
+    const line: [number, number][] = [[4.63942, 52.1665], [4.63861, 52.16757]];
+    const c = await engine.detectRouteStructures(line, chain(line));
     assert.deepStrictEqual(c.map((x: { name: string }) => x.name), [`${BRIDGE} (opening span)`]);
   });
 });
 
+/** The private parts of RoutingEngine these tests reach into, on an engine built without a constructor. */
+interface StubEngine {
+  _config: unknown;
+  toRadians: (d: number) => number;
+  db: unknown;
+  detectRouteStructures: (coords: unknown[], segs: unknown[]) => Promise<Array<{ name: string }>>;
+  crossingWaitSchedule: (coords: unknown[], segs: unknown[], crossings: unknown[]) => Array<{ seconds: number }>;
+}
+
 describe('synthetic lock entry from the edges', () => {
   const run = (db: unknown) => {
-    const engine = Object.create(RoutingEngine.prototype) as any;
+    const engine = Object.create(RoutingEngine.prototype) as StubEngine;
     engine._config = { ...DEFAULT_CONFIG };
     engine.db = db;
-    const crossings: any[] = [];
+    const crossings: Array<{ name: string; waitMinutes?: number }> = [];
     const segs = [{ distance: 100, lockIds: [100] }, { distance: 100 }];
     const sched = engine.crossingWaitSchedule([[4, 51], [4.001, 51], [4.002, 51]], segs, crossings);
     return { crossings, sched };
@@ -649,11 +716,11 @@ describe('synthetic lock entry from the edges', () => {
 
   it('takes the whole\'s name and typical_wait_minutes', () => {
     const whole = { id: 100, type_id: 1, parent_id: null, name: 'Big Lock', properties: '{"typical_wait_minutes":10}' };
-    const { crossings, sched } = run({ getPoiRow: () => whole, poiDisplayName: (r: any) => r.name });
+    const { crossings, sched } = run({ getPoiRow: () => whole, poiDisplayName: (r: { name: string }) => r.name });
     assert.strictEqual(crossings.length, 1);
     assert.strictEqual(crossings[0].name, 'Big Lock');
     assert.strictEqual(crossings[0].waitMinutes, 10);
-    assert.strictEqual(sched.reduce((t: number, w: any) => t + w.seconds, 0), 600);
+    assert.strictEqual(sched.reduce((t: number, w: { seconds: number }) => t + w.seconds, 0), 600);
   });
 
   it('keeps "Lock" and the configured default when the whole is unknown or gives no wait', () => {
@@ -661,8 +728,8 @@ describe('synthetic lock entry from the edges', () => {
     assert.strictEqual(a.crossings[0].name, 'Lock');
     assert.strictEqual(a.crossings[0].waitMinutes, undefined);
     const whole = { id: 100, type_id: 1, parent_id: null, name: '', properties: '{}' };
-    const b = run({ getPoiRow: () => whole, poiDisplayName: (r: any) => r.name });
+    const b = run({ getPoiRow: () => whole, poiDisplayName: (r: { name: string }) => r.name });
     assert.strictEqual(b.crossings[0].name, 'Lock');
-    assert.strictEqual(b.sched.reduce((t: number, w: any) => t + w.seconds, 0), 3600);
+    assert.strictEqual(b.sched.reduce((t: number, w: { seconds: number }) => t + w.seconds, 0), 3600);
   });
 });
