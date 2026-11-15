@@ -7841,8 +7841,14 @@
   function updateRouteTitle() {
     const titleEl = document.querySelector("#route-pane-inner .panel-title");
     if (!titleEl) return;
-    const sn = state.startPoiName;
-    const dn = state.destPoiName;
+    // A name the user picked (search, nearest POI) wins; else the server's
+    // name for that end of the route (a nearby POI or the water it is in).
+    const itin = (state.lastGeoJson && state.lastGeoJson.itinerary) || [];
+    const sn = state.startPoiName || (itin.length > 1 && itin[0].name) || "";
+    const dn =
+      state.destPoiName ||
+      (itin.length > 1 && itin[itin.length - 1].name) ||
+      "";
     if (sn && dn) {
       state.routeName = sn + " → " + dn;
       titleEl.textContent = sn + " → " + dn;
@@ -7926,16 +7932,6 @@
             poiLine.textContent =
               "near " + (bestPoi.displayName || bestPoi.name);
             el.appendChild(poiLine);
-            if (el.classList.contains("start") && !state.startPoiName) {
-              state.startPoiName = bestPoi.displayName || bestPoi.name;
-              updateRouteTitle();
-              updateInfo();
-            }
-            if (el.classList.contains("dest") && !state.destPoiName) {
-              state.destPoiName = bestPoi.displayName || bestPoi.name;
-              updateRouteTitle();
-              updateInfo();
-            }
           }
         }
       })

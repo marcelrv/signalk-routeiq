@@ -945,8 +945,17 @@ async function calculate(forcedRequestPoints, known) {
   // points, so a linked endpoint still sits on its waypoint.
   const first = requestPoints[0],
     last = requestPoints[requestPoints.length - 1];
-  if (first.name) newPoints[0].name = first.name;
-  if (last.name) newPoints[newPoints.length - 1].name = last.name;
+  // An end the user never named (blank, or a placeholder this panel gave it)
+  // takes the server's name for it: a nearby POI, else the water it is in.
+  const itin = result.itinerary || [];
+  const firstName = isPlaceholderName(first.name)
+    ? (itin.length > 1 && itin[0].name) || first.name
+    : first.name;
+  const lastName = isPlaceholderName(last.name)
+    ? (itin.length > 1 && itin[itin.length - 1].name) || last.name
+    : last.name;
+  if (firstName) newPoints[0].name = firstName;
+  if (lastName) newPoints[newPoints.length - 1].name = lastName;
   if (first.href) newPoints[0].href = first.href;
   if (last.href) newPoints[newPoints.length - 1].href = last.href;
 
@@ -968,6 +977,16 @@ async function calculate(forcedRequestPoints, known) {
     "ok",
   );
   renderSummary(result);
+}
+
+/**
+ * Whether a route point's name says nothing: blank, or one of the stand-ins
+ * this panel and the host hand out ("Start", "Destination", "Via 2", "WP7").
+ * @param {string} [name] The point's name.
+ * @returns {boolean} True when the server's name for that end should be used.
+ */
+function isPlaceholderName(name) {
+  return !name || /^(Start|Destination|Via \d+|WP\d+)$/.test(name.trim());
 }
 
 async function revert() {

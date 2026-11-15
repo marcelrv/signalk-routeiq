@@ -20,7 +20,12 @@ import {
   TRAFFIC_ONE_WAY_REV,
 } from "./database.js";
 import type { FunnelResult, NavmeshRegion } from "./navmesh.js";
-import { attachWaters, buildRouteDescription } from "./route-description.js";
+import {
+  attachWaters,
+  buildRouteDescription,
+  ENDPOINT_POI_RADIUS_M,
+  nameEndpoints,
+} from "./route-description.js";
 import {
   bearingDeg,
   buildItinerary,
@@ -3644,6 +3649,14 @@ export class RoutingEngine {
           },
         ];
       }
+    }
+
+    // What to call the two ends, for clients that have no name for them.
+    // Skipped with the description: a departure scan reads only times.
+    if (waitOverrides?.describe !== false) {
+      nameEndpoints(itinerary, route.description, (lat, lon) =>
+        this.db.nearestPoiName(lat, lon, ENDPOINT_POI_RADIUS_M),
+      );
     }
 
     route.totalSeconds = Math.round(totalSec);
