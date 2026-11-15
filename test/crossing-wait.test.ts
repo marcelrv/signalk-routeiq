@@ -528,16 +528,20 @@ describe('one crossing per whole (parent_id grouping)', () => {
     return coords;
   };
 
+  /** One segment per coordinate pair, from node i to i + 1 (no edge in any file). */
+  const chain = (coords: [number, number][]) => coords.slice(1).map((_c, i) => ({ from: i, to: i + 1 }));
+
   type Found = {
     name: string; type: string; subtype?: string; structure?: string; partId?: number;
     waitMinutes?: number; height?: number;
   };
-  /** Run detectCrossings for a route along `lon`, with `parts` and `wholes` as the database holds them. */
+  /** Run detectRouteStructures (an unknown stretch: the geometric fallback) for a route along `lon`, with `parts` and `wholes` as the database holds them. */
   const detect = async (parts: Part[], wholes: Whole[], lon: number) => {
     const engine = Object.create(RoutingEngine.prototype) as any;
     engine._config = { ...DEFAULT_CONFIG };
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
     engine.db = {
+      getRoutePois: async (pairs: unknown[]) => pairs.map(() => ({ poiIds: [], known: false })),
       // Route building asks for parts without info (includeInfo false)...
       getPoisInBBox: async () => parts.map((p) => ({ ...p, info: {} })),
       // ...and reads it only for the spans it lists.
@@ -545,7 +549,8 @@ describe('one crossing per whole (parent_id grouping)', () => {
         Object.fromEntries(parts.filter((p) => ids.includes(p.id) && Object.keys(p.info).length > 0).map((p) => [String(p.id), p.info])),
       getPoiParent: (row: { parent_id: number | null }) => wholes.find((w) => w.id === row.parent_id),
     };
-    return (await engine.detectCrossings(routeAlong(lon))) as Found[];
+    const coords = routeAlong(lon);
+    return (await engine.detectRouteStructures(coords, chain(coords))) as Found[];
   };
 
   it('lists only the opening span when the route goes through it', async () => {
@@ -627,11 +632,13 @@ describe('one crossing per whole (parent_id grouping)', () => {
     engine._config = { ...DEFAULT_CONFIG };
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
     engine.db = {
+      getRoutePois: async (pairs: unknown[]) => pairs.map(() => ({ poiIds: [], known: false })),
       getPoisInBBox: async () => parts.map((p) => ({ ...p, info: {} })),
       getPoiInfo: async () => ({}),
       getPoiParent: () => bridgeWhole(7),
     };
-    const c = await engine.detectCrossings([[4.63942, 52.1665], [4.63861, 52.16757]]);
+    const line: [number, number][] = [[4.63942, 52.1665], [4.63861, 52.16757]];
+    const c = await engine.detectRouteStructures(line, chain(line));
     assert.deepStrictEqual(c.map((x: { name: string }) => x.name), [`${BRIDGE} (opening span)`]);
   });
 });

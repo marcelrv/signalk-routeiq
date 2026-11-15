@@ -106,7 +106,7 @@ export interface RouteCrossing {
   // an obstacle group, and left off the ones it absorbs, so the numbers add up
   // exactly once. Distinct from waitMinutes below, which is an input.
   waitSeconds?: number;
-  // Per-POI wait, overriding the config default. Populated by detectCrossings
+  // Per-POI wait, overriding the config default. Populated by detectRouteStructures
   // from the POI's `typical_wait_minutes` property, for both bridges and locks,
   // on databases that carry one.
   waitMinutes?: number;

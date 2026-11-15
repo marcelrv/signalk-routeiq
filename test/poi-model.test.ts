@@ -437,9 +437,9 @@ describe('a route reports the whole and uses the part', () => {
   });
 
   it('gives a span over a lock head the lock, from edge_pois alone', async () => {
-    const seg: { from: number; to: number; lockIds?: number[] } = { from: 3, to: 4 };
-    (engine as any).segmentHops.set(seg, [4, 3]); // direction does not matter: pairs are normalised
-    await (engine as any).fillLockIds([seg]);
+    // Direction does not matter: pairs are normalised.
+    const seg: { from: number; to: number; nodes: number[]; lockIds?: number[] } = { from: 3, to: 4, nodes: [4, 3] };
+    await (engine as any).detectRouteStructures([[lonOf(3), LAT], [lonOf(4), LAT]], [seg]);
     assert.deepStrictEqual(seg.lockIds, [100]);
   });
 

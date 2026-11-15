@@ -6,6 +6,7 @@
 import {
   EdgeRow,
   PoiRow,
+  type PoiBBoxResult,
   RoutingDatabase,
   parsePoiJson,
   getNodeTypeInt,
@@ -268,6 +269,20 @@ const ROUTE_PART_TYPES: ReadonlySet<number> = new Set([
   POI_TYPE_LOCK_CHAMBER,
   POI_TYPE_BRIDGE_SPAN,
 ]);
+
+/** The graph-edge node sequence each route segment covers, recorded where
+ *  the segment is built (a segment names only its two ends, or `nodes` when
+ *  it spans several). Read by detectRouteStructures. */
+const segmentHops = new WeakMap<object, number[]>();
+
+/**
+ * How close (m) a route stretch no database knows must pass to a bridge span
+ * or lock chamber for it to count as a crossing. Known stretches use the
+ * `edge_pois` links instead. Lowered from 150 m (measured from route vertices)
+ * to 50 m (measured to the route line) because 150 m listed bridges on
+ * neighbouring and crossing canals: #57.
+ */
+const FALLBACK_MAX_DIST = 50;
 
 export class RoutingEngine {
   private db: RoutingDatabase;
@@ -2714,7 +2729,8 @@ export class RoutingEngine {
     // caller that does pre-populate it pays nothing extra. Never detected at
     // all with tides off, matching truePassageTimes' own early-out.
     const crossings = env
-      ? (result.crossings ?? (await this.detectCrossings(coords)))
+      ? (result.crossings ??
+        (await this.detectRouteStructures(coords, segments)))
       : [];
     const times = await this.truePassageTimes(
       coords,
@@ -3390,7 +3406,7 @@ export class RoutingEngine {
    * its own bridges group with it regardless of which end you enter from.
    *
    * This is an approximation standing in for data the databases do not carry:
-   * the databases' `edge_pois` rows (see fillLockIds) say
+   * the databases' `edge_pois` rows (see detectRouteStructures) say
    * exactly which chamber was traversed, and nothing marks opening-bridge edges
    * at all. Both would beat guessing from proximity.
    */
@@ -3459,7 +3475,7 @@ export class RoutingEngine {
     // Crossings first: a lock or an opening span costs time to get through,
     // and the totals below have to include it.
     if (!route.crossings) {
-      const detected = await this.detectCrossings(coords);
+      const detected = await this.detectRouteStructures(coords, segments);
       if (detected.length > 0) route.crossings = detected;
     }
 
@@ -3504,33 +3520,13 @@ export class RoutingEngine {
         // compression, line-of-sight) spans several, and only edges are in
         // the databases' sequence tables.
         // `seg` ties each edge to its route segment, for warning locations.
-        const units: Array<{
-          from: number;
-          to: number;
-          distance: number;
-          seg: number;
-        }> = [];
-        /** Add the graph edges of route segment `si`, tagged with `si`. */
-        segments.forEach((seg, si) => {
-          const n = seg.nodes;
-          if (n && n.length >= 2) {
-            for (let k = 0; k + 1 < n.length; k++) {
-              units.push({
-                from: n[k],
-                to: n[k + 1],
-                distance: this.db.getEdgeSync(n[k], n[k + 1])?.distance ?? 0,
-                seg: si,
-              });
-            }
-          } else {
-            units.push({
-              from: seg.from,
-              to: seg.to,
-              distance: seg.distance ?? 0,
-              seg: si,
-            });
-          }
-        });
+        const units = this.expandSegmentEdges(segments).map((u) => ({
+          ...u,
+          distance:
+            segments[u.seg].nodes && segments[u.seg].nodes!.length >= 2
+              ? (this.db.getEdgeSync(u.from, u.to)?.distance ?? 0)
+              : (segments[u.seg].distance ?? 0),
+        }));
         const described = await this.db.describeRoute(
           units,
           waitOverrides?.lang,
@@ -3903,65 +3899,30 @@ export class RoutingEngine {
     if (crossings) route.crossings = crossings;
   }
 
-  /** The graph-edge node sequence each route segment covers, recorded where
-   *  the segment is built (a segment names only its two ends, or `nodes` when
-   *  it spans several). Read by fillLockIds. */
-  private segmentHops = new WeakMap<object, number[]>();
-
   /**
-   * Set `lockIds` on the segments that pass through a lock, from the
-   * database's `edge_pois` rows (spec §2.14): the lock whole that owns a
-   * chamber the edge runs through, and the lock under a span carried over one
-   * of its heads. Which lock is known from the edge, so no guessing from
-   * nearby points. A pair no file knows leaves its segment unmarked.
+   * Record on `segments` (those at `owners`) the lock a linked POI row
+   * belongs to, for `crossingWaitSchedule`'s lock spans: the lock whole that
+   * owns a chamber the edge runs through, or the lock under a span carried
+   * over one of its heads. Known from the edge (`edge_pois`, spec §2.14), so
+   * no guessing from nearby points. Anything else is ignored.
    */
-  private async fillLockIds(
+  private noteLockId(
     segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
-  ): Promise<void> {
-    const pairs: Array<[number, number]> = [];
-    const owners: number[][] = []; // per pair: indexes into segments
-    const indexOf = new Map<string, number>();
-    segments.forEach((seg, si) => {
-      const hops = this.segmentHops.get(seg);
-      if (!hops) return;
-      for (let k = 0; k + 1 < hops.length; k++) {
-        const lo = Math.min(hops[k], hops[k + 1]);
-        const hi = Math.max(hops[k], hops[k + 1]);
-        const key = `${lo}:${hi}`;
-        let idx = indexOf.get(key);
-        if (idx === undefined) {
-          idx = pairs.length;
-          indexOf.set(key, idx);
-          pairs.push([lo, hi]);
-          owners.push([]);
-        }
-        if (!owners[idx].includes(si)) owners[idx].push(si);
-      }
-    });
-    if (pairs.length === 0) return;
-    const found = await this.db.getRoutePois(pairs);
-    const lockOf = (poiId: number): number | undefined => {
-      const row = this.db.getPoiRow(poiId);
-      if (!row) return undefined;
-      const whole = this.db.getPoiParent(row);
-      if (!whole || whole.type_id !== POI_TYPE_LOCK) return undefined;
-      // A chamber is part of its lock; so is a span carried over a lock head.
-      return row.type_id === POI_TYPE_LOCK_CHAMBER ||
-        row.type_id === POI_TYPE_BRIDGE_SPAN
-        ? whole.id
-        : undefined;
-    };
-    found.forEach((r, idx) => {
-      for (const poiId of r.poiIds) {
-        const lockId = lockOf(poiId);
-        if (lockId === undefined) continue;
-        for (const si of owners[idx]) {
-          const seg = segments[si];
-          if (!seg.lockIds) seg.lockIds = [];
-          if (!seg.lockIds.includes(lockId)) seg.lockIds.push(lockId);
-        }
-      }
-    });
+    owners: number[],
+    row: PoiRow,
+  ): void {
+    if (
+      row.type_id !== POI_TYPE_LOCK_CHAMBER &&
+      row.type_id !== POI_TYPE_BRIDGE_SPAN
+    )
+      return;
+    const whole = this.db.getPoiParent(row);
+    if (!whole || whole.type_id !== POI_TYPE_LOCK) return;
+    for (const si of owners) {
+      const seg = segments[si];
+      if (!seg.lockIds) seg.lockIds = [];
+      if (!seg.lockIds.includes(whole.id)) seg.lockIds.push(whole.id);
+    }
   }
 
   /**
@@ -4038,13 +3999,13 @@ export class RoutingEngine {
                 sub.nodes = [spanned[k], spanned[k + 1]];
               });
             }
-            // Which graph edges each sub-segment covers, for fillLockIds.
+            // Which graph edges each sub-segment covers, for detectRouteStructures.
             // Without a one-to-one match every sub-segment gets the whole
             // edge's nodes: a lock's extent must cover the edge's full length
             // (crossingWaitSchedule keys spans by lock id and extends them,
             // so repeating an id never charges a second locking).
             subs.forEach((sub, k) =>
-              this.segmentHops.set(
+              segmentHops.set(
                 sub,
                 spanned && spanned.length === pts.length
                   ? [spanned[k], spanned[k + 1]]
@@ -4066,7 +4027,7 @@ export class RoutingEngine {
               edgeTypeId: edge.edge_type_id,
               ...(spanned && spanned.length > 2 ? { nodes: spanned } : {}),
             };
-            this.segmentHops.set(seg, spanned ?? [prevNode, currNode]);
+            segmentHops.set(seg, spanned ?? [prevNode, currNode]);
             segments.push(seg);
           }
         } else {
@@ -4100,8 +4061,7 @@ export class RoutingEngine {
       if (node) coordinates.push([node.lon, node.lat]);
     }
 
-    await this.fillLockIds(segments);
-    const crossings = await this.detectCrossings(coordinates);
+    const crossings = await this.detectRouteStructures(coordinates, segments);
 
     return {
       type: "FeatureCollection",
@@ -4168,6 +4128,20 @@ export class RoutingEngine {
     a: [number, number],
     b: [number, number],
   ): number {
+    return RoutingEngine.pointSegmentProjection(lat, lon, a, b).dist;
+  }
+
+  /**
+   * As pointSegmentMetres, and where along the segment the nearest point is.
+   *
+   * @returns `dist` in metres, and `t` in [0, 1] from a (0) to b (1).
+   */
+  static pointSegmentProjection(
+    lat: number,
+    lon: number,
+    a: [number, number],
+    b: [number, number],
+  ): { dist: number; t: number } {
     const kx = 111320 * Math.cos((lat * Math.PI) / 180);
     const ky = 110540;
     const ax = (a[0] - lon) * kx;
@@ -4177,70 +4151,172 @@ export class RoutingEngine {
     const len2 = dx * dx + dy * dy;
     const t =
       len2 > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
-    return Math.hypot(ax + t * dx, ay + t * dy);
+    return { dist: Math.hypot(ax + t * dx, ay + t * dy), t };
   }
 
   /**
-   * Bridges and locks a route passes: every structure with a span within
-   * 150 m of a route coordinate, one entry per passage, in route order,
-   * bridges first. Each entry names the span nearest the route line.
+   * The graph edges the route segments cover, one unit per edge, each tagged
+   * with the index of its segment. An aggregated segment (collinear
+   * compression, line-of-sight) spans several edges and names them in
+   * `nodes`; one without goes from `from` to `to`. Shared by finalizeRoute's
+   * description and detectRouteStructures, so both see the same edges.
+   *
+   * @param segments - The route's segments.
+   * @param nodesOf - The node sequence of a segment, when it differs from
+   *   `nodes` (undefined falls back to `nodes`, then to `from`/`to`).
+   * @returns One `{from, to, seg}` per edge.
+   */
+  private expandSegmentEdges(
+    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
+    nodesOf?: (seg: (typeof segments)[number]) => number[] | undefined,
+  ): Array<{ from: number; to: number; seg: number }> {
+    const units: Array<{ from: number; to: number; seg: number }> = [];
+    segments.forEach((seg, si) => {
+      const n = nodesOf?.(seg) ?? seg.nodes;
+      if (n && n.length >= 2) {
+        for (let k = 0; k + 1 < n.length; k++)
+          units.push({ from: n[k], to: n[k + 1], seg: si });
+      } else {
+        units.push({ from: seg.from, to: seg.to, seg: si });
+      }
+    });
+    return units;
+  }
+
+  /**
+   * The bridges and locks a route passes, one entry per passage, in route
+   * order, bridges first. Each entry names the span or chamber nearest the
+   * route line.
+   *
+   * Where the databases know the edges (`edge_pois`, spec §2.14), exactly the
+   * parts linked to the route's edges are listed. Where they do not (an edge
+   * in no file: connector, navmesh shortcut, overlay), parts within
+   * FALLBACK_MAX_DIST of that stretch of the line are listed instead.
+   * It also sets `segments[].lockIds` (the lock whole of each chamber the
+   * edges run through), from the same single `routePois` request.
    *
    * @param coordinates - The route line, [lon, lat] per point.
+   * @param segments - The route's segments; segment i runs from coordinate i
+   *   to i + 1.
    * @returns The crossings; empty for an empty route.
    */
-  private async detectCrossings(
+  private async detectRouteStructures(
     coordinates: [number, number][],
+    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
   ): Promise<RouteCrossing[]> {
     if (coordinates.length === 0) return [];
 
-    const MARGIN = 0.002; // ~222 m, comfortably larger than MAX_DIST (150 m) below
+    const MARGIN = 0.001; // ~111 m of latitude, comfortably larger than FALLBACK_MAX_DIST
     const CHUNK = 64; // points per segmented bbox query
+    const nSegs = coordinates.length - 1;
 
-    // Segmented, deduped POI fetch: instead of one query over the bbox of
-    // the entire route (which pulls in every POI in that rectangle, not
-    // just ones near the polyline), walk the route in fixed-size chunks and
-    // query each chunk's own (much smaller) bbox. Consecutive chunks share
-    // their boundary point so a crossing right at a chunk edge is still
-    // covered by both neighboring queries.
-    //
-    // Correctness: every route vertex lies in some chunk, and each chunk's
-    // query box is that chunk's vertex extent expanded by MARGIN >= MAX_DIST,
-    // so any POI within MAX_DIST of any vertex is inside at least one
-    // chunk's box. The union of chunk results is therefore a superset of
-    // the single-whole-route-bbox result restricted to the near-route
-    // corridor, and deduping by id turns that union into a proper set —
-    // so detectCrossings' output is unchanged; only far-off-route POIs that
-    // would have been fetched-then-rejected are never fetched at all.
-    const poiById = new Map<
-      number,
-      Awaited<ReturnType<typeof this.db.getPoisInBBox>>[number]
-    >();
-    for (let i = 0; i < coordinates.length; i += CHUNK) {
-      const end = Math.min(i + CHUNK, coordinates.length - 1);
-      let cMinLat = Infinity,
-        cMaxLat = -Infinity,
-        cMinLon = Infinity,
-        cMaxLon = -Infinity;
-      for (let j = i; j <= end; j++) {
-        const [lon, lat] = coordinates[j];
-        if (lat < cMinLat) cMinLat = lat;
-        if (lat > cMaxLat) cMaxLat = lat;
-        if (lon < cMinLon) cMinLon = lon;
-        if (lon > cMaxLon) cMaxLon = lon;
+    // One request for the whole route: the graph edges (hops recorded where
+    // the segment was built, else as the description does), deduplicated by
+    // pair, each pair remembering the segments that contain it.
+    const units = this.expandSegmentEdges(segments, (s) => segmentHops.get(s));
+    const pairs: Array<[number, number]> = [];
+    const owners: number[][] = [];
+    const indexOf = new Map<string, number>();
+    for (const u of units) {
+      const lo = Math.min(u.from, u.to);
+      const hi = Math.max(u.from, u.to);
+      const key = `${lo}:${hi}`;
+      let idx = indexOf.get(key);
+      if (idx === undefined) {
+        idx = pairs.length;
+        indexOf.set(key, idx);
+        pairs.push([lo, hi]);
+        owners.push([]);
       }
-      const chunkPois = await this.db.getPoisInBBox(
-        cMinLat - MARGIN,
-        cMinLon - MARGIN,
-        cMaxLat + MARGIN,
-        cMaxLon + MARGIN,
-        // Parts only, uncapped, and no info: the map's 500 cap must never
-        // hide a span or chamber from a route; info is read below for the
-        // parts that survive the distance filter.
-        Number.MAX_SAFE_INTEGER,
-        { types: ROUTE_PART_TYPES, includeInfo: false },
-      );
-      for (const poi of chunkPois) poiById.set(poi.id, poi);
-      if (end >= coordinates.length - 1) break;
+      if (!owners[idx].includes(u.seg)) owners[idx].push(u.seg);
+    }
+    const found = pairs.length > 0 ? await this.db.getRoutePois(pairs) : [];
+
+    // Per segment: the parts linked to it, and whether any of its edges is
+    // unknown to every file (then the geometric fallback covers it).
+    type Poi = Omit<PoiBBoxResult, "info" | "displayName">;
+    // A coordinate span with no segment (fewer segments than spans) has no
+    // edge data at all: unknown.
+    const unknownSeg: boolean[] = Array.from(
+      { length: nSegs },
+      (_v, si) => si >= segments.length,
+    );
+    const poiById = new Map<number, Poi>();
+    const linkedSegs = new Map<number, Set<number>>(); // part id -> segments
+    found.forEach((r, idx) => {
+      for (const si of owners[idx])
+        if (!r.known && si < nSegs) unknownSeg[si] = true;
+      for (const poiId of r.poiIds) {
+        const row = this.db.getPoiRow(poiId);
+        if (!row) continue;
+        this.noteLockId(segments, owners[idx], row);
+        if (!ROUTE_PART_TYPES.has(row.type_id)) continue;
+        if (!poiById.has(poiId))
+          poiById.set(poiId, {
+            id: row.id,
+            name: row.name,
+            typeId: row.type_id,
+            parentId: row.parent_id ?? null,
+            properties: parsePoiJson(row.properties),
+            lat: row.lat,
+            lon: row.lon,
+          });
+        let set = linkedSegs.get(poiId);
+        if (!set) linkedSegs.set(poiId, (set = new Set()));
+        for (const si of owners[idx]) if (si < nSegs) set.add(si);
+      }
+    });
+
+    // The fallback's POIs: only those near the unknown stretches. Walk each
+    // contiguous run of unknown segments in fixed-size chunks and query each
+    // chunk's own small bbox (consecutive chunks share their boundary point).
+    // Every vertex of an unknown segment lies in some chunk, and the query box
+    // is the chunk's extent expanded by MARGIN >= FALLBACK_MAX_DIST, so any
+    // part within that distance of such a segment is fetched.
+    const unknownSegs: number[] = [];
+    for (let si = 0; si < nSegs; si++) if (unknownSeg[si]) unknownSegs.push(si);
+    for (let r = 0; r < unknownSegs.length; ) {
+      let rEnd = r;
+      while (
+        rEnd + 1 < unknownSegs.length &&
+        unknownSegs[rEnd + 1] === unknownSegs[rEnd] + 1
+      )
+        rEnd++;
+      const first = unknownSegs[r];
+      const last = unknownSegs[rEnd] + 1; // last vertex of the run
+      r = rEnd + 1;
+      for (let i = first; i < last; i += CHUNK) {
+        const end = Math.min(i + CHUNK, last);
+        let cMinLat = Infinity,
+          cMaxLat = -Infinity,
+          cMinLon = Infinity,
+          cMaxLon = -Infinity;
+        for (let j = i; j <= end; j++) {
+          const [lon, lat] = coordinates[j];
+          if (lat < cMinLat) cMinLat = lat;
+          if (lat > cMaxLat) cMaxLat = lat;
+          if (lon < cMinLon) cMinLon = lon;
+          if (lon > cMaxLon) cMaxLon = lon;
+        }
+        // A degree of longitude shrinks with latitude: widen the margin so it
+        // stays at least ~111 m wide (clamped near the poles).
+        const lonMargin =
+          MARGIN /
+          Math.max(0.2, Math.cos((((cMinLat + cMaxLat) / 2) * Math.PI) / 180));
+        const chunkPois = await this.db.getPoisInBBox(
+          cMinLat - MARGIN,
+          cMinLon - lonMargin,
+          cMaxLat + MARGIN,
+          cMaxLon + lonMargin,
+          // Parts only, uncapped, and no info: the map's 500 cap must never
+          // hide a span or chamber from a route; info is read below for the
+          // parts that are listed.
+          Number.MAX_SAFE_INTEGER,
+          { types: ROUTE_PART_TYPES, includeInfo: false },
+        );
+        for (const poi of chunkPois)
+          if (!poiById.has(poi.id)) poiById.set(poi.id, poi);
+      }
     }
     const pois = [...poiById.values()];
 
@@ -4248,7 +4324,6 @@ export class RoutingEngine {
     // head) and chambers (locks). Wholes and harbours are not detected here.
     const bridgePois = pois.filter((p) => p.typeId === POI_TYPE_BRIDGE_SPAN);
     const lockPois = pois.filter((p) => p.typeId === POI_TYPE_LOCK_CHAMBER);
-    const MAX_DIST = 150; // m: how close the route must pass to a POI to count as a crossing
     const MERGE_ROUTE_DIST = 300; // m along-route: same-structure events closer than this are one physical crossing
 
     // Cumulative along-route distance per coordinate, used only to decide
@@ -4263,19 +4338,19 @@ export class RoutingEngine {
       );
     }
 
-    type Poi = (typeof bridgePois)[0];
-
     /**
      * For a set of same-typed parts: group by whole (`parent_id`), then walk
-     * the route once per group. At each coordinate within MAX_DIST, attach the *nearest* POI in the
-     * group. Consecutive in-range coordinates collapse into a single run (one
-     * physical crossing); runs that are close together along the route are
-     * merged too, so a cluster of spans near one crossing point never produces
-     * more than one entry. The span listed for a run is the one nearest the
-     * route line over that run (see below).
+     * the route's segments once per group. A segment is hit by the group's
+     * nearest part that is linked to it (any distance: the data says the edge
+     * passes it) or, on an unknown segment, lies within FALLBACK_MAX_DIST of
+     * it. Consecutive hit segments collapse into a single run (one physical
+     * crossing); runs close together along the route are merged too, so a
+     * cluster of spans near one crossing point never produces more than one
+     * entry. The part listed for a run is the one nearest the route line
+     * over that run.
      *
-     * @param groupPois - POIs of one type (bridges or locks).
-     * @param build - Makes the crossing entry for the span that is listed.
+     * @param groupPois - Parts of one type (bridges or locks).
+     * @param build - Makes the crossing entry for the part that is listed.
      * @returns The crossings of this type, in route order.
      */
     const detectForGroup = (
@@ -4293,114 +4368,97 @@ export class RoutingEngine {
         else byStructure.set(key, [poi]);
       }
 
-      const out: Array<{
-        crossing: RouteCrossing;
-        dist: number;
-        coordIdx: number;
-      }> = [];
-      type Run = {
-        poi: Poi;
-        dist: number;
-        coordIdx: number;
-        first: number;
-        last: number;
-      };
+      const out: Array<{ crossing: RouteCrossing; chain: number }> = [];
+      type Run = { poi: Poi; dist: number; chain: number };
       for (const group of byStructure.values()) {
-        let current: Run | null = null;
+        // Where each part can hit: its linked segments, and the unknown ones
+        // within reach (a cheap box test first, the exact distance after).
+        const reach = new Map<
+          number,
+          Array<{ poi: Poi; dist: number; chain: number }>
+        >();
+        const add = (
+          si: number,
+          poi: Poi,
+          d: { dist: number; chain: number },
+        ) => {
+          const list = reach.get(si);
+          if (list) list.push({ poi, ...d });
+          else reach.set(si, [{ poi, ...d }]);
+        };
+        // Distance to the segment, and the chainage of its nearest point.
+        const segDist = (poi: Poi, si: number) => {
+          const { dist, t } = RoutingEngine.pointSegmentProjection(
+            poi.lat,
+            poi.lon,
+            coordinates[si],
+            coordinates[si + 1],
+          );
+          return {
+            dist,
+            chain: cumDist[si] + t * (cumDist[si + 1] - cumDist[si]),
+          };
+        };
+        for (const poi of group) {
+          const linked = linkedSegs.get(poi.id);
+          if (linked) for (const si of linked) add(si, poi, segDist(poi, si));
+          const dLat = FALLBACK_MAX_DIST / 110540;
+          const dLon =
+            FALLBACK_MAX_DIST /
+            (111320 * Math.cos((poi.lat * Math.PI) / 180) || 1);
+          for (const si of unknownSegs) {
+            if (linked?.has(si)) continue;
+            const [lonA, latA] = coordinates[si];
+            const [lonB, latB] = coordinates[si + 1];
+            if (
+              poi.lat < Math.min(latA, latB) - dLat ||
+              poi.lat > Math.max(latA, latB) + dLat ||
+              poi.lon < Math.min(lonA, lonB) - dLon ||
+              poi.lon > Math.max(lonA, lonB) + dLon
+            )
+              continue;
+            const d = segDist(poi, si);
+            if (d.dist <= FALLBACK_MAX_DIST) add(si, poi, d);
+          }
+        }
+        const hitSegs = [...reach.keys()].sort((a, b) => a - b);
+
         const runs: Run[] = [];
-        for (let i = 0; i < coordinates.length; i++) {
-          const [lon, lat] = coordinates[i];
-          let bestPoi: Poi | null = null;
-          let bestDist = Infinity;
-          for (const poi of group) {
-            const d = this.haversineDistance(lat, lon, poi.lat, poi.lon);
-            if (d <= MAX_DIST && d < bestDist) {
-              bestDist = d;
-              bestPoi = poi;
+        let current: Run | null = null;
+        let prevSi = -2;
+        for (const si of hitSegs) {
+          let best = reach.get(si)![0];
+          for (const c of reach.get(si)!) if (c.dist < best.dist) best = c;
+          if (current && si === prevSi + 1) {
+            if (best.dist < current.dist) {
+              current.poi = best.poi;
+              current.dist = best.dist;
+              current.chain = best.chain;
             }
+          } else {
+            if (current) runs.push(current);
+            current = { poi: best.poi, dist: best.dist, chain: best.chain };
           }
-          if (bestPoi) {
-            if (!current) {
-              current = {
-                poi: bestPoi,
-                dist: bestDist,
-                coordIdx: i,
-                first: i,
-                last: i,
-              };
-            } else {
-              current.last = i;
-              if (bestDist < current.dist) {
-                current.poi = bestPoi;
-                current.dist = bestDist;
-                current.coordIdx = i;
-              }
-            }
-          } else if (current) {
-            runs.push(current);
-            current = null;
-          }
+          prevSi = si;
         }
         if (current) runs.push(current);
 
         // Merge runs *within this structure group* that are close together
-        // along the route into one crossing, keeping the nearest vertex hit.
+        // along the route into one crossing, keeping the nearest hit.
         const merged: Run[] = [];
         for (const run of runs) {
           const prev =
             merged.length > 0 ? merged[merged.length - 1] : undefined;
-          if (
-            prev &&
-            cumDist[run.coordIdx] - cumDist[prev.coordIdx] < MERGE_ROUTE_DIST
-          ) {
-            merged[merged.length - 1] = {
-              ...(run.dist < prev.dist ? run : prev),
-              first: prev.first,
-              last: run.last,
-            };
+          if (prev && run.chain - prev.chain < MERGE_ROUTE_DIST) {
+            merged[merged.length - 1] = run.dist < prev.dist ? run : prev;
           } else {
             merged.push(run);
           }
         }
-        for (const run of merged) {
-          // The span passed is the one nearest the route *line* over the run,
-          // not the one nearest a vertex: graph nodes can sit tens of metres
-          // before a bridge, where a side span's centroid may be the closer
-          // one (Woubrugsebrug: the node is 31 m from the fixed span and 33 m
-          // from the opening the edge goes through; the line is 8.2 m from the
-          // fixed span and 6.7 m from the opening).
-          const lo = Math.max(0, run.first - 1);
-          const hi = Math.min(coordinates.length - 1, run.last + 1);
-          let poi = run.poi;
-          if (group.length > 1 && hi > lo) {
-            let best = Infinity;
-            for (const p of group) {
-              let d = Infinity;
-              for (let i = lo; i < hi; i++) {
-                d = Math.min(
-                  d,
-                  RoutingEngine.pointSegmentMetres(
-                    p.lat,
-                    p.lon,
-                    coordinates[i],
-                    coordinates[i + 1],
-                  ),
-                );
-              }
-              if (d < best) {
-                best = d;
-                poi = p;
-              }
-            }
-          }
-          out.push({
-            crossing: build(poi),
-            dist: run.dist,
-            coordIdx: run.coordIdx,
-          });
-        }
+        for (const run of merged)
+          out.push({ crossing: build(run.poi), chain: run.chain });
       }
-      out.sort((a, b) => a.coordIdx - b.coordIdx);
+      out.sort((a, b) => a.chain - b.chain);
       return out.map((e) => e.crossing);
     };
 
@@ -4545,7 +4603,8 @@ export class RoutingEngine {
     // builds a fresh merged one), so the write is simply never read there —
     // harmless, not wrong.
     const crossings = env
-      ? (result.crossings ?? (await this.detectCrossings(coords)))
+      ? (result.crossings ??
+        (await this.detectRouteStructures(coords, segments)))
       : [];
     if (env && !result.crossings) result.crossings = crossings;
     const times = await this.truePassageTimes(
