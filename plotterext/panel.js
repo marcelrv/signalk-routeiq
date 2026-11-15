@@ -1004,7 +1004,13 @@ async function save() {
   if (!r) return;
   // dialog:true → the host prompts for name/description (its Route Details
   // dialog in Freeboard-SK) and persists through the user's session.
-  await client.call("route.save", { routeId: r.routeId, dialog: true });
+  // The call stays open until the user answers that dialog, so the bus's
+  // default 10 s call timeout must not apply (0 = no timeout).
+  await client.call(
+    "route.save",
+    { routeId: r.routeId, dialog: true },
+    { timeoutMs: 0 },
+  );
 }
 
 /* ---------- route creation ---------- */
