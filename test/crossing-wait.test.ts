@@ -139,6 +139,29 @@ describe('crossing wait time', () => {
     assert.strictEqual(waitSeconds(lockAndHead), 3600);
   });
 
+  it('gives each passage through a lock its own span when the route turns back far beyond it', () => {
+    // Through lock 7 (0..100 m), on 3 km to an opening bridge, back 3 km and
+    // through lock 7 again (6100..6200 m). One span over both passages would
+    // swallow the bridge between them into the lock's group.
+    const crossings: Array<Record<string, unknown>> = [
+      lock({ structure: '7', distanceFromStart: 50 }),
+      opening({ distanceFromStart: 3100 }),
+      lock({ structure: '7', distanceFromStart: 6150 }),
+    ];
+    const segments = [
+      { distance: 100, lockIds: [7] },
+      { distance: 3000 },
+      { distance: 3000 },
+      { distance: 100, lockIds: [7] },
+    ];
+    assert.strictEqual(waitSeconds(crossings, {}, segments), 2 * 3600 + 1800);
+    assert.deepStrictEqual(
+      crossings.filter((c) => c.type === 'lock').map((c) => c.lockSpan),
+      [[0, 100], [6100, 6200]],
+      'each passage claims its own POI with its own span',
+    );
+  });
+
   it('groups a run of fixed spans into no wait at all', () => {
     const stack = [0, 0, 0].map((m) => fixed({ distanceFromStart: m }));
     assert.strictEqual(waitSeconds(stack), 0);

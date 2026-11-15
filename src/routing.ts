@@ -3281,16 +3281,30 @@ export class RoutingEngine {
     // Locks the route demonstrably passed through, from the edges it used, at
     // the chainage where it used them. Distinct ids: a lock spans several edges
     // and they are one locking. Only pipeline-built databases record this.
-    const lockSpans = new Map<number, [number, number]>();
+    // One span per passage: a route that leaves the lock and comes back
+    // through it (turning back) passes it again, and one span stretching from
+    // the first passage to the second would swallow every crossing between.
+    const spans: Array<{ id: number; from: number; to: number }> = [];
+    const openSpan = new Map<
+      number,
+      { id: number; from: number; to: number }
+    >();
     let along = 0;
     for (const seg of segments) {
       const end = along + (seg.distance ?? 0);
       for (const id of seg.lockIds ?? []) {
-        const span = lockSpans.get(id);
+        const span = openSpan.get(id);
         // Extended rather than replaced: a lock is several edges, and its far
-        // head is where its bridges are.
-        if (span) span[1] = Math.max(span[1], end);
-        else lockSpans.set(id, [along, end]);
+        // head is where its bridges are. A short stretch without the id (an
+        // unlinked edge between a head and the chamber) is still the same
+        // locking; a longer one is the route coming back.
+        if (span && along - span.to <= RoutingEngine.CROSSING_GROUP_METRES) {
+          span.to = Math.max(span.to, end);
+        } else {
+          const fresh = { id, from: along, to: end };
+          spans.push(fresh);
+          openSpan.set(id, fresh);
+        }
       }
       along = end;
     }
@@ -3306,9 +3320,7 @@ export class RoutingEngine {
     const claimedPois = new Set<RouteCrossing>();
     // Chainage order, not Map insertion order, so which span reaches for
     // which POI cannot depend on the order lock ids happened to be inserted.
-    const spans = [...lockSpans.entries()]
-      .map(([id, span]) => ({ id, from: span[0], to: span[1] }))
-      .sort((a, b) => a.from - b.from);
+    spans.sort((a, b) => a.from - b.from);
     for (const { id: lockId, from, to } of spans) {
       // The charted POI and the traversed edges rarely land on the same
       // metre, so allow the usual grouping tolerance at each end of the span.
@@ -4411,6 +4423,22 @@ export class RoutingEngine {
         const [a, b] = k.split(">");
         return seen.has(`${b}>${a}`);
       });
+    // The direction of travel along segment si (east, north in metres), or
+    // undefined for a zero-length one.
+    const segDir = (si: number): [number, number] | undefined => {
+      const [lon1, lat1] = coordinates[si];
+      const [lon2, lat2] = coordinates[si + 1];
+      const dx =
+        (lon2 - lon1) * Math.cos((((lat1 + lat2) / 2) * Math.PI) / 180);
+      const dy = lat2 - lat1;
+      const len = Math.hypot(dx, dy);
+      return len > 0 ? [dx / len, dy / len] : undefined;
+    };
+    /** True when u and v head more than 120 degrees apart: coming back. */
+    const opposes = (
+      u: [number, number] | undefined,
+      v: [number, number] | undefined,
+    ): boolean => !!u && !!v && u[0] * v[0] + u[1] * v[1] < -0.5;
 
     /**
      * For a set of same-typed parts: group by whole (`parent_id`), then walk
@@ -4443,20 +4471,27 @@ export class RoutingEngine {
       }
 
       const out: Array<{ crossing: RouteCrossing; chain: number }> = [];
-      // `afterTurn`: the run starts where the route came back over the edges
-      // of the previous one, a passage of its own that is never merged back.
-      type Run = { poi: Poi; dist: number; chain: number; afterTurn?: boolean };
+      // `afterTurn`: the run starts where the route came back past the
+      // structure (over the edges of the previous run, or heading the other
+      // way), a passage of its own that is never merged back. `dir`: the
+      // direction of travel on the run's latest hit segment.
+      // `line`: the distance to the segment's own line, which breaks a tie in
+      // `dist` (sub-segments sharing one unknown edge are all as far from it).
+      type Hit = { poi: Poi; dist: number; line: number; chain: number };
+      type Run = Hit & {
+        afterTurn?: boolean;
+        dir?: [number, number];
+      };
+      const nearer = (a: Hit, b: Hit): boolean =>
+        a.dist < b.dist || (a.dist === b.dist && a.line < b.line);
       for (const group of byStructure.values()) {
         // Where each part can hit: its linked segments, and the unknown ones
         // within reach (a cheap box test first, the exact distance after).
-        const reach = new Map<
-          number,
-          Array<{ poi: Poi; dist: number; chain: number }>
-        >();
+        const reach = new Map<number, Hit[]>();
         const add = (
           si: number,
           poi: Poi,
-          d: { dist: number; chain: number },
+          d: { dist: number; line: number; chain: number },
         ) => {
           const list = reach.get(si);
           if (list) list.push({ poi, ...d });
@@ -4477,7 +4512,11 @@ export class RoutingEngine {
         };
         for (const poi of group) {
           const linked = linkedSegs.get(poi.id);
-          if (linked) for (const si of linked) add(si, poi, segDist(poi, si));
+          if (linked)
+            for (const si of linked) {
+              const d = segDist(poi, si);
+              add(si, poi, { ...d, line: d.dist });
+            }
           const dLat = FALLBACK_MAX_DIST / 110540;
           const dLon =
             FALLBACK_MAX_DIST /
@@ -4494,15 +4533,18 @@ export class RoutingEngine {
             )
               continue;
             // Judged against the unknown edge itself; placed along the route
-            // by where the segment passes it.
+            // by where the segment passes it, and ranked by that too when
+            // several segments are as near the edge.
             const { dist } = RoutingEngine.pointSegmentProjection(
               poi.lat,
               poi.lon,
               a,
               b,
             );
-            if (dist <= FALLBACK_MAX_DIST)
-              add(si, poi, { dist, chain: segDist(poi, si).chain });
+            if (dist <= FALLBACK_MAX_DIST) {
+              const onSeg = segDist(poi, si);
+              add(si, poi, { dist, line: onSeg.dist, chain: onSeg.chain });
+            }
           }
         }
         const hitSegs = [...reach.keys()].sort((a, b) => a - b);
@@ -4513,20 +4555,24 @@ export class RoutingEngine {
         let prevSi = -2;
         for (const si of hitSegs) {
           let best = reach.get(si)![0];
-          for (const c of reach.get(si)!) if (c.dist < best.dist) best = c;
-          const turned: boolean = current !== null && turnsBack(seen, si);
+          for (const c of reach.get(si)!) if (nearer(c, best)) best = c;
+          const dir = segDir(si);
+          const turned: boolean =
+            current !== null &&
+            (turnsBack(seen, si) || opposes(current.dir, dir));
           if (current && si === prevSi + 1 && !turned) {
-            if (best.dist < current.dist) {
+            if (nearer(best, current)) {
               current.poi = best.poi;
               current.dist = best.dist;
+              current.line = best.line;
               current.chain = best.chain;
             }
+            if (dir) current.dir = dir;
           } else {
             if (current) runs.push(current);
             current = {
-              poi: best.poi,
-              dist: best.dist,
-              chain: best.chain,
+              ...best,
+              ...(dir ? { dir } : {}),
               ...(turned ? { afterTurn: true } : {}),
             };
             seen = new Set();
@@ -4551,7 +4597,7 @@ export class RoutingEngine {
             !run.afterTurn &&
             run.chain - prevChain < MERGE_ROUTE_DIST
           ) {
-            merged[merged.length - 1] = run.dist < prev.dist ? run : prev;
+            merged[merged.length - 1] = nearer(run, prev) ? run : prev;
           } else {
             merged.push(run);
           }

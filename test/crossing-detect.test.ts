@@ -944,6 +944,104 @@ describe("route structures: an aggregated segment with one unknown edge", () => 
       ["91", "93"],
     );
   });
+
+  it("places a bridge on a shared unknown edge where the route passes it, not on the first sub-segment", async () => {
+    // Three sub-segments (a funnel polyline without a one-to-one node match)
+    // all naming the whole edge sequence 1-2-3-4: each is as far from the
+    // unknown edge 3-4 as the others, so only their own lines can say which
+    // passes Z (x = 500).
+    const subs = [0, 1, 2].map(() => ({
+      from: 1,
+      to: 4,
+      nodes: [1, 2, 3, 4],
+    }));
+    const found = (await (fx.engine as any).detectRouteStructures(
+      [pos(0, 0), pos(200, 0), pos(400, 0), pos(600, 0)],
+      subs,
+    )) as Found[];
+    assert.deepStrictEqual(
+      found.map((c) => c.structure),
+      ["91", "93"],
+    );
+    const z = found[1].distanceFromStart ?? NaN;
+    assert.ok(Math.abs(z - 500) <= 2, `Z at ${z} m, not 200 m`);
+  });
+});
+
+describe("route structures: a turn-back that returns on other edges", () => {
+  let fx: Fixture;
+  before(async () => {
+    // Out along y = 0 (1-2-3) under span A of bridge X at x = 300, across to
+    // the parallel channel (3-4, 20 m) and back west along y = 20 (4-5)
+    // under span B of the same bridge. The return shares no edge with the
+    // way out, and the two passages are only ~220 m apart along the route.
+    fx = await openFixture([
+      {
+        country: "AAA",
+        nodes: [
+          ...line(3, 200),
+          { id: 4, x: 400, y: 20 },
+          { id: 5, x: 200, y: 20 },
+        ],
+        edges: [
+          [1, 2],
+          [2, 3],
+          [3, 4],
+          [4, 5],
+        ],
+        pois: [
+          {
+            id: 400,
+            type: BRIDGE,
+            name: "Bridge X",
+            properties: { typical_wait_minutes: 5 },
+            x: 300,
+            y: 10,
+          },
+          {
+            id: 401,
+            type: SPAN,
+            parent: 400,
+            properties: { subtype: "opening" },
+            x: 300,
+            y: 0,
+          },
+          {
+            id: 402,
+            type: SPAN,
+            parent: 400,
+            properties: { subtype: "opening" },
+            x: 300,
+            y: 20,
+          },
+        ],
+        edgePois: [
+          [2, 3, 401],
+          [4, 5, 402],
+        ],
+      },
+    ]);
+  });
+  after(() => fx.close());
+
+  it("lists X once per passage, each with the span it went through", async () => {
+    const { crossings } = await detect(fx, [1, 2, 3, 4, 5]);
+    assert.deepStrictEqual(
+      crossings.map((c) => [c.structure, c.partId]),
+      [
+        ["400", 401],
+        ["400", 402],
+      ],
+    );
+  });
+
+  it("still lists one crossing for a single passage", async () => {
+    const { crossings } = await detect(fx, [1, 2, 3]);
+    assert.deepStrictEqual(
+      crossings.map((c) => [c.structure, c.partId]),
+      [["400", 401]],
+    );
+  });
 });
 
 describe("route structures: the fallback box far north", () => {
