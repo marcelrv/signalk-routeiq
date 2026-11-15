@@ -221,3 +221,45 @@ describe('POST /route/profile', () => {
     assert.strictEqual(writes.length, 0);
   });
 });
+
+describe('passage profile in GPX', () => {
+  it('writes the times as extensions before the first route point', () => {
+    const gpx = GpxExporter.toGpx(calculated(), 'probe');
+    const ext = gpx.indexOf('<extensions>');
+    assert.ok(ext > gpx.indexOf('</desc>'), 'extensions follow <desc>');
+    assert.ok(ext < gpx.indexOf('<rtept'), 'GPX 1.1 order: extensions before rtept');
+    assert.match(gpx, /<ar:passageProfile version="1" provider="signalk-routeiq" providerVersion="\d[^"]*" calculatedAt="2026-11-15T10:00:00.000Z">/);
+    assert.match(gpx, /<ar:duration total="20520" moving="13320" waiting="7200" waitingIncludedInTotal="true"\/>/);
+    assert.match(gpx, /<ar:assumptions speedThroughWater="3.087" lockWait="3600" bridgeWait="1800" tide="false"\/>/);
+    assert.ok(!gpx.includes('<ar:departure>'), 'an undated plan has no departure');
+  });
+
+  it('lists each wait with where it is, and the warnings', () => {
+    const gpx = GpxExporter.toGpx(calculated(), 'probe');
+    const waits = gpx.match(/<ar:wait [^>]*\/>/g) ?? [];
+    assert.strictEqual(waits.length, 2);
+    assert.match(waits[0], /type="lock" name="Sluis A" structure="7" distanceFromStart="8123" seconds="3600" lat="52.010000" lon="5.020000"/);
+    assert.match(gpx, /<ar:warning type="shallow" level="danger" distanceFromStart="500">Shallow<\/ar:warning>/);
+  });
+
+  it('says the duration in the description, for plotters that skip extensions', () => {
+    const gpx = GpxExporter.toGpx(calculated(), 'probe');
+    assert.match(gpx, /<desc>[^<]*, Duration: 5h42m \(2h00m waiting\)<\/desc>/);
+  });
+
+  it('escapes names, and leaves everything out when there is no time', () => {
+    const r = calculated();
+    r.crossings[0].name = 'Sluis "A" & <B>';
+    assert.match(GpxExporter.toGpx(r, 'probe'), /name="Sluis &quot;A&quot; &amp; &lt;B&gt;"/);
+    const none = GpxExporter.toGpx(calculated({ totalSeconds: undefined }), 'probe');
+    assert.ok(!none.includes('<extensions>') && !none.includes('Duration:'));
+  });
+
+  it('carries departure and arrival for a dated plan', () => {
+    const gpx = GpxExporter.toGpx(
+      calculated({ departureTime: '2026-11-15T08:00:00.000Z', arrivalTime: '2026-11-15T13:42:00.000Z' }),
+      'probe',
+    );
+    assert.match(gpx, /<ar:departure>2026-11-15T08:00:00.000Z<\/ar:departure>\s*<ar:arrival>2026-11-15T13:42:00.000Z<\/ar:arrival>/);
+  });
+});

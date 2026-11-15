@@ -4,6 +4,8 @@ When RouteIQ saves a calculated route to Signal K, it also stores the times it
 calculated with the route. Other applications can then read the duration and
 the waits back through the Resources API without routing again. This applies
 to the webapp's **Save to Signal K** and to saves from the Freeboard-SK panel.
+The webapp's **GPX export** carries the same numbers as RouteIQ GPX extensions
+(see [In GPX](#in-gpx)).
 
 The profile is stored in the route resource at
 `feature.properties.passageProfile`:
@@ -44,8 +46,10 @@ All values use Signal K units: seconds, metres and m/s.
     "tide": { "enabled": false }
   },
   "waits": [
-    { "type": "lock", "name": "Sluis A", "structure": "7", "distanceFromStart": 8123, "seconds": 3600 },
-    { "type": "bridge", "name": "Brug B", "structure": "9", "distanceFromStart": 9000, "seconds": 3600 }
+    { "type": "lock", "name": "Sluis A", "structure": "7", "distanceFromStart": 8123, "seconds": 3600,
+      "position": { "latitude": 52.01, "longitude": 5.02 } },
+    { "type": "bridge", "name": "Brug B", "structure": "9", "distanceFromStart": 9000, "seconds": 3600,
+      "position": { "latitude": 52.012, "longitude": 5.027 } }
   ],
   "warnings": [
     { "type": "shallow", "level": "danger", "message": "…", "distanceFromStart": 500 }
@@ -69,7 +73,7 @@ All values use Signal K units: seconds, metres and m/s.
 | `assumptions.speedThroughWater` | The constant speed through the water used for every leg (m/s). |
 | `assumptions.lockWait`, `bridgeWait` | Default wait per lock and per opening span, in seconds. A structure can carry its own wait, so the per-structure `waits` can differ from these defaults. |
 | `assumptions.tide` | `{enabled:false}`, or `{enabled:true, estimated, source}` when the times were corrected for tidal current. `estimated:true` means the tide comes from predictions or model data, not measurements. |
-| `waits[]` | Each structure that added a wait, in route order. The `seconds` values add up to `duration.waiting`. `structure` is an opaque id for the physical structure. A bridge that can be passed closed charges no wait and is not listed. |
+| `waits[]` | Each structure that added a wait, in route order. The `seconds` values add up to `duration.waiting`. `structure` is an opaque id for the physical structure, and `position` is where the structure is. A bridge that can be passed closed charges no wait and is not listed. |
 | `warnings[]` | Every warning on the calculated route: route-level warnings (`type` and `message`), shallow or narrow legs, and notices from the charts (`type`, `level` = `danger`/`caution`/`info`, and where available `distanceFromStart`). |
 
 ### What the times are not
@@ -96,3 +100,34 @@ RouteIQ never writes a profile for geometry that is not its own calculation:
 - **Freeboard-SK panel**: the host saves the route. When the host reports `route.saved`, the panel sends the calculated result to `POST /signalk/v1/api/router/route/profile` with `{ href, route }`. The server reads the stored route and attaches the profile only if the stored geometry matches the calculated one. Otherwise it answers `409` and leaves the resource unchanged. If the route is saved again after an edit, the host either drops the profile or keeps one whose hash no longer matches. Either way, a reader can tell.
 
 A route without calculated times, such as one from an older RouteIQ version, has no `passageProfile`.
+
+## In GPX
+
+`POST /signalk/v1/api/router/export/gpx` writes the same profile into the GPX
+file's route, as extensions in the RouteIQ namespace
+(`xmlns:ar="http://signalk.org/routeiq"`). They sit in `<rte><extensions>`,
+after `<desc>` and before the first `<rtept>`, as GPX 1.1 requires:
+
+```xml
+<rte>
+  <name>…</name>
+  <desc>Route calculated by … - Distance: 41114m, Cost: 1.00, Duration: 5h42m (2h00m waiting)</desc>
+  <extensions>
+    <ar:passageProfile version="1" provider="signalk-routeiq" providerVersion="0.1.0-alpha.10" calculatedAt="2026-11-15T10:00:00.000Z">
+      <ar:duration total="20520" moving="13320" waiting="7200" waitingIncludedInTotal="true"/>
+      <ar:departure>2026-11-15T08:00:00.000Z</ar:departure>  <!-- dated plans only -->
+      <ar:arrival>2026-11-15T13:42:00.000Z</ar:arrival>
+      <ar:assumptions speedThroughWater="3.087" lockWait="3600" bridgeWait="1800" tide="false"/>
+      <ar:wait type="lock" name="Sluis A" structure="7" distanceFromStart="8123" seconds="3600" lat="52.010000" lon="5.020000"/>
+      <ar:warning type="shallow" level="danger" distanceFromStart="500">…</ar:warning>
+    </ar:passageProfile>
+  </extensions>
+  <rtept …>
+```
+
+- The numbers and units are the same as in the Signal K profile.
+- An undated plan has no `<ar:departure>` or `<ar:arrival>`.
+- When tides were used, `<ar:assumptions>` also carries `tideEstimated` and `tideSource`.
+- A route without calculated times gets no extensions and no duration in `<desc>`.
+- Applications that do not know the namespace ignore the extensions. The duration in `<desc>` is there for them.
+- GPX has no geometry hash. A GPX file is a copy, so there is no shared resource that someone could edit after the times were calculated.

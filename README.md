@@ -170,6 +170,8 @@ dated, the speed and wait assumptions, the waits per structure and the route's
 warnings. Other applications can read these times back without routing again.
 The profile records a hash of the geometry it was calculated for, so a reader
 can tell when the route has been edited since and the times no longer apply.
+The GPX export carries the same numbers as RouteIQ GPX extensions, and gives
+the duration in the route description for plotters that ignore extensions.
 See [docs/passage-profile.md](docs/passage-profile.md) for the format.
 
 ## License

@@ -119,6 +119,7 @@ export interface PassageProfile {
     structure?: string;
     distanceFromStart?: number; // m
     seconds: number;
+    position?: { latitude: number; longitude: number };
   }>;
   warnings: PassageProfileWarning[];
 }
@@ -169,6 +170,16 @@ export function buildPassageProfile(
         ? { distanceFromStart: c.distanceFromStart }
         : {}),
       seconds: c.waitSeconds as number,
+      ...(c.position &&
+      Number.isFinite(c.position.latitude) &&
+      Number.isFinite(c.position.longitude)
+        ? {
+            position: {
+              latitude: c.position.latitude,
+              longitude: c.position.longitude,
+            },
+          }
+        : {}),
     }));
 
   return {
