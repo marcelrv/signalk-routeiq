@@ -616,6 +616,7 @@ describe('one crossing per whole (parent_id grouping)', () => {
       getPoiParent: (row: { parent_id: number | null }) => wholes.find((w) => w.id === row.parent_id),
       withSpanKindSources: (ids: number[]) => ids,
       spanKind: () => undefined,
+      spanHeightUnknown: () => false,
     };
     const coords = routeAlong(lon);
     return (await engine.detectRouteStructures(coords, chain(coords))) as Found[];
@@ -706,6 +707,7 @@ describe('one crossing per whole (parent_id grouping)', () => {
       getPoiParent: () => bridgeWhole(7),
       withSpanKindSources: (ids: number[]) => ids,
       spanKind: () => undefined,
+      spanHeightUnknown: () => false,
     };
     const line: [number, number][] = [[4.63942, 52.1665], [4.63861, 52.16757]];
     const c = await engine.detectRouteStructures(line, chain(line));

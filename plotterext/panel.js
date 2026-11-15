@@ -1507,15 +1507,27 @@ function renderItinerary(itinerary) {
           ? p.leg.seconds - (p.leg.waitSeconds || 0)
           : null;
       for (const [, entries] of grouped) {
-        const e0 = entries[0];
-        const hasFixed = entries.some((e) => e.subtype === "fixed");
-        const hasOpening = entries.some((e) => e.subtype === "opening");
+        // A span's own `kind` wins over its whole's, so a bridge can have a
+        // power-line span: draw the bridge from its other spans and add a
+        // pylon, whatever the order. `e0` is the entry named and linked.
+        const nonCable =
+          entries[0].type === "lock"
+            ? entries
+            : entries.filter((e) => e.kind !== "cable");
+        const allCable = nonCable.length === 0;
+        const bridges = allCable ? [] : nonCable;
+        const e0 = allCable ? entries[0] : nonCable[0];
+        const cable = allCable
+          ? undefined
+          : entries.find((e) => e.kind === "cable");
+        const hasFixed = bridges.some((e) => e.subtype === "fixed");
+        const hasOpening = bridges.some((e) => e.subtype === "opening");
         const row = document.createElement("div");
         row.className = "crossing";
         const color =
           e0.type === "lock"
             ? CROSSING_COLORS.lock
-            : e0.kind === "cable"
+            : allCable
               ? CABLE_COLOR
               : hasFixed
                 ? CROSSING_COLORS.fixed
@@ -1527,6 +1539,9 @@ function renderItinerary(itinerary) {
           row.appendChild(
             poiBadge("bridge", { subtype: "opening" }, CROSSING_COLORS.opening),
           );
+        }
+        if (cable) {
+          row.appendChild(poiBadge("bridge", { kind: "cable" }, CABLE_COLOR));
         }
         const cn = document.createElement("span");
         cn.className = "cname";
@@ -1545,7 +1560,7 @@ function renderItinerary(itinerary) {
         if (nameHasSpanInfo) {
           info = "";
         } else if (e0.type === "bridge") {
-          const fixed = entries.find((e) => e.subtype === "fixed");
+          const fixed = bridges.find((e) => e.subtype === "fixed");
           if (fixed && typeof fixed.height === "number") {
             info =
               " (" +

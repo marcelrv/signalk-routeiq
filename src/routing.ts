@@ -4780,7 +4780,8 @@ export class RoutingEngine {
       return crossing;
     });
     // Display facts only for the spans that were listed: `info.height`, and
-    // the kind (`spanKind`: the span's own, else its bridge whole's).
+    // the kind and height-unknown flag (`spanKind`, `spanHeightUnknown`: the
+    // span's own, else its bridge whole's).
     if (spanOf.size > 0) {
       const info = await this.db.getPoiInfo(
         this.db.withSpanKindSources([...spanOf.values()].map((e) => e.poi.id)),
@@ -4789,7 +4790,7 @@ export class RoutingEngine {
         const own = info[String(e.poi.id)];
         const h = own?.height;
         if (typeof h === "number" && Number.isFinite(h)) c.height = h;
-        if (own?.height_unknown === true) c.heightUnknown = true;
+        if (this.db.spanHeightUnknown(e.poi.id, info)) c.heightUnknown = true;
         const kind = this.db.spanKind(e.poi.id, info);
         if (kind !== undefined) c.kind = kind;
         c.name = `${e.base}${RoutingEngine.formatSpanSuffix(c.subtype, c.height, e.closedHeight, { kind: c.kind, heightUnknown: c.heightUnknown })}`;

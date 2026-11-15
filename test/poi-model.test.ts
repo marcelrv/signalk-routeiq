@@ -382,7 +382,7 @@ describe('a route reports the whole and uses the part', () => {
   const route = () =>
     engine.calculateRoute({
       start: { latitude: LAT, longitude: lonOf(1) },
-      end: { latitude: LAT, longitude: lonOf(5) },
+      end: { latitude: LAT, longitude: lonOf(6) },
       minCoastDistance: 0,
     });
 
@@ -588,16 +588,19 @@ describe('structure kind: a power line is told apart from a bridge', () => {
     { id: 601, type: 6, parent: 600, name: 'Old Bridge span', properties: { subtype: 'fixed' }, info: { height: 7.2 }, lon: lonOf(3) },
     { id: 700, type: 2, name: 'Mixed', info: { kind: 'bridge' }, lon: lonOf(4) },
     { id: 701, type: 6, parent: 700, name: 'Mixed span', properties: { subtype: 'fixed' }, info: { kind: 'cable', height: 30 }, lon: lonOf(4) },
+    // The height-unknown flag on the whole only; the span gives the estimate.
+    { id: 800, type: 2, name: 'Estimated', info: { kind: 'cable', height_unknown: true }, lon: lonOf(5) },
+    { id: 801, type: 6, parent: 800, name: 'Estimated span', properties: { subtype: 'fixed' }, info: { height: 40 }, lon: lonOf(5) },
   ];
 
   before(async () => {
     dir = tmpDir();
     buildFile(path.join(dir, 'k.sqlite'), {
       country: 'KND',
-      nodes: [1, 2, 3, 4, 5],
-      edges: [[1, 2], [2, 3], [3, 4], [4, 5]],
+      nodes: [1, 2, 3, 4, 5, 6],
+      edges: [[1, 2], [2, 3], [3, 4], [4, 5], [5, 6]],
       pois: KIND_POIS,
-      edgePois: [[1, 2, 501], [2, 3, 601], [3, 4, 701]],
+      edgePois: [[1, 2, 501], [2, 3, 601], [3, 4, 701], [4, 5, 801]],
     });
     db = new RoutingDatabase(dir, false);
     await db.init();
@@ -611,18 +614,21 @@ describe('structure kind: a power line is told apart from a bridge', () => {
   });
 
   it('the map gives a span its whole\'s kind, its own when it has one, and none when no file says', async () => {
-    const pois = await db.getPoisInBBox(LAT - 0.01, 5.0, LAT + 0.01, 5.05);
+    const pois = await db.getPoisInBBox(LAT - 0.01, 5.0, LAT + 0.01, 5.06);
     const kindOf = (id: number) => pois.find((p) => p.id === id)!;
     assert.strictEqual(kindOf(501).kind, 'cable');
     assert.deepStrictEqual(kindOf(501).info, { height: 25.5, height_unknown: true }, 'info stays the span\'s own');
     assert.strictEqual('kind' in kindOf(601), false);
     assert.strictEqual(kindOf(701).kind, 'cable', 'the span\'s own kind wins over the whole\'s');
+    assert.strictEqual(kindOf(501).heightUnknown, true, 'the span\'s own flag');
+    assert.strictEqual(kindOf(801).heightUnknown, true, 'the whole\'s flag when the span has none');
+    assert.strictEqual('heightUnknown' in kindOf(601), false);
   });
 
   it('a route crossing carries the kind and an estimated height, and names the power line', async () => {
     const r = await engine.calculateRoute({
       start: { latitude: LAT, longitude: lonOf(1) },
-      end: { latitude: LAT, longitude: lonOf(5) },
+      end: { latitude: LAT, longitude: lonOf(6) },
       minCoastDistance: 0,
     });
     const by = (s: string) => (r.crossings ?? []).find((c) => c.structure === s)!;
@@ -634,5 +640,7 @@ describe('structure kind: a power line is told apart from a bridge', () => {
     assert.strictEqual(by('600').kind, undefined);
     assert.strictEqual(by('600').name, 'Old Bridge (fixed, 7.2m)');
     assert.strictEqual(by('700').kind, 'cable');
+    assert.strictEqual(by('800').heightUnknown, true, 'the whole\'s flag when the span has none');
+    assert.strictEqual(by('800').name, 'Estimated (power line, ~40.0m)');
   });
 });
