@@ -4,6 +4,7 @@ import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase } from '../dist/database.js';
+import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // A route or a position update can trigger a region to be read into the graph
 // before the request can be answered, and that read is inline: the request
@@ -60,6 +61,7 @@ describe('regions being read into the graph are reported', () => {
            VALUES (?, ?, 7000, 9.0, 30.0, 40.0, 1.0, 500, 0, 0, 0)`, [s, t]);
     }
     run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
+    upgradeToPoiModel(raw);
     raw.close();
   }
 
@@ -93,6 +95,7 @@ describe('regions being read into the graph are reported', () => {
            VALUES (?, ?, 7000, 9.0, 30.0, 40.0, 1.0, 500, 0, 0, 0)`, [s, t]);
     }
     run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
+    upgradeToPoiModel(raw);
     raw.close();
     buildNameless();
 

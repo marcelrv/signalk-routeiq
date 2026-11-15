@@ -55,7 +55,14 @@ interface PoiRow {
   properties: string | null;
   lat: number;
   lon: number;
+  parent_id: number | null;
 }
+
+/** POI types this build handles (database.ts has the named constants). A row
+ *  of any other type is dropped when POIs are loaded (spec §1.1 rule 2). */
+const KNOWN_POI_TYPES = [0, 1, 2, 5, 6];
+/** `metadata.format_generation` values this build can read (spec §1.1). */
+const SUPPORTED_FORMAT_GENERATIONS = [0];
 
 interface SchemaFlags extends DescribeFlags {
   hasCrossesLand: boolean;
@@ -63,7 +70,6 @@ interface SchemaFlags extends DescribeFlags {
   hasNodeDepth: boolean;
   hasRegionId: boolean;
   hasEdgeKind: boolean;
-  hasLockId: boolean;
 }
 
 interface DbHandle {
@@ -73,8 +79,8 @@ interface DbHandle {
    * This file's own columns. The globals below OR-merge across every file
    * loaded, which is the right answer for "can any route report a lock" but
    * the wrong one for building a SELECT: a directory can hold databases from
-   * different pipeline generations, and naming `lock_id` in a query against
-   * one that predates the column fails the whole load.
+   * builds with different optional columns, and naming a column in a query
+   * against a file that lacks it fails the whole load.
    */
   flags: SchemaFlags;
   /** This file's `metadata.schema_version`, read once at open time (null if
@@ -140,7 +146,6 @@ let hasCrossesObstacle = false;
 let hasNodeDepth = false;
 let hasRegionId = false;
 let hasEdgeKind = false;
-let hasLockId = false;
 let overlayHandle: DbHandle | null = null;
 
 if (!parentPort) {
@@ -161,10 +166,6 @@ function detectSchemaFlags(db: DatabaseSync): SchemaFlags & {
     hasCrossesLand: edgeCols.some((c) => c.name === "crosses_land"),
     hasCrossesObstacle: edgeCols.some((c) => c.name === "crosses_obstacle"),
     hasEdgeKind: edgeCols.some((c) => c.name === "edge_kind_id"),
-    // Pipeline-built databases say which lock an edge passes through; the
-    // nv-chart conversion has no such column. Detected rather than assumed, the
-    // same way the others here are.
-    hasLockId: edgeCols.some((c) => c.name === "lock_id"),
     hasNodeDepth: nodeCols.some((c) => c.name === "node_depth"),
     hasRegionId: nodeCols.some((c) => c.name === "region_id"),
     // Route-description tables, detected per file like the columns above.
@@ -172,6 +173,37 @@ function detectSchemaFlags(db: DatabaseSync): SchemaFlags & {
     edgeCols,
     nodeCols,
   };
+}
+
+/**
+ * Why this file cannot be read, or null when it can. A file is refused, never
+ * partly read: an unknown format generation (spec §1.1), or a file built
+ * before the POI model (no `pois.parent_id` or no `edge_pois` table; judged by
+ * presence, never by `schema_version`). There is no legacy reading path; the fix for an
+ * old file is to rebuild it with the factory.
+ */
+function formatRefusal(db: DatabaseSync, filename: string): string | null {
+  const meta = readMetadataRow(db, filename);
+  const generation = meta?.formatGeneration ?? 0;
+  if (!SUPPORTED_FORMAT_GENERATIONS.includes(generation)) {
+    return `Built with database format generation ${generation}, which this version of routeiq does not read. Update routeiq.`;
+  }
+  const poiCols = db.prepare("PRAGMA table_info('pois')").all() as Array<{
+    name: string;
+  }>;
+  const hasParent = poiCols.some((c) => c.name === "parent_id");
+  const hasEdgePois =
+    (db.prepare("PRAGMA table_info('edge_pois')").all() as Array<unknown>)
+      .length > 0;
+  // Detected by presence, never by schema_version (spec §1.1 rule 3).
+  if (!hasParent || !hasEdgePois) {
+    const missing = [
+      ...(hasParent ? [] : ["pois.parent_id"]),
+      ...(hasEdgePois ? [] : ["edge_pois"]),
+    ].join(" and ");
+    return `Built with an older database format (POI model missing: no ${missing}). Rebuild it with the factory.`;
+  }
+  return null;
 }
 
 /** Collision check for a freshly opened handle against the others (see
@@ -225,6 +257,9 @@ function readMetadataRow(
   boundingBox: string | null;
   boundaryGeometry: string | null;
   schemaVersion: number | null;
+  /** `metadata.format_generation`; a file without the column is generation 0
+   *  (spec §1.1). */
+  formatGeneration: number;
   /** The value this file reserves for "depth unknown", from
    *  `metadata.depth_unknown_sentinel`. Null when the column is absent,
    *  meaning the legacy convention (any negative is unknown). Read
@@ -246,6 +281,7 @@ function readMetadataRow(
       ${colNames.has("bounding_box") ? "bounding_box" : "NULL AS bounding_box"},
       ${colNames.has("boundary_geometry") ? "boundary_geometry" : "NULL AS boundary_geometry"},
       ${colNames.has("schema_version") ? "schema_version" : "NULL AS schema_version"},
+      ${colNames.has("format_generation") ? "format_generation" : "0 AS format_generation"},
       ${colNames.has("depth_unknown_sentinel") ? "depth_unknown_sentinel" : "NULL AS depth_unknown_sentinel"},
       ${colNames.has("contributor") ? "contributor" : "'' AS contributor"},
       ${colNames.has("url") ? "url" : "'' AS url"}
@@ -262,6 +298,8 @@ function readMetadataRow(
       boundingBox: r.bounding_box ?? null,
       boundaryGeometry: r.boundary_geometry ?? null,
       schemaVersion: r.schema_version ?? null,
+      formatGeneration:
+        typeof r.format_generation === "number" ? r.format_generation : 0,
       depthUnknownSentinel:
         typeof r.depth_unknown_sentinel === "number"
           ? r.depth_unknown_sentinel
@@ -326,9 +364,9 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
         hasNodeDepth = false;
         hasRegionId = false;
         hasEdgeKind = false;
-        hasLockId = false;
         handles.length = 0;
         filenames.length = 0;
+        const formatErrors: Record<string, string> = {};
         for (const dbPath of dbPaths) {
           try {
             const db = new DatabaseSync(dbPath);
@@ -350,11 +388,17 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
               db.close();
               continue;
             }
+            const refusal = formatRefusal(db, filenameOf(dbPath));
+            if (refusal) {
+              console.warn(`[db-worker] Refusing ${dbPath}: ${refusal}`);
+              formatErrors[filenameOf(dbPath)] = refusal;
+              db.close();
+              continue;
+            }
             // Merge schema flags across all valid databases
             hasCrossesLand = hasCrossesLand || flags.hasCrossesLand;
             hasCrossesObstacle = hasCrossesObstacle || flags.hasCrossesObstacle;
             hasEdgeKind = hasEdgeKind || flags.hasEdgeKind;
-            hasLockId = hasLockId || flags.hasLockId;
             hasNodeDepth = hasNodeDepth || flags.hasNodeDepth;
             hasRegionId = hasRegionId || flags.hasRegionId;
             const filename = filenameOf(dbPath);
@@ -382,7 +426,10 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             id,
             type,
             error:
-              "No valid .sqlite routing databases found in the data directory",
+              "No valid .sqlite routing databases found in the data directory" +
+              Object.entries(formatErrors)
+                .map(([f, m]) => ` (${f}: ${m})`)
+                .join(""),
           });
           break;
         }
@@ -396,6 +443,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             hasRegionId,
             filenames: loadedFilenames,
             descriptionErrors: describeErrors(),
+            formatErrors,
           },
         });
         break;
@@ -412,6 +460,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
           meta: ReturnType<typeof readMetadataRow>;
           flags: SchemaFlags;
           stats: ReturnType<typeof readStatsRow>;
+          formatError: string | null;
         }> = [];
         for (const dbPath of dbPaths) {
           let db: DatabaseSync | null = null;
@@ -441,6 +490,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             // node/edge/POI counts a loaded one gets from getMetadata's
             // readStatsRow, instead of leaving them blank until it loads.
             const stats = readStatsRow(db);
+            const formatError = formatRefusal(db, filename);
             results.push({
               path: dbPath,
               filename,
@@ -455,6 +505,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
               meta,
               flags,
               stats,
+              formatError,
             });
           } catch (err: any) {
             console.warn(
@@ -493,18 +544,28 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
           db.close();
           throw new Error(`Invalid database (no edges table): ${dbPath}`);
         }
+        const refusal = formatRefusal(db, filenameOf(dbPath));
+        if (refusal) {
+          db.close();
+          // A structured refusal, not an error: the caller keeps the entry
+          // `unsupported` instead of making it loadable again.
+          parentPort!.postMessage({
+            id,
+            type,
+            result: { refused: refusal, filename: filenameOf(dbPath) },
+          });
+          break;
+        }
         // Sticky OR-merge, same convention as bulk `init` — a flag once true
         // (e.g. some loaded file has crosses_land) stays true for the life of
         // the worker even if that specific file is later closed. This says
         // what the loaded set can offer, and nothing more: the SQL in
         // loadNodes/loadEdges is built from each handle's own flags, because
-        // a routing-data directory really does mix pipeline generations (a
-        // database downloaded before `lock_id` existed alongside one built
-        // after).
+        // a routing-data directory can mix files built with different optional
+        // columns.
         hasCrossesLand = hasCrossesLand || flags.hasCrossesLand;
         hasCrossesObstacle = hasCrossesObstacle || flags.hasCrossesObstacle;
         hasEdgeKind = hasEdgeKind || flags.hasEdgeKind;
-        hasLockId = hasLockId || flags.hasLockId;
         hasNodeDepth = hasNodeDepth || flags.hasNodeDepth;
         hasRegionId = hasRegionId || flags.hasRegionId;
 
@@ -856,12 +917,11 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
           const edgeKindCol = h.flags.hasEdgeKind
             ? ", edge_kind_id"
             : ", 0 AS edge_kind_id";
-          const lockCol = h.flags.hasLockId ? ", lock_id" : ", NULL AS lock_id";
           const edges = h.db
             .prepare(
               `SELECT source, target, distance, min_depth, max_air_draft, min_width,
                     cost_factor, distance_to_land,
-                    edge_type_id, traffic_mode${crossesCol}${obstacleCol}${edgeKindCol}${lockCol}
+                    edge_type_id, traffic_mode${crossesCol}${obstacleCol}${edgeKindCol}
              FROM edges`,
             )
             .all() as unknown as EdgeRow[];
@@ -883,7 +943,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             .prepare(
               `SELECT source, target, distance, min_depth, max_air_draft, min_width,
                     cost_factor, distance_to_land, edge_type_id, traffic_mode,
-                    0 AS edge_kind_id, NULL AS lock_id, edited_fields
+                    0 AS edge_kind_id, edited_fields
              FROM edges`,
             )
             .all() as unknown as EdgeRow[];
@@ -924,6 +984,129 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
         });
         break;
       }
+      case "poiInfo": {
+        // Display facts (`pois.info`) for the POIs a response is about to
+        // show; never loaded at start-up. A POI in several files (a whole cut
+        // by a region border) has the same row content in each, so the first
+        // file with an `info` wins. A value that is not a JSON object is
+        // treated as absent.
+        const { ids } = payload as { ids: number[] };
+        const out: Record<string, Record<string, unknown>> = {};
+        const seenInfo = new Map<number, string>();
+        let warned = false;
+        // Every file is asked, so a disagreement between files is noticed;
+        // the first file with an `info` still wins.
+        for (const h of handles) {
+          if (!h) continue;
+          for (let i = 0; i < ids.length; i += 500) {
+            const chunk = ids.slice(i, i + 500);
+            const rows = h.db
+              .prepare(
+                `SELECT id, info FROM pois WHERE id IN (${chunk.map(() => "?").join(",")})`,
+              )
+              .all(...chunk) as unknown as Array<{
+              id: number;
+              info: string | null;
+            }>;
+            for (const r of rows) {
+              if (typeof r.info !== "string") continue;
+              const prior = seenInfo.get(r.id);
+              if (prior !== undefined) {
+                if (prior !== r.info && !warned) {
+                  warned = true;
+                  console.warn(
+                    `[db-worker] poiInfo: files disagree on info for POI ${r.id} (${filenameOf(h.path)}); keeping the first file's`,
+                  );
+                }
+                continue;
+              }
+              try {
+                const parsed = JSON.parse(r.info);
+                if (
+                  parsed &&
+                  typeof parsed === "object" &&
+                  !Array.isArray(parsed)
+                ) {
+                  out[String(r.id)] = parsed;
+                  seenInfo.set(r.id, r.info);
+                }
+              } catch {
+                /* malformed info: treated as absent */
+              }
+            }
+          }
+        }
+        parentPort!.postMessage({ id, type, result: out });
+        break;
+      }
+      case "routePois": {
+        // The chambers and spans each edge of a found route passes
+        // (`edge_pois`, spec §2.14). Pairs are normalised (lo < hi) by the
+        // caller, who also names the files that hold the pair (`dbIndexes`).
+        // The answer is the union over those files; `known` says at least one
+        // of them was asked, so an empty list means "passes none" rather than
+        // "no data". A pair held by no open file is not known.
+        // `dbIndexes: null` means the caller does not know (bulk mode leaves
+        // file edges untagged): every open file is asked whether it holds the
+        // pair in its `edges` table.
+        const { pairs } = payload as {
+          pairs: Array<{
+            lo: number;
+            hi: number;
+            dbIndexes: number[] | null;
+          }>;
+        };
+        // Statements are prepared once per handle; a handle whose edge_pois
+        // is empty is skipped (cached), it has nothing to add.
+        const stmts = new Map<
+          number,
+          {
+            holds: ReturnType<DatabaseSync["prepare"]>;
+            rows: ReturnType<DatabaseSync["prepare"]>;
+            empty: boolean;
+          }
+        >();
+        const stmtsOf = (i: number) => {
+          let st = stmts.get(i);
+          if (!st) {
+            const h = handles[i]!;
+            const empty = !h.db
+              .prepare("SELECT 1 FROM edge_pois LIMIT 1")
+              .get();
+            st = {
+              empty,
+              holds: h.db.prepare(
+                "SELECT 1 FROM edges WHERE (source = ? AND target = ?) OR (source = ? AND target = ?) LIMIT 1",
+              ),
+              rows: h.db.prepare(
+                "SELECT poi_id FROM edge_pois WHERE source = ? AND target = ?",
+              ),
+            };
+            stmts.set(i, st);
+          }
+          return st;
+        };
+        const result = pairs.map((p) => {
+          const poiIds = new Set<number>();
+          let known = false;
+          const candidates = p.dbIndexes ?? handles.map((_h, i) => i);
+          for (const i of candidates) {
+            if (!handles[i]) continue;
+            const st = stmtsOf(i);
+            if (p.dbIndexes === null && !st.holds.get(p.lo, p.hi, p.hi, p.lo))
+              continue;
+            known = true;
+            if (st.empty) continue;
+            for (const r of st.rows.all(p.lo, p.hi) as unknown as Array<{
+              poi_id: number;
+            }>)
+              poiIds.add(r.poi_id);
+          }
+          return { poiIds: [...poiIds], known };
+        });
+        parentPort!.postMessage({ id, type, result });
+        break;
+      }
       case "loadPois": {
         const { dbIndexes } = (payload ?? {}) as { dbIndexes?: number[] };
         const targets: Array<{ h: DbHandle; i: number }> =
@@ -945,9 +1128,12 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
               .prepare("PRAGMA table_info('pois')")
               .all() as Array<{ name: string }>;
             if (cols.length === 0) continue;
+            // `info` is deliberately not selected: display facts load on
+            // demand (poiInfo). Types this build does not know are dropped.
             const rows = h.db
               .prepare(
-                "SELECT id, name, type_id, properties, lat, lon FROM pois",
+                `SELECT id, name, type_id, properties, lat, lon, parent_id
+                 FROM pois WHERE type_id IN (${KNOWN_POI_TYPES.join(",")})`,
               )
               .all() as unknown as PoiRow[];
             for (const r of rows) allPois.push({ ...r, db_index: i });

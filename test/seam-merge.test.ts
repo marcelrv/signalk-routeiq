@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase } from '../dist/database.js';
 import { RoutingEngine } from '../dist/routing.js';
 import { DEFAULT_CONFIG } from '../dist/types.js';
+import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // Cross-database seam merge — the runtime half of the build-time stitching
 // mechanism (signalk-router-pipeline/STITCHING_DESIGN.md §8-§10.8).
@@ -204,6 +205,7 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
       }
     }
     run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
+    upgradeToPoiModel(db);
     db.close();
   }
 

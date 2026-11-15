@@ -3,7 +3,7 @@ import * as path from "path";
 import assert from "node:assert";
 import { after, before, describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { POI_TYPE_LOCK, RoutingDatabase } from "../dist/database.js";
+import { POI_TYPE_LOCK_CHAMBER, RoutingDatabase } from "../dist/database.js";
 import { RoutingEngine } from "../dist/routing.js";
 import {
   KNOTS_TO_MS,
@@ -11,6 +11,7 @@ import {
   TidesClient,
 } from "../dist/tides.js";
 import { DEFAULT_CONFIG } from "../dist/types.js";
+import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // Charted depths are referenced to LAT, so they are the low-water case and the
 // router used to treat every hour of the day as low water. These cover the two
@@ -321,6 +322,7 @@ describe("tide-informed depth", () => {
       run(
         `CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`,
       );
+      upgradeToPoiModel(db);
       db.close();
     }
 
@@ -485,6 +487,7 @@ describe("tide-informed depth", () => {
       run(
         `CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`,
       );
+      upgradeToPoiModel(raw);
       raw.close();
 
       db = new RoutingDatabase(fixturesDir);
@@ -884,12 +887,15 @@ describe("tide-informed depth", () => {
           {
             id: 1,
             name: "Test Lock",
-            typeId: POI_TYPE_LOCK,
+            typeId: POI_TYPE_LOCK_CHAMBER,
+            parentId: null,
             properties: {},
+            info: {},
             lat: A.latitude,
             lon: A.longitude,
           },
         ],
+        getPoiParent: () => undefined,
       };
       return engine;
     }
@@ -1013,13 +1019,16 @@ describe("tide-informed depth", () => {
             {
               id: 1,
               name: "Test Lock",
-              typeId: POI_TYPE_LOCK,
+              typeId: POI_TYPE_LOCK_CHAMBER,
+              parentId: null,
               properties: {},
+              info: {},
               lat: A.latitude,
               lon: A.longitude,
             },
           ];
         },
+        getPoiParent: () => undefined,
       };
       const r = result();
       assert.strictEqual(r.crossings, undefined);

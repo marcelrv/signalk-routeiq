@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase } from '../dist/database.js';
 import { RoutingEngine } from '../dist/routing.js';
 import { DEFAULT_CONFIG } from '../dist/types.js';
+import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // Regression fixture for the "penalized-but-successful" bbox bug: a tight
 // routingBBoxMargin can leave only a constraint-violating edge reachable
@@ -92,6 +93,7 @@ describe('bbox expansion retries on a penalized (not just failed) result', () =>
 
     run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
 
+    upgradeToPoiModel(raw);
     raw.close();
 
     db = new RoutingDatabase(fixturesDir);
@@ -269,6 +271,7 @@ describe('violation-rate tradeoff is bounded, not all-or-nothing (Round 19)', ()
 
     run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
 
+    upgradeToPoiModel(raw);
     raw.close();
 
     const db = new RoutingDatabase(fixturesDir);

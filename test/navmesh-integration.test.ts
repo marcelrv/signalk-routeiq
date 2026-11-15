@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase } from '../dist/database.js';
 import { RoutingEngine } from '../dist/routing.js';
 import { DEFAULT_CONFIG } from '../dist/types.js';
+import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // Deterministic node ID formula per routing-database-format-specification.md §2.7
 function nodeIdFor(lat: number, lon: number): number {
@@ -104,6 +105,7 @@ describe('navmesh_regions consumption (integration)', () => {
       JSON.stringify([NODE_A, NODE_B]),
     ]);
 
+    upgradeToPoiModel(navDb);
     navDb.close();
 
     // --- plain fixture: ordinary graph, no navmesh_regions table at all —
@@ -133,6 +135,7 @@ describe('navmesh_regions consumption (integration)', () => {
       (?, ?, 1400, 5.0, 20.0, 10.0, 0.8, 500, 0, 0, 0)`, [plainA, plainB]);
     runPlain(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id) VALUES
       (?, ?, 1400, 5.0, 20.0, 10.0, 0.8, 500, 0, 0, 0)`, [plainB, plainA]);
+    upgradeToPoiModel(plainDb);
     plainDb.close();
 
     db = new RoutingDatabase(fixturesDir);
@@ -324,6 +327,7 @@ describe('navmesh boundary-shortcut sparsification (regression)', () => {
       JSON.stringify(triangles),
       JSON.stringify(rimNodeIds),
     ]);
+    upgradeToPoiModel(sdb);
     sdb.close();
 
     warnings = [];
@@ -433,6 +437,7 @@ describe('empty boundary_node_ids (Round 9 warn-on-empty)', () => {
       JSON.stringify([[0, 0], [0, 1], [1, 1], [1, 0]]),
       JSON.stringify([[0, 1, 2], [0, 2, 3]]),
     ]);
+    upgradeToPoiModel(sdb);
     sdb.close();
 
     warnings = [];

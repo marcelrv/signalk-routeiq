@@ -2582,7 +2582,7 @@
       getApiBase() +
       "/signalk/v1/api/router/pois?bbox=" +
       getBboxStr() +
-      "&limit=4000"
+      "&limit=500"
     );
   }
   function waterwaysUrl() {
@@ -2809,9 +2809,19 @@
       .catch(() => {});
   }
 
-  const POI_TYPE_NAMES = ["harbour", "lock", "bridge", "fairway", "waterway"];
+  // The routing database's POI model: 0 harbour, 1 lock, 2 bridge (wholes),
+  // 5 lock_chamber and 6 bridge_span (parts, drawn with the lock / bridge
+  // icon). Any other type is not drawn: it is skipped, never shown as a
+  // harbour.
+  const POI_TYPE_NAMES = {
+    0: "harbour",
+    1: "lock",
+    2: "bridge",
+    5: "lock",
+    6: "bridge",
+  };
   function poiTypeName(poi) {
-    return poi.type || POI_TYPE_NAMES[poi.typeId] || "harbour";
+    return POI_TYPE_NAMES[poi.typeId] || null;
   }
 
   function poiIcon(type, props, size) {
@@ -2874,18 +2884,23 @@
         };
         for (const p of data.pois) {
           const props = p.properties || {};
+          // Display facts (height, kind, ...) come as `info`, never from
+          // `properties`.
+          const info = p.info || {};
           const t = poiTypeName(p);
+          if (!t) continue;
           const subtypeColors = subtypeColor[t];
           let color =
             subtypeColors && props.subtype
               ? subtypeColors[props.subtype]
               : typeColor[t] || "#6d96c0";
           const iconHtml = poiIcon(t, props);
-          let label = p.name;
+          let label = p.displayName || p.name || "POI";
           if (t === "bridge") {
             if (props.subtype === "fixed") {
-              if (props.height != null && props.height < 999)
-                label += " — " + props.height + "m";
+              if (info.height_unknown === true) label += " — height unknown";
+              else if (typeof info.height === "number" && info.height < 999)
+                label += " — " + info.height + "m";
             } else if (props.subtype === "opening") {
               // Closed clearance: below it you need not wait for an opening.
               const ch = props.closed_height;
@@ -2921,7 +2936,7 @@
             // leaves it showing right on top of the popup this opens,
             // seen as two overlapping dialogs from one click.
             m.closeTooltip();
-            const name = p.name || "POI";
+            const name = p.displayName || p.name || "POI";
             const lat = p.lat,
               lng = p.lon;
             const html =
@@ -3006,7 +3021,7 @@
           // A disabled database is never going to load, so showing its
           // coverage here would promise routing the engine cannot deliver.
           // The Data Manager is where switched-off regions belong.
-          if (db.state === "disabled") return;
+          if (db.state === "disabled" || db.state === "unsupported") return;
           const loaded = db.state === "loaded";
           const style = loaded
             ? {
@@ -5103,6 +5118,7 @@
           // not an empty install — say so, or the only hint is a bare
           // "No databases found" that reads like the data went missing.
           var disabledCount = status.disabled || 0;
+          var unsupportedCount = status.unsupported || 0;
           var allDisabled = availableCount === 0 && disabledCount > 0;
           if (dbsEl) {
             dbsEl.textContent =
@@ -5111,10 +5127,13 @@
                 : availableCount > 0
                   ? availableCount +
                     " region(s) available — none loaded yet (dynamic loading)"
-                  : allDisabled
-                    ? disabledCount +
-                      " region(s) installed, all disabled — enable one in Manage Routing Data"
-                    : "No databases found";
+                  : unsupportedCount > 0 && availableCount === 0
+                    ? unsupportedCount +
+                      " region(s) installed in an unsupported format — see Manage Routing Data"
+                    : allDisabled
+                      ? disabledCount +
+                        " region(s) installed, all disabled — enable one in Manage Routing Data"
+                      : "No databases found";
           }
           if (status.loaded) {
             if (subtitleEl)
@@ -5139,12 +5158,25 @@
             !status.loaded &&
             loadedCount === 0 &&
             availableCount === 0 &&
-            !allDisabled
+            !allDisabled &&
+            unsupportedCount === 0
           ) {
             // No databases at all — not an error, just an empty install.
             // An install whose regions are merely switched off is not empty,
             // and must not be sent off to download data it already has.
             jumpToDownloadManager();
+          } else if (
+            !status.loaded &&
+            loadedCount === 0 &&
+            availableCount === 0 &&
+            unsupportedCount > 0
+          ) {
+            // Installed but in a format this version cannot read: not a fresh
+            // install, and nothing will load. The Data Manager says why.
+            if (subtitleEl)
+              subtitleEl.textContent =
+                unsupportedCount +
+                " installed database(s) are in an unsupported format — see Manage Routing Data";
           } else {
             if (subtitleEl) subtitleEl.textContent = "Loading routing graph...";
             setTimeout(poll, 1000);
@@ -6678,7 +6710,11 @@
         return r.json();
       })
       .then(function (data) {
-        const items = Array.isArray(data) ? data : data.results || [];
+        const items = (Array.isArray(data) ? data : data.results || []).filter(
+          function (it) {
+            return !!poiTypeName(it);
+          },
+        );
         searchItems = items;
         const qLower = q.toLowerCase();
 
@@ -7887,15 +7923,16 @@
           if (bestPoi) {
             var poiLine = document.createElement("div");
             poiLine.className = "node-poi";
-            poiLine.textContent = "near " + bestPoi.name;
+            poiLine.textContent =
+              "near " + (bestPoi.displayName || bestPoi.name);
             el.appendChild(poiLine);
             if (el.classList.contains("start") && !state.startPoiName) {
-              state.startPoiName = bestPoi.name;
+              state.startPoiName = bestPoi.displayName || bestPoi.name;
               updateRouteTitle();
               updateInfo();
             }
             if (el.classList.contains("dest") && !state.destPoiName) {
-              state.destPoiName = bestPoi.name;
+              state.destPoiName = bestPoi.displayName || bestPoi.name;
               updateRouteTitle();
               updateInfo();
             }
@@ -8406,7 +8443,9 @@
           ? "loading&hellip;"
           : ir.loadState === "disabled"
             ? "disabled"
-            : "loaded";
+            : ir.loadState === "unsupported"
+              ? "unusable (old format)"
+              : "loaded";
     return (
       '<div style="font-weight:600">' +
       displayName +
@@ -8923,6 +8962,11 @@
         "</div>" +
         (description
           ? '<div class="dm-region-desc">' + description + "</div>"
+          : "") +
+        (r.formatError
+          ? '<div class="dm-region-desc" style="color:#ef4444">Not usable: ' +
+            escapeHtml(r.formatError) +
+            "</div>"
           : "") +
         (r.descriptionError
           ? '<div class="dm-region-desc" style="color:#ef4444">Route description off: ' +

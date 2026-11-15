@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { BBox, PoiResult, OVERLAY_EDITABLE_COLUMNS } from "./types.js";
@@ -25,6 +25,71 @@ export const POI_TYPE_LOCK = 1;
 export const POI_TYPE_BRIDGE = 2;
 export const POI_TYPE_FAIRWAY = 3;
 export const POI_TYPE_WATERWAY = 4;
+/** A chamber of a lock (part; its parent is a POI_TYPE_LOCK whole). */
+export const POI_TYPE_LOCK_CHAMBER = 5;
+/** A span or opening of a bridge (part; its parent is a bridge whole, or a
+ *  lock whole when the bridge is carried over the lock's heads). */
+export const POI_TYPE_BRIDGE_SPAN = 6;
+/** The POI types this build handles. Rows of any other type are dropped when
+ *  POIs are loaded (spec §1.1 rule 2: unknown = ignored). Types 3 and 4 are
+ *  in the enum table but have no rows in the POI model. */
+export const KNOWN_POI_TYPES: ReadonlySet<number> = new Set([
+  POI_TYPE_HARBOUR,
+  POI_TYPE_LOCK,
+  POI_TYPE_BRIDGE,
+  POI_TYPE_LOCK_CHAMBER,
+  POI_TYPE_BRIDGE_SPAN,
+]);
+/** Part types: what a route passes (it goes through a chamber, under a span). */
+export const POI_PART_TYPES: ReadonlySet<number> = new Set([
+  POI_TYPE_LOCK_CHAMBER,
+  POI_TYPE_BRIDGE_SPAN,
+]);
+/** Whole types that have parts. */
+export const POI_WHOLE_TYPES: ReadonlySet<number> = new Set([
+  POI_TYPE_LOCK,
+  POI_TYPE_BRIDGE,
+]);
+
+/** Most POIs the map/API returns for one box; their `info` is read from the
+ *  files per result. Callers (the API) apply it; route building does not. */
+export const MAX_POIS_IN_BBOX = 500;
+
+/** A POI as the bounding-box query returns it. */
+export interface PoiBBoxResult {
+  id: number;
+  name: string;
+  typeId: number;
+  /** The whole a part belongs to; null on a harbour. */
+  parentId: number | null;
+  /** The name to show: the whole's for a chamber or a span of a bridge
+   *  (spec §2.10: a part's own name only where there is no whole's), a span
+   *  over a lock head keeps its own, being the bridge's name. */
+  displayName: string;
+  /** Routing facts (spec §2.10.1). */
+  properties: Record<string, unknown>;
+  /** Display facts (spec §2.10.2), read on demand. */
+  info: Record<string, unknown>;
+  lat: number;
+  lon: number;
+}
+
+/** Parse a POI's `properties`/`info` JSON. Anything that is not a JSON object
+ *  (malformed text, an array, a scalar) reads as an empty object: a bad row
+ *  must never fail a bounding-box query or a search. */
+export function parsePoiJson(
+  raw: string | null | undefined,
+): Record<string, unknown> {
+  if (typeof raw !== "string" || raw === "") return {};
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" && !Array.isArray(v)
+      ? (v as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
 
 // Traffic mode: 0=two-way, 1=one-way fwd (source->target), 2=one-way rev
 export const TRAFFIC_TWO_WAY = 0;
@@ -98,13 +163,6 @@ export interface EdgeRow {
   edge_type_id: number;
   traffic_mode: number;
   edge_kind_id?: number;
-  // Which lock this edge passes through, on databases that record it. The
-  // nv-chart conversion does not, so it is absent rather than zero there —
-  // absent means "unknown", not "no lock".
-  lock_id?: number | null;
-  // Every lock an aggregated edge passes through, when several were collapsed
-  // into one. Only set by the aggregation, never read from the database.
-  lock_ids?: number[];
   crosses_land?: number;
   crosses_obstacle?: number;
   // No coordinates here by design: an edge's endpoints are always resolvable
@@ -144,13 +202,15 @@ export interface EdgeRow {
   editedFields?: string[];
 }
 
-interface PoiRow {
+export interface PoiRow {
   id: number;
   name: string;
   type_id: number;
   properties: string | null;
   lat: number;
   lon: number;
+  /** The whole this part belongs to; null on wholes and harbours. */
+  parent_id: number | null;
   /** Worker handle index this row was loaded from (-1 = overlay). Only
    *  populated in dynamic-loading mode; used by unloadDatabaseGraph to know
    *  which POIs belong to the database being evicted. */
@@ -187,7 +247,11 @@ export interface DatabaseCoverageEntry {
   /** 'disabled' is a user-set on-disk state (the .disabled suffix), not a
    *  transient one: nothing ever promotes a disabled entry to 'loading'
    *  without an explicit enable, so every region-selection path must skip it. */
-  state: "not_loaded" | "loading" | "loaded" | "disabled";
+  state: "not_loaded" | "loading" | "loaded" | "disabled" | "unsupported";
+  /** Why this file is refused (unknown format generation, or built before the
+   *  POI model); set exactly when `state` is "unsupported". The file is never
+   *  opened for routing. Shown as `formatError` in GET /databases. */
+  formatError?: string;
   /** Worker-side handle index once loaded; null while not_loaded/disabled. */
   dbIndex: number | null;
   /** True while the on-disk file carries the .disabled suffix. Kept alongside
@@ -226,6 +290,9 @@ export interface EdgeSnapResult {
   edge: EdgeRow;
 }
 
+/** The worker refused to open a file (see formatRefusal in db-worker.ts). */
+class FormatRefusal extends Error {}
+
 export class RoutingDatabase {
   private worker: Worker | null = null;
   private messageIdCounter = 0;
@@ -262,6 +329,11 @@ export class RoutingDatabase {
    *  over the current `this.pois`, so a rebuilt cache is always correct —
    *  correctness never depends on incrementally patching it. */
   private poiGrid: Map<string, PoiRow[]> | null = null;
+  /** Lazy id and parent maps, see getPoiIndex. */
+  private poiIndex: {
+    byId: Map<number, PoiRow>;
+    childrenOf: Map<number, PoiRow[]>;
+  } | null = null;
 
   /** Lazy cache of edgesBySource's edges bucketed into the same 0.01° grid
    *  cells, each edge registered under BOTH its source-endpoint cell and its
@@ -578,14 +650,25 @@ export class RoutingDatabase {
       this.descriptionErrors = new Map(
         Object.entries(schema.descriptionErrors ?? {}),
       );
-      this.bulkFileList = dbPaths.map((p, i) => ({
-        filename: filenames[i] || p.split("/").pop() || "",
-        path: p,
-      }));
+      // Files the worker refused (format generation, or built before the POI
+      // model) were never opened; list them with their message instead.
+      const formatErrors: Record<string, string> = schema.formatErrors ?? {};
+      const refusedPaths = dbPaths.filter(
+        (p) => basename(p.replace(/\\/g, "/")) in formatErrors,
+      );
+      this.bulkFileList = dbPaths
+        .filter((p) => !refusedPaths.includes(p))
+        .map((p, i) => ({
+          filename: filenames[i] || basename(p.replace(/\\/g, "/")),
+          path: p,
+        }));
       // Bulk mode never opens disabled files, but the Data Manager still has
       // to list them (and offer the switch back on), so peek them separately
       // and keep the result for rebuildCoverageIndexAfterBulkLoad to merge.
-      this.disabledEntries = await this.peekDisabled(disabledPaths);
+      this.disabledEntries = [
+        ...(await this.peekDisabled(disabledPaths)),
+        ...(await this.peekRefused(refusedPaths, formatErrors)),
+      ];
     } else {
       // Dynamic loading: peek every file's metadata/coverage/schema-flags
       // without opening a lasting handle for any of them (§4a task 1). Real
@@ -607,6 +690,7 @@ export class RoutingDatabase {
           hasEdgeKind: boolean;
         };
         stats: DatabaseCoverageEntry["stats"];
+        formatError: string | null;
       }> = await this.sendMessage("peekMetadata", {
         // Disabled files are peeked too — a short-lived read-only handle, so
         // their cards keep name/coverage/stats and the coverage map can still
@@ -619,7 +703,7 @@ export class RoutingDatabase {
         const disabled = isDisabledFile(p.filename);
         // A disabled file's schema flags must not widen the engine's
         // capabilities — nothing from it ever enters the graph.
-        if (!disabled) {
+        if (!disabled && !p.formatError) {
           this.hasCrossesLand = this.hasCrossesLand || p.flags.hasCrossesLand;
           this.hasCrossesObstacle =
             this.hasCrossesObstacle || p.flags.hasCrossesObstacle;
@@ -632,7 +716,12 @@ export class RoutingDatabase {
           path: p.path,
           bbox: p.coverage.boundingBox ?? null,
           boundary: p.coverage.boundaryGeometry ?? null,
-          state: disabled ? "disabled" : "not_loaded",
+          state: disabled
+            ? "disabled"
+            : p.formatError
+              ? "unsupported"
+              : "not_loaded",
+          ...(p.formatError && !disabled ? { formatError: p.formatError } : {}),
           dbIndex: null,
           disabled,
           meta: p.meta,
@@ -713,6 +802,7 @@ export class RoutingDatabase {
       contributor: string | null;
       url: string | null;
       descriptionError: string | null;
+      formatError: string | null;
     }>
   > {
     const result: Array<{
@@ -738,6 +828,7 @@ export class RoutingDatabase {
       contributor: string | null;
       url: string | null;
       descriptionError: string | null;
+      formatError: string | null;
     }> = [];
     for (const entry of this.coverageIndex.values()) {
       const m = entry.meta;
@@ -760,6 +851,7 @@ export class RoutingDatabase {
         contributor: m ? m.contributor : null,
         url: m ? m.url : null,
         descriptionError: this.descriptionErrors.get(entry.filename) ?? null,
+        formatError: entry.formatError ?? null,
       });
     }
     return result;
@@ -774,12 +866,15 @@ export class RoutingDatabase {
     filenames: string[];
     available: number;
     disabled: number;
+    unsupported: number;
     loading: Array<{ filename: string; name: string }>;
   } {
     let disabled = 0;
+    let unsupported = 0;
     const loading: Array<{ filename: string; name: string }> = [];
     for (const entry of this.coverageIndex.values()) {
       if (entry.state === "disabled") disabled++;
+      if (entry.state === "unsupported") unsupported++;
       // Regions being read into the graph right now. A route or a position
       // update can trigger a load inline, and the request that triggered it
       // simply takes tens of seconds longer with nothing to show for it —
@@ -799,10 +894,29 @@ export class RoutingDatabase {
       // `available` stays the count of databases that can actually route.
       // The webapp's first-run check keys off it, so counting disabled files
       // here would make an all-disabled install look like a fresh one.
-      available: this.coverageIndex.size - disabled,
+      available: this.coverageIndex.size - disabled - unsupported,
       disabled,
+      unsupported,
       loading,
     };
+  }
+
+  /** For a "no routing nodes" error: when a refused file covers the point, a
+   *  suffix saying why it is not in use ("" otherwise). */
+  unsupportedCoverageNote(lat: number, lon: number): string {
+    for (const e of this.coverageIndex.values()) {
+      if (
+        e.state === "unsupported" &&
+        e.bbox &&
+        lat >= e.bbox.min_lat &&
+        lat <= e.bbox.max_lat &&
+        lon >= e.bbox.min_lon &&
+        lon <= e.bbox.max_lon
+      ) {
+        return ` (${e.filename} covers this area but is not used: ${e.formatError ?? "unsupported format"})`;
+      }
+    }
+    return "";
   }
 
   /** Peek *.sqlite.disabled files into ready-made coverage entries. Shared by
@@ -843,6 +957,46 @@ export class RoutingDatabase {
       console.warn(`[routeiq] Could not peek disabled database(s): ${e}`);
       return [];
     }
+  }
+
+  /** Coverage entries for files the bulk `init` refused, so the Data Manager
+   *  still lists them (with `formatError`) instead of silently dropping them. */
+  private async peekRefused(
+    paths: string[],
+    formatErrors: Record<string, string>,
+  ): Promise<DatabaseCoverageEntry[]> {
+    if (paths.length === 0) return [];
+    let peeked: Array<{
+      path: string;
+      filename: string;
+      coverage: {
+        boundingBox: DatabaseCoverageEntry["bbox"];
+        boundaryGeometry: DatabaseCoverageEntry["boundary"];
+      };
+      meta: DatabaseCoverageEntry["meta"];
+      stats: DatabaseCoverageEntry["stats"];
+    }> = [];
+    try {
+      peeked = await this.sendMessage("peekMetadata", { dbPaths: paths });
+    } catch (e) {
+      console.warn(`[routeiq] Could not peek refused database(s): ${e}`);
+    }
+    return paths.map((path) => {
+      const filename = basename(path.replace(/\\/g, "/")) || path;
+      const p = peeked.find((x) => x.path === path);
+      return {
+        filename,
+        path,
+        bbox: p?.coverage.boundingBox ?? null,
+        boundary: p?.coverage.boundaryGeometry ?? null,
+        state: "unsupported" as const,
+        formatError: formatErrors[filename],
+        dbIndex: null,
+        disabled: false,
+        meta: p?.meta ?? null,
+        stats: p?.stats ?? null,
+      };
+    });
   }
 
   /**
@@ -888,6 +1042,7 @@ export class RoutingDatabase {
         };
         meta: DatabaseCoverageEntry["meta"];
         stats: DatabaseCoverageEntry["stats"];
+        formatError?: string | null;
       }> = await this.sendMessage("peekMetadata", { dbPaths });
 
       this.mergeMetadataIntoCoverageIndex(peeked);
@@ -917,6 +1072,7 @@ export class RoutingDatabase {
       };
       meta: DatabaseCoverageEntry["meta"];
       stats: DatabaseCoverageEntry["stats"];
+      formatError?: string | null;
     }>,
   ): void {
     const seen = new Set<string>();
@@ -933,7 +1089,14 @@ export class RoutingDatabase {
       // dbIndex here cannot orphan loaded nodes.
       let state: DatabaseCoverageEntry["state"];
       if (disabled) state = "disabled";
-      else if (!existing || existing.state === "disabled") state = "not_loaded";
+      else if (p.formatError && (!existing || existing.state !== "loaded"))
+        state = "unsupported";
+      else if (
+        !existing ||
+        existing.state === "disabled" ||
+        existing.state === "unsupported"
+      )
+        state = "not_loaded";
       else state = existing.state;
       this.coverageIndex.set(key, {
         filename: key,
@@ -941,6 +1104,9 @@ export class RoutingDatabase {
         bbox: p.coverage.boundingBox ?? null,
         boundary: p.coverage.boundaryGeometry ?? null,
         state,
+        ...(state === "unsupported" && p.formatError
+          ? { formatError: p.formatError }
+          : {}),
         dbIndex: disabled ? null : (existing?.dbIndex ?? null),
         disabled,
         meta: p.meta,
@@ -950,7 +1116,9 @@ export class RoutingDatabase {
     for (const [filename, entry] of this.coverageIndex) {
       if (
         !seen.has(filename) &&
-        (entry.state === "not_loaded" || entry.state === "disabled")
+        (entry.state === "not_loaded" ||
+          entry.state === "disabled" ||
+          entry.state === "unsupported")
       ) {
         this.coverageIndex.delete(filename);
       }
@@ -1241,6 +1409,7 @@ export class RoutingDatabase {
       properties: string | null;
       lat: number;
       lon: number;
+      parent_id: number | null;
     }> = await this.sendMessage("loadPois");
     this.pois.push(...allPois);
 
@@ -1609,7 +1778,8 @@ export class RoutingDatabase {
     const toLoad = new Set<string>();
     for (const p of points) {
       for (const entry of this.coverageIndex.values()) {
-        if (entry.state === "disabled") continue;
+        if (entry.state === "disabled" || entry.state === "unsupported")
+          continue;
         if (!entry.bbox) continue;
         if (
           p.latitude >= entry.bbox.min_lat &&
@@ -1653,7 +1823,7 @@ export class RoutingDatabase {
     if (!this.dynamicLoading) return;
     const toLoad = new Set<string>();
     for (const entry of this.coverageIndex.values()) {
-      if (entry.state === "disabled") continue;
+      if (entry.state === "disabled" || entry.state === "unsupported") continue;
       if (!entry.bbox) continue;
       const intersects =
         entry.bbox.min_lat <= bbox.maxLat &&
@@ -1728,7 +1898,7 @@ export class RoutingDatabase {
     const dLon = radiusNm / 60 / Math.max(0.1, Math.cos((lat * Math.PI) / 180));
     const toLoad = new Set<string>();
     for (const entry of this.coverageIndex.values()) {
-      if (entry.state === "disabled") continue;
+      if (entry.state === "disabled" || entry.state === "unsupported") continue;
       if (!entry.bbox) continue;
       if (
         lat >= entry.bbox.min_lat - dLat &&
@@ -1775,7 +1945,7 @@ export class RoutingDatabase {
     // between, and a raw coverageIndex.size check would silently stop
     // eager-loading the moment a second region was installed-then-disabled.
     const enabled = Array.from(this.coverageIndex.values()).filter(
-      (e) => e.state !== "disabled",
+      (e) => e.state !== "disabled" && e.state !== "unsupported",
     );
     if (enabled.length !== 1) return;
     const [only] = enabled;
@@ -1810,6 +1980,13 @@ export class RoutingDatabase {
     if (entry.state === "disabled") {
       throw new Error(
         `Database ${filename} is disabled — enable it before loading`,
+      );
+    }
+    // Refused at peek (format generation, or built before the POI model):
+    // report why, and stay unsupported rather than becoming loadable.
+    if (entry.state === "unsupported") {
+      throw new Error(
+        `${filename}: ${entry.formatError ?? "unsupported database format"}`,
       );
     }
     if (entry.state === "loaded") return;
@@ -1863,7 +2040,9 @@ export class RoutingDatabase {
           hasEdgeKind: boolean;
         };
         descriptionError?: string | null;
+        refused?: string;
       } = await this.sendMessage("openDb", { dbPath: entry.path });
+      if (opened.refused) throw new FormatRefusal(opened.refused);
       const dbIndex = opened.dbIndex;
       if (opened.descriptionError) {
         this.descriptionErrors.set(filename, opened.descriptionError);
@@ -1993,6 +2172,7 @@ export class RoutingDatabase {
         properties: string | null;
         lat: number;
         lon: number;
+        parent_id: number | null;
         db_index: number;
       }> = await this.sendMessage("loadPois", { dbIndexes: [dbIndex] });
       for (const p of pois) this.pois.push({ ...p, dbIndex: p.db_index });
@@ -2037,6 +2217,13 @@ export class RoutingDatabase {
           `${nodeIdSet.size} nodes, ${edgeCount} edges, ${pois.length} POIs, ${newRegions.length} navmesh regions`,
       );
     } catch (err) {
+      if (err instanceof FormatRefusal) {
+        // The file is not in a format this build reads (possibly replaced on
+        // disk after the peek): keep it out of every selection path.
+        entry.state = "unsupported";
+        entry.formatError = err.message;
+        throw new Error(`${filename}: ${err.message}`);
+      }
       // Leave the coverage entry loadable again on failure rather than
       // stuck 'loading' forever.
       entry.state = "not_loaded";
@@ -2752,20 +2939,72 @@ export class RoutingDatabase {
     maxResults: number = 20,
   ): Promise<PoiResult[]> {
     const pattern = query.toLowerCase();
-    // Sort before slicing so results are alphabetically consistent regardless
-    // of the order rows were inserted into the database.
-    return this.pois
-      .filter((row) => row.name.toLowerCase().includes(pattern))
+    // Wholes and harbours only: a part is found through its whole, so the
+    // same lock never appears once per chamber. Sort before slicing so
+    // results are alphabetically consistent regardless of the order rows were
+    // inserted into the database. One entry per id (a whole in two files).
+    const rows = [...this.getPoiIndex().byId.values()]
+      .filter(
+        (row) =>
+          KNOWN_POI_TYPES.has(row.type_id) &&
+          !POI_PART_TYPES.has(row.type_id) &&
+          (row.name ?? "").toLowerCase().includes(pattern),
+      )
       .sort((a, b) => a.name.localeCompare(b.name))
-      .slice(0, maxResults)
-      .map((row) => ({
-        id: row.id,
-        name: row.name,
-        typeId: row.type_id,
-        properties: row.properties ? JSON.parse(row.properties) : {},
-        latitude: row.lat,
-        longitude: row.lon,
-      }));
+      .slice(0, maxResults);
+    const info = await this.getPoiInfo(rows.map((r) => r.id));
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      typeId: row.type_id,
+      properties: parsePoiJson(row.properties),
+      info: info[String(row.id)] ?? {},
+      latitude: row.lat,
+      longitude: row.lon,
+    }));
+  }
+
+  /** Display facts (`pois.info`) for the given POIs, read from the database
+   *  files on demand (the graph never holds them). Keyed by id as a string;
+   *  a POI with no usable `info` has no entry. */
+  async getPoiInfo(
+    ids: number[],
+  ): Promise<Record<string, Record<string, unknown>>> {
+    if (ids.length === 0) return {};
+    return this.sendMessage("poiInfo", { ids });
+  }
+
+  /**
+   * The chambers and spans each edge pair passes (`edge_pois`), unioned over
+   * every file that holds the pair. `known` is false for a pair no open file
+   * holds (overlay edits, connectors, navmesh shortcuts): "no data", as
+   * opposed to a known pair that passes nothing.
+   */
+  async getRoutePois(
+    pairs: Array<[number, number]>,
+  ): Promise<Array<{ poiIds: number[]; known: boolean }>> {
+    if (pairs.length === 0) return [];
+    const request = pairs.map(([a, b]) => {
+      // Both directions: each directed edge may be held by different files,
+      // and edge_pois is keyed by the unordered pair.
+      const edges = [this.getEdgeSync(a, b), this.getEdgeSync(b, a)].filter(
+        (e) => e !== null && e !== undefined,
+      );
+      let dbIndexes: number[] | null;
+      if (edges.some((e) => e.dbIndex === undefined)) {
+        dbIndexes = null; // bulk mode leaves file edges untagged: the worker checks every file
+      } else {
+        const set = new Set<number>();
+        for (const e of edges) {
+          for (const i of [e.dbIndex as number, ...(e.extraDbIndexes ?? [])]) {
+            if (i >= 0) set.add(i);
+          }
+        }
+        dbIndexes = [...set];
+      }
+      return { lo: Math.min(a, b), hi: Math.max(a, b), dbIndexes };
+    });
+    return this.sendMessage("routePois", { pairs: request });
   }
 
   async getOverlayStats(): Promise<{
@@ -2997,30 +3236,28 @@ export class RoutingDatabase {
     return results;
   }
 
+  /**
+   * POIs inside a box, for the map and for crossing detection: parts (chambers
+   * and spans) and harbours, never a whole, so a lock is not drawn once as a
+   * whole and again as each chamber. One entry per id. At most
+   * MAX_POIS_IN_BBOX results (`info` is read from the files for each result,
+   * so the cap bounds that read); `limit` can only lower it.
+   *
+   * Each result carries `properties` (routing facts) and `info` (display
+   * facts) as separate fields, and `parentId` for a part.
+   */
   async getPoisInBBox(
     minLat: number,
     minLon: number,
     maxLat: number,
     maxLon: number,
-    limit: number = 2000,
-  ): Promise<
-    Array<{
-      id: number;
-      name: string;
-      typeId: number;
-      properties: Record<string, unknown>;
-      lat: number;
-      lon: number;
-    }>
-  > {
-    const results: Array<{
-      id: number;
-      name: string;
-      typeId: number;
-      properties: Record<string, unknown>;
-      lat: number;
-      lon: number;
-    }> = [];
+    limit: number = MAX_POIS_IN_BBOX,
+    opts: { types?: ReadonlySet<number>; includeInfo?: boolean } = {},
+  ): Promise<PoiBBoxResult[]> {
+    const cap = limit;
+    const includeInfo = opts.includeInfo ?? true;
+    const rows: PoiRow[] = [];
+    const seen = new Set<number>();
     if (!this.poiGrid) this.poiGrid = this.buildPoiGrid();
     // Box query, not a radius query — no cos(lat) correction needed: iterate
     // every grid cell whose row/col range overlaps [minLat,maxLat] x
@@ -3031,31 +3268,55 @@ export class RoutingDatabase {
     const maxRow = Math.floor(maxLat / cellSize);
     const minCol = Math.floor(minLon / cellSize);
     const maxCol = Math.floor(maxLon / cellSize);
-    outer: for (let row = minRow; row <= maxRow; row++) {
+    for (let row = minRow; row <= maxRow; row++) {
       for (let col = minCol; col <= maxCol; col++) {
         const bucket = this.poiGrid.get(`${row}:${col}`);
         if (!bucket) continue;
         for (const poi of bucket) {
+          if (!KNOWN_POI_TYPES.has(poi.type_id)) continue;
+          if (POI_WHOLE_TYPES.has(poi.type_id)) continue;
+          if (opts.types && !opts.types.has(poi.type_id)) continue;
+          if (seen.has(poi.id)) continue;
           if (
             poi.lat >= minLat &&
             poi.lat <= maxLat &&
             poi.lon >= minLon &&
             poi.lon <= maxLon
           ) {
-            results.push({
-              id: poi.id,
-              name: poi.name,
-              typeId: poi.type_id,
-              properties: poi.properties ? JSON.parse(poi.properties) : {},
-              lat: poi.lat,
-              lon: poi.lon,
-            });
-            if (results.length >= limit) break outer;
+            seen.add(poi.id);
+            rows.push(poi);
           }
         }
       }
     }
-    results.sort((a, b) => a.name.localeCompare(b.name));
+    // Over the cap, keep the POIs nearest the box centre: cutting in grid
+    // order would favour one corner of the box.
+    if (rows.length > cap) {
+      const cLat = (minLat + maxLat) / 2;
+      const cLon = (minLon + maxLon) / 2;
+      // Longitude degrees shrink with latitude: scale them so the ranking is
+      // by ground distance (still a cheap squared distance).
+      const cosLat = Math.max(0.01, Math.cos((cLat * Math.PI) / 180));
+      const d2 = (r: PoiRow) =>
+        (r.lat - cLat) ** 2 + ((r.lon - cLon) * cosLat) ** 2;
+      rows.sort((a, b) => d2(a) - d2(b));
+      rows.length = cap;
+    }
+    const info = includeInfo
+      ? await this.getPoiInfo(rows.map((r) => r.id))
+      : {};
+    const results: PoiBBoxResult[] = rows.map((poi) => ({
+      id: poi.id,
+      name: poi.name,
+      displayName: this.poiDisplayName(poi),
+      typeId: poi.type_id,
+      parentId: poi.parent_id ?? null,
+      properties: parsePoiJson(poi.properties),
+      info: info[String(poi.id)] ?? {},
+      lat: poi.lat,
+      lon: poi.lon,
+    }));
+    results.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
     return results;
   }
 
@@ -3067,7 +3328,9 @@ export class RoutingDatabase {
     id: number;
     name: string;
     typeId: number;
+    parentId: number | null;
     properties: Record<string, unknown>;
+    info: Record<string, unknown>;
     latitude: number;
     longitude: number;
     distance: number;
@@ -3078,7 +3341,8 @@ export class RoutingDatabase {
     // Gather candidates from every cell overlapping the cos(lat)-corrected
     // radius box — same superset technique gridCandidateIds uses for nodes —
     // then apply the same exact haversine + `d <= maxDistanceMeters` +
-    // nearest selection the old full scan used.
+    // nearest selection the old full scan used. Parts and harbours only, as
+    // on the map.
     const latRad = (lat * Math.PI) / 180;
     const cosLat = Math.cos(latRad);
     const marginLat = maxDistanceMeters / 111320;
@@ -3093,6 +3357,8 @@ export class RoutingDatabase {
         const bucket = this.poiGrid.get(`${row}:${col}`);
         if (!bucket) continue;
         for (const poi of bucket) {
+          if (!KNOWN_POI_TYPES.has(poi.type_id)) continue;
+          if (POI_WHOLE_TYPES.has(poi.type_id)) continue;
           const d = this.haversineMeters(lat, lon, poi.lat, poi.lon);
           if (d < bestDist && d <= maxDistanceMeters) {
             bestDist = d;
@@ -3102,11 +3368,14 @@ export class RoutingDatabase {
       }
     }
     if (!best) return null;
+    const info = await this.getPoiInfo([best.id]);
     return {
       id: best.id,
       name: best.name,
       typeId: best.type_id,
-      properties: best.properties ? JSON.parse(best.properties) : {},
+      parentId: best.parent_id ?? null,
+      properties: parsePoiJson(best.properties),
+      info: info[String(best.id)] ?? {},
       latitude: best.lat,
       longitude: best.lon,
       distance: Math.round(bestDist),
@@ -3183,7 +3452,62 @@ export class RoutingDatabase {
    *  redundant. */
   private invalidateBBoxCaches(): void {
     this.poiGrid = null;
+    this.poiIndex = null;
     this.edgeGrid = null;
+  }
+
+  /** Lazy id -> row and whole -> parts maps over `this.pois`, rebuilt from
+   *  scratch after any change (see invalidateBBoxCaches). A POI present in
+   *  several files (a whole cut by a region border) is one entry; the first
+   *  row wins, the rows being identical by the spec (§2.10). */
+  private getPoiIndex(): {
+    byId: Map<number, PoiRow>;
+    childrenOf: Map<number, PoiRow[]>;
+  } {
+    if (this.poiIndex) return this.poiIndex;
+    const byId = new Map<number, PoiRow>();
+    for (const row of this.pois) if (!byId.has(row.id)) byId.set(row.id, row);
+    const childrenOf = new Map<number, PoiRow[]>();
+    for (const row of byId.values()) {
+      if (row.parent_id === null || row.parent_id === undefined) continue;
+      const list = childrenOf.get(row.parent_id);
+      if (list) list.push(row);
+      else childrenOf.set(row.parent_id, [row]);
+    }
+    this.poiIndex = { byId, childrenOf };
+    return this.poiIndex;
+  }
+
+  /** See PoiBBoxResult.displayName. */
+  poiDisplayName(poi: PoiRow): string {
+    const whole = this.getPoiParent(poi);
+    const wholeNamesIt =
+      whole !== undefined &&
+      ((poi.type_id === POI_TYPE_LOCK_CHAMBER &&
+        whole.type_id === POI_TYPE_LOCK) ||
+        (poi.type_id === POI_TYPE_BRIDGE_SPAN &&
+          whole.type_id === POI_TYPE_BRIDGE));
+    return (
+      (wholeNamesIt ? whole.name : poi.name) || poi.name || whole?.name || ""
+    );
+  }
+
+  /** A POI row by id, or undefined. */
+  getPoiRow(id: number): PoiRow | undefined {
+    return this.getPoiIndex().byId.get(id);
+  }
+
+  /** The whole a part belongs to. Undefined for a whole or a harbour, and for
+   *  a part whose parent is not loaded (a dangling `parent_id`: spec §2.10 says
+   *  to treat such a part as a whole of its own). */
+  getPoiParent(row: { parent_id: number | null }): PoiRow | undefined {
+    if (row.parent_id === null || row.parent_id === undefined) return undefined;
+    return this.getPoiIndex().byId.get(row.parent_id);
+  }
+
+  /** The parts of a whole. */
+  getPoiChildren(wholeId: number): PoiRow[] {
+    return this.getPoiIndex().childrenOf.get(wholeId) ?? [];
   }
 
   /** Bucket every row in `this.pois` into the same 0.01° grid cells
@@ -3413,10 +3737,6 @@ export class RoutingDatabase {
     let edgeTypeId = EDGE_TYPE_COASTAL;
     let crossesLand = 0;
     let crossesObstacle = 0;
-    // Which locks this aggregated segment actually passes through. Knowing the
-    // traversed edge beats guessing from nearby points of interest, which
-    // cannot tell one chamber of a lock from the three beside it.
-    const lockIds = new Set<number>();
     const pathPoints: Array<[number, number]> = [];
 
     for (let i = startIdx; i < endIdx; i++) {
@@ -3445,7 +3765,6 @@ export class RoutingDatabase {
         )
           trafficMode = TRAFFIC_ONE_WAY_FWD;
         edgeTypeId = edge.edge_type_id;
-        if (typeof edge.lock_id === "number") lockIds.add(edge.lock_id);
         if (edge.crosses_land === 1) crossesLand = 1;
         if (edge.crosses_obstacle === 1) crossesObstacle = 1;
 
@@ -3476,8 +3795,6 @@ export class RoutingDatabase {
       traffic_mode: trafficMode,
       crosses_land: crossesLand,
       crosses_obstacle: crossesObstacle,
-      ...(lockIds.size > 0 ? { lock_id: [...lockIds][0] } : {}),
-      ...(lockIds.size > 0 ? { lock_ids: [...lockIds] } : {}),
       ...(pathPoints.length > 0 ? { path_points: pathPoints } : {}),
     };
   }
@@ -3696,6 +4013,7 @@ export class RoutingDatabase {
     this.navmeshRegions = [];
     this.spatialGrid.clear();
     this.poiGrid = null;
+    this.poiIndex = null;
     this.edgeGrid = null;
     this.waterwaysGeoJson = null;
     this.waterwaysGeojsonPath = null;

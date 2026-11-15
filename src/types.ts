@@ -121,12 +121,14 @@ export interface RouteCrossing {
    */
   lockSpan?: [number, number];
   /**
-   * The POI's `properties.structure`, passed through unchanged: entries with
-   * the same value are one physical structure. An opaque string, compared
-   * only for equality. Absent when the database does not write one; clients
-   * then treat the entry as a structure of its own, never grouping by name.
+   * The id of the whole (lock or bridge) the crossing belongs to, as a string:
+   * entries with the same value are one physical structure. An opaque string,
+   * compared only for equality. A part with no loaded whole is its own
+   * structure and carries its own id.
    */
   structure?: string;
+  /** The chamber or span the route uses (a part of the structure). */
+  partId?: number;
 }
 
 // A point of the simplified, navigable route geometry (Douglas-Peucker with
@@ -344,9 +346,10 @@ export interface RouteResult {
         costFactor: number;
         trafficMode: number;
         edgeTypeId?: number;
-        // Locks this segment passes through, on databases that record it per
-        // edge. Empty or absent means the database does not say, not that there
-        // is no lock.
+        // Locks this segment passes through, from the `edge_pois` rows of the
+        // edges it covers (the lock whole of each chamber, or of a span carried
+        // over a lock head). Empty or absent means none is known, not that
+        // there is no lock.
         lockIds?: number[];
         mode?: "manual"; // user-drawn straight-line segment (bypasses the graph)
         seconds?: number; // traversal time, tide-corrected when tides active
@@ -388,7 +391,12 @@ export interface PoiResult {
   id: number;
   name: string;
   typeId: number;
+  /** Routing facts only (spec §2.10.1). */
   properties: Record<string, unknown>;
+  /** Display facts (spec §2.10.2): height, kind, refs, sources, ... */
+  info: Record<string, unknown>;
+  /** The whole a part belongs to; absent on wholes and harbours. */
+  parentId?: number | null;
   latitude: number;
   longitude: number;
   distance?: number; // meters from search point

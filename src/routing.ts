@@ -5,12 +5,16 @@
 
 import {
   EdgeRow,
+  PoiRow,
   RoutingDatabase,
+  parsePoiJson,
   getNodeTypeInt,
   NODE_TYPE_INLAND,
   EDGE_TYPE_COASTAL,
   POI_TYPE_BRIDGE,
+  POI_TYPE_BRIDGE_SPAN,
   POI_TYPE_LOCK,
+  POI_TYPE_LOCK_CHAMBER,
   TRAFFIC_TWO_WAY,
   TRAFFIC_ONE_WAY_REV,
 } from "./database.js";
@@ -259,6 +263,12 @@ class MinHeap<T> {
   }
 }
 
+/** The POI types route building looks for: lock chambers and bridge spans. */
+const ROUTE_PART_TYPES: ReadonlySet<number> = new Set([
+  POI_TYPE_LOCK_CHAMBER,
+  POI_TYPE_BRIDGE_SPAN,
+]);
+
 export class RoutingEngine {
   private db: RoutingDatabase;
   private _config: PluginConfig;
@@ -491,9 +501,13 @@ export class RoutingEngine {
     const lastLegMode = request.endMode;
 
     if (!startNode && firstLegMode !== "manual")
-      throw new Error(`No routing nodes found near start point`);
+      throw new Error(
+        `No routing nodes found near start point${this.db.unsupportedCoverageNote(start.latitude, start.longitude)}`,
+      );
     if (!endNode && lastLegMode !== "manual")
-      throw new Error(`No routing nodes found near end point`);
+      throw new Error(
+        `No routing nodes found near end point${this.db.unsupportedCoverageNote(end.latitude, end.longitude)}`,
+      );
 
     // Tidal flow field for time-dependent costs (undefined = tides off/unavailable)
     const env = await this.prepareEnv(request, [start, ...via, end]);
@@ -1884,7 +1898,6 @@ export class RoutingEngine {
       costFactor: number;
       trafficMode: number;
       edgeTypeId?: number;
-      lockIds?: number[];
     },
     fromNodeId: number,
     toNodeId: number,
@@ -1912,13 +1925,6 @@ export class RoutingEngine {
         costFactor: attrs.costFactor,
         trafficMode: attrs.trafficMode,
         edgeTypeId: attrs.edgeTypeId,
-        // On every sub-segment: the lock belongs to the aggregated edge as a
-        // whole, so the span recorded for it has to cover the whole length.
-        // Marking only the first one understated the lock's extent, and that
-        // extent is what decides whether the bridge over its far head is part
-        // of the same locking. Safe to repeat: crossingWaitSchedule keys spans
-        // by lock id and extends them, so this never charges a second locking.
-        ...(attrs.lockIds?.length ? { lockIds: attrs.lockIds } : {}),
       });
     }
     return segs;
@@ -3250,7 +3256,7 @@ export class RoutingEngine {
       }
       along = end;
     }
-    // Zandkreeksluis and Hansweert carry lock_id on their edges AND have a POI
+    // Zandkreeksluis and Hansweert have edge_pois rows naming the lock AND a POI
     // of the same name in the database. A span's start is always the earliest
     // point in its group, so left unreconciled it would always win the "who
     // owns the wait" contest in groupCrossings below — leaving the real,
@@ -3262,8 +3268,10 @@ export class RoutingEngine {
     const claimedPois = new Set<RouteCrossing>();
     // Chainage order, not Map insertion order, so which span reaches for
     // which POI cannot depend on the order lock ids happened to be inserted.
-    const spans = [...lockSpans.values()].sort((a, b) => a[0] - b[0]);
-    for (const [from, to] of spans) {
+    const spans = [...lockSpans.entries()]
+      .map(([id, span]) => ({ id, from: span[0], to: span[1] }))
+      .sort((a, b) => a.from - b.from);
+    for (const { id: lockId, from, to } of spans) {
       // The charted POI and the traversed edges rarely land on the same
       // metre, so allow the usual grouping tolerance at each end of the span.
       const lo = from - RoutingEngine.CROSSING_GROUP_METRES;
@@ -3298,9 +3306,21 @@ export class RoutingEngine {
       let idx = 0;
       while (idx < cum.length - 1 && cum[idx] < at) idx++;
       const coord = coords[Math.min(idx, coords.length - 1)];
+      // `lockIds` holds the whole, so a chamber's own wait override is not
+      // available here; linked chambers normally appear as crossings
+      // themselves and claim the span above.
+      const whole = this.db?.getPoiRow(lockId);
+      const wholeWait = whole
+        ? parsePoiJson(whole.properties).typical_wait_minutes
+        : undefined;
       crossings.push({
         type: "lock",
-        name: "Lock",
+        name: (whole && this.db.poiDisplayName(whole)) || "Lock",
+        ...(typeof wholeWait === "number" &&
+        Number.isFinite(wholeWait) &&
+        wholeWait >= 0
+          ? { waitMinutes: wholeWait }
+          : {}),
         position: coord
           ? { latitude: coord[1], longitude: coord[0] }
           : { latitude: 0, longitude: 0 },
@@ -3350,18 +3370,6 @@ export class RoutingEngine {
     return schedule.sort((a, b) => a.atMetres - b.atMetres);
   }
 
-  /**
-   * The locks an edge passes through, as the segments carry them. A single
-   * edge records one lock; an aggregated one carries every lock it collapsed.
-   * Absent on databases with no such column, which is why the caller falls back
-   * to detecting locks from nearby points of interest.
-   */
-  private static edgeLockIds(edge: EdgeRow): { lockIds?: number[] } {
-    if (edge.lock_ids?.length) return { lockIds: edge.lock_ids };
-    if (typeof edge.lock_id === "number") return { lockIds: [edge.lock_id] };
-    return {};
-  }
-
   /** Crossings closer together than this are treated as one obstacle. */
   private static readonly CROSSING_GROUP_METRES = 250;
 
@@ -3382,7 +3390,7 @@ export class RoutingEngine {
    * its own bridges group with it regardless of which end you enter from.
    *
    * This is an approximation standing in for data the databases do not carry:
-   * pipeline-built ones mark `requires_lock`/`lock_id` per edge, which would say
+   * the databases' `edge_pois` rows (see fillLockIds) say
    * exactly which chamber was traversed, and nothing marks opening-bridge edges
    * at all. Both would beat guessing from proximity.
    */
@@ -3895,6 +3903,67 @@ export class RoutingEngine {
     if (crossings) route.crossings = crossings;
   }
 
+  /** The graph-edge node sequence each route segment covers, recorded where
+   *  the segment is built (a segment names only its two ends, or `nodes` when
+   *  it spans several). Read by fillLockIds. */
+  private segmentHops = new WeakMap<object, number[]>();
+
+  /**
+   * Set `lockIds` on the segments that pass through a lock, from the
+   * database's `edge_pois` rows (spec §2.14): the lock whole that owns a
+   * chamber the edge runs through, and the lock under a span carried over one
+   * of its heads. Which lock is known from the edge, so no guessing from
+   * nearby points. A pair no file knows leaves its segment unmarked.
+   */
+  private async fillLockIds(
+    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
+  ): Promise<void> {
+    const pairs: Array<[number, number]> = [];
+    const owners: number[][] = []; // per pair: indexes into segments
+    const indexOf = new Map<string, number>();
+    segments.forEach((seg, si) => {
+      const hops = this.segmentHops.get(seg);
+      if (!hops) return;
+      for (let k = 0; k + 1 < hops.length; k++) {
+        const lo = Math.min(hops[k], hops[k + 1]);
+        const hi = Math.max(hops[k], hops[k + 1]);
+        const key = `${lo}:${hi}`;
+        let idx = indexOf.get(key);
+        if (idx === undefined) {
+          idx = pairs.length;
+          indexOf.set(key, idx);
+          pairs.push([lo, hi]);
+          owners.push([]);
+        }
+        if (!owners[idx].includes(si)) owners[idx].push(si);
+      }
+    });
+    if (pairs.length === 0) return;
+    const found = await this.db.getRoutePois(pairs);
+    const lockOf = (poiId: number): number | undefined => {
+      const row = this.db.getPoiRow(poiId);
+      if (!row) return undefined;
+      const whole = this.db.getPoiParent(row);
+      if (!whole || whole.type_id !== POI_TYPE_LOCK) return undefined;
+      // A chamber is part of its lock; so is a span carried over a lock head.
+      return row.type_id === POI_TYPE_LOCK_CHAMBER ||
+        row.type_id === POI_TYPE_BRIDGE_SPAN
+        ? whole.id
+        : undefined;
+    };
+    found.forEach((r, idx) => {
+      for (const poiId of r.poiIds) {
+        const lockId = lockOf(poiId);
+        if (lockId === undefined) continue;
+        for (const si of owners[idx]) {
+          const seg = segments[si];
+          if (!seg.lockIds) seg.lockIds = [];
+          if (!seg.lockIds.includes(lockId)) seg.lockIds.push(lockId);
+        }
+      }
+    });
+  }
+
   /**
    * Build GeoJSON RouteResult from path node IDs
    */
@@ -3958,7 +4027,6 @@ export class RoutingEngine {
                 costFactor: edge.cost_factor,
                 trafficMode: edge.traffic_mode,
                 edgeTypeId: edge.edge_type_id,
-                ...RoutingEngine.edgeLockIds(edge),
               },
               prevNode,
               currNode,
@@ -3970,9 +4038,22 @@ export class RoutingEngine {
                 sub.nodes = [spanned[k], spanned[k + 1]];
               });
             }
+            // Which graph edges each sub-segment covers, for fillLockIds.
+            // Without a one-to-one match every sub-segment gets the whole
+            // edge's nodes: a lock's extent must cover the edge's full length
+            // (crossingWaitSchedule keys spans by lock id and extends them,
+            // so repeating an id never charges a second locking).
+            subs.forEach((sub, k) =>
+              this.segmentHops.set(
+                sub,
+                spanned && spanned.length === pts.length
+                  ? [spanned[k], spanned[k + 1]]
+                  : (spanned ?? [prevNode, currNode]),
+              ),
+            );
             segments.push(...subs);
           } else {
-            segments.push({
+            const seg: (typeof segments)[number] = {
               from: prevNode,
               to: currNode,
               distance: edge.distance,
@@ -3983,9 +4064,10 @@ export class RoutingEngine {
               costFactor: edge.cost_factor,
               trafficMode: edge.traffic_mode,
               edgeTypeId: edge.edge_type_id,
-              ...RoutingEngine.edgeLockIds(edge),
               ...(spanned && spanned.length > 2 ? { nodes: spanned } : {}),
-            });
+            };
+            this.segmentHops.set(seg, spanned ?? [prevNode, currNode]);
+            segments.push(seg);
           }
         } else {
           const fromNode = await this.db.getNodeById(prevNode);
@@ -4018,6 +4100,7 @@ export class RoutingEngine {
       if (node) coordinates.push([node.lon, node.lat]);
     }
 
+    await this.fillLockIds(segments);
     const crossings = await this.detectCrossings(coordinates);
 
     return {
@@ -4067,32 +4150,6 @@ export class RoutingEngine {
         : " (fixed span)";
     }
     return "";
-  }
-
-  /**
-   * Grouping key for crossing detection: spans with the same key are one
-   * structure, so a route passing it lists only the span it went through. The
-   * prefixes keep a structure key from ever colliding with a POI name.
-   *
-   * @param poi - A POI with its parsed `properties`.
-   * @returns `s:<properties.structure>` when that is a non-empty string, else
-   *   `n:<name>` (databases without the key group spans by name).
-   */
-  static structureKey(poi: { name: string; properties?: unknown }): string {
-    const s = RoutingEngine.structureId(poi);
-    return s !== undefined ? `s:${s}` : `n:${poi.name}`;
-  }
-
-  /**
-   * The POI's `properties.structure` when it is a non-empty string.
-   *
-   * @param poi - A POI with its parsed `properties`.
-   * @returns The structure id, or undefined when the database writes none.
-   */
-  static structureId(poi: { properties?: unknown }): string | undefined {
-    const s = (poi.properties as Record<string, unknown> | undefined)
-      ?.structure;
-    return typeof s === "string" && s !== "" ? s : undefined;
   }
 
   /**
@@ -4176,14 +4233,21 @@ export class RoutingEngine {
         cMinLon - MARGIN,
         cMaxLat + MARGIN,
         cMaxLon + MARGIN,
+        // Parts only, uncapped, and no info: the map's 500 cap must never
+        // hide a span or chamber from a route; info is read below for the
+        // parts that survive the distance filter.
+        Number.MAX_SAFE_INTEGER,
+        { types: ROUTE_PART_TYPES, includeInfo: false },
       );
       for (const poi of chunkPois) poiById.set(poi.id, poi);
       if (end >= coordinates.length - 1) break;
     }
     const pois = [...poiById.values()];
 
-    const bridgePois = pois.filter((p) => p.typeId === POI_TYPE_BRIDGE);
-    const lockPois = pois.filter((p) => p.typeId === POI_TYPE_LOCK);
+    // The parts a route passes: spans (bridges, including those over a lock
+    // head) and chambers (locks). Wholes and harbours are not detected here.
+    const bridgePois = pois.filter((p) => p.typeId === POI_TYPE_BRIDGE_SPAN);
+    const lockPois = pois.filter((p) => p.typeId === POI_TYPE_LOCK_CHAMBER);
     const MAX_DIST = 150; // m: how close the route must pass to a POI to count as a crossing
     const MERGE_ROUTE_DIST = 300; // m along-route: same-structure events closer than this are one physical crossing
 
@@ -4202,12 +4266,8 @@ export class RoutingEngine {
     type Poi = (typeof bridgePois)[0];
 
     /**
-     * For a set of same-typed POIs: group by structure, then walk the route
-     * once per group. A POI's structure is its `properties.structure` key when
-     * the database writes one (sources such as the Dutch VNDS name every span
-     * of one bridge differently, so only that key ties them together), else its
-     * name (S-57 gives every span of one bridge/lock complex the same OBJNAM).
-     * At each coordinate within MAX_DIST, attach the *nearest* POI in the
+     * For a set of same-typed parts: group by whole (`parent_id`), then walk
+     * the route once per group. At each coordinate within MAX_DIST, attach the *nearest* POI in the
      * group. Consecutive in-range coordinates collapse into a single run (one
      * physical crossing); runs that are close together along the route are
      * merged too, so a cluster of spans near one crossing point never produces
@@ -4224,7 +4284,10 @@ export class RoutingEngine {
     ): RouteCrossing[] => {
       const byStructure = new Map<string, Poi[]>();
       for (const poi of groupPois) {
-        const key = RoutingEngine.structureKey(poi);
+        // One whole, one group; a part whose whole is not loaded is a whole
+        // of its own (spec §2.10).
+        const whole = this.db.getPoiParent({ parent_id: poi.parentId });
+        const key = `p:${whole ? whole.id : poi.id}`;
         const arr = byStructure.get(key);
         if (arr) arr.push(poi);
         else byStructure.set(key, [poi]);
@@ -4341,42 +4404,61 @@ export class RoutingEngine {
       return out.map((e) => e.crossing);
     };
 
+    const validWait = (v: unknown): number | undefined =>
+      typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
+
     /**
-     * A database may carry a figure for a specific bridge or lock. Read it here
-     * so the configured default is only a fallback; nothing emits this field
-     * yet, but wiring it now means the pipeline can start to without a second
-     * change on this side.
+     * The typical wait for the part a route uses. A part reads its own value
+     * where the spec lets it carry one (a chamber, which overrides its lock's,
+     * so `0` is a real value; a span whose parent is a lock, whose bridge has
+     * its own wait; a part with no loaded whole), else the whole's. A span
+     * under a bridge whole carries none: the whole's value applies.
      *
-     * @param props - The POI's parsed `properties`.
-     * @returns `typical_wait_minutes` when it is a finite number >= 0, else undefined.
+     * @param part - The chamber or span the route passes.
+     * @param whole - Its whole, when loaded.
+     * @returns Minutes (>= 0), or undefined when the database gives none.
      */
     const poiWaitMinutes = (
-      props?: Record<string, unknown>,
+      part: Poi,
+      whole: PoiRow | undefined,
     ): number | undefined => {
-      const v = props?.typical_wait_minutes;
-      return typeof v === "number" && Number.isFinite(v) && v >= 0
-        ? v
+      const ownCounts =
+        part.typeId === POI_TYPE_LOCK_CHAMBER ||
+        !whole ||
+        whole.type_id === POI_TYPE_LOCK;
+      const own = ownCounts
+        ? validWait(part.properties?.typical_wait_minutes)
+        : undefined;
+      if (own !== undefined) return own;
+      return whole
+        ? validWait(parsePoiJson(whole.properties).typical_wait_minutes)
         : undefined;
     };
 
     /**
-     * The crossing's `structure` field, passed on so clients can tell
-     * structures apart without going by name.
-     *
-     * @param poi - The POI the crossing is listed for.
-     * @returns `{ structure }`, or `{}` when the POI has no usable id.
+     * What every crossing carries about its whole: `structure` is the whole's
+     * id as a string (a part without a loaded whole is its own structure),
+     * `partId` the chamber or span used.
      */
-    const structureField = (poi: Poi): { structure?: string } => {
-      const structure = RoutingEngine.structureId(poi);
-      return structure !== undefined ? { structure } : {};
-    };
+    const identity = (
+      poi: Poi,
+      whole: PoiRow | undefined,
+    ): { structure: string; partId: number } => ({
+      structure: String(whole?.id ?? poi.id),
+      partId: poi.id,
+    });
 
+    const spanOf = new Map<
+      RouteCrossing,
+      { poi: Poi; base: string; closedHeight?: number }
+    >();
     const bridgeCrossings = detectForGroup(bridgePois, (poi) => {
-      const props = poi.properties as Record<string, unknown>;
-      const subtype = props?.subtype as string | undefined;
-      const height = props?.height as number | undefined;
+      const whole = this.db.getPoiParent({ parent_id: poi.parentId });
+      const props = poi.properties;
+      const subtype =
+        typeof props.subtype === "string" ? props.subtype : undefined;
       // Opening spans only, and only a real figure: absent means unknown.
-      const ch = props?.closed_height;
+      const ch = props.closed_height;
       const closedHeight =
         subtype === "opening" &&
         typeof ch === "number" &&
@@ -4384,24 +4466,48 @@ export class RoutingEngine {
         ch > 0
           ? ch
           : undefined;
-      return {
+      // A bridge whole gives the name; a span carried over a lock head has no
+      // bridge whole and carries the bridge's own name.
+      const name =
+        (whole && whole.type_id === POI_TYPE_BRIDGE ? whole.name : poi.name) ||
+        poi.name ||
+        whole?.name ||
+        "";
+      const crossing: RouteCrossing = {
         type: "bridge",
-        name: `${poi.name}${RoutingEngine.formatSpanSuffix(subtype, height, closedHeight)}`,
+        name: `${name}${RoutingEngine.formatSpanSuffix(subtype, undefined, closedHeight)}`,
         subtype,
-        height,
         ...(closedHeight !== undefined ? { closedHeight } : {}),
-        waitMinutes: poiWaitMinutes(props),
+        waitMinutes: poiWaitMinutes(poi, whole),
         position: { latitude: poi.lat, longitude: poi.lon },
-        ...structureField(poi),
+        ...identity(poi, whole),
+      };
+      spanOf.set(crossing, { poi, base: name, closedHeight });
+      return crossing;
+    });
+    // `info.height` (display) only for the spans that were listed.
+    if (spanOf.size > 0) {
+      const info = await this.db.getPoiInfo(
+        [...spanOf.values()].map((e) => e.poi.id),
+      );
+      for (const [c, e] of spanOf) {
+        const h = info[String(e.poi.id)]?.height;
+        if (typeof h === "number" && Number.isFinite(h)) {
+          c.height = h;
+          c.name = `${e.base}${RoutingEngine.formatSpanSuffix(c.subtype, h, e.closedHeight)}`;
+        }
+      }
+    }
+    const lockCrossings = detectForGroup(lockPois, (poi) => {
+      const whole = this.db.getPoiParent({ parent_id: poi.parentId });
+      return {
+        type: "lock",
+        name: whole?.name || poi.name || "",
+        waitMinutes: poiWaitMinutes(poi, whole),
+        position: { latitude: poi.lat, longitude: poi.lon },
+        ...identity(poi, whole),
       };
     });
-    const lockCrossings = detectForGroup(lockPois, (poi) => ({
-      type: "lock",
-      name: poi.name,
-      waitMinutes: poiWaitMinutes(poi.properties as Record<string, unknown>),
-      position: { latitude: poi.lat, longitude: poi.lon },
-      ...structureField(poi),
-    }));
 
     return [...bridgeCrossings, ...lockCrossings];
   }

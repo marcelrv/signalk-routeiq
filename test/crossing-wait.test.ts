@@ -11,7 +11,6 @@ import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import { RoutingEngine, passesClosedSpan } from '../dist/routing.js';
 import { DEFAULT_CONFIG } from '../dist/types.js';
-import { POI_TYPE_BRIDGE } from '../dist/database.js';
 
 describe('crossing wait time', () => {
   /**
@@ -184,7 +183,7 @@ describe('crossing wait time', () => {
   });
 
   it('falls back to the crossing list when the database has no lock data', () => {
-    // nv-chart has no lock_id column at all: segments carry nothing.
+    // A route whose edges no file knows (overlay edits, connectors): segments carry no lock ids.
     const crossings = [lock({ distanceFromStart: 0 })];
     assert.strictEqual(waitSeconds(crossings, {}, [{}, {}]), 3600);
     assert.strictEqual(waitSeconds(crossings, {}, undefined), 3600);
@@ -201,7 +200,7 @@ describe('crossing wait time', () => {
   });
 
   it('does not charge a lock twice when both the edges and a POI name it', () => {
-    // Zandkreeksluis: the edges carry lock_id and the POI index carries the
+    // Zandkreeksluis: the edges' edge_pois rows name the lock and the POI index carries the
     // same lock under its own name. Left unreconciled, the edge-derived span
     // always sorts first in groupCrossings — its start is the earliest point
     // in the group — so it always wins the "who owns the wait" contest,
@@ -490,102 +489,180 @@ describe('a wait moves the tide clock, not just the total', () => {
   });
 });
 
-describe('one crossing per bridge structure', () => {
-  // Woubrugsebrug in the Dutch database: VNDS names every span on its own, so
-  // the opening span and the fixed span ~15 m east share no name. The pipeline
-  // ties them together with properties.structure.
+describe('one crossing per whole (parent_id grouping)', () => {
+  // Woubrugsebrug in the Dutch database: one bridge whole with an opening span
+  // and a fixed span ~15 m east. The spans' own names differ; the whole's name
+  // is the bridge's.
   const LAT = 52.1667;
   const OPEN_LON = 4.639;
   const FIXED_LON = 4.63922; // ~15 m east
-  const OPEN_NAME = 'Doorvaartopening 2 (beweegbaar) Woubrugsebrug';
-  const FIXED_NAME = 'Doorvaartopening 1 (vast) Woubrugsebrug';
+  const BRIDGE = 'Woubrugsebrug';
 
-  type Poi = { id: number; name: string; lat: number; lon: number; properties: Record<string, unknown> };
-  /** The Woubrugsebrug opening span POI; `props` are added to its properties. */
-  const openSpan = (props: Record<string, unknown> = {}, name = OPEN_NAME): Poi => ({
-    id: 1, name, lat: LAT, lon: OPEN_LON, properties: { subtype: 'opening', ...props },
+  type Part = {
+    id: number; name: string | null; lat: number; lon: number; typeId: number; parentId: number | null;
+    properties: Record<string, unknown>; info: Record<string, unknown>;
+  };
+  type Whole = { id: number; type_id: number; name: string | null; properties: string | null; parent_id: null };
+
+  const bridgeWhole = (id: number, props: Record<string, unknown> = {}, name: string | null = BRIDGE): Whole =>
+    ({ id, type_id: 2, name, properties: JSON.stringify(props), parent_id: null });
+  const lockWhole = (id: number, props: Record<string, unknown> = {}, name: string | null = 'Test lock'): Whole =>
+    ({ id, type_id: 1, name, properties: JSON.stringify(props), parent_id: null });
+
+  /** The opening span, a bridge_span (type 6) of whole `parentId`. */
+  const openSpan = (parentId: number | null, props: Record<string, unknown> = {}, name: string | null = 'Doorvaartopening 2'): Part => ({
+    id: 11, name, lat: LAT, lon: OPEN_LON, typeId: 6, parentId, properties: { subtype: 'opening', ...props }, info: {},
   });
-  /** The Woubrugsebrug fixed span POI, 2.61 m, ~15 m east of the opening. */
-  const fixedSpan = (props: Record<string, unknown> = {}, name = FIXED_NAME): Poi => ({
-    id: 2, name, lat: LAT, lon: FIXED_LON, properties: { subtype: 'fixed', height: 2.61, ...props },
+  /** The fixed span, 2.61 m (an `info` key, not a routing property). */
+  const fixedSpan = (parentId: number | null, name: string | null = 'Doorvaartopening 1'): Part => ({
+    id: 12, name, lat: LAT, lon: FIXED_LON, typeId: 6, parentId, properties: { subtype: 'fixed' }, info: { height: 2.61 },
+  });
+  const chamber = (id: number, parentId: number | null, props: Record<string, unknown> = {}, lon = OPEN_LON): Part => ({
+    id, name: null, lat: LAT, lon, typeId: 5, parentId, properties: props, info: {},
   });
 
-  /** A north-south route along `lon` through the bridge, a point every ~22 m. */
+  /** A north-south route along `lon` through the structure, a point every ~22 m. */
   const routeAlong = (lon: number): [number, number][] => {
     const coords: [number, number][] = [];
     for (let i = -30; i <= 30; i++) coords.push([lon, LAT + i * 0.0002]);
     return coords;
   };
 
-  /** Run detectCrossings for a route along `lon`, with `pois` as the database's bridges. */
-  const detect = async (pois: Poi[], lon: number) => {
+  type Found = {
+    name: string; type: string; subtype?: string; structure?: string; partId?: number;
+    waitMinutes?: number; height?: number;
+  };
+  /** Run detectCrossings for a route along `lon`, with `parts` and `wholes` as the database holds them. */
+  const detect = async (parts: Part[], wholes: Whole[], lon: number) => {
     const engine = Object.create(RoutingEngine.prototype) as any;
     engine._config = { ...DEFAULT_CONFIG };
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
     engine.db = {
-      getPoisInBBox: async () => pois.map((p) => ({ ...p, typeId: POI_TYPE_BRIDGE })),
+      // Route building asks for parts without info (includeInfo false)...
+      getPoisInBBox: async () => parts.map((p) => ({ ...p, info: {} })),
+      // ...and reads it only for the spans it lists.
+      getPoiInfo: async (ids: number[]) =>
+        Object.fromEntries(parts.filter((p) => ids.includes(p.id) && Object.keys(p.info).length > 0).map((p) => [String(p.id), p.info])),
+      getPoiParent: (row: { parent_id: number | null }) => wholes.find((w) => w.id === row.parent_id),
     };
-    return (await engine.detectCrossings(routeAlong(lon))) as Array<{ name: string; subtype?: string; structure?: string }>;
+    return (await engine.detectCrossings(routeAlong(lon))) as Found[];
   };
 
   it('lists only the opening span when the route goes through it', async () => {
-    const c = await detect([openSpan({ structure: '101' }), fixedSpan({ structure: '101' })], OPEN_LON);
-    assert.deepStrictEqual(c.map((x) => x.name), [`${OPEN_NAME} (opening span)`]);
+    const c = await detect([openSpan(1), fixedSpan(1)], [bridgeWhole(1)], OPEN_LON);
+    assert.deepStrictEqual(c.map((x) => x.name), [`${BRIDGE} (opening span)`]);
     assert.strictEqual(c[0].subtype, 'opening');
+    assert.strictEqual(c[0].partId, 11);
   });
 
-  it('lists only the fixed span when the route goes through it', async () => {
-    const c = await detect([openSpan({ structure: '101' }), fixedSpan({ structure: '101' })], FIXED_LON);
-    assert.deepStrictEqual(c.map((x) => x.name), [`${FIXED_NAME} (fixed, 2.6m)`]);
+  it('lists only the fixed span, with its info.height, when the route goes through it', async () => {
+    const c = await detect([openSpan(1), fixedSpan(1)], [bridgeWhole(1)], FIXED_LON);
+    assert.deepStrictEqual(c.map((x) => x.name), [`${BRIDGE} (fixed, 2.6m)`]);
+    assert.strictEqual(c[0].height, 2.61);
   });
 
-  it('keeps two structures apart, each listed', async () => {
-    const c = await detect([openSpan({ structure: '101' }), fixedSpan({ structure: '102' })], OPEN_LON);
+  it('keeps two wholes apart, each listed', async () => {
+    const c = await detect([openSpan(1), fixedSpan(2)], [bridgeWhole(1), bridgeWhole(2)], OPEN_LON);
     assert.strictEqual(c.length, 2);
   });
 
-  it('passes the structure id on to the crossing, so clients need not group by name', async () => {
-    const c = await detect([openSpan({ structure: '101' }), fixedSpan({ structure: '102' })], OPEN_LON);
-    assert.deepStrictEqual(c.map((x) => x.structure).sort(), ['101', '102']);
+  it('passes the whole\'s id on as the crossing\'s structure string', async () => {
+    const c = await detect([openSpan(1), fixedSpan(2)], [bridgeWhole(1), bridgeWhole(2)], OPEN_LON);
+    assert.deepStrictEqual(c.map((x) => x.structure).sort(), ['1', '2']);
   });
 
-  it('leaves structure off a crossing whose POI has no usable key', async () => {
-    const c = await detect([openSpan({ structure: '' }), fixedSpan()], OPEN_LON);
-    assert.ok(c.length > 0);
-    for (const x of c) assert.ok(!('structure' in x));
+  it('treats a span whose whole is not loaded as a whole of its own', async () => {
+    // Both spans point at whole 99, which is in no loaded file: each stands alone
+    // under its own id, so the two are not merged, and the name is the span's.
+    const c = await detect([openSpan(99), fixedSpan(99)], [], OPEN_LON);
+    assert.deepStrictEqual(c.map((x) => x.structure).sort(), ['11', '12']);
+    assert.ok(c.some((x) => x.name === 'Doorvaartopening 2 (opening span)'));
   });
 
-  it('without a structure key, differently named spans are listed each (unchanged)', async () => {
-    const c = await detect([openSpan(), fixedSpan()], OPEN_LON);
-    assert.deepStrictEqual(c.map((x) => x.name).sort(),
-      [`${FIXED_NAME} (fixed, 2.6m)`, `${OPEN_NAME} (opening span)`]);
+  it('names a span over a lock head after the span, since it carries the bridge\'s own name', async () => {
+    const c = await detect([openSpan(5, {}, 'Brug over de sluis')], [lockWhole(5)], OPEN_LON);
+    assert.deepStrictEqual(c.map((x) => x.name), ['Brug over de sluis (opening span)']);
+    assert.strictEqual(c[0].type, 'bridge');
+    assert.strictEqual(c[0].structure, '5', 'it belongs to the lock whole it is carried over');
   });
 
-  it('without a structure key, same-named spans are one crossing, the nearest (unchanged)', async () => {
-    const c = await detect([openSpan({}, 'Woubrugsebrug'), fixedSpan({}, 'Woubrugsebrug')], OPEN_LON);
-    assert.deepStrictEqual(c.map((x) => x.name), ['Woubrugsebrug (opening span)']);
+  it('names a lock crossing after the lock and reports the chamber used', async () => {
+    const c = await detect([chamber(21, 5), chamber(22, 5, {}, OPEN_LON + 0.0003)], [lockWhole(5)], OPEN_LON);
+    assert.strictEqual(c.length, 1, 'two chambers of one lock are one crossing');
+    assert.strictEqual(c[0].type, 'lock');
+    assert.strictEqual(c[0].name, 'Test lock');
+    assert.strictEqual(c[0].partId, 21);
+  });
+
+  it('reads the lock\'s wait for a chamber without its own, and the chamber\'s own value (0 included) otherwise', async () => {
+    const whole = lockWhole(5, { typical_wait_minutes: 20 });
+    const inherits = await detect([chamber(21, 5)], [whole], OPEN_LON);
+    assert.strictEqual(inherits[0].waitMinutes, 20);
+    const overrides = await detect([chamber(21, 5, { typical_wait_minutes: 0 })], [whole], OPEN_LON);
+    assert.strictEqual(overrides[0].waitMinutes, 0, 'a chamber that stands open overrides the lock with 0');
+    const other = await detect([chamber(21, 5, { typical_wait_minutes: 7 })], [whole], OPEN_LON);
+    assert.strictEqual(other[0].waitMinutes, 7);
+  });
+
+  it('reads a span over a lock head\'s own wait, else the lock\'s; a span under a bridge whole ignores a stray own value', async () => {
+    const lock = lockWhole(5, { typical_wait_minutes: 20 });
+    const own = await detect([openSpan(5, { typical_wait_minutes: 4 })], [lock], OPEN_LON);
+    assert.strictEqual(own[0].waitMinutes, 4);
+    const inherited = await detect([openSpan(5)], [lock], OPEN_LON);
+    assert.strictEqual(inherited[0].waitMinutes, 20);
+    const bridge = bridgeWhole(1, { typical_wait_minutes: 15 });
+    const underBridge = await detect([openSpan(1, { typical_wait_minutes: 4 })], [bridge], OPEN_LON);
+    assert.strictEqual(underBridge[0].waitMinutes, 15, 'only a span under a lock carries its own value');
   });
 
   it('lists the span the route line goes through, not the one nearest a graph node', async () => {
     // The real NL graph: one 131 m edge passes the bridge through the opening
     // span, but its node south of the bridge is 31.4 m from the fixed span and
     // 33.1 m from the opening. The line itself is 6.7 m from the opening.
-    const pois: Poi[] = [
-      { id: 1, name: OPEN_NAME, lat: 52.16674, lon: 4.63913, properties: { subtype: 'opening', structure: '316044088261125' } },
-      { id: 2, name: FIXED_NAME, lat: 52.16678, lon: 4.63934, properties: { subtype: 'fixed', height: 2.61, structure: '316044088261125' } },
+    const parts: Part[] = [
+      { id: 1, name: 'opening', lat: 52.16674, lon: 4.63913, typeId: 6, parentId: 7, properties: { subtype: 'opening' }, info: {} },
+      { id: 2, name: 'fixed', lat: 52.16678, lon: 4.63934, typeId: 6, parentId: 7, properties: { subtype: 'fixed' }, info: { height: 2.61 } },
     ];
     const engine = Object.create(RoutingEngine.prototype) as any;
     engine._config = { ...DEFAULT_CONFIG };
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
-    engine.db = { getPoisInBBox: async () => pois.map((p) => ({ ...p, typeId: POI_TYPE_BRIDGE })) };
+    engine.db = {
+      getPoisInBBox: async () => parts.map((p) => ({ ...p, info: {} })),
+      getPoiInfo: async () => ({}),
+      getPoiParent: () => bridgeWhole(7),
+    };
     const c = await engine.detectCrossings([[4.63942, 52.1665], [4.63861, 52.16757]]);
-    assert.deepStrictEqual(c.map((x: { name: string }) => x.name), [`${OPEN_NAME} (opening span)`]);
+    assert.deepStrictEqual(c.map((x: { name: string }) => x.name), [`${BRIDGE} (opening span)`]);
+  });
+});
+
+describe('synthetic lock entry from the edges', () => {
+  const run = (db: unknown) => {
+    const engine = Object.create(RoutingEngine.prototype) as any;
+    engine._config = { ...DEFAULT_CONFIG };
+    engine.db = db;
+    const crossings: any[] = [];
+    const segs = [{ distance: 100, lockIds: [100] }, { distance: 100 }];
+    const sched = engine.crossingWaitSchedule([[4, 51], [4.001, 51], [4.002, 51]], segs, crossings);
+    return { crossings, sched };
+  };
+
+  it('takes the whole\'s name and typical_wait_minutes', () => {
+    const whole = { id: 100, type_id: 1, parent_id: null, name: 'Big Lock', properties: '{"typical_wait_minutes":10}' };
+    const { crossings, sched } = run({ getPoiRow: () => whole, poiDisplayName: (r: any) => r.name });
+    assert.strictEqual(crossings.length, 1);
+    assert.strictEqual(crossings[0].name, 'Big Lock');
+    assert.strictEqual(crossings[0].waitMinutes, 10);
+    assert.strictEqual(sched.reduce((t: number, w: any) => t + w.seconds, 0), 600);
   });
 
-  it('falls back to the name for an empty or non-string key', () => {
-    assert.strictEqual(RoutingEngine.structureKey({ name: 'X', properties: { structure: '' } }), 'n:X');
-    assert.strictEqual(RoutingEngine.structureKey({ name: 'X', properties: { structure: 7 } }), 'n:X');
-    assert.strictEqual(RoutingEngine.structureKey({ name: 'X', properties: { structure: '7' } }), 's:7');
-    assert.strictEqual(RoutingEngine.structureKey({ name: 'X' }), 'n:X');
+  it('keeps "Lock" and the configured default when the whole is unknown or gives no wait', () => {
+    const a = run({ getPoiRow: () => undefined, poiDisplayName: () => '' });
+    assert.strictEqual(a.crossings[0].name, 'Lock');
+    assert.strictEqual(a.crossings[0].waitMinutes, undefined);
+    const whole = { id: 100, type_id: 1, parent_id: null, name: '', properties: '{}' };
+    const b = run({ getPoiRow: () => whole, poiDisplayName: (r: any) => r.name });
+    assert.strictEqual(b.crossings[0].name, 'Lock');
+    assert.strictEqual(b.sched.reduce((t: number, w: any) => t + w.seconds, 0), 3600);
   });
 });

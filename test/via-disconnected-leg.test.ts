@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase } from '../dist/database.js';
 import { RoutingEngine } from '../dist/routing.js';
 import { DEFAULT_CONFIG } from '../dist/types.js';
+import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // Regression test for the "finalResult.features[0].properties.segments is
 // not iterable" crash (found live on the Puerto Rico dataset, Round 24).
@@ -79,6 +80,7 @@ describe('via route with a disconnected final leg (Round 24 regression)', () => 
       (4, 3, 3400, 10.0, 20.0, 10.0, 1.0, 5000, 1, 0)`);
 
     run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
+    upgradeToPoiModel(raw);
     raw.close();
 
     db = new RoutingDatabase(fixturesDir);
