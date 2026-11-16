@@ -7304,15 +7304,20 @@
         const deltaMin = Math.round(
           (geoJson.totalSeconds - geoJson.totalSecondsNoTide) / 60,
         );
-        const sign = deltaMin > 0 ? "+" : "\u2212";
-        const col = deltaMin > 0 ? "#f59e0b" : "#22c55e";
-        tideStr =
-          '  \u00b7  <span style="color:' +
-          col +
-          '" title="Time the estimated tidal current costs or saves versus still water — minutes, not metres of tide">tide ' +
-          sign +
-          Math.abs(deltaMin) +
-          " min</span>";
+        // Only current stations give a current. With tide heights alone
+        // (source "heights") no current was applied, so there is no time
+        // difference to show — just the arrival time.
+        if (geoJson.tide.source === "stations" && deltaMin !== 0) {
+          const sign = deltaMin > 0 ? "+" : "\u2212";
+          const col = deltaMin > 0 ? "#f59e0b" : "#22c55e";
+          tideStr =
+            '  \u00b7  <span style="color:' +
+            col +
+            '" title="Time the estimated tidal current costs or saves versus still water — minutes, not metres of tide">tide ' +
+            sign +
+            Math.abs(deltaMin) +
+            " min</span>";
+        }
         if (geoJson.arrivalTime) {
           const arr = new Date(geoJson.arrivalTime);
           if (!isNaN(arr))

@@ -3938,7 +3938,16 @@ export class RoutingEngine {
         enabled: true,
         estimated: env.flow.estimated,
         source: env.flow.source,
-        stations: env.flow.stations.map((s) => s.name),
+        // Current stations and tide-height stations both: with current
+        // stations the flow lists only those, but the depth still used the
+        // height stations.
+        stations: [
+          ...new Set(
+            [...env.flow.stations, ...(env.heights?.stations ?? [])].map(
+              (s) => s.name,
+            ),
+          ),
+        ],
         // Whether the tide was actually counted towards depth anywhere on
         // this route, not merely whether a height source existed: it needs
         // enough stations in range to answer, and needs to have made a

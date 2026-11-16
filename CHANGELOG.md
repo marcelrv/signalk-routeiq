@@ -23,6 +23,34 @@
   whole stretch between vias; the leg context menu still shows the whole leg
   it acts on.
 
+### Changed
+
+- Tidal current now comes only from `signalk-tidal-currents` stations; away
+  from them no current is assumed. `signalk-tides` supplies tide heights
+  only, for the depth at the time of passage.
+- **API:** `tide.source` on route results and saved passage profiles, and
+  `source` on `GET /router/tides/status`, is now `"stations"` or `"heights"`.
+  `"heights"` replaces `"height-estimate"`: it means only tide heights were
+  known and no current was applied. Clients that checked for
+  `"height-estimate"` should check for `"heights"`; older saved profiles may
+  still carry the old value.
+- `tide.stations` lists the tide-height stations as well as the current
+  stations when both were used.
+- The route summary shows the tide's time difference only when a current
+  was applied.
+- Default average speed is 5 kn (was 6).
+
+### Removed
+
+- Plugin settings: Default Min Coast Distance (a client can still send
+  `minCoastDistance` per request; there is no default), Max Tidal Current,
+  Wrong Way Penalty and Line-of-Sight Sample Interval. Waypoint
+  Simplification Tolerance, Line-of-Sight Search Radius, Eager-load Region,
+  Proactive Load Radius and Max Loaded Regions are now fixed internal
+  defaults. A value saved for any of them is ignored.
+- `defaultCoastDistance` and `maxTidalCurrentKnots` from
+  `GET /router/config`.
+
 ## 0.1.0-alpha.10 — 2026-11-09
 
 ### Added

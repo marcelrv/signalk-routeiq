@@ -1470,8 +1470,12 @@ function summaryLine(result) {
     const deltaMin = Math.round(
       (result.totalSeconds - result.totalSecondsNoTide) / 60,
     );
-    line +=
-      "  ·  tide " + (deltaMin > 0 ? "+" : "−") + Math.abs(deltaMin) + "m";
+    // Only current stations give a current; with tide heights alone
+    // (source "heights") there is no time difference to show.
+    if (result.tide.source === "stations" && deltaMin !== 0) {
+      line +=
+        "  ·  tide " + (deltaMin > 0 ? "+" : "−") + Math.abs(deltaMin) + "m";
+    }
     if (result.arrivalTime) {
       const arr = new Date(result.arrivalTime);
       if (!isNaN(arr)) {
