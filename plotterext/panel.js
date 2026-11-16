@@ -103,6 +103,10 @@ let units = { distance: "naut-mile" };
 //   requestPoints — the user's original start/via/end (survives re-calcs)
 //   generated     — the points we last wrote with route.replace
 //   revertPoints  — the points before our first replace (for Revert)
+//   result        — the engine's last result, minus its geometry features:
+//                   sent back on save so the server can attach its passage
+//                   profile (times, waits) to the saved route resource
+//   profiledRev   — the host rev the profile was last attached for
 const sessions = new Map();
 // Click-start / via / destination planning, fed by chart actions and by
 // map.pick. Until the destination is known there is no route on the chart
@@ -760,14 +764,48 @@ async function onRouteEvent(name, params) {
   ) {
     endPlanning();
   }
+  let profileNote = "";
+  if (name === "route.saved") profileNote = await attachPassageProfile(params);
   if (name === "route.saved" && params?.routeId === selectedId) {
     setStatus(
       "route-status",
-      "Saved as “" + (params.name || "route") + "”",
-      "ok",
+      "Saved as “" + (params.name || "route") + "”" + profileNote,
+      profileNote.startsWith(" — timing not") ? "" : "ok",
     );
   }
   await refreshRoutes(name === "route.visible" ? params?.routeId : undefined);
+}
+
+// The host saved a route this panel calculated: have the server add the
+// calculated times to the stored resource, which the host's save has no way
+// to carry. The server checks the stored geometry is still the calculated one
+// and refuses (409) otherwise — the panel does not compare anything itself.
+// Returns a note for the status line ("" when there is nothing to say).
+async function attachPassageProfile(params) {
+  const session = params?.routeId ? sessions.get(params.routeId) : null;
+  if (!session?.result || !params.href) return "";
+  if (session.profiledRev === params.rev) return "";
+  try {
+    const resp = await fetch(API + "/route/profile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ href: params.href, route: session.result }),
+    });
+    // Only a final answer settles this rev; a failure is tried again on the
+    // next route.saved for it.
+    if (resp.ok || resp.status === 409) session.profiledRev = params.rev;
+    if (resp.ok) return " with its passage timing";
+    if (resp.status === 409)
+      return " — timing not attached (route edited after calculation)";
+    const err = await resp.json().catch(() => ({}));
+    // A 404 without a reason is the endpoint itself missing: an older server.
+    if (resp.status === 404 && err.reason !== "routeNotFound") return "";
+    if (resp.status === 401 || resp.status === 403)
+      return " — timing not attached: log into Signal K with write access";
+    return " — timing not attached: " + (err.error || resp.status);
+  } catch (e) {
+    return " — timing not attached: " + (e?.message || e);
+  }
 }
 
 async function refreshRoutes(autoSelectId) {
@@ -1011,6 +1049,7 @@ async function calculate(forcedRequestPoints, known) {
     requestPoints: storedRequest,
     generated: newPoints,
     revertPoints: session?.revertPoints ?? points,
+    result: { ...result, features: [] },
     autoNames: { first: firstEnd.auto, last: lastEnd.auto },
     suggestedName: routeNameFor(firstName, lastName),
     suggestedDescription: routeDescriptionFor(

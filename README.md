@@ -160,6 +160,20 @@ lists each run of the leg that is too shallow or too narrow; a water warning
 lists the part of the leg its sequence or notice covers. Both bundled UIs make
 any warning with `at` clickable, whatever its `type`.
 
+## Saved routes: passage profile
+
+When a calculated route is saved to Signal K, whether with **Save to Signal K**
+in the webapp or from the Freeboard-SK panel, the route resource also gets
+`feature.properties.passageProfile`. It holds the total passage time with the
+waits at locks and bridges included, departure and arrival when the plan is
+dated, the speed and wait assumptions, the waits per structure and the route's
+warnings. Other applications can read these times back without routing again.
+The profile records a hash of the geometry it was calculated for, so a reader
+can tell when the route has been edited since and the times no longer apply.
+The GPX export carries the same numbers as RouteIQ GPX extensions, and gives
+the duration in the route description for plotters that ignore extensions.
+See [docs/passage-profile.md](docs/passage-profile.md) for the format.
+
 ## License
 
 Apache License 2.0 - see LICENSE file for details

@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { RouteResult } from "./types.js";
+import { buildPassageProfile, PassageProfile } from "./passage-profile.js";
 
 export class GpxExporter {
   /**
@@ -16,11 +17,27 @@ export class GpxExporter {
     const waypoints =
       route.waypoints && route.waypoints.length >= 2 ? route.waypoints : null;
 
+    // The calculated times (issue #50), over the points this <rte> lists.
+    const profile = buildPassageProfile(
+      route,
+      waypoints
+        ? waypoints.map((w) => [w.longitude, w.latitude] as [number, number])
+        : coords,
+    );
+    const duration = profile
+      ? `, Duration: ${this.formatDuration(profile.duration.total)}` +
+        (profile.duration.waiting > 0
+          ? ` (${this.formatDuration(profile.duration.waiting)} waiting)`
+          : "")
+      : "";
+
     let gpx = `<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="signalk-routeiq" xmlns:ar="http://signalk.org/routeiq">
   <rte>
     <name>${this.escapeXml(name)}</name>
-    <desc>Route calculated by SignalK RouteIQ Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m, Cost: ${totalCost.toFixed(2)}</desc>`;
+    <desc>Route calculated by SignalK RouteIQ Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m, Cost: ${totalCost.toFixed(2)}${duration}</desc>`;
+    // GPX 1.1 puts <extensions> after <desc> and before the first <rtept>.
+    if (profile) gpx += this.passageProfileGpx(profile);
 
     if (waypoints) {
       waypoints.forEach((wp, index) => {
@@ -108,6 +125,9 @@ export class GpxExporter {
     // waypoint lists depending on which window it was saved from.
     const coordinatesMeta = coordinates.map((_, i) => ({ name: `WP${i + 1}` }));
 
+    // The calculated times, tied to exactly these coordinates (issue #50).
+    const passageProfile = buildPassageProfile(route, coordinates);
+
     return {
       name,
       description: `Route calculated by SignalK RouteIQ Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m`,
@@ -121,6 +141,7 @@ export class GpxExporter {
         properties: {
           totalCost,
           coordinatesMeta,
+          ...(passageProfile ? { passageProfile } : {}),
           ...(waypoints
             ? {}
             : {
@@ -139,6 +160,83 @@ export class GpxExporter {
       },
       timestamp: new Date().toISOString(),
     };
+  }
+
+  /** Seconds as "11h18m" (or "45m" under an hour). */
+  private static formatDuration(seconds: number): string {
+    const m = Math.round(seconds / 60);
+    const h = Math.floor(m / 60);
+    const mm = String(m % 60).padStart(2, "0");
+    return h > 0 ? `${h}h${mm}m` : `${m % 60}m`;
+  }
+
+  /**
+   * The passage profile as RouteIQ GPX extensions (format in
+   * docs/passage-profile.md, "In GPX"). Same numbers and units as the Signal K
+   * profile; no geometry hash, since a GPX file is a copy, not a resource
+   * someone else can edit under it.
+   */
+  private static passageProfileGpx(p: PassageProfile): string {
+    const x = (v: string) => this.escapeXml(v);
+    const attrs = (o: Record<string, string | number | boolean | undefined>) =>
+      Object.entries(o)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => ` ${k}="${x(String(v))}"`)
+        .join("");
+    const a = p.assumptions;
+    let out = `
+    <extensions>
+      <ar:passageProfile${attrs({
+        version: p.version,
+        provider: p.provider.name,
+        providerVersion: p.provider.version || undefined,
+        calculatedAt: p.calculatedAt ?? undefined,
+      })}>
+        <ar:duration${attrs({
+          total: p.duration.total,
+          moving: p.duration.moving,
+          waiting: p.duration.waiting,
+          waitingIncludedInTotal: true,
+        })}/>`;
+    if (p.departure)
+      out += `
+        <ar:departure>${x(p.departure)}</ar:departure>`;
+    if (p.arrival)
+      out += `
+        <ar:arrival>${x(p.arrival)}</ar:arrival>`;
+    out += `
+        <ar:assumptions${attrs({
+          speedThroughWater: a.speedThroughWater ?? undefined,
+          lockWait: a.lockWait ?? undefined,
+          bridgeWait: a.bridgeWait ?? undefined,
+          tide: a.tide.enabled,
+          tideEstimated: a.tide.enabled ? a.tide.estimated : undefined,
+          tideSource: a.tide.source,
+        })}/>`;
+    for (const w of p.waits) {
+      out += `
+        <ar:wait${attrs({
+          type: w.type,
+          name: w.name,
+          structure: w.structure,
+          distanceFromStart: w.distanceFromStart,
+          seconds: w.seconds,
+          lat: w.position?.latitude.toFixed(6),
+          lon: w.position?.longitude.toFixed(6),
+        })}/>`;
+    }
+    for (const w of p.warnings) {
+      out += `
+        <ar:warning${attrs({
+          type: w.type,
+          level: w.level,
+          distanceFromStart: w.distanceFromStart,
+        })}>${x(w.message)}</ar:warning>`;
+    }
+    out += `
+      </ar:passageProfile>
+    </extensions>`;
+    return out;
   }
 
   /**

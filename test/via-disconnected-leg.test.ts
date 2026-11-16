@@ -111,4 +111,19 @@ describe('via route with a disconnected final leg (Round 24 regression)', () => 
     assert.ok(types.includes('via_constrained') || types.includes('manual_segment') || types.length > 0,
       `expected a bridging/disconnect warning, got: ${JSON.stringify(route.warnings)}`);
   });
+
+  it('records when it was calculated and the timing assumptions it used (#50)', async () => {
+    const route = await engine.calculateRoute({
+      start: { latitude: A.lat, longitude: A.lon },
+      end: { latitude: B.lat, longitude: B.lon },
+      minCoastDistance: 0,
+      lockWaitMinutes: 15,
+    });
+    assert.ok(Number.isFinite(Date.parse(route.calculatedAt!)), 'calculatedAt is an ISO time');
+    assert.deepStrictEqual(route.timingAssumptions, {
+      averageSpeedKnots: DEFAULT_CONFIG.averageSpeedKnots,
+      lockWaitMinutes: 15,
+      bridgeWaitMinutes: DEFAULT_CONFIG.bridgeWaitMinutes ?? 30,
+    });
+  });
 });

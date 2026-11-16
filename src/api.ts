@@ -17,6 +17,12 @@ import {
   RoutingDatabase,
 } from "./database.js";
 import { GpxExporter } from "./gpx-export.js";
+import {
+  buildPassageProfile,
+  geometryHash,
+  isPositionList,
+  savedCoordinates,
+} from "./passage-profile.js";
 import { RoutingEngine } from "./routing.js";
 import {
   PluginConfig,
@@ -36,6 +42,7 @@ interface SkAuthedRequest {
 interface SkResourcesApp {
   resourcesApi: {
     setResource(type: string, id: string, value: unknown): Promise<void>;
+    getResource(type: string, id: string): Promise<object>;
   };
 }
 
@@ -375,6 +382,13 @@ export class ApiHandler {
 
     // POST /signalk/v1/api/router/push
     this.router.post("/push", this.handlePushRoute.bind(this));
+
+    // POST /signalk/v1/api/router/route/profile — attach the passage profile
+    // to a route a host saved itself (the Freeboard panel's route.save)
+    this.router.post(
+      "/route/profile",
+      this.handleAttachPassageProfile.bind(this),
+    );
 
     // GET /signalk/v1/api/router/stats
     this.router.get("/stats", this.handleStats.bind(this));
@@ -948,6 +962,104 @@ export class ApiHandler {
   }
 
   /**
+   * Attach the passage profile of a calculated route to a route resource that
+   * something else saved — the Freeboard panel stages the route on the host's
+   * chart and the host persists it, with no way to pass properties along.
+   * POST /signalk/v1/api/router/route/profile  { href, route }
+   *
+   * Writes only when the stored geometry is still the one the route was
+   * calculated for (same geometry hash as `route.waypoints`): a route edited
+   * after calculating answers 409 and is left untouched. Only
+   * `feature.properties.passageProfile` changes.
+   */
+  private async handleAttachPassageProfile(
+    req: Request,
+    res: Response,
+  ): Promise<void> {
+    // It rewrites a stored resource with the plugin's own rights, which skip
+    // the resources ACL, so the caller has to be allowed to write.
+    if (!this.requireWriteAuth(req, res)) return;
+    try {
+      const href: unknown = req.body?.href;
+      const route: RouteResult | undefined = req.body?.route;
+      const m =
+        typeof href === "string"
+          ? // Freeboard-SK's route.saved carries the bare resource id; accept
+            // a resource path too.
+            /^(?:(?:\/signalk\/v2\/api)?\/resources\/routes\/)?([A-Za-z0-9:._-]+)$/.exec(
+              href,
+            )
+          : null;
+      if (!m) {
+        res.status(400).json({
+          error: "href must be a route resource id or /resources/routes/<id>",
+        });
+        return;
+      }
+      if (!route || typeof route !== "object") {
+        res.status(400).json({ error: "Missing route data in request body" });
+        return;
+      }
+      const calculated = savedCoordinates(route);
+      if (!calculated) {
+        res.status(400).json({ error: "Route has no waypoints" });
+        return;
+      }
+      const id = m[1];
+      const resources = (this.app as unknown as SkResourcesApp).resourcesApi;
+      let stored: Record<string, any>;
+      try {
+        stored = (await resources.getResource("routes", id)) as Record<
+          string,
+          any
+        >;
+      } catch {
+        // `reason` tells this apart from a 404 for the endpoint itself (an
+        // older server), which the panel ignores.
+        res
+          .status(404)
+          .json({ error: `Route ${id} not found`, reason: "routeNotFound" });
+        return;
+      }
+      const coords = stored?.feature?.geometry?.coordinates;
+      if (
+        !isPositionList(coords) ||
+        geometryHash(coords) !== geometryHash(calculated)
+      ) {
+        res.status(409).json({
+          error:
+            "Route geometry changed since it was calculated — timing not attached",
+        });
+        return;
+      }
+      const passageProfile = buildPassageProfile(route, coords);
+      if (!passageProfile) {
+        res.status(400).json({ error: "Route carries no calculated times" });
+        return;
+      }
+      // Fields the server adds on read ($source and the like) are not part of
+      // the resource and are not written back.
+      const value: Record<string, any> = Object.fromEntries(
+        Object.entries(stored).filter(([k]) => !k.startsWith("$")),
+      );
+      value.feature = {
+        ...stored.feature,
+        properties: { ...(stored.feature.properties ?? {}), passageProfile },
+      };
+      await resources.setResource("routes", id, value);
+      res.json({ success: true, routeId: id, passageProfile });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[routeiq] Attach passage profile error:", error);
+      res
+        .status(500)
+        .json({ error: `Failed to attach passage profile: ${message}` });
+      // No next(error): the response is sent, and Express would drop the
+      // connection under it.
+    }
+  }
+
+  /**
    * Handle database stats request
    * GET /signalk/v1/api/router/stats
    */
@@ -1220,6 +1332,27 @@ export class ApiHandler {
     }
     if (skReq.skPrincipal && skReq.skPrincipal.permissions !== "admin") {
       res.status(403).json({ error: "Admin permission required." });
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Auth check for writes to the user's own Signal K resources (a saved
+   * route): a logged-in user with write access, not necessarily an admin.
+   * Same middleware fields as requireAuth.
+   */
+  private requireWriteAuth(req: Request, res: Response): boolean {
+    const skReq = req as unknown as SkAuthedRequest;
+    if (skReq.skIsAuthenticated !== true) {
+      res.status(401).json({
+        error: "Authentication required. Please log into Signal K.",
+      });
+      return false;
+    }
+    const permissions = skReq.skPrincipal?.permissions;
+    if (permissions && permissions !== "admin" && permissions !== "readwrite") {
+      res.status(403).json({ error: "Write permission required." });
       return false;
     }
     return true;
