@@ -27,6 +27,8 @@ const CROSSING_COLORS = {
   fixed: "#ef4444",
   opening: "#22c55e",
 };
+/* Overhead power line (bridge POI of kind "cable"); same as the webapp. */
+const CABLE_COLOR = "#64748b";
 const POI_COLORS = {
   harbour: "#3b8fd4",
   lock: "#f59e0b",
@@ -39,6 +41,17 @@ const POI_COLORS = {
 function poiIcon(type, props, size) {
   size = size || 14;
   if (type === "bridge") {
+    // An overhead power line (`kind` "cable", sent by the server; absent
+    // means a bridge) gets a pylon, whatever its subtype.
+    if (props.kind === "cable") {
+      return (
+        '<svg width="' +
+        size +
+        '" height="' +
+        size +
+        '" viewBox="0 0 22 22"><polyline points="7,19 11,3 15,19" stroke="white" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/><line x1="5" y1="7" x2="17" y2="7" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="8.7" y1="12.5" x2="13.3" y2="12.5" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M5 7 Q3 11 1 11 M17 7 Q19 11 21 11" stroke="white" stroke-width="1.2" fill="none" stroke-linecap="round"/></svg>'
+      );
+    }
     if (props.subtype === "opening") {
       return (
         '<svg width="' +
@@ -1379,11 +1392,15 @@ async function searchPois() {
     if (!t) continue;
     const li = document.createElement("li");
     const props = poi.properties || {};
+    // Search returns wholes, which carry their kind in `info`.
+    const kind = poi.info?.kind;
     const color =
-      t === "bridge" && props.subtype === "opening"
-        ? CROSSING_COLORS.opening
-        : POI_COLORS[t] || "#6d96c0";
-    li.appendChild(poiBadge(t, props, color));
+      t === "bridge" && kind === "cable"
+        ? CABLE_COLOR
+        : t === "bridge" && props.subtype === "opening"
+          ? CROSSING_COLORS.opening
+          : POI_COLORS[t] || "#6d96c0";
+    li.appendChild(poiBadge(t, { subtype: props.subtype, kind }, color));
     const name = document.createElement("span");
     name.className = "name";
     name.textContent = poi.name || "Unnamed";
@@ -1697,22 +1714,41 @@ function renderItinerary(itinerary) {
           ? p.leg.seconds - (p.leg.waitSeconds || 0)
           : null;
       for (const [, entries] of grouped) {
-        const e0 = entries[0];
-        const hasFixed = entries.some((e) => e.subtype === "fixed");
-        const hasOpening = entries.some((e) => e.subtype === "opening");
+        // A span's own `kind` wins over its whole's, so a bridge can have a
+        // power-line span: draw the bridge from its other spans and add a
+        // pylon, whatever the order. `e0` is the entry named and linked.
+        const nonCable =
+          entries[0].type === "lock"
+            ? entries
+            : entries.filter((e) => e.kind !== "cable");
+        const allCable = nonCable.length === 0;
+        const bridges = allCable ? [] : nonCable;
+        const e0 = allCable ? entries[0] : nonCable[0];
+        const cable = allCable
+          ? undefined
+          : entries.find((e) => e.kind === "cable");
+        const hasFixed = bridges.some((e) => e.subtype === "fixed");
+        const hasOpening = bridges.some((e) => e.subtype === "opening");
         const row = document.createElement("div");
         row.className = "crossing";
         const color =
           e0.type === "lock"
             ? CROSSING_COLORS.lock
-            : hasFixed
-              ? CROSSING_COLORS.fixed
-              : CROSSING_COLORS.opening;
-        row.appendChild(poiBadge(e0.type, { subtype: e0.subtype }, color));
+            : allCable
+              ? CABLE_COLOR
+              : hasFixed
+                ? CROSSING_COLORS.fixed
+                : CROSSING_COLORS.opening;
+        row.appendChild(
+          poiBadge(e0.type, { subtype: e0.subtype, kind: e0.kind }, color),
+        );
         if (hasFixed && hasOpening) {
           row.appendChild(
             poiBadge("bridge", { subtype: "opening" }, CROSSING_COLORS.opening),
           );
+        }
+        if (cable) {
+          row.appendChild(poiBadge("bridge", { kind: "cable" }, CABLE_COLOR));
         }
         const cn = document.createElement("span");
         cn.className = "cname";
@@ -1720,7 +1756,10 @@ function renderItinerary(itinerary) {
         // known (e.g. "... (opening span)", "... (opening, closed 6.6m)" /
         // "... (fixed, 18.4m)"). Only synthesize a separate suffix for
         // older/raw data that lacks it.
+        // A non-bridge `kind` always comes with its suffix from the server
+        // ("(power line, 38.8m)").
         const nameHasSpanInfo =
+          (e0.kind && e0.kind !== "bridge") ||
           /\((?:opening(?: span|,[^)]*)|fixed(?:,[^)]*)?)\)/.test(
             e0.name || "",
           );
@@ -1728,7 +1767,7 @@ function renderItinerary(itinerary) {
         if (nameHasSpanInfo) {
           info = "";
         } else if (e0.type === "bridge") {
-          const fixed = entries.find((e) => e.subtype === "fixed");
+          const fixed = bridges.find((e) => e.subtype === "fixed");
           if (fixed && typeof fixed.height === "number") {
             info =
               " (" +
