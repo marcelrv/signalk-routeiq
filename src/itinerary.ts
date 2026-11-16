@@ -393,6 +393,10 @@ export interface ItineraryResult {
  * @param toleranceM Douglas-Peucker tolerance for the navigable waypoints
  * @param vessel     what the vessel needs; when given, legs too shallow or
  *                   narrow for it carry `leg.warnings`
+ * @param viaAt      where each via is on the route, as vertex index → via
+ *                   index: the vertex where the leg to that via ends (a
+ *                   skipped via has none). Without it each via is looked up
+ *                   as the nearest vertex (`viaVertices`).
  */
 export function buildItinerary(
   coords: LonLat[],
@@ -401,6 +405,7 @@ export function buildItinerary(
   via: Array<{ latitude: number; longitude: number }>,
   toleranceM: number,
   vessel?: VesselNeeds,
+  viaAt?: ReadonlyMap<number, number>,
 ): ItineraryResult {
   if (coords.length < 2) {
     return {
@@ -414,7 +419,9 @@ export function buildItinerary(
 
   const cum = cumulativeDistances(coords, segments);
   const totalKm = cum[cum.length - 1] / 1000;
-  const viaIdxByCoord = viaVertices(coords, via);
+  const viaIdxByCoord = viaAt
+    ? knownViaVertices(coords, via, viaAt)
+    : viaVertices(coords, via);
   const kept = simplifyIndices(coords, toleranceM, viaIdxByCoord.keys());
 
   // Annotate crossings with chainage along the route, keeping one the
@@ -627,6 +634,24 @@ export function buildItinerary(
     }),
     itinerary,
   };
+}
+
+/**
+ * The via vertices the router reported, minus any that is not a vertex of
+ * its own (the start, the end, out of range) or names no via.
+ */
+function knownViaVertices(
+  coords: LonLat[],
+  via: Array<{ latitude: number; longitude: number }>,
+  viaAt: ReadonlyMap<number, number>,
+): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const [idx, v] of viaAt) {
+    if (!Number.isInteger(idx) || idx <= 0 || idx >= coords.length - 1) continue;
+    if (!Number.isInteger(v) || v < 0 || v >= via.length) continue;
+    out.set(idx, v);
+  }
+  return out;
 }
 
 /**

@@ -1076,6 +1076,10 @@ export class RoutingEngine {
     const warnings: RouteWarning[] = [];
     let totalDistanceMeters = 0;
     let totalCostAccum = 0;
+    // Route vertex → via index: where each leg to a via ends. Taken from the
+    // legs as they are joined, so it never depends on which vertex happens to
+    // lie nearest the via's raw position (a later pass can lie nearer).
+    const viaAt = new Map<number, number>();
 
     // Compute an adaptive margin from the overall span of all waypoints.
     // Water routes can make large lat/lon excursions (e.g. Lisbon→Italy via
@@ -1163,6 +1167,7 @@ export class RoutingEngine {
         );
       }
 
+      viaAt.set(allCoordinates.length - 1, i);
       allSegments.push(...segmentResult.features[0].properties.segments!);
       totalDistanceMeters +=
         segmentResult.features[0].properties.totalDistance ?? 0;
@@ -1251,7 +1256,7 @@ export class RoutingEngine {
     // Connect only the overall end coordinate (start is handled per-segment above)
     await this.connectUserPoint(end, result, "end");
 
-    await this.finalizeRoute(result, dims, via, env, waitOverrides);
+    await this.finalizeRoute(result, dims, via, env, waitOverrides, viaAt);
     return result;
   }
 
@@ -3783,6 +3788,7 @@ export class RoutingEngine {
     via: Array<{ latitude: number; longitude: number }> = [],
     env?: RouteEnv,
     waitOverrides?: WaitOverrides,
+    viaAt?: ReadonlyMap<number, number>,
   ): Promise<void> {
     const feature = route.features[0];
     if (!feature || feature.geometry.coordinates.length < 2) return;
@@ -3825,6 +3831,7 @@ export class RoutingEngine {
         beam: dims.beam ?? 4.0,
         requiredWidth: (dims.beam ?? 4.0) + this.config.safetyMarginBeam,
       },
+      viaAt,
     );
     route.waypoints = waypoints;
     route.itinerary = itinerary;
