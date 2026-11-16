@@ -3941,7 +3941,10 @@ export class RoutingDatabase {
     let totalDist = 0;
     let minDepth = Infinity;
     let minDepthKnown = false;
-    let maxAirDraft = -Infinity;
+    // The lowest known clearance: starts at +Infinity like minWidth (it
+    // started at -Infinity, so Math.min never moved it and every aggregated
+    // segment read as unknown air draft).
+    let maxAirDraft = Infinity;
     let minWidth = Infinity;
     let weightedCostFactor = 0;
     let trafficMode = TRAFFIC_TWO_WAY;
@@ -3998,7 +4001,7 @@ export class RoutingDatabase {
       distance: totalDist,
       min_depth: minDepthKnown ? minDepth : -1,
       min_depth_known: minDepthKnown,
-      max_air_draft: maxAirDraft === -Infinity ? -1 : maxAirDraft,
+      max_air_draft: maxAirDraft === Infinity ? -1 : maxAirDraft,
       min_width: minWidth === Infinity ? -1 : minWidth,
       cost_factor: totalDist > 0 ? weightedCostFactor / totalDist : 1.2,
       distance_to_land: 0,
