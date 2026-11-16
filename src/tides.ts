@@ -17,6 +17,14 @@
  * interface; the engine only ever sees sample(lat, lon, t) → (u, v).
  */
 
+import {
+  callerKey,
+  CurrentsApiHandle,
+  GetJson,
+  loopbackGetJson,
+  TideSource,
+} from "./server-access.js";
+
 export interface FlowVector {
   u: number; // m/s, east component
   v: number; // m/s, north component
@@ -116,9 +124,13 @@ function pruneCache<T>(
 /**
  * Client for the signalk-tides REST API with response caching, so a 24 h
  * departure scan (dozens of route calculations) reuses one set of fetches.
+ * Reached over HTTP on this server (signalk-tides offers nothing in-process),
+ * with the caller's login — see server-access.ts. Cache entries are kept per
+ * login, so one caller's answer is never served to another.
  */
 export class TidesClient {
   private baseUrl: string;
+  private source: TideSource;
   private stationCache = new Map<
     string,
     { at: number; data: TideStationInfo[] }
@@ -129,26 +141,34 @@ export class TidesClient {
   >();
   private static CACHE_TTL_MS = 6 * 3600_000;
 
-  constructor(baseUrl: string) {
+  constructor(
+    baseUrl: string,
+    getJson: GetJson = loopbackGetJson,
+    source?: TideSource,
+  ) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.source =
+      source ?? new TideSource("signalk-tides", this.baseUrl, getJson);
   }
 
   private api(path: string): string {
     return `${this.baseUrl}/signalk/v2/api/tides${path}`;
   }
 
+  private get(url: string, what: string): Promise<unknown> {
+    return this.source.get(url, what);
+  }
+
   /** Nearest stations (the API returns up to 10, closest first). */
   async findStations(lat: number, lon: number): Promise<TideStationInfo[]> {
-    const key = `${lat.toFixed(1)},${lon.toFixed(1)}`;
+    const key = `${callerKey()}|${lat.toFixed(1)},${lon.toFixed(1)}`;
     const hit = this.stationCache.get(key);
     if (hit && Date.now() - hit.at < TidesClient.CACHE_TTL_MS) return hit.data;
 
-    const resp = await fetch(
+    const raw = (await this.get(
       this.api(`/stations?latitude=${lat}&longitude=${lon}`),
-    );
-    if (!resp.ok)
-      throw new Error(`tides station search failed (${resp.status})`);
-    const raw = (await resp.json()) as Array<Record<string, unknown>>;
+      "tides station search",
+    )) as Array<Record<string, unknown>>;
     const data = (Array.isArray(raw) ? raw : [])
       .filter(
         (s) =>
@@ -175,7 +195,7 @@ export class TidesClient {
     const HOUR = 3600_000;
     const s = Math.floor(startMs / HOUR) * HOUR;
     const e = Math.ceil(endMs / HOUR) * HOUR;
-    const key = `${stationId}|${s}|${e}`;
+    const key = `${callerKey()}|${stationId}|${s}|${e}`;
     const hit = this.timelineCache.get(key);
     if (hit && Date.now() - hit.at < TidesClient.CACHE_TTL_MS) return hit.data;
 
@@ -184,12 +204,10 @@ export class TidesClient {
         `?start=${encodeURIComponent(new Date(s).toISOString())}` +
         `&end=${encodeURIComponent(new Date(e).toISOString())}`,
     );
-    const resp = await fetch(url);
-    if (!resp.ok)
-      throw new Error(
-        `tides timeline failed for ${stationId} (${resp.status})`,
-      );
-    const data = (await resp.json()) as TimelineResponse;
+    const data = (await this.get(
+      url,
+      `tides timeline for ${stationId}`,
+    )) as TimelineResponse;
     pruneCache(this.timelineCache, TidesClient.CACHE_TTL_MS);
     this.timelineCache.set(key, { at: Date.now(), data });
     return data;
@@ -363,12 +381,22 @@ interface CurrentTimelineDto {
 }
 
 /**
- * Client for the signalk-tidal-currents plugin REST API
- * (/signalk/v2/api/currents) — real harmonic current stations with
- * flood/ebb axes. Responses are cached so departure scans reuse fetches.
+ * Client for the signalk-tidal-currents plugin — real harmonic current
+ * stations with flood/ebb axes. Calls the plugin in-process through its
+ * `currentsApi` handle when it has emitted one, else its REST API
+ * (/signalk/v2/api/currents) on this server with the caller's login — see
+ * server-access.ts. Responses are cached so departure scans reuse fetches;
+ * those fetched over HTTP per login, so one caller's answer is never served
+ * to another (the in-process answers need no login and are shared).
  */
+/** A stable number per in-process handle, for cache keys. */
+const handleIds = new WeakMap<CurrentsApiHandle, number>();
+let nextHandleId = 1;
+
 export class CurrentsClient {
   private baseUrl: string;
+  private source: TideSource;
+  private handle: () => CurrentsApiHandle | null;
   private stationCache = new Map<
     string,
     { at: number; data: CurrentStationDto[] }
@@ -379,26 +407,53 @@ export class CurrentsClient {
   >();
   private static CACHE_TTL_MS = 6 * 3600_000;
 
-  constructor(baseUrl: string) {
+  constructor(
+    baseUrl: string,
+    handle: () => CurrentsApiHandle | null = () => null,
+    getJson: GetJson = loopbackGetJson,
+    source?: TideSource,
+  ) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.handle = handle;
+    this.source =
+      source ?? new TideSource("signalk-tidal-currents", this.baseUrl, getJson);
   }
 
   private api(path: string): string {
     return `${this.baseUrl}/signalk/v2/api/currents${path}`;
   }
 
+  private get(url: string, what: string): Promise<unknown> {
+    return this.source.get(url, what);
+  }
+
+  /** Cache-key prefix: the login for HTTP answers; in-process, the handle
+   *  itself, so a handle the provider replaced (after its restart, say) never
+   *  serves its predecessor's answers. */
+  private keyPrefix(handle: CurrentsApiHandle | null): string {
+    if (!handle) return `http:${callerKey()}`;
+    let id = handleIds.get(handle);
+    if (id === undefined) handleIds.set(handle, (id = nextHandleId++));
+    return `ip${id}`;
+  }
+
   /** Nearest vector-capable current stations to a position. */
   async findStations(lat: number, lon: number): Promise<CurrentStationDto[]> {
-    const key = `${lat.toFixed(1)},${lon.toFixed(1)}`;
+    const handle = this.handle();
+    const key = `${this.keyPrefix(handle)}|${lat.toFixed(1)},${lon.toFixed(1)}`;
     const hit = this.stationCache.get(key);
     if (hit && Date.now() - hit.at < CurrentsClient.CACHE_TTL_MS)
       return hit.data;
-    const resp = await fetch(
-      this.api(`/stations?latitude=${lat}&longitude=${lon}&limit=10`),
-    );
-    if (!resp.ok)
-      throw new Error(`currents station search failed (${resp.status})`);
-    const raw = (await resp.json()) as CurrentStationDto[];
+    const raw = (
+      handle
+        ? await this.source.call("currents station search", () =>
+            handle.findStations(lat, lon, 10),
+          )
+        : await this.get(
+            this.api(`/stations?latitude=${lat}&longitude=${lon}&limit=10`),
+            "currents station search",
+          )
+    ) as CurrentStationDto[];
     const data = (Array.isArray(raw) ? raw : []).filter((s) => s.vectorCapable);
     pruneCache(this.stationCache, CurrentsClient.CACHE_TTL_MS);
     this.stationCache.set(key, { at: Date.now(), data });
@@ -413,21 +468,27 @@ export class CurrentsClient {
     const HOUR = 3600_000;
     const s = Math.floor(startMs / HOUR) * HOUR;
     const e = Math.ceil(endMs / HOUR) * HOUR;
-    const key = `${stationId}|${s}|${e}`;
+    const handle = this.handle();
+    const key = `${this.keyPrefix(handle)}|${stationId}|${s}|${e}`;
     const hit = this.timelineCache.get(key);
     if (hit && Date.now() - hit.at < CurrentsClient.CACHE_TTL_MS)
       return hit.data;
-    const url = this.api(
-      `/stations/${stationId}/timeline` +
-        `?start=${encodeURIComponent(new Date(s).toISOString())}` +
-        `&end=${encodeURIComponent(new Date(e).toISOString())}&step=10`,
-    );
-    const resp = await fetch(url);
-    if (!resp.ok)
-      throw new Error(
-        `currents timeline failed for ${stationId} (${resp.status})`,
-      );
-    const data = (await resp.json()) as CurrentTimelineDto;
+    const startIso = new Date(s).toISOString();
+    const endIso = new Date(e).toISOString();
+    const data = (
+      handle
+        ? await this.source.call(`currents timeline for ${stationId}`, () =>
+            handle.getTimeline(stationId, startIso, endIso, 10),
+          )
+        : await this.get(
+            this.api(
+              `/stations/${stationId}/timeline` +
+                `?start=${encodeURIComponent(startIso)}` +
+                `&end=${encodeURIComponent(endIso)}&step=10`,
+            ),
+            `currents timeline for ${stationId}`,
+          )
+    ) as CurrentTimelineDto;
     pruneCache(this.timelineCache, CurrentsClient.CACHE_TTL_MS);
     this.timelineCache.set(key, { at: Date.now(), data });
     return data;
@@ -522,12 +583,13 @@ export async function prepareStationFlowField(
         longitude: (anchors[i - 1].longitude + anchors[i].longitude) / 2,
       });
     }
+    // All points at once: one slow answer then costs one wait, not one per
+    // point.
     const byId = new Map<string, CurrentStationDto>();
-    for (const p of points) {
-      for (const s of await client.findStations(p.latitude, p.longitude)) {
-        byId.set(s.id, s);
-      }
-    }
+    const found = await Promise.all(
+      points.map((p) => client.findStations(p.latitude, p.longitude)),
+    );
+    for (const list of found) for (const s of list) byId.set(s.id, s);
     if (byId.size === 0) return null;
 
     const padMs = 3600_000;
@@ -587,11 +649,10 @@ export async function prepareTideHeights(
   try {
     // Union of nearest stations at each anchor point (start / via / end).
     const byId = new Map<string, TideStationInfo>();
-    for (const p of points) {
-      for (const s of await client.findStations(p.latitude, p.longitude)) {
-        byId.set(s.id, s);
-      }
-    }
+    const found = await Promise.all(
+      points.map((p) => client.findStations(p.latitude, p.longitude)),
+    );
+    for (const list of found) for (const s of list) byId.set(s.id, s);
     if (byId.size === 0) return null;
 
     const timelines: StationTimeline[] = [];

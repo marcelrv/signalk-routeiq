@@ -440,21 +440,18 @@ export class RoutingEngine {
 
     const endMs = departureMs + windowSec * 1000;
 
-    // Tide heights (signalk-tides) — used for depth at the time of passage.
-    const heights = this.tides
-      ? await prepareTideHeights(this.tides, anchors, departureMs, endMs)
-      : null;
-
-    // Harmonic current stations (signalk-tidal-currents) — the only source of
-    // current. Without them a route still gets the heights, with no current.
-    const stationField = this.currents
-      ? await prepareStationFlowField(
-          this.currents,
-          anchors,
-          departureMs,
-          endMs,
-        )
-      : null;
+    // Tide heights (signalk-tides) — used for depth at the time of passage —
+    // and harmonic current stations (signalk-tidal-currents) — the only source
+    // of current; without them a route still gets the heights, with no
+    // current. Asked at the same time, so a slow plugin costs one wait.
+    const [heights, stationField] = await Promise.all([
+      this.tides
+        ? prepareTideHeights(this.tides, anchors, departureMs, endMs)
+        : null,
+      this.currents
+        ? prepareStationFlowField(this.currents, anchors, departureMs, endMs)
+        : null,
+    ]);
 
     if (!stationField && !heights) return undefined;
     return {
