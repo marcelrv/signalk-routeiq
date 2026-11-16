@@ -97,7 +97,7 @@ let selectedId = null;
 let busy = false;
 let engineReady = false;
 let tidesAvailable = false;
-let cfg = { averageSpeedKnots: 6, defaultCoastDistance: 0.5 };
+let cfg = { averageSpeedKnots: 5 };
 let units = { distance: "naut-mile" };
 // Per-route calculation session:
 //   requestPoints — the user's original start/via/end (survives re-calcs)
@@ -1614,7 +1614,7 @@ async function searchPois() {
  */
 function summaryLine(result) {
   const distM = result.totalDistance || 0;
-  const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 6;
+  const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 5;
   const tideActive =
     result.tide &&
     result.tide.enabled &&
@@ -1637,8 +1637,12 @@ function summaryLine(result) {
     const deltaMin = Math.round(
       (result.totalSeconds - result.totalSecondsNoTide) / 60,
     );
-    line +=
-      "  ·  tide " + (deltaMin > 0 ? "+" : "−") + Math.abs(deltaMin) + "m";
+    // Only current stations give a current; with tide heights alone
+    // (source "heights") there is no time difference to show.
+    if (result.tide.source === "stations" && deltaMin !== 0) {
+      line +=
+        "  ·  tide " + (deltaMin > 0 ? "+" : "−") + Math.abs(deltaMin) + "m";
+    }
     if (result.arrivalTime) {
       const arr = new Date(result.arrivalTime);
       if (!isNaN(arr)) {
@@ -1678,6 +1682,18 @@ function renderSummary(result) {
 
   renderItinerary(result.itinerary || []);
   $("summary").style.display = "block";
+}
+
+/**
+ * The grouping key of a crossing: type + the server's `structure` id + its
+ * `passage` (which pass through the structure; absent from an older server,
+ * read as one pass). Without a structure id the entry is its own key.
+ */
+function crossingGroupKey(c) {
+  if (!c.structure) return c;
+  return (
+    c.type + ":" + c.structure + ":" + (c.passage == null ? "" : c.passage)
+  );
 }
 
 /**
@@ -1865,11 +1881,14 @@ function renderItinerary(itinerary) {
 
       // Group crossings of one structure (a bridge can have a fixed and an
       // opening span) — same presentation as the webapp's route leg details.
-      // Entries without the server's structure id stay separate: names are
-      // not unique, so two same-named locks are two places.
+      // Keyed by type too: a span over a lock head has the lock as its whole,
+      // so the lock and that bridge share one id, and keyed by id alone the
+      // lock disappeared into the bridge's row. Entries without the server's
+      // structure id stay separate: names are not unique, so two same-named
+      // locks are two places.
       const grouped = new Map();
       for (const c of p.leg.crossings || []) {
-        const key = c.structure || c;
+        const key = crossingGroupKey(c);
         if (!grouped.has(key)) grouped.set(key, []);
         grouped.get(key).push(c);
       }
@@ -2225,7 +2244,7 @@ function fmtDistance(meters) {
 
 /** Sailing time for a distance at the configured average speed, as h:mm. */
 function fmtDuration(meters) {
-  const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 6;
+  const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 5;
   const totalMinutes = Math.round((meters / 1852 / speed) * 60);
   return (
     Math.floor(totalMinutes / 60) +

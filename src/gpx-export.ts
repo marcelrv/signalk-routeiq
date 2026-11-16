@@ -219,6 +219,7 @@ export class GpxExporter {
           type: w.type,
           name: w.name,
           structure: w.structure,
+          passage: w.passage,
           distanceFromStart: w.distanceFromStart,
           seconds: w.seconds,
           lat: w.position?.latitude.toFixed(6),

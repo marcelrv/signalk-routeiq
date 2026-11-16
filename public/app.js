@@ -85,8 +85,6 @@
         if (!c) return;
         if (c.averageSpeedKnots)
           document.getElementById("avg-speed").value = c.averageSpeedKnots;
-        if (c.defaultCoastDistance != null)
-          document.getElementById("min-coast").value = c.defaultCoastDistance;
         if (c.lockWaitMinutes != null)
           document.getElementById("lock-wait").value = c.lockWaitMinutes;
         if (c.bridgeWaitMinutes != null)
@@ -382,8 +380,6 @@
         mode: state.viaModes[i] || "auto",
       })),
       endMode: state.destMode || "auto",
-      minCoastDistance:
-        (parseFloat(document.getElementById("min-coast").value) || 0) / 1852,
       ...vesselOverrides(),
       ...waitOverrides(),
     };
@@ -5398,16 +5394,11 @@
         mode: state.viaModes[i] || "auto",
       }));
 
-      const minCoastMeters =
-        parseFloat(document.getElementById("min-coast").value) || 0;
-      const minCoastNauticalMiles = minCoastMeters / 1852;
-
       const payload = {
         start: start,
         end: end,
         via: via,
         endMode: state.destMode || "auto",
-        minCoastDistance: minCoastNauticalMiles,
         ...vesselOverrides(),
         ...waitOverrides(),
         useTides: tideEnabled(),
@@ -7287,7 +7278,7 @@
       const totalKm = totalDistM / 1000;
       const totalNm = totalKm / 1.852;
       const speedKn =
-        parseFloat(document.getElementById("avg-speed").value) || 6;
+        parseFloat(document.getElementById("avg-speed").value) || 5;
       // Tide-corrected total time from the server when available
       const tideActive =
         geoJson.tide &&
@@ -7313,15 +7304,20 @@
         const deltaMin = Math.round(
           (geoJson.totalSeconds - geoJson.totalSecondsNoTide) / 60,
         );
-        const sign = deltaMin > 0 ? "+" : "\u2212";
-        const col = deltaMin > 0 ? "#f59e0b" : "#22c55e";
-        tideStr =
-          '  \u00b7  <span style="color:' +
-          col +
-          '" title="Time the estimated tidal current costs or saves versus still water — minutes, not metres of tide">tide ' +
-          sign +
-          Math.abs(deltaMin) +
-          " min</span>";
+        // Only current stations give a current. With tide heights alone
+        // (source "heights") no current was applied, so there is no time
+        // difference to show — just the arrival time.
+        if (geoJson.tide.source === "stations" && deltaMin !== 0) {
+          const sign = deltaMin > 0 ? "+" : "\u2212";
+          const col = deltaMin > 0 ? "#f59e0b" : "#22c55e";
+          tideStr =
+            '  \u00b7  <span style="color:' +
+            col +
+            '" title="Time the estimated tidal current costs or saves versus still water — minutes, not metres of tide">tide ' +
+            sign +
+            Math.abs(deltaMin) +
+            " min</span>";
+        }
         if (geoJson.arrivalTime) {
           const arr = new Date(geoJson.arrivalTime);
           if (!isNaN(arr))
@@ -7426,7 +7422,7 @@
       else label = "Turn " + i;
 
       const speedKn =
-        parseFloat(document.getElementById("avg-speed").value) || 6;
+        parseFloat(document.getElementById("avg-speed").value) || 5;
       const cumDistNm = node.cumDistKm / 1.852;
       const cumTimeH =
         typeof node.cumSeconds === "number"
@@ -8031,16 +8027,33 @@
   }
 
   /**
-   * Groups crossings by the server's `structure` id: entries sharing one are
-   * spans of the same physical structure. Entries without one each stay on
-   * their own, never merged by name (many bridges and locks share a name).
+   * The grouping key of a crossing: type + the server's `structure` id + its
+   * `passage` (which pass through the structure; absent from an older server,
+   * read as one pass). Without a structure id the entry is its own key.
+   */
+  function crossingGroupKey(c) {
+    if (!c.structure) return c;
+    return (
+      c.type + ":" + c.structure + ":" + (c.passage == null ? "" : c.passage)
+    );
+  }
+
+  /**
+   * Groups crossings by type, the server's `structure` id and `passage` (the
+   * pass through it): entries sharing all three are spans of one structure
+   * passed once. The type is part of the key because a span carried over a
+   * lock head has the lock as its whole, so the lock and that bridge share
+   * one id: keyed by id alone the lock was merged into the bridge's row and
+   * never shown. Entries without an id each
+   * stay on their own, never merged by name (many bridges and locks share a
+   * name).
    * @param {object[]} crossings Itinerary crossings, in route order.
    * @returns {Map<*, object[]>} Groups in first-seen order.
    */
   function groupCrossingsByStructure(crossings) {
     const grouped = new Map();
     for (const c of crossings) {
-      const key = c.structure || c;
+      const key = crossingGroupKey(c);
       if (!grouped.has(key)) grouped.set(key, []);
       grouped.get(key).push(c);
     }

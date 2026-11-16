@@ -6,8 +6,10 @@ import { DatabaseSync } from "node:sqlite";
 import { POI_TYPE_LOCK_CHAMBER, RoutingDatabase } from "../dist/database.js";
 import { RoutingEngine } from "../dist/routing.js";
 import {
+  CurrentsClient,
   KNOTS_TO_MS,
-  prepareTidalFlowField,
+  prepareStationFlowField,
+  prepareTideHeights,
   TidesClient,
 } from "../dist/tides.js";
 import { DEFAULT_CONFIG } from "../dist/types.js";
@@ -86,12 +88,11 @@ describe("tide-informed depth", () => {
     const lowWaterMs = Date.parse("2026-08-11T00:00:00Z");
 
     async function fieldAt(lowMs: number, stations = STATIONS) {
-      return prepareTidalFlowField(
+      return prepareTideHeights(
         stubTidesClient(lowMs, stations),
         [{ latitude: 52.0, longitude: 5.0 }],
         lowMs,
         lowMs + 8 * HOUR_MS,
-        2.0,
       );
     }
 
@@ -549,6 +550,16 @@ describe("tide-informed depth", () => {
         route.totalDistance! < 3000,
         `expected the ~2396 m direct route, got ${route.totalDistance}`,
       );
+    });
+
+    it("applies no current when only tide heights are known", async () => {
+      // signalk-tides gives heights only. The current that used to be guessed
+      // from their slope is gone: the heights still set the depth, and the
+      // passage takes exactly as long as in still water.
+      const route = await routeAt(highWaterMs);
+      assert.strictEqual(route.tide?.source, "heights");
+      assert.strictEqual(route.tide?.depthAware, true);
+      assert.strictEqual(route.totalSeconds, route.totalSecondsNoTide);
     });
 
     it("reports the charted depth and the passage depth side by side", async () => {
@@ -1049,5 +1060,33 @@ describe("tide-informed depth", () => {
         "expected the detected lock to be stashed on the result",
       );
     });
+  });
+});
+
+describe("current stations", () => {
+  it("give zero flow out of range of every station", async () => {
+    const t0 = Date.parse("2026-08-11T00:00:00Z");
+    const client = {
+      findStations: async () => [
+        { id: "s", name: "s", latitude: 52.0, longitude: 5.0, vectorCapable: true },
+      ],
+      fetchTimeline: async (_id: string, startMs: number, endMs: number) => {
+        const timeline = [];
+        for (let t = startMs; t <= endMs; t += 600_000)
+          timeline.push({ time: new Date(t).toISOString(), u: 1, v: 0 });
+        return { timeline };
+      },
+    } as unknown as CurrentsClient;
+    const field = (await prepareStationFlowField(
+      client,
+      [{ latitude: 52.0, longitude: 5.0 }],
+      t0,
+      t0 + 6 * HOUR_MS,
+    ))!;
+    assert.ok(field);
+    assert.strictEqual(field.source, "stations");
+    assert.ok(Math.abs(field.sample(52.0, 5.0, t0 + HOUR_MS).u - 1) < 1e-9);
+    // ~110 km north: far outside the 20 km a station describes.
+    assert.deepStrictEqual(field.sample(53.0, 5.0, t0 + HOUR_MS), { u: 0, v: 0 });
   });
 });

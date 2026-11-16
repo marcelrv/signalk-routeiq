@@ -8,7 +8,8 @@
   webapp and the Freeboard panel.
 - Click the route line to select and open that section in the route list;
   it stays highlighted until Esc, a map click or a new route.
-- Route crossings carry the database's `structure` id, when it has one.
+- Route crossings carry the database's `structure` id, when it has one, and
+  a `passage` index telling separate passes through one structure apart.
 - Itinerary points carry `coordIndex`, their vertex on the route geometry,
   so a client can match legs to the route line without searching for them.
 
@@ -19,6 +20,11 @@
   through every waypoint. Moving or adding a point on the chart makes it a
   via, and only the legs next to it change. Routes saved before this update
   have no named vias and route straight from start to end.
+- A route that passes the same bridge or lock twice within one section of
+  the route list (out and back) now shows two rows, each with its own map
+  link and wait, instead of one row with the waits added up (#60). The
+  bridges over both ends of one long lock stay one row, and the saved
+  passage profile and GPX waits carry the same `passage` index.
 - Bridges or locks that share a name, such as two locks both called "Lock",
   are no longer merged into one row in the route list. Each keeps its own
   map link. Spans are combined only when they belong to the same structure.
@@ -27,6 +33,34 @@
 - Hovering the route line highlights the section a click selects, not the
   whole stretch between vias; the leg context menu still shows the whole leg
   it acts on.
+
+### Changed
+
+- Tidal current now comes only from `signalk-tidal-currents` stations; away
+  from them no current is assumed. `signalk-tides` supplies tide heights
+  only, for the depth at the time of passage.
+- **API:** `tide.source` on route results and saved passage profiles, and
+  `source` on `GET /router/tides/status`, is now `"stations"` or `"heights"`.
+  `"heights"` replaces `"height-estimate"`: it means only tide heights were
+  known and no current was applied. Clients that checked for
+  `"height-estimate"` should check for `"heights"`; older saved profiles may
+  still carry the old value.
+- `tide.stations` lists the tide-height stations as well as the current
+  stations when both were used.
+- The route summary shows the tide's time difference only when a current
+  was applied.
+- Default average speed is 5 kn (was 6).
+
+### Removed
+
+- Plugin settings: Default Min Coast Distance (a client can still send
+  `minCoastDistance` per request; there is no default), Max Tidal Current,
+  Wrong Way Penalty and Line-of-Sight Sample Interval. Waypoint
+  Simplification Tolerance, Line-of-Sight Search Radius, Eager-load Region,
+  Proactive Load Radius and Max Loaded Regions are now fixed internal
+  defaults. A value saved for any of them is ignored.
+- `defaultCoastDistance` and `maxTidalCurrentKnots` from
+  `GET /router/config`.
 
 ## 0.1.0-alpha.10 — 2026-11-09
 

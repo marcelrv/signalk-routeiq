@@ -18,7 +18,7 @@ import {
 } from "./plotterext.js";
 import { RoutingEngine } from "./routing.js";
 import { CurrentsClient, TidesClient } from "./tides.js";
-import { DEFAULT_CONFIG, PluginConfig } from "./types.js";
+import { DEFAULT_CONFIG, PluginConfig, RETIRED_CONFIG_KEYS } from "./types.js";
 
 /**
  * Narrow surface of the Signal K server API this plugin actually calls.
@@ -81,17 +81,13 @@ export function pluginConstructor(app: ServerAPI) {
         "[routeiq] Starting SignalK RouteIQ Nautical Route Planner Plugin...",
       );
 
-      // Merge received configuration with defaults.
-      // routingBBoxMargin/routingBBoxMaxExtent are internal search tuning,
-      // removed from the settings schema (2026-07-18) — strip them from any
-      // previously-persisted config so a stale saved value (e.g. the old
-      // 0.1° default frozen into plugin-config-data) can never override the
-      // engine's current defaults.
-      const {
-        routingBBoxMargin: _ignoredMargin,
-        routingBBoxMaxExtent: _ignoredExtent,
-        ...userOptions
-      } = (options ?? {}) as Record<string, unknown>;
+      // Merge received configuration with defaults, minus every key that is
+      // no longer a user setting (see RETIRED_CONFIG_KEYS) so a stale saved
+      // value can never override the engine's current default.
+      const userOptions: Record<string, unknown> = {
+        ...((options ?? {}) as Record<string, unknown>),
+      };
+      for (const key of RETIRED_CONFIG_KEYS) delete userOptions[key];
       config = { ...DEFAULT_CONFIG, ...userOptions };
 
       // Migrate legacy routingDatabase config to routingDataDir. Read through
@@ -218,13 +214,6 @@ export function pluginConstructor(app: ServerAPI) {
             minimum: 0,
             multipleOf: 0.1,
           },
-          defaultCoastDistance: {
-            type: "number",
-            title: "Default Min Coast Distance (NM)",
-            description:
-              "Default minimum distance from coastline in nautical miles",
-            default: DEFAULT_CONFIG.defaultCoastDistance,
-          },
           averageSpeedKnots: {
             type: "number",
             title: "Average Speed (kn)",
@@ -253,17 +242,8 @@ export function pluginConstructor(app: ServerAPI) {
             type: "boolean",
             title: "Consider Tides by Default",
             description:
-              "Factor tidal currents into route calculation. Needs a tide data plugin: signalk-tidal-currents (real current stations, preferred) and/or signalk-tides (height-derived estimate). With neither installed, routes fall back to plain distance. Clients can override per request.",
+              "Factor the tide into route calculation. Needs a tide data plugin: signalk-tidal-currents (current stations: the only source of tidal current) and/or signalk-tides (tide heights, for the depth at the time of passage). Away from current stations no current is assumed. With neither installed, routes fall back to plain distance. Clients can override per request.",
             default: DEFAULT_CONFIG.considerTides,
-          },
-          maxTidalCurrentKnots: {
-            type: "number",
-            title: "Max Tidal Current (kn)",
-            description:
-              "Spring-tide current at full flood/ebb used to scale the estimated tidal flow",
-            default: DEFAULT_CONFIG.maxTidalCurrentKnots,
-            minimum: 0,
-            multipleOf: 0.1,
           },
           tidesApiBase: {
             type: "string",
@@ -271,35 +251,6 @@ export function pluginConstructor(app: ServerAPI) {
             description:
               "Server hosting the tide/current data plugins (default: this server)",
             default: DEFAULT_CONFIG.tidesApiBase,
-          },
-          waypointTolerance: {
-            type: "number",
-            title: "Waypoint Simplification Tolerance (m)",
-            description:
-              "Max deviation from the computed path when reducing it to route waypoints (0 = keep every graph node)",
-            default: DEFAULT_CONFIG.waypointTolerance,
-            minimum: 0,
-          },
-          wrongWayPenalty: {
-            type: "number",
-            title: "Wrong Way Penalty",
-            description:
-              "Penalty multiplier for traveling against traffic flow",
-            default: DEFAULT_CONFIG.wrongWayPenalty,
-          },
-          lineOfSightSampleInterval: {
-            type: "number",
-            title: "Line-of-Sight Sample Interval (m)",
-            description:
-              "Spacing between samples when checking line-of-sight for smoothing",
-            default: DEFAULT_CONFIG.lineOfSightSampleInterval,
-          },
-          lineOfSightSearchRadius: {
-            type: "number",
-            title: "Line-of-Sight Search Radius (m)",
-            description:
-              "Radius to search for graph nodes when verifying line-of-sight",
-            default: DEFAULT_CONFIG.lineOfSightSearchRadius,
           },
           catalogUrl: {
             type: "string",
@@ -315,32 +266,11 @@ export function pluginConstructor(app: ServerAPI) {
               "Peek installed databases at startup instead of loading all of them; load each region into memory only when a route actually needs it. Leave off for a single-region deployment — there is nothing to gain and startup behavior is unchanged.",
             default: DEFAULT_CONFIG.dynamicLoading,
           },
-          eagerLoadAtPosition: {
-            type: "boolean",
-            title: "Eager-load region at vessel position",
-            description:
-              "With dynamic loading on, load the region under the vessel at startup and as it moves (via navigation.position), so a positioned vessel boots ready-to-route instead of empty. No effect when dynamic loading is off.",
-            default: DEFAULT_CONFIG.eagerLoadAtPosition,
-          },
-          loadRadiusNm: {
-            type: "number",
-            title: "Proactive load radius (nm)",
-            description:
-              "Load a region when the vessel is within this many nautical miles of it, before it actually crosses in. 0 = only load the region the vessel is inside.",
-            default: DEFAULT_CONFIG.loadRadiusNm,
-          },
-          maxLoadedRegions: {
-            type: "number",
-            title: "Max loaded regions (dynamic loading)",
-            description:
-              "Only applies with dynamic loading on. Keep at most this many regions loaded in memory, evicting the least-recently-used region once a route finishes and none is in progress. 0 = unlimited (keep every region ever loaded) — uncapped memory growth on long passages.",
-            default: DEFAULT_CONFIG.maxLoadedRegions,
-          },
           maxLoadedRegionEdges: {
             type: "number",
             title: "Max loaded graph edges (dynamic loading)",
             description:
-              "Only applies with dynamic loading on. Sibling cap to 'Max loaded regions', weighted by size instead of count — a handful of large regions can exceed a count-based cap alone. A route search that would need to load past this stops widening its search box rather than loading more; between routes, the least-recently-used region is evicted past it the same way the region-count cap works. 0 = unlimited. Defaults to an estimate based on this server's available memory.",
+              "Only applies with dynamic loading on. Caps how much routing graph is held in memory. A route search that would need to load past this stops widening its search box rather than loading more; between routes, the least-recently-used regions are unloaded until the total fits again. 0 = unlimited. Defaults to an estimate based on this server's available memory.",
             default: DEFAULT_CONFIG.maxLoadedRegionEdges,
             minimum: 0,
           },

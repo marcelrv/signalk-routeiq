@@ -72,7 +72,7 @@ local channel effects and eddies are not modeled). The UI labels all values
     readonly maxSpeedMs: number               // bound for A* admissibility
     readonly stations: TideStationInfo[]      // for the tide{stations} result field
     readonly estimated: boolean               // model estimate vs. real station data
-    readonly source: 'stations' | 'height-estimate'
+    readonly source: 'stations' | 'heights'
   }
   ```
   `stations`/`estimated`/`source` were added beyond the original sketch so
@@ -115,7 +115,7 @@ local channel effects and eddies are not modeled). The UI labels all values
 - Result additions: per-segment `seconds`, `currentKn` (signed, + = fair),
   `sogKn`; route-level `departureTime`, `arrivalTime`, `totalSeconds`,
   `totalSecondsNoTide`, `tide { enabled, estimated, source, stations }` (the
-  `source` field — `'stations' | 'height-estimate'` — was added beyond the
+  `source` field — `'stations' | 'heights'`, `'height-estimate'` before 2026-11-16 — was added beyond the
   original sketch, see `FlowField` above). Itinerary legs aggregate `seconds`
   and distance-weighted `currentKn`.
 - `scanDepartures(request, hours, stepMinutes)` — full re-route per step

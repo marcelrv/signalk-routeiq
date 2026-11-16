@@ -827,7 +827,7 @@ export class ApiHandler {
       available: probe.available || currentStations,
       estimated: true, // station predictions still derive from community harmonic data
       currentStations,
-      source: currentStations ? "stations" : "height-estimate",
+      source: currentStations ? "stations" : "heights",
       considerTidesDefault: this.config.considerTides,
       stations: probe.stations.slice(0, 5).map((s) => ({
         id: s.id,
@@ -1090,11 +1090,9 @@ export class ApiHandler {
   private async handleGetConfig(_req: Request, res: Response): Promise<void> {
     res.json({
       averageSpeedKnots: this.config.averageSpeedKnots,
-      defaultCoastDistance: this.config.defaultCoastDistance,
       lockWaitMinutes: this.config.lockWaitMinutes,
       bridgeWaitMinutes: this.config.bridgeWaitMinutes,
       considerTides: this.config.considerTides,
-      maxTidalCurrentKnots: this.config.maxTidalCurrentKnots,
     });
   }
 

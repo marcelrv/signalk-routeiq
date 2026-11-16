@@ -131,17 +131,17 @@ describe('crossing wait time', () => {
   });
 
   it('charges each passage under one opening bridge when the route turns back under it', () => {
-    // The same structure listed twice is two passages (detection lists one per
-    // passage), however close: out under it at 300 m, back under it at 500 m.
+    // Two passes of one structure (detection numbers them), however close:
+    // out under it at 300 m, back under it at 500 m.
     const twice = [
-      opening({ structure: '300', distanceFromStart: 300 }),
-      opening({ structure: '300', distanceFromStart: 500 }),
+      opening({ structure: '300', passage: 0, distanceFromStart: 300 }),
+      opening({ structure: '300', passage: 1, distanceFromStart: 500 }),
     ];
     assert.strictEqual(waitSeconds(twice), 2 * 1800);
     // A lock and the bridge over its head share the lock's id: still one obstacle.
     const lockAndHead = [
-      lock({ structure: '100', distanceFromStart: 0 }),
-      opening({ structure: '100', distanceFromStart: 60 }),
+      lock({ structure: '100', passage: 0, distanceFromStart: 0 }),
+      opening({ structure: '100', passage: 0, distanceFromStart: 60 }),
     ];
     assert.strictEqual(waitSeconds(lockAndHead), 3600);
   });
@@ -149,11 +149,11 @@ describe('crossing wait time', () => {
   it('lets a long lock absorb the bridges over both its heads, though they share its id', () => {
     // A 400 m lock whose two heads each carry an opening span parented to the
     // lock: detection lists the lock's bridge twice, once per head, more than
-    // its 300 m merge distance apart. Both open with the locking.
+    // its 300 m merge distance apart, as one pass. Both open with the locking.
     const crossings = [
-      opening({ structure: '7', distanceFromStart: 0 }),
-      lock({ structure: '7', distanceFromStart: 200 }),
-      opening({ structure: '7', distanceFromStart: 400 }),
+      opening({ structure: '7', passage: 0, distanceFromStart: 0 }),
+      lock({ structure: '7', passage: 0, distanceFromStart: 200 }),
+      opening({ structure: '7', passage: 0, distanceFromStart: 400 }),
     ];
     assert.strictEqual(waitSeconds(crossings, {}, [{ distance: 400, lockIds: [7] }]), 3600);
   });
@@ -163,9 +163,9 @@ describe('crossing wait time', () => {
     // through lock 7 again (6100..6200 m). One span over both passages would
     // swallow the bridge between them into the lock's group.
     const crossings: Array<Record<string, unknown>> = [
-      lock({ structure: '7', distanceFromStart: 50 }),
+      lock({ structure: '7', passage: 0, distanceFromStart: 50 }),
       opening({ distanceFromStart: 3100 }),
-      lock({ structure: '7', distanceFromStart: 6150 }),
+      lock({ structure: '7', passage: 1, distanceFromStart: 6150 }),
     ];
     const segments = [
       { distance: 100, lockIds: [7] },
