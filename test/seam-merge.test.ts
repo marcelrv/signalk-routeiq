@@ -702,6 +702,38 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
     assert.match(text, /depth 7\.5m/, `a depth warning names the tightened seam: ${text}`);
   });
 
+  it('a region another request loads while a candidate is scored is caught', async () => {
+    // One box, no widening: only the final refresh can see the load.
+    const engine = new RoutingEngine(db, {
+      ...DEFAULT_CONFIG,
+      routingBBoxMargin: 0.005,
+      routingBBoxMaxExtent: 0.005,
+    }) as any;
+    engine.setVesselDimensions({ draft: 8, beam: 4, airDraft: 10 });
+    const score = engine.pathViolationMeters.bind(engine);
+    let loaded = false;
+    engine.pathViolationMeters = async (...args: unknown[]) => {
+      // Another request's load lands while the first scoring awaits.
+      if (!loaded) {
+        loaded = true;
+        await db.loadDatabaseGraph('east.sqlite');
+      }
+      return score(...args);
+    };
+
+    const route = await engine.calculateRoute({
+      start: { latitude: rW0.lat, longitude: rW0.lon },
+      end: { latitude: rS1.lat, longitude: rS1.lon },
+      minCoastDistance: 0,
+    });
+
+    assert.ok(loaded, 'east loaded during scoring');
+    const depths = route.features.map((f: any) => f.properties.minDepth)
+      .filter((d: unknown): d is number => typeof d === 'number' && d >= 0);
+    assert.strictEqual(Math.min(...depths), 7.5);
+    assert.match(JSON.stringify(route.warnings ?? []), /depth 7\.5m/);
+  });
+
   it('a load that fails part-way leaves the loaded seam edge as it was', async () => {
     const anyDb = db as any;
     const send = anyDb.sendMessage.bind(db);

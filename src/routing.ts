@@ -661,6 +661,10 @@ export class RoutingEngine {
         // Inside the try: a region that fails to load on a wider box must
         // not throw away a route an earlier box already found.
         await this.db.ensureRegionsForBbox(bbox);
+        // Taken before the search: a region another request loads while
+        // this one searches or scores is then caught by
+        // refreshCandidateLimits, not stamped as already seen.
+        const generation = this.db.graphGeneration;
         const result = await this.astarSearch(
           start.latitude,
           start.longitude,
@@ -685,7 +689,7 @@ export class RoutingEngine {
           violatingMeters,
           cost,
           distance,
-          generation: this.db.graphGeneration,
+          generation,
         });
         // This attempt's box may have loaded a region that tightened a seam
         // edge an earlier candidate runs along; rescore those first.
@@ -1344,6 +1348,10 @@ export class RoutingEngine {
       try {
         // Inside the try, as in calculateRouteImpl.
         await this.db.ensureRegionsForBbox(segmentBbox);
+        // Taken before the search: a region another request loads while
+        // this one searches or scores is then caught by
+        // refreshCandidateLimits, not stamped as already seen.
+        const generation = this.db.graphGeneration;
         const result = await this.astarSearch(
           startLat,
           startLon,
@@ -1368,7 +1376,7 @@ export class RoutingEngine {
           violatingMeters,
           cost,
           distance,
-          generation: this.db.graphGeneration,
+          generation,
         });
         // This attempt's box may have loaded a region that tightened a seam
         // edge an earlier candidate runs along; rescore those first.
@@ -1441,6 +1449,8 @@ export class RoutingEngine {
         );
       }
       const before = warnings.length;
+      // Before the check, which awaits (see the bbox loop above).
+      const generation = this.db.graphGeneration;
       await this.addViolationWarnings(
         best.result,
         warnings,
@@ -1459,7 +1469,7 @@ export class RoutingEngine {
         env,
         waitOverrides,
         warnings: warnings.slice(before),
-        generation: this.db.graphGeneration,
+        generation,
       });
       return best.result;
     }
@@ -3074,8 +3084,10 @@ export class RoutingEngine {
     env?: RouteEnv,
     waitOverrides?: WaitOverrides,
   ): Promise<void> {
-    const generation = this.db.graphGeneration;
     for (const c of candidates) {
+      // Read per candidate, before anything awaits: a load during an earlier
+      // candidate's recount must not pass for one this candidate has seen.
+      const generation = this.db.graphGeneration;
       if (c.generation === generation) continue;
       c.generation = generation;
       const changed = this.refreshSegmentLimits(c.result);
@@ -3108,8 +3120,9 @@ export class RoutingEngine {
     legs: RouteResult[],
     warnings: RouteWarning[],
   ): Promise<void> {
-    const generation = this.db.graphGeneration;
     for (const leg of legs) {
+      // Per leg, before anything awaits (as in refreshCandidateLimits).
+      const generation = this.db.graphGeneration;
       const check = legChecks.get(leg);
       if (!check || check.generation === generation) continue;
       check.generation = generation;
