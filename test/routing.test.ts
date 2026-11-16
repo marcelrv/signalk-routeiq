@@ -446,6 +446,17 @@ describe('Itinerary', async () => {
     assert.strictEqual(byType.narrow.at![0].position, undefined);
   });
 
+  it('locates a clearance under the air draft in `at`, as a danger', () => {
+    const vessel = { requiredDepth: 1.0, beam: 4.0, requiredWidth: 6.0, requiredAirDraft: 17.0 };
+    // A 6.7 m fixed bridge on segment 4; unknown (-1) or ample elsewhere.
+    const segs = segments.map((s, i) => ({ ...s, maxAirDraft: i === 4 ? 6.7 : i === 6 ? 30 : -1 }));
+    const { itinerary } = buildItinerary(coords, segs, [], [], 30, vessel);
+    const [w] = itinerary[0].leg!.warnings!;
+    assert.deepStrictEqual([w.type, w.level, (w as any).maxAirDraft], ['low_clearance', 'danger', 6.7]);
+    assert.deepStrictEqual(w.at!.map((l) => [l.coordIndex, l.toCoordIndex]), [[4, 5]]);
+    assert.strictEqual(itinerary[1].leg!.warnings, undefined);
+  });
+
   it('keeps a point location whole when it is clipped to a leg', () => {
     // A point (a bridge, lock or other POI): coordIndex === toCoordIndex, so
     // there is nothing to cut. It belongs to the leg it starts, once.

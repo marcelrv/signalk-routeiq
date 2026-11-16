@@ -133,6 +133,14 @@ export interface RouteCrossing {
    * structure and carries its own id.
    */
   structure?: string;
+  /**
+   * Which pass through the structure this is: 0, 1, ... in route order, per
+   * type and `structure`. One pass is one run of consecutive route edges
+   * linked to the structure (nearby runs merge); a pass after the route turned
+   * back, or beyond the merge distance, is the next index. Clients key a row
+   * on type + structure + passage; absent (older server) reads as one pass.
+   */
+  passage?: number;
   /** The chamber or span the route uses (a part of the structure). */
   partId?: number;
 }
@@ -226,6 +234,11 @@ export type LegWarning =
       minWidth: number;
       beam: number;
       requiredWidth: number; // beam + safetyMarginBeam
+    })
+  | (WarningBase & {
+      type: "low_clearance";
+      maxAirDraft: number; // lowest charted clearance on the leg
+      requiredAirDraft: number; // airDraft + safetyMarginAirDraft
     });
 
 // A warning on a stretch of the route, from the routing database's metadata.

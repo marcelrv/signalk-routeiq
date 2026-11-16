@@ -1518,6 +1518,18 @@ function renderSummary(result) {
 }
 
 /**
+ * The grouping key of a crossing: type + the server's `structure` id + its
+ * `passage` (which pass through the structure; absent from an older server,
+ * read as one pass). Without a structure id the entry is its own key.
+ */
+function crossingGroupKey(c) {
+  if (!c.structure) return c;
+  return (
+    c.type + ":" + c.structure + ":" + (c.passage == null ? "" : c.passage)
+  );
+}
+
+/**
  * Fill the itinerary list: one item per route point (start, turns, vias,
  * destination) with its running time, and under it the leg that follows:
  * distance, time, the bridges and locks crossed with their waits, and the
@@ -1702,11 +1714,14 @@ function renderItinerary(itinerary) {
 
       // Group crossings of one structure (a bridge can have a fixed and an
       // opening span) — same presentation as the webapp's route leg details.
-      // Entries without the server's structure id stay separate: names are
-      // not unique, so two same-named locks are two places.
+      // Keyed by type too: a span over a lock head has the lock as its whole,
+      // so the lock and that bridge share one id, and keyed by id alone the
+      // lock disappeared into the bridge's row. Entries without the server's
+      // structure id stay separate: names are not unique, so two same-named
+      // locks are two places.
       const grouped = new Map();
       for (const c of p.leg.crossings || []) {
-        const key = c.structure || c;
+        const key = crossingGroupKey(c);
         if (!grouped.has(key)) grouped.set(key, []);
         grouped.get(key).push(c);
       }

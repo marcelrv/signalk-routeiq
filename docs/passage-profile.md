@@ -46,9 +46,9 @@ All values use Signal K units: seconds, metres and m/s.
     "tide": { "enabled": false }
   },
   "waits": [
-    { "type": "lock", "name": "Sluis A", "structure": "7", "distanceFromStart": 8123, "seconds": 3600,
+    { "type": "lock", "name": "Sluis A", "structure": "7", "passage": 0, "distanceFromStart": 8123, "seconds": 3600,
       "position": { "latitude": 52.01, "longitude": 5.02 } },
-    { "type": "bridge", "name": "Brug B", "structure": "9", "distanceFromStart": 9000, "seconds": 3600,
+    { "type": "bridge", "name": "Brug B", "structure": "9", "passage": 0, "distanceFromStart": 9000, "seconds": 3600,
       "position": { "latitude": 52.012, "longitude": 5.027 } }
   ],
   "warnings": [
@@ -72,8 +72,8 @@ All values use Signal K units: seconds, metres and m/s.
 | `departure`, `arrival` | ISO 8601 times when the plan is dated. Today a plan is dated only when tides were used. Both are `null` for an undated plan: an undated plan does not mean "leaving now". |
 | `assumptions.speedThroughWater` | The constant speed through the water used for every leg (m/s). |
 | `assumptions.lockWait`, `bridgeWait` | Default wait per lock and per opening span, in seconds. A structure can carry its own wait, so the per-structure `waits` can differ from these defaults. |
-| `assumptions.tide` | `{enabled:false}`, or `{enabled:true, estimated, source}` when tides were used. `source` is `stations` when the times were corrected for tidal current from current stations, or `heights` when only tide heights were known: they set the depth, and no current was applied. Profiles saved before 2026-11-16 may say `height-estimate`, a current estimated from tide heights that is no longer made. `estimated:true` means the tide comes from predictions or model data, not measurements. |
-| `waits[]` | Each structure that added a wait, in route order. The `seconds` values add up to `duration.waiting`. `structure` is an opaque id for the physical structure, and `position` is where the structure is. A bridge that can be passed closed charges no wait and is not listed. |
+| `assumptions.tide` | `{enabled:false}`, or `{enabled:true, estimated, source}` when the times were corrected for tidal current. `estimated:true` means the tide comes from predictions or model data, not measurements. |
+| `waits[]` | Each structure that added a wait, in route order. The `seconds` values add up to `duration.waiting`. `structure` is an opaque id for the physical structure, `passage` (0, 1, ...) tells separate passes through one structure apart (a route out and back under one bridge waits twice), and `position` is where the structure is. A bridge that can be passed closed charges no wait and is not listed. |
 | `warnings[]` | Every warning on the calculated route: route-level warnings (`type` and `message`), shallow or narrow legs, and notices from the charts (`type`, `level` = `danger`/`caution`/`info`, and where available `distanceFromStart`). |
 
 ### What the times are not
@@ -118,7 +118,7 @@ after `<desc>` and before the first `<rtept>`, as GPX 1.1 requires:
       <ar:departure>2026-11-15T08:00:00.000Z</ar:departure>  <!-- dated plans only -->
       <ar:arrival>2026-11-15T13:42:00.000Z</ar:arrival>
       <ar:assumptions speedThroughWater="3.087" lockWait="3600" bridgeWait="1800" tide="false"/>
-      <ar:wait type="lock" name="Sluis A" structure="7" distanceFromStart="8123" seconds="3600" lat="52.010000" lon="5.020000"/>
+      <ar:wait type="lock" name="Sluis A" structure="7" passage="0" distanceFromStart="8123" seconds="3600" lat="52.010000" lon="5.020000"/>
       <ar:warning type="shallow" level="danger" distanceFromStart="500">…</ar:warning>
     </ar:passageProfile>
   </extensions>
