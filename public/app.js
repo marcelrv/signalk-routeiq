@@ -7278,7 +7278,7 @@
       const totalKm = totalDistM / 1000;
       const totalNm = totalKm / 1.852;
       const speedKn =
-        parseFloat(document.getElementById("avg-speed").value) || 6;
+        parseFloat(document.getElementById("avg-speed").value) || 5;
       // Tide-corrected total time from the server when available
       const tideActive =
         geoJson.tide &&
@@ -7417,7 +7417,7 @@
       else label = "Turn " + i;
 
       const speedKn =
-        parseFloat(document.getElementById("avg-speed").value) || 6;
+        parseFloat(document.getElementById("avg-speed").value) || 5;
       const cumDistNm = node.cumDistKm / 1.852;
       const cumTimeH =
         typeof node.cumSeconds === "number"
