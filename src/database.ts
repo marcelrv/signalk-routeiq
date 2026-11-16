@@ -105,6 +105,19 @@ export const TRAFFIC_TWO_WAY = 0;
 export const TRAFFIC_ONE_WAY_FWD = 1;
 export const TRAFFIC_ONE_WAY_REV = 2;
 
+/**
+ * Whether A* can sail this edge source→target at all: not a wrong-way
+ * one-way edge, not one across land or an obstacle. The rule the endpoint
+ * swap's reach checks (leadsAnywhere, localGraphReach) share.
+ */
+export function isSailableEdge(edge: EdgeRow): boolean {
+  return (
+    edge.traffic_mode !== TRAFFIC_ONE_WAY_REV &&
+    edge.crosses_land !== 1 &&
+    edge.crosses_obstacle !== 1
+  );
+}
+
 /** Suffix marking an installed database the user has switched off. The file
  *  stays on disk and stays listed by the Data Manager, but nothing ever loads
  *  it into the graph. Renaming (rather than a config list) keeps the state
@@ -2870,6 +2883,37 @@ export class RoutingDatabase {
       }
     }
     return visited;
+  }
+
+  /**
+   * Whether `startNode` leads anywhere: a forward search over the edges
+   * A* can sail (no wrong-way one-way edge, none across land or an
+   * obstacle) that reaches one of `targets`, or visits
+   * more than `maxNodes` nodes, says yes; running out of nodes first says
+   * it sits in a small island of its own. Bounded, so the common "yes" on a
+   * big graph costs at most `maxNodes` visits.
+   */
+  leadsAnywhere(
+    startNode: number,
+    targets: ReadonlySet<number>,
+    maxNodes: number,
+  ): boolean {
+    if (targets.has(startNode)) return true;
+    const visited = new Set<number>([startNode]);
+    const queue: number[] = [startNode];
+    for (let i = 0; i < queue.length; i++) {
+      const edges = this.edgesBySource.get(queue[i]);
+      if (!edges) continue;
+      for (const edge of edges) {
+        if (!isSailableEdge(edge)) continue;
+        if (visited.has(edge.target)) continue;
+        if (targets.has(edge.target)) return true;
+        visited.add(edge.target);
+        if (visited.size > maxNodes) return true;
+        queue.push(edge.target);
+      }
+    }
+    return false;
   }
 
   /** The navmesh region (if any) whose boundary_geometry contains this point. */

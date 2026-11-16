@@ -18,6 +18,7 @@ import {
   POI_TYPE_LOCK_CHAMBER,
   TRAFFIC_TWO_WAY,
   TRAFFIC_ONE_WAY_REV,
+  isSailableEdge,
 } from "./database.js";
 import type { FunnelResult, NavmeshRegion } from "./navmesh.js";
 import {
@@ -189,6 +190,26 @@ interface SearchSkipReasons {
   coastDistance: number;
   bbox: number;
 }
+
+/**
+ * A failure of the A* search itself (no routing node near a point, start
+ * outside the box, no path found). calculateRouteImpl's bounding-box loop
+ * retries with a wider box on this and keeps the last one for its final
+ * message; any other error is a bug and propagates.
+ */
+export class RouteSearchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RouteSearchError";
+  }
+}
+
+/**
+ * How many nodes a forward search from a "better depth" replacement endpoint
+ * must reach (failing the original node or the other endpoint) before it
+ * counts as part of the main network rather than an island.
+ */
+const IMPROVE_NODE_MIN_REACH = 5000;
 
 // Priority queue for A* (min-heap)
 class MinHeap<T> {
@@ -597,6 +618,8 @@ export class RoutingEngine {
       distance: number;
     } | null = null;
     let retriedForPenalty = false;
+    // The last A* failure, for the final message when no box finds a path.
+    let lastSearchError: RouteSearchError | undefined;
 
     while (currentMargin <= maxMargin) {
       const bbox = bboxFromPoints(start, end, currentMargin);
@@ -617,9 +640,10 @@ export class RoutingEngine {
       // the first, routingBBoxMargin-sized attempt; the wider boxes only
       // exist for the ones that don't, and now only load regions when the
       // search actually widens to look at them.
-      await this.db.ensureRegionsForBbox(bbox);
-
       try {
+        // Inside the try: a region that fails to load on a wider box must
+        // not throw away a route an earlier box already found.
+        await this.db.ensureRegionsForBbox(bbox);
         const result = await this.astarSearch(
           start.latitude,
           start.longitude,
@@ -670,7 +694,18 @@ export class RoutingEngine {
         retriedForPenalty = true;
         previousAttempt = { violatingMeters, cost, distance };
         currentMargin = newMargin;
-      } catch {
+      } catch (e) {
+        // Only an A* failure is worth a wider box. Anything else is a bug:
+        // it propagates, unless an earlier box already found a route, which
+        // is kept rather than thrown away.
+        if (!(e instanceof RouteSearchError)) {
+          if (candidates.length === 0) throw e;
+          console.error(
+            `[routeiq] Route search failed after a route was found; keeping that route: ${e instanceof Error ? e.message : String(e)}`,
+          );
+          break;
+        }
+        lastSearchError = e;
         // Expand bounding box and retry
         if (currentMargin < maxMargin) {
           const newMargin = Math.min(currentMargin * 2, maxMargin);
@@ -735,6 +770,8 @@ export class RoutingEngine {
       effectiveDims,
       env,
       request,
+      true,
+      lastSearchError,
     );
   }
 
@@ -938,6 +975,8 @@ export class RoutingEngine {
     // properties.segments — routeViaPoints' merge then crashes with
     // "segments is not iterable". The via caller finalizes once at the end.
     finalize: boolean = true,
+    // The bounding-box loop's last A* failure, reported when this gives up.
+    searchError?: Error,
   ): Promise<RouteResult> {
     const warnings: RouteWarning[] = [];
     const reachableFromStart = this.db.getReachableNodes(startNode);
@@ -1008,7 +1047,8 @@ export class RoutingEngine {
 
     throw new Error(
       `No route found — graph is connected but A* could not find a path. ` +
-        `This should not happen with soft constraints enabled.`,
+        `This should not happen with soft constraints enabled.` +
+        (searchError ? ` Last search error: ${searchError.message}` : ""),
     );
   }
 
@@ -1137,6 +1177,7 @@ export class RoutingEngine {
     }
 
     let finalResult: RouteResult | null;
+    const finalFailure: { reason?: string } = {};
     if (endMode === "manual") {
       // Final leg drawn by hand — end exactly at the user's destination
       // (no node snapping; there is no following leg to pick up from it).
@@ -1163,11 +1204,15 @@ export class RoutingEngine {
         finalBbox,
         env ? { ...env, offsetSec: elapsedSec } : undefined,
         waitOverrides,
+        finalFailure,
       );
     }
 
     if (!finalResult) {
-      throw new Error("No route found to destination");
+      throw new Error(
+        "No route found to destination" +
+          (finalFailure.reason ? `: ${finalFailure.reason}` : ""),
+      );
     }
 
     // Snap the final segment's start to currentStart (last via point or start if no vias)
@@ -1227,6 +1272,8 @@ export class RoutingEngine {
     bbox?: BBox,
     env?: RouteEnv,
     waitOverrides?: WaitOverrides,
+    // Filled with why the segment failed when this returns null.
+    failure: { reason?: string } = {},
   ): Promise<RouteResult | null> {
     const label = viaIndex >= 0 ? `Via point ${viaIndex + 1}` : "Destination";
     const startPt = { latitude: startLat, longitude: startLon };
@@ -1242,6 +1289,8 @@ export class RoutingEngine {
       distance: number;
     } | null = null;
     let retriedForPenalty = false;
+    // The last A* failure, for the fallback's message when no box finds a path.
+    let lastSearchError: RouteSearchError | undefined;
 
     while (currentMargin <= segmentMaxMargin) {
       const segmentBbox = bbox ?? bboxFromPoints(startPt, endPt, currentMargin);
@@ -1252,9 +1301,9 @@ export class RoutingEngine {
       // the caller-supplied box (routeViaPoints' adaptiveMargin one), which
       // is dropped on the first retry (`bbox = undefined` below) so later
       // attempts fall through to the expanding bboxFromPoints box.
-      await this.db.ensureRegionsForBbox(segmentBbox);
-
       try {
+        // Inside the try, as in calculateRouteImpl.
+        await this.db.ensureRegionsForBbox(segmentBbox);
         const result = await this.astarSearch(
           startLat,
           startLon,
@@ -1304,7 +1353,17 @@ export class RoutingEngine {
         retriedForPenalty = true;
         previousAttempt = { violatingMeters, cost, distance };
         currentMargin = newMargin;
-      } catch {
+      } catch (e) {
+        // As in calculateRouteImpl: widen only on an A* failure; a bug
+        // propagates unless a route was already found.
+        if (!(e instanceof RouteSearchError)) {
+          if (candidates.length === 0) throw e;
+          console.error(
+            `[routeiq] Route search for ${label} failed after a route was found; keeping that route: ${e instanceof Error ? e.message : String(e)}`,
+          );
+          break;
+        }
+        lastSearchError = e;
         bbox = undefined;
         if (currentMargin >= segmentMaxMargin) break;
         const newMargin = Math.min(currentMargin * 2, segmentMaxMargin);
@@ -1361,16 +1420,20 @@ export class RoutingEngine {
           // merged route is scheduled once, as a whole.
           undefined,
           false,
+          lastSearchError,
         );
         if (fallback.warnings) {
           warnings.push(...fallback.warnings);
           fallback.warnings = undefined;
         }
         return fallback;
-      } catch {
+      } catch (e) {
+        failure.reason = e instanceof Error ? e.message : String(e);
+        console.log(`[routeiq] ${label}: ${failure.reason}`);
         return null;
       }
     }
+    failure.reason = lastSearchError?.message;
     return null;
   }
 
@@ -2190,6 +2253,9 @@ export class RoutingEngine {
     dims: VesselDimensions,
     bbox?: BBox,
     env?: RouteEnv,
+    // false: search from the literal nearest nodes, without the "better
+    // depth" swap — the retry when a swapped endpoint led nowhere.
+    improveEndpoints: boolean = true,
   ): Promise<RouteResult> {
     let startNode: number | null = await this.db.findNearestNode(
       startLat,
@@ -2201,7 +2267,9 @@ export class RoutingEngine {
     const endRegion = this.db.findNavmeshRegionAt(endLat, endLon);
 
     if ((!startNode && !startRegion) || (!endNode && !endRegion)) {
-      throw new Error("Could not find routing nodes near start or end point");
+      throw new RouteSearchError(
+        "Could not find routing nodes near start or end point",
+      );
     }
 
     // Multi-candidate boundary-node seeding/goal-testing (spec §6 items 1-4):
@@ -2227,10 +2295,12 @@ export class RoutingEngine {
       ? this.seedNavmeshCandidates(endRegion, endLat, endLon)
       : null;
     if (!startCandidates && startNode === null) {
-      throw new Error("Could not find routing nodes near start point");
+      throw new RouteSearchError(
+        "Could not find routing nodes near start point",
+      );
     }
     if (!endCandidates && endNode === null) {
-      throw new Error("Could not find routing nodes near end point");
+      throw new RouteSearchError("Could not find routing nodes near end point");
     }
 
     const minDepth = this.requiredDepth(dims);
@@ -2318,9 +2388,32 @@ export class RoutingEngine {
         nodeLon,
         radius,
       );
+      // The nearest candidate with a deep edge, with two exclusions.
+      //
+      // A node joined to this one along the waterway close by is no better
+      // endpoint: the vessel has to sail that stretch anyway, and A* takes
+      // it and reports its depth. Swapping would only cut the shallow
+      // stretch out of the route and put an unchecked straight connector
+      // in its place — a 1.5 km harbour channel became a "coverage gap"
+      // with no depth warning. For the start that is a node this one leads
+      // to; for the end, a node that leads to this one (the approach). So
+      // the swap is only for water not joined to this node nearby.
+      //
+      // A node that leads nowhere is no entry at all: a small island of its
+      // own (a stray overlay edit, an unconnected basin) has a deep edge
+      // too, and swapping to it left A* nothing to search, so a slightly
+      // shallow harbour exit failed outright instead of routing with a
+      // depth warning. Reaching the node being replaced or the other
+      // endpoint, or a few thousand nodes, counts as leading somewhere.
+      // Computed only once a deep candidate turns up: most calls find none.
+      let localReach: Set<number> | null = null;
+      const other = label === "Start" ? endNode : startNode;
+      const targets = new Set<number>([node]);
+      if (other !== null) targets.add(other);
+      const sorted = [...candidates].sort((a, b) => a.distance - b.distance);
       let best = node;
       let bestDist = Infinity;
-      for (const c of candidates) {
+      for (const c of sorted) {
         if (c.id === node) continue;
         const cEdges = await this.db.getOutgoingEdges(c.id);
         if (cEdges.length === 0) continue; // skip dead-end candidates for start node
@@ -2328,10 +2421,23 @@ export class RoutingEngine {
           const d = depthOf(e, c.lat, c.lon);
           return !depthKnownOf(e) || d >= minDepth;
         });
-        if (hasDeep && c.distance < bestDist) {
-          bestDist = c.distance;
-          best = c.id;
+        if (!hasDeep) continue;
+        if (!localReach) {
+          localReach = await this.localGraphReach(
+            node,
+            nodePos.lat,
+            nodePos.lon,
+            radius * 2,
+            label === "Start" ? "from" : "to",
+          );
         }
+        if (localReach.has(c.id)) continue;
+        if (!this.db.leadsAnywhere(c.id, targets, IMPROVE_NODE_MIN_REACH)) {
+          continue;
+        }
+        bestDist = c.distance;
+        best = c.id;
+        break;
       }
       if (best !== node) {
         console.log(
@@ -2345,11 +2451,13 @@ export class RoutingEngine {
     // valid boundary candidates — navmesh regions are open water by
     // construction, so "improve to a deeper nearby node" doesn't apply, and
     // real A* cost comparison across candidates already does a better job.
-    if (!endCandidates && endNode !== null) {
+    const literalStart = startNode;
+    const literalEnd = endNode;
+    if (improveEndpoints && !endCandidates && endNode !== null) {
       const improvedEnd = await improveNode(endNode, endLat, endLon, "End");
       if (improvedEnd !== endNode) endNode = improvedEnd;
     }
-    if (!startCandidates && startNode !== null) {
+    if (improveEndpoints && !startCandidates && startNode !== null) {
       const improvedStart = await improveNode(
         startNode,
         startLat,
@@ -2475,7 +2583,9 @@ export class RoutingEngine {
         startCoords &&
         !isInsideBBox(startCoords.lat, startCoords.lon, bbox)
       ) {
-        throw new Error("Start node is outside the routing bounding box");
+        throw new RouteSearchError(
+          "Start node is outside the routing bounding box",
+        );
       }
     }
 
@@ -2670,6 +2780,38 @@ export class RoutingEngine {
       }
     }
 
+    if (
+      (!goalReached || reachedNode === null) &&
+      improveEndpoints &&
+      (startNode !== literalStart || endNode !== literalEnd)
+    ) {
+      // A swapped endpoint can still lead nowhere the island check above
+      // missed (a basin bigger than IMPROVE_NODE_MIN_REACH that misses the
+      // other endpoint). The literal nearest nodes route with a depth
+      // penalty instead of not at all, so search again from those.
+      console.log(
+        `[routeiq] No path from the better-depth endpoint(s) — retrying from the nearest nodes`,
+      );
+      try {
+        return await this.astarSearch(
+          startLat,
+          startLon,
+          endLat,
+          endLon,
+          minCoastDistanceMeters,
+          dims,
+          bbox,
+          env,
+          false,
+        );
+      } catch (e) {
+        if (!(e instanceof RouteSearchError)) throw e;
+        throw new RouteSearchError(
+          `${e.message} [retried from the nearest nodes after the better-depth endpoint(s) found no path]`,
+        );
+      }
+    }
+
     if (!goalReached || reachedNode === null) {
       // Report what the search actually ran into instead of always blaming
       // vessel constraints — a disconnected graph, an undersized bounding
@@ -2715,7 +2857,7 @@ export class RoutingEngine {
             : "");
       }
 
-      throw new Error(
+      throw new RouteSearchError(
         `No route found between the given points — ${detail} ` +
           `(vessel dims: draft=${dims.draft}m, beam=${dims.beam}m, airDraft=${dims.airDraft}m, minCoastDistance=${(minCoastDistanceMeters / 1852).toFixed(2)}nm)`,
       );
@@ -3081,6 +3223,69 @@ export class RoutingEngine {
     return env
       ? env.departureMs + (env.offsetSec + elapsedSec) * 1000
       : undefined;
+  }
+
+  /**
+   * Nodes joined to `node` within `maxDistance` metres of sailing (edge
+   * lengths, a bounded Dijkstra): the ones it leads to (`"from"`) or the
+   * ones that lead to it (`"to"`). Only edges A* could sail in that
+   * direction count — not a wrong-way one-way edge, not one that crosses
+   * land or an obstacle.
+   */
+  private async localGraphReach(
+    node: number,
+    lat: number,
+    lon: number,
+    maxDistance: number,
+    direction: "from" | "to",
+  ): Promise<Set<number>> {
+    // The graph only indexes outgoing edges. Every node on a path of at
+    // most maxDistance lies within maxDistance of `node` as the crow flies,
+    // so the incoming edges that matter come from the nodes in that circle.
+    let incoming: Map<number, Array<{ id: number; distance: number }>> | null =
+      null;
+    if (direction === "to") {
+      incoming = new Map();
+      const near = await this.db.getNodesInRadius(lat, lon, maxDistance);
+      const ids = new Set<number>(near.map((n) => n.id));
+      ids.add(node);
+      for (const id of ids) {
+        for (const e of await this.db.getOutgoingEdges(id)) {
+          if (!ids.has(e.target) || !isSailableEdge(e)) continue;
+          let list = incoming.get(e.target);
+          if (!list) incoming.set(e.target, (list = []));
+          list.push({ id, distance: e.distance });
+        }
+      }
+    }
+    const neighbours = async (
+      id: number,
+    ): Promise<Array<{ id: number; distance: number }>> => {
+      if (incoming) return incoming.get(id) ?? [];
+      return (await this.db.getOutgoingEdges(id))
+        .filter(isSailableEdge)
+        .map((e) => ({ id: e.target, distance: e.distance }));
+    };
+
+    const dist = new Map<number, number>([[node, 0]]);
+    const done = new Set<number>();
+    const heap = new MinHeap<{ id: number; d: number }>((x) => x.d);
+    heap.push({ id: node, d: 0 });
+    while (!heap.isEmpty()) {
+      const { id, d } = heap.pop()!;
+      if (done.has(id)) continue;
+      done.add(id);
+      for (const n of await neighbours(id)) {
+        const nd = d + n.distance;
+        if (nd > maxDistance) continue;
+        const known = dist.get(n.id);
+        if (known === undefined || nd < known) {
+          dist.set(n.id, nd);
+          heap.push({ id: n.id, d: nd });
+        }
+      }
+    }
+    return done;
   }
 
   private getEdgePenalty(
