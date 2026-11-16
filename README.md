@@ -22,7 +22,7 @@ An offline-first, vessel-aware nautical route planner designed to run natively a
 
 - **Offline-First Routing**: Pre-computed routing graph enables instant route calculation without internet connectivity
 - **Vessel-Aware**: Considers draft, beam, and air draft (with configurable safety margins) to ensure safe navigation
-- **Tide-Aware (optional)**: Can factor in tidal currents — needs a tide data plugin installed and running: [`signalk-tidal-currents`](https://github.com/marcelrv/signalk-tidal-currents) for real harmonic current stations (preferred), and/or [`signalk-tides`](https://github.com/openwatersio/signalk-tides) for a height-derived estimate. Without either, routes fall back to plain distance
+- **Tide-Aware (optional)**: Can factor in tidal currents — needs a tide data plugin installed and running: [`signalk-tidal-currents`](https://github.com/marcelrv/signalk-tidal-currents) for real harmonic current stations (preferred), and/or [`signalk-tides`](https://github.com/openwatersio/signalk-tides) for tide heights, which give the depth under the keel at the time of passage. Without either, routes fall back to plain distance
 - **Interactive Web UI**: Leaflet-based map interface with click-and-drag route planning
 - **Freeboard-SK Integration**: Runs as a [Freeboard-SK](https://github.com/SignalK/freeboard-sk) Plotter Extension panel, so you can plan routes without leaving Freeboard-SK's own charting UI
 - **GPX Export**: Export routes for use in OpenCPN, WilhelmSK, and other navigation software
@@ -60,7 +60,7 @@ RouteIQ can be used two ways: as its own standalone web app (served by the plugi
 4. Click the ☰ menu icon in the top-right corner of the screen to open the Routing / Charts / View settings, and use **Manage Routing Data** there to download a routing database for your area.
 5. Set your vessel dimensions (or let RouteIQ auto-detect them from `design.draft` etc. if your Signal K server provides them) and start planning routes.
 
-Want tide-aware routing? Install and enable a tide data plugin first — [`signalk-tidal-currents`](https://github.com/marcelrv/signalk-tidal-currents) for real harmonic current stations, and/or [`signalk-tides`](https://github.com/openwatersio/signalk-tides) for a height-derived estimate — then turn on "Consider Tides" in RouteIQ's settings (☰ menu → Routing) or per request. When both are available RouteIQ prefers the current stations and falls back to the height estimate outside their range.
+Want tide-aware routing? Install and enable a tide data plugin first — [`signalk-tidal-currents`](https://github.com/marcelrv/signalk-tidal-currents) for real harmonic current stations, and/or [`signalk-tides`](https://github.com/openwatersio/signalk-tides) for tide heights — then turn on "Consider Tides" in RouteIQ's settings (☰ menu → Routing) or per request. Currents come only from the current stations: away from them RouteIQ assumes no current, rather than guessing one. Tide heights, where available, set the depth at the time of passage.
 
 ## Configuration
 
@@ -72,22 +72,18 @@ These settings are available under Server → Plugin Config → RouteIQ:
 | Draft Safety Margin (m) | 0.3 | Under-keel clearance added to the vessel's design draft |
 | Air Draft Safety Margin (m) | 1.5 | Mast clearance added to the vessel's design air draft |
 | Beam Safety Margin (m) | 2.0 | Width clearance added to the vessel's design beam |
-| Default Min Coast Distance (NM) | 0.5 | Default minimum distance to keep from the coastline |
 | Average Speed (kn) | 6.0 | Cruising speed used to estimate route duration / ETA |
 | Typical Lock Wait (min) | 60 | Time allowed for each lock on the route, counted towards duration and ETA. Adjustable per route under ☰ → Routing |
 | Typical Opening Bridge Wait (min) | 30 | Time allowed for each opening bridge. Fixed spans cost nothing |
 | Consider Tides by Default | off | Factor in tidal currents when calculating routes (needs `signalk-tidal-currents` and/or `signalk-tides`); can be overridden per request |
-| Max Tidal Current (kn) | 2.0 | Spring-tide current at full flood/ebb, used to scale the estimated tidal flow model |
 | Tides API Base URL | this server | Server hosting the tide/current data plugins, if not this one |
-| Waypoint Simplification Tolerance (m) | 30 | Max deviation allowed when simplifying the computed path down to route waypoints |
-| Wrong Way Penalty | 5.0 | Cost penalty applied when routing against marked traffic flow |
-| Line-of-Sight Sample Interval (m) | 500 | Spacing between samples when checking line-of-sight for route smoothing |
-| Line-of-Sight Search Radius (m) | 0 | Radius to search for graph nodes when verifying line-of-sight |
 | Database Catalog URL | signalk-router-data catalog | Where to look for downloadable routing databases |
 | Dynamic Database Loading | on | Load each region into memory only when a route actually needs it, instead of loading everything at startup. Recommended when you have multiple regional databases installed |
-| Eager-load Region at Vessel Position | on | With dynamic loading on, pre-load the region under the vessel so it's ready to route as soon as it's positioned |
-| Proactive Load Radius (NM) | 0 | Load a region before the vessel actually enters it, once within this distance |
-| Max Loaded Regions | 6 | Cap on how many regions stay loaded in memory at once when using dynamic loading |
+| Max Loaded Graph Edges | from available memory | With dynamic loading on, caps how much routing graph stays in memory; the least-recently-used regions are unloaded between routes to stay under it |
+
+With dynamic loading on, RouteIQ also loads the region under the vessel as soon as it has a position, so it is ready to route.
+
+Settings that used to be here and are gone: Default Min Coast Distance (a no-op on current routing databases, which carry no distance to land; a client can still send `minCoastDistance` per request), Max Tidal Current (it scaled a current guessed from tide heights, which is no longer made), Wrong Way Penalty and Line-of-Sight Sample Interval (nothing read them), and Waypoint Simplification Tolerance, Line-of-Sight Search Radius, Eager-load Region, Proactive Load Radius and Max Loaded Regions (now fixed internal defaults). A value saved for any of them is ignored.
 
 ## Safety Constraints & Routing
 
@@ -95,7 +91,7 @@ Routes avoid edges where:
 - Water depth is insufficient for the vessel's draft (plus safety margin)
 - Vertical clearance is insufficient for the vessel's air draft (plus safety margin)
 - Channel width is insufficient for the vessel's beam (plus safety margin)
-- Distance to land is below the configured minimum coast distance
+- Distance to land is below the `minCoastDistance` a request asks for (none by default)
 
 Routing prefers marked fairways over open water and penalizes travel against marked traffic flow.
 

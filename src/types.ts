@@ -310,7 +310,7 @@ export interface RouteResult {
   tide?: {
     enabled: boolean;
     estimated: boolean; // true = model/community-data predictions, not measurements
-    source?: "stations" | "height-estimate"; // real current stations vs height-derived estimate
+    source?: "stations" | "heights"; // current stations, or tide heights only (depth, no current)
     stations: string[]; // station names used for the flow field
     // True when the tide was counted towards depth somewhere on this route —
     // see the segment-level minDepthAtPassage.
@@ -443,8 +443,6 @@ export interface PluginConfig {
   safetyMarginDraft: number; // meters, added to design draft
   safetyMarginAirDraft: number; // meters, added to design air draft
   safetyMarginBeam: number; // meters, added to design beam
-  defaultCoastDistance: number;
-  wrongWayPenalty: number;
   routingBBoxMargin: number; // degrees, default 1.0 (~111km) — internal search tuning, not in the settings schema
   routingBBoxMaxExtent: number; // degrees, default 10.0 — internal, not in the settings schema
   // How much longer a fully-compliant route may be before the search stops
@@ -464,8 +462,7 @@ export interface PluginConfig {
   // empty band between them and needs no tuning per deployment. Internal, like
   // routingBBoxMargin — deliberately not in the settings schema. 0 disables.
   coverageGapMeters: number; // meters, default 1500 — internal, not user-facing
-  lineOfSightSampleInterval: number; // meters, default 500
-  lineOfSightSearchRadius: number; // meters, default 800
+  lineOfSightSearchRadius: number; // meters, default 0 (smoothing off) — internal
   averageSpeedKnots: number; // knots, default 6.0
   // Typical wait at an opening span or a lock, in minutes. Applied to the ETA
   // only — never to the routing cost — so it cannot change which way a route
@@ -473,10 +470,9 @@ export interface PluginConfig {
   // passable or it is not, so it carries no wait.
   lockWaitMinutes: number; // minutes, default 60
   bridgeWaitMinutes: number; // minutes, default 30 (opening spans only)
-  waypointTolerance: number; // meters, max deviation when simplifying to waypoints (default 30)
+  waypointTolerance: number; // meters, max deviation when simplifying to waypoints (default 30) — internal
   catalogUrl: string; // URL to the routing-index.json catalog for downloadable databases
   considerTides: boolean; // default for the per-request "use tides" toggle
-  maxTidalCurrentKnots: number; // spring-current calibration for the estimated flow model
   tidesApiBase: string; // base URL of the server hosting signalk-tides
   // §4a: when true (default since 2026-07-20), startup only peeks each
   // file's metadata/coverage (cheap), and individual databases load into
@@ -490,16 +486,16 @@ export interface PluginConfig {
   // which stopped being true once per-region publishing started. See
   // PHASE_4_DESIGN.md §4a and NEXT_PHASES.md's 2026-07-20 entry.
   dynamicLoading: boolean;
-  // §4a trigger 1: when dynamicLoading is on, subscribe to navigation.position
+  // §4a trigger 1 (internal): when dynamicLoading is on, subscribe to navigation.position
   // and eager-load the region under the vessel at startup + on movement, so a
   // positioned vessel boots with its local region loaded instead of an empty
   // graph. Default on; opt out to keep loading purely route-triggered.
   eagerLoadAtPosition: boolean;
-  // Proactive load band (nautical miles) around the vessel position — a region
+  // Internal. Proactive load band (nautical miles) around the vessel position — a region
   // within this distance of the vessel loads before it actually crosses in.
   // 0 = containment only (load only the region the vessel is inside).
   loadRadiusNm: number;
-  // §4a M5: bounded working-set for dynamic loading. 0 = unlimited (keep
+  // §4a M5 (internal): bounded working-set for dynamic loading. 0 = unlimited (keep
   // every region a route/position has loaded). >0 = keep at most N regions
   // loaded, evicting the least-recently-used region(s) beyond that once no
   // route is in flight. Only takes effect with dynamicLoading on.
@@ -560,13 +556,10 @@ export const DEFAULT_CONFIG: PluginConfig = {
   safetyMarginDraft: 0.3,
   safetyMarginAirDraft: 1.5,
   safetyMarginBeam: 2.0,
-  defaultCoastDistance: 0.5,
-  wrongWayPenalty: 5.0,
   routingBBoxMargin: 1.0,
   routingBBoxMaxExtent: 10.0,
   maxPenaltyDetourRatio: 3.0,
   coverageGapMeters: 1500,
-  lineOfSightSampleInterval: 500,
   lineOfSightSearchRadius: 0,
   averageSpeedKnots: 6.0,
   lockWaitMinutes: 60,
@@ -575,7 +568,6 @@ export const DEFAULT_CONFIG: PluginConfig = {
   catalogUrl:
     "https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/routing-index.json",
   considerTides: false,
-  maxTidalCurrentKnots: 2.0,
   tidesApiBase: "http://localhost:3000",
   dynamicLoading: true,
   eagerLoadAtPosition: true,
@@ -583,3 +575,28 @@ export const DEFAULT_CONFIG: PluginConfig = {
   maxLoadedRegions: 6,
   maxLoadedRegionEdges: defaultMaxLoadedRegionEdges(),
 };
+
+/** Keys that are no longer user settings. start() deletes them from the saved
+ *  plugin config before merging it with DEFAULT_CONFIG, so a value saved back
+ *  when the field was on the settings page can never override the current
+ *  default. The ones still in PluginConfig are internal tuning with a fixed
+ *  default; the others are gone altogether. */
+export const RETIRED_CONFIG_KEYS: readonly string[] = [
+  // internal search tuning, off the settings page since 2026-07-18
+  "routingBBoxMargin",
+  "routingBBoxMaxExtent",
+  // retired 2026-11-16: nothing read these
+  "wrongWayPenalty",
+  "lineOfSightSampleInterval",
+  // retired 2026-11-16: a no-op on factory databases (no distance_to_land)
+  "defaultCoastDistance",
+  // retired 2026-11-16: only scaled the height-derived current estimate,
+  // which is gone (currents come from current stations only)
+  "maxTidalCurrentKnots",
+  // internal tuning since 2026-11-16
+  "lineOfSightSearchRadius",
+  "waypointTolerance",
+  "eagerLoadAtPosition",
+  "loadRadiusNm",
+  "maxLoadedRegions",
+];

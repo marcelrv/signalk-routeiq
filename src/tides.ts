@@ -1,11 +1,15 @@
 /**
- * Tidal current estimation for tide-aware routing.
+ * Tide data for tide-aware routing, from two plugins:
  *
- * Data source: the signalk-tides plugin (https://github.com/openwatersio/signalk-tides)
- * which serves offline harmonic tide-HEIGHT predictions at
- * /signalk/v2/api/tides (station search by position, 10-minute timelines).
- * It provides no current (set/drift) data, so v1 derives an ESTIMATED
- * current from the height stations — see prepareTidalFlowField().
+ * - signalk-tidal-currents (/signalk/v2/api/currents): harmonic current
+ *   stations with set/drift. The only source of tidal *current* — see
+ *   prepareStationFlowField(). Away from its stations the flow is zero.
+ * - signalk-tides (https://github.com/openwatersio/signalk-tides,
+ *   /signalk/v2/api/tides): tide-HEIGHT predictions, used only for the depth
+ *   under the keel at the time of passage — see prepareTideHeights(). Until
+ *   2026-11-16 a current was also estimated from these heights' slope, scaled
+ *   by a single user-set spring speed; that estimate is gone, because no one
+ *   speed fits every area and a wrong current is worse than none.
  *
  * Architecture note: FlowField is the provider-agnostic abstraction the
  * routing engine consumes. Future providers (ENC TS_PAD panels, RWS
@@ -34,8 +38,9 @@ export interface FlowField {
   /** True when values are model estimates rather than measured/official data. */
   readonly estimated: boolean;
   /** Where the vectors come from: 'stations' (harmonic current stations via
-   *  signalk-tidal-currents) or 'height-estimate' (derived from tide heights). */
-  readonly source: "stations" | "height-estimate";
+   *  signalk-tidal-currents) or 'heights' (none: only tide heights are known,
+   *  so the flow is zero everywhere). */
+  readonly source: "stations" | "heights";
 }
 
 /**
@@ -53,6 +58,8 @@ export interface FlowField {
  * low at neaps and on short windows; that is the safe way to be wrong.
  */
 export interface TideHeightField {
+  /** The height stations the field was built from. */
+  readonly stations: TideStationInfo[];
   /** Metres of tide above low water at (lat, lon, timeMs), or null when it
    *  cannot be answered — too few stations, a degenerate fit, or a time
    *  outside the fetched window. Never negative, and never 0 as a stand-in
@@ -65,9 +72,7 @@ export interface TideHeightField {
 
 export const KNOTS_TO_MS = 0.514444;
 
-/** How far a height station may be from a sample point and still describe it.
- *  Shared by the gradient and the height fit so they always agree on which
- *  stations apply. */
+/** How far a height station may be from a sample point and still describe it. */
 const MAX_STATION_DIST_M = 60_000;
 
 interface StationTimeline {
@@ -75,7 +80,6 @@ interface StationTimeline {
   startMs: number;
   stepMs: number;
   levels: number[];
-  maxAbsDhDt: number; // m/s over the fetched window, for phase normalization
   /** Lowest level in the window — this station's own low-water reference.
    *  Per station, so stations need not share a datum (or even be consistent
    *  with each other) for the rise to come out right. */
@@ -208,30 +212,20 @@ export class TidesClient {
 const EARTH_M_PER_DEG_LAT = 111_320;
 
 /**
- * Height-derived tidal flow field (v1 "estimated current" model).
- *
- * Magnitude: dh/dt at the nearest station, normalized by that station's max
- * |dh/dt| over the window → phase in [0, 1], times the configured spring
- * current. Direction: water flows down the sea-surface slope, taken from a
- * least-squares plane through the heights of the nearby stations. With
- * fewer than 3 stations the direction is indeterminate → zero flow
- * (conservative: never invents a favorable current).
+ * Tide heights from the signalk-tides stations: the rise above low water at a
+ * point, interpolated from the nearby stations with a least-squares plane.
+ * With fewer than 3 stations in range there is no answer (null).
  */
-class HeightGradientFlowField implements FlowField, TideHeightField {
-  readonly maxSpeedMs: number;
+class StationTideHeights implements TideHeightField {
   readonly maxRiseM: number;
   readonly stations: TideStationInfo[];
-  readonly estimated = true;
-  readonly source = "height-estimate" as const;
 
   private timelines: StationTimeline[];
-  private sampleCache = new Map<string, FlowVector>();
   private riseCache = new Map<string, number | null>();
   private static CACHE_MAX = 200_000;
 
-  constructor(timelines: StationTimeline[], maxCurrentKnots: number) {
+  constructor(timelines: StationTimeline[]) {
     this.timelines = timelines;
-    this.maxSpeedMs = maxCurrentKnots * KNOTS_TO_MS;
     this.stations = timelines.map((t) => t.station);
     let maxRise = 0;
     for (const tl of timelines) {
@@ -241,17 +235,15 @@ class HeightGradientFlowField implements FlowField, TideHeightField {
   }
 
   /** True when timeMs sits inside the fetched series. levelAt clamps to the
-   *  ends rather than failing, which is harmless for a gradient (the shape is
-   *  still roughly right) but not for a height: outside the window it would
-   *  quietly report the first or last level as though it were current. */
+   *  ends rather than failing: outside the window it would quietly report the
+   *  first or last level as though it were current. */
   private inWindow(tl: StationTimeline, timeMs: number): boolean {
     const endMs = tl.startMs + (tl.levels.length - 1) * tl.stepMs;
     return timeMs >= tl.startMs && timeMs <= endMs;
   }
 
   /** The stations this sample point should be interpolated from: nearest
-   *  first, within MAX_STATION_DIST_M, at most 6. Shared by the gradient and
-   *  the height so the two can never disagree about which stations apply. */
+   *  first, within MAX_STATION_DIST_M, at most 6. */
   private nearStations(
     lat: number,
     lon: number,
@@ -269,11 +261,10 @@ class HeightGradientFlowField implements FlowField, TideHeightField {
   }
 
   /**
-   * Rise above low water at a point, by fitting the same least-squares plane
-   * the gradient uses — but through each station's rise rather than its raw
-   * level, and keeping the intercept instead of throwing it away. With x and y
-   * measured from the sample point, the intercept *is* the interpolated rise
-   * there.
+   * Rise above low water at a point, by fitting a least-squares plane
+   * h = a + bx + cy through each station's rise (not its raw level). With x
+   * and y measured from the sample point, the intercept a *is* the
+   * interpolated rise there.
    *
    * Fitting rises rather than levels is what makes the datum question go away:
    * a constant offset in one station's series cancels against its own minimum
@@ -294,15 +285,15 @@ class HeightGradientFlowField implements FlowField, TideHeightField {
     if (cached !== undefined) return cached;
 
     const near = this.nearStations(lat, lon);
-    // Same three-station rule the gradient applies. It matters more here: a
-    // permissive depth answer from one distant or wrong-side station is the
-    // difference between a detour and a grounding.
+    // At least three stations, so the plane is determined: a permissive depth
+    // answer from one distant or wrong-side station is the difference between
+    // a detour and a grounding.
     const answer =
       near.length >= 3 && near.every((w) => this.inWindow(w.tl, bucketMs))
         ? this.fitRise(near, bucketMs)
         : null;
 
-    if (this.riseCache.size > HeightGradientFlowField.CACHE_MAX)
+    if (this.riseCache.size > StationTideHeights.CACHE_MAX)
       this.riseCache.clear();
     this.riseCache.set(key, answer);
     return answer;
@@ -353,85 +344,6 @@ class HeightGradientFlowField implements FlowField, TideHeightField {
     const i = Math.max(0, Math.min(tl.levels.length - 2, Math.floor(pos)));
     const f = Math.max(0, Math.min(1, pos - i));
     return tl.levels[i] * (1 - f) + tl.levels[i + 1] * f;
-  }
-
-  private dhDtAt(tl: StationTimeline, timeMs: number): number {
-    const h1 = this.levelAt(tl, timeMs - tl.stepMs / 2);
-    const h2 = this.levelAt(tl, timeMs + tl.stepMs / 2);
-    return (h2 - h1) / (tl.stepMs / 1000); // m/s
-  }
-
-  sample(lat: number, lon: number, timeMs: number): FlowVector {
-    if (this.timelines.length < 3) return { u: 0, v: 0 };
-
-    // Memoize on ~2 km / 10 min buckets — A* revisits nearby edges at
-    // similar times, and the tide field is smooth at that scale.
-    const key = `${Math.round(lat * 50)},${Math.round(lon * 50)},${Math.round(timeMs / 600_000)}`;
-    const cached = this.sampleCache.get(key);
-    if (cached) return cached;
-
-    const near = this.nearStations(lat, lon);
-    const result: FlowVector = { u: 0, v: 0 };
-
-    if (near.length >= 3) {
-      // Least-squares plane h = a + b·x + c·y through station heights (x, y
-      // in meters relative to the sample point). (b, c) = surface gradient.
-      let sx = 0,
-        sy = 0,
-        sxx = 0,
-        syy = 0,
-        sxy = 0,
-        sh = 0,
-        shx = 0,
-        shy = 0;
-      for (const w of near) {
-        const h = this.levelAt(w.tl, timeMs);
-        sx += w.dx;
-        sy += w.dy;
-        sxx += w.dx * w.dx;
-        syy += w.dy * w.dy;
-        sxy += w.dx * w.dy;
-        sh += h;
-        shx += h * w.dx;
-        shy += h * w.dy;
-      }
-      const n = near.length;
-      // Solve the 3x3 normal equations via Cramer's rule.
-      const det =
-        n * (sxx * syy - sxy * sxy) -
-        sx * (sx * syy - sxy * sy) +
-        sy * (sx * sxy - sxx * sy);
-      if (Math.abs(det) > 1e-9) {
-        const b =
-          (n * (shx * syy - sxy * shy) -
-            sh * (sx * syy - sxy * sy) +
-            sy * (sx * shy - shx * sy)) /
-          det;
-        const c =
-          (n * (sxx * shy - shx * sxy) -
-            sx * (sx * shy - shx * sy) +
-            sh * (sx * sxy - sxx * sy)) /
-          det;
-        const gradLen = Math.hypot(b, c);
-        // Typical tidal surface slope is ~1e-5; below a tenth of that the
-        // direction is numerically meaningless.
-        if (gradLen > 1e-7) {
-          const phase = Math.min(
-            1,
-            Math.abs(this.dhDtAt(near[0].tl, timeMs)) /
-              (near[0].tl.maxAbsDhDt || 1e-9),
-          );
-          const speed = this.maxSpeedMs * phase;
-          result.u = (-b / gradLen) * speed;
-          result.v = (-c / gradLen) * speed;
-        }
-      }
-    }
-
-    if (this.sampleCache.size > HeightGradientFlowField.CACHE_MAX)
-      this.sampleCache.clear();
-    this.sampleCache.set(key, result);
-    return result;
   }
 }
 
@@ -543,8 +455,8 @@ const STATION_RANGE_M = 20_000;
 
 /**
  * Flow field backed by real harmonic current stations: nearest station
- * within range, linear time interpolation. Positions out of range fall back
- * to the (estimated) height-gradient field when one is available.
+ * within range, linear time interpolation. Out of range of every station the
+ * flow is zero — no current is invented where nothing is known.
  */
 class StationFlowField implements FlowField {
   readonly maxSpeedMs: number;
@@ -552,21 +464,15 @@ class StationFlowField implements FlowField {
   readonly estimated: boolean;
   readonly source = "stations" as const;
 
-  constructor(
-    private series: StationSeries[],
-    private fallback: FlowField | null,
-  ) {
-    let max = fallback?.maxSpeedMs ?? 0;
+  constructor(private series: StationSeries[]) {
+    let max = 0;
     for (const s of series) {
       for (let i = 0; i < s.u.length; i++) {
         max = Math.max(max, Math.hypot(s.u[i], s.v[i]));
       }
     }
     this.maxSpeedMs = max;
-    this.stations = [
-      ...series.map((s) => s.info),
-      ...(fallback ? fallback.stations : []),
-    ];
+    this.stations = series.map((s) => s.info);
     // Station predictions themselves derive from community harmonic data.
     this.estimated = true;
   }
@@ -584,11 +490,7 @@ class StationFlowField implements FlowField {
         best = s;
       }
     }
-    if (!best) {
-      return this.fallback
-        ? this.fallback.sample(lat, lon, timeMs)
-        : { u: 0, v: 0 };
-    }
+    if (!best) return { u: 0, v: 0 };
     const pos = (timeMs - best.startMs) / best.stepMs;
     const i = Math.max(0, Math.min(best.u.length - 2, Math.floor(pos)));
     const f = Math.max(0, Math.min(1, pos - i));
@@ -602,8 +504,7 @@ class StationFlowField implements FlowField {
 /**
  * Prepare a station-backed flow field for a route. Queries stations at the
  * anchor points AND at midpoints between them (long legs would otherwise
- * miss mid-route stations), prefetches their set/drift timelines, and wires
- * the height-gradient field in as the out-of-range fallback.
+ * miss mid-route stations) and prefetches their set/drift timelines.
  * Returns null when no vector-capable station is anywhere near the route.
  */
 export async function prepareStationFlowField(
@@ -611,7 +512,6 @@ export async function prepareStationFlowField(
   anchors: Array<{ latitude: number; longitude: number }>,
   startMs: number,
   endMs: number,
-  fallback: FlowField | null,
 ): Promise<FlowField | null> {
   try {
     // Densify: anchor points plus midpoints of consecutive anchors.
@@ -665,7 +565,7 @@ export async function prepareStationFlowField(
       )
       .map((r) => r.value);
     if (series.length === 0) return null;
-    return new StationFlowField(series, fallback);
+    return new StationFlowField(series);
   } catch (e) {
     console.warn(`[routeiq] station flow field unavailable: ${e}`);
     return null;
@@ -673,18 +573,17 @@ export async function prepareStationFlowField(
 }
 
 /**
- * Prepare a tidal flow field covering a route request: find stations around
- * the request area, prefetch their height timelines for the travel window,
- * and return a synchronously sampleable field. Returns null when tides are
- * unavailable (plugin missing, no stations, fetch failures).
+ * Prepare tide heights covering a route request: find height stations around
+ * the request area, prefetch their timelines for the travel window, and return
+ * a synchronously queryable field. Returns null when heights are unavailable
+ * (plugin missing, no stations, fetch failures).
  */
-export async function prepareTidalFlowField(
+export async function prepareTideHeights(
   client: TidesClient,
   points: Array<{ latitude: number; longitude: number }>,
   startMs: number,
   endMs: number,
-  maxCurrentKnots: number,
-): Promise<(FlowField & TideHeightField) | null> {
+): Promise<TideHeightField | null> {
   try {
     // Union of nearest stations at each anchor point (start / via / end).
     const byId = new Map<string, TideStationInfo>();
@@ -696,7 +595,7 @@ export async function prepareTidalFlowField(
     if (byId.size === 0) return null;
 
     const timelines: StationTimeline[] = [];
-    // Pad the window so mid-route sampling and dh/dt differencing stay inside.
+    // Pad the window so mid-route sampling stays inside it.
     const padMs = 3600_000;
     const results = await Promise.allSettled(
       [...byId.values()].map(async (station) => {
@@ -711,19 +610,11 @@ export async function prepareTidalFlowField(
         const stepMs = Date.parse(tl[1].time) - t0;
         const levels = tl.map((e) => e.level);
         const minLevel = Math.min(...levels);
-        let maxAbsDhDt = 0;
-        for (let i = 1; i < levels.length; i++) {
-          maxAbsDhDt = Math.max(
-            maxAbsDhDt,
-            Math.abs(levels[i] - levels[i - 1]) / (stepMs / 1000),
-          );
-        }
         return {
           station,
           startMs: t0,
           stepMs,
           levels,
-          maxAbsDhDt,
           minLevel,
         } as StationTimeline;
       }),
@@ -733,9 +624,21 @@ export async function prepareTidalFlowField(
     }
     if (timelines.length === 0) return null;
 
-    return new HeightGradientFlowField(timelines, maxCurrentKnots);
+    return new StationTideHeights(timelines);
   } catch (e) {
-    console.warn(`[routeiq] tidal flow field unavailable: ${e}`);
+    console.warn(`[routeiq] tide heights unavailable: ${e}`);
     return null;
   }
+}
+
+/** The flow when only tide heights are known: zero everywhere. Lets a route
+ *  use the heights for depth without any current being applied. */
+export function noCurrentField(stations: TideStationInfo[]): FlowField {
+  return {
+    sample: () => ({ u: 0, v: 0 }),
+    maxSpeedMs: 0,
+    stations,
+    estimated: true,
+    source: "heights",
+  };
 }

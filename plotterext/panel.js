@@ -97,7 +97,7 @@ let selectedId = null;
 let busy = false;
 let engineReady = false;
 let tidesAvailable = false;
-let cfg = { averageSpeedKnots: 6, defaultCoastDistance: 0.5 };
+let cfg = { averageSpeedKnots: 6 };
 let units = { distance: "naut-mile" };
 // Per-route calculation session:
 //   requestPoints — the user's original start/via/end (survives re-calcs)

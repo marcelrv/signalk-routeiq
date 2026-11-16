@@ -85,8 +85,6 @@
         if (!c) return;
         if (c.averageSpeedKnots)
           document.getElementById("avg-speed").value = c.averageSpeedKnots;
-        if (c.defaultCoastDistance != null)
-          document.getElementById("min-coast").value = c.defaultCoastDistance;
         if (c.lockWaitMinutes != null)
           document.getElementById("lock-wait").value = c.lockWaitMinutes;
         if (c.bridgeWaitMinutes != null)
@@ -382,8 +380,6 @@
         mode: state.viaModes[i] || "auto",
       })),
       endMode: state.destMode || "auto",
-      minCoastDistance:
-        (parseFloat(document.getElementById("min-coast").value) || 0) / 1852,
       ...vesselOverrides(),
       ...waitOverrides(),
     };
@@ -5398,16 +5394,11 @@
         mode: state.viaModes[i] || "auto",
       }));
 
-      const minCoastMeters =
-        parseFloat(document.getElementById("min-coast").value) || 0;
-      const minCoastNauticalMiles = minCoastMeters / 1852;
-
       const payload = {
         start: start,
         end: end,
         via: via,
         endMode: state.destMode || "auto",
-        minCoastDistance: minCoastNauticalMiles,
         ...vesselOverrides(),
         ...waitOverrides(),
         useTides: tideEnabled(),

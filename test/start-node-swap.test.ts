@@ -147,7 +147,6 @@ function makeEngine(db: RoutingDatabase): RoutingEngine {
   const engine = new RoutingEngine(db, {
     ...DEFAULT_CONFIG,
     safetyMarginDraft: 0.2,
-    lineOfSightSampleInterval: 0,
     lineOfSightSearchRadius: 0,
   });
   engine.setVesselDimensions({ draft: 1.9, beam: 3.6, airDraft: 16 });

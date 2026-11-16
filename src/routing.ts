@@ -39,8 +39,9 @@ import {
   KNOTS_TO_MS,
   TideHeightField,
   TidesClient,
+  noCurrentField,
   prepareStationFlowField,
-  prepareTidalFlowField,
+  prepareTideHeights,
 } from "./tides.js";
 import {
   BBox,
@@ -430,37 +431,26 @@ export class RoutingEngine {
 
     const endMs = departureMs + windowSec * 1000;
 
-    // Height-derived estimate (signalk-tides) — used directly when no
-    // current stations cover the route, else as the out-of-range fallback.
-    const gradient = this.tides
-      ? await prepareTidalFlowField(
-          this.tides,
-          anchors,
-          departureMs,
-          endMs,
-          this.config.maxTidalCurrentKnots,
-        )
+    // Tide heights (signalk-tides) — used for depth at the time of passage.
+    const heights = this.tides
+      ? await prepareTideHeights(this.tides, anchors, departureMs, endMs)
       : null;
 
-    // Real harmonic current stations (signalk-tidal-currents) — preferred.
+    // Harmonic current stations (signalk-tidal-currents) — the only source of
+    // current. Without them a route still gets the heights, with no current.
     const stationField = this.currents
       ? await prepareStationFlowField(
           this.currents,
           anchors,
           departureMs,
           endMs,
-          gradient,
         )
       : null;
 
-    const flow = stationField ?? gradient;
-    if (!flow) return undefined;
-    // `gradient`, not `flow`: real current stations are preferred for the flow
-    // and carry no heights, so reading depths off the chosen field would lose
-    // them exactly where the data is best.
+    if (!stationField && !heights) return undefined;
     return {
-      flow,
-      heights: gradient ?? undefined,
+      flow: stationField ?? noCurrentField(heights!.stations),
+      heights: heights ?? undefined,
       departureMs,
       offsetSec: 0,
       speedMs,
@@ -502,8 +492,10 @@ export class RoutingEngine {
       beam,
       airDraft,
     } = request;
-    const effectiveCoastDistance =
-      minCoastDistance ?? this.config.defaultCoastDistance;
+    // No coast clearance unless the request asks for one: the factory
+    // databases carry no distance_to_land, so a server-wide default was a
+    // no-op there (and the setting for it is retired).
+    const effectiveCoastDistance = minCoastDistance ?? 0;
 
     // §4a dynamic loading: no-op in non-dynamic mode. In dynamic mode, load
     // (inline, before the search runs) any not-yet-loaded database whose
