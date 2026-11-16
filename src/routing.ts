@@ -32,6 +32,7 @@ import {
   buildItinerary,
   closestCoordIndex,
   cumulativeDistances,
+  limitPair,
 } from "./itinerary.js";
 import {
   CurrentsClient,
@@ -96,7 +97,7 @@ export function passesClosedSpan(
     airDraft <= 0
   )
     return false;
-  return airDraft + margin < closed;
+  return toCm(airDraft + margin) < closed;
 }
 
 interface RouteEnv {
@@ -340,6 +341,14 @@ function keepSegmentEdges(
  * neighbouring and crossing canals: #57.
  */
 const FALLBACK_MAX_DIST = 50;
+
+/** A vessel limit (dimension + safety margin) to the centimetre. The sum is
+ *  floating point — 2.1 + 0.2 is 2.3000000000000003, 15.56 + 1.5 is
+ *  17.060000000000002 — and unrounded it calls a charted value exactly at the
+ *  limit (2.3 m deep, 17.06 m clearance) a violation. */
+function toCm(m: number): number {
+  return Math.round(m * 100) / 100;
+}
 
 export class RoutingEngine {
   private db: RoutingDatabase;
@@ -2923,8 +2932,8 @@ export class RoutingEngine {
     const segments = result.features[0]?.properties.segments;
     if (!segments) return 0;
     const minDepth = this.requiredDepth(dims);
-    const minAirDraft = (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft;
-    const minBeam = (dims.beam ?? 4.0) + this.config.safetyMarginBeam;
+    const minAirDraft = this.requiredAirDraft(dims);
+    const minBeam = this.requiredWidth(dims);
 
     const coords = result.features[0]?.geometry.coordinates ?? [];
     // Reuse crossings this same result already carries (an earlier consumer
@@ -3097,7 +3106,19 @@ export class RoutingEngine {
    *  `??`, not `||`: a draft of 0 is a real answer (an unknown draft is
    *  `undefined`), and treating it as 2 m was a bug once already. */
   private requiredDepth(dims: VesselDimensions): number {
-    return (dims.draft ?? 2.0) + this.config.safetyMarginDraft;
+    return toCm((dims.draft ?? 2.0) + this.config.safetyMarginDraft);
+  }
+
+  /** Width the vessel needs: beam plus the configured side margin. The
+   *  search cost, the violation audit and the leg warnings all use this. */
+  private requiredWidth(dims: VesselDimensions): number {
+    return toCm((dims.beam ?? 4.0) + this.config.safetyMarginBeam);
+  }
+
+  /** Air draft plus mast clearance margin; an unknown air draft counts as 0.
+   *  The search cost, the violation audit and the warnings all use this. */
+  private requiredAirDraft(dims: VesselDimensions): number {
+    return toCm((dims.airDraft ?? 0) + this.config.safetyMarginAirDraft);
   }
 
   /**
@@ -3309,8 +3330,7 @@ export class RoutingEngine {
     if (
       typeof edge.max_air_draft === "number" &&
       edge.max_air_draft >= 0 &&
-      edge.max_air_draft <
-        (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft
+      edge.max_air_draft < this.requiredAirDraft(dims)
     ) {
       penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
       if (skipReasons) skipReasons.airDraft++;
@@ -3347,7 +3367,7 @@ export class RoutingEngine {
     if (
       typeof edge.min_width === "number" &&
       edge.min_width >= 0 &&
-      edge.min_width < (dims.beam ?? 4.0) + this.config.safetyMarginBeam
+      edge.min_width < this.requiredWidth(dims)
     ) {
       penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
       if (skipReasons) skipReasons.beam++;
@@ -3823,7 +3843,9 @@ export class RoutingEngine {
       {
         requiredDepth: this.requiredDepth(dims),
         beam: dims.beam ?? 4.0,
-        requiredWidth: (dims.beam ?? 4.0) + this.config.safetyMarginBeam,
+        requiredWidth: this.requiredWidth(dims),
+        // Same threshold as the via_constrained check in reportViolations.
+        requiredAirDraft: this.requiredAirDraft(dims),
       },
     );
     route.waypoints = waypoints;
@@ -5105,12 +5127,12 @@ export class RoutingEngine {
     const coords = result.features[0].geometry.coordinates;
     const segments = result.features[0].properties.segments!;
     const minDepth = this.requiredDepth(dims);
-    const airDraft = (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft;
+    const airDraft = this.requiredAirDraft(dims);
     // Beam is tested exactly as pathViolationMeters tests it. The two must
     // agree: that function decides a route is violating and may now be KEPT
     // anyway once maxPenaltyDetourRatio bounds the detour, so anything it
     // counts and this does not is a violation the helm is never told about.
-    const minBeam = (dims.beam ?? 4.0) + this.config.safetyMarginBeam;
+    const minBeam = this.requiredWidth(dims);
 
     let totalViolationSegments = 0;
     let totalViolationDist = 0;
@@ -5189,20 +5211,21 @@ export class RoutingEngine {
         // Only mention the tide where it actually moved the figure — with
         // tides off, or where the rise made no difference, the message reads
         // exactly as it always has rather than acquiring unexplained wording.
+        const [depth, need] = limitPair(worstDepth, minDepth);
         reasons.push(
           worstDepth - worstCharted >= RoutingEngine.TIDE_REPORT_MIN_RISE_M
-            ? `depth ${worstDepth.toFixed(1)}m at passage (${worstCharted.toFixed(1)}m charted) < required ${minDepth}m`
-            : `depth ${worstDepth.toFixed(1)}m < required ${minDepth}m`,
+            ? `depth ${depth}m at passage (${worstCharted.toFixed(1)}m charted) < required ${need}m`
+            : `depth ${depth}m < required ${need}m`,
         );
       }
-      if (worstAirDraft < Infinity)
-        reasons.push(
-          `air draft ${worstAirDraft.toFixed(1)}m < required ${airDraft}m`,
-        );
-      if (worstBeam < Infinity)
-        reasons.push(
-          `width ${worstBeam.toFixed(1)}m < required beam ${minBeam}m`,
-        );
+      if (worstAirDraft < Infinity) {
+        const [have, need] = limitPair(worstAirDraft, airDraft);
+        reasons.push(`air draft ${have}m < required ${need}m`);
+      }
+      if (worstBeam < Infinity) {
+        const [have, need] = limitPair(worstBeam, minBeam);
+        reasons.push(`width ${have}m < required beam ${need}m`);
+      }
       const distNm = totalViolationDist / 1852;
       warnings.push({
         type: "via_constrained",
