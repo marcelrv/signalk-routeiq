@@ -925,6 +925,24 @@ function samePoints(a, b) {
 }
 
 /**
+ * samePoints, and every point also keeps its name and waypoint link: a point
+ * renamed on the chart changes what the route asks for even where it stays.
+ * @param {object[]} a One list of route points.
+ * @param {object[]} b The other.
+ * @returns {boolean} True when nothing about the points changed.
+ */
+function unchangedPoints(a, b) {
+  return (
+    samePoints(a, b) &&
+    a.every(
+      (p, i) =>
+        (p.name || "").trim() === (b[i].name || "").trim() &&
+        (p.href || "") === (b[i].href || ""),
+    )
+  );
+}
+
+/**
  * Whether a route point is one this panel put in between the request points
  * ("WP7"): the start, the vias and the end carry a real name (or a waypoint
  * link), so a saved route says which of its points the user chose.
@@ -996,7 +1014,7 @@ async function currentRequestPoints(routeId) {
   const route = await client.call("route.get", { routeId });
   const points = route.points;
   const session = sessions.get(routeId);
-  if (session && samePoints(points, session.generated)) {
+  if (session && unchangedPoints(points, session.generated)) {
     return { points, requestPoints: session.requestPoints };
   }
   let base = null;
@@ -1009,7 +1027,10 @@ async function currentRequestPoints(routeId) {
           : null,
     };
   } else {
-    if (route.saved && !route.dirty) baselines.set(routeId, points);
+    // The first clean copy stays until the route leaves the chart or is
+    // calculated: an edit saved meanwhile is still an edit against it.
+    if (route.saved && !route.dirty && !baselines.has(routeId))
+      baselines.set(routeId, points);
     const loaded = baselines.get(routeId);
     if (loaded) {
       base = {
@@ -1023,16 +1044,19 @@ async function currentRequestPoints(routeId) {
 
 /**
  * Remember how a stored route looked when it came onto the chart (or was
- * saved), unless this panel calculated it and so knows its points already.
+ * first saved here), unless this panel calculated it and so knows its points
+ * already. A later save keeps the first copy: a point moved and saved before
+ * any calculation is still told apart from the route as loaded. (After a
+ * reload that is lost: the moved point is saved under its generated name.)
  * @param {{routeId: string, saved?: boolean, dirty?: boolean}} params The
  *   route.visible / route.saved event.
  */
 async function rememberBaseline(params) {
   if (!params?.routeId || !params.saved || params.dirty) return;
-  if (sessions.has(params.routeId)) return;
+  if (sessions.has(params.routeId) || baselines.has(params.routeId)) return;
   try {
     const route = await client.call("route.get", { routeId: params.routeId });
-    if (route.saved && !route.dirty)
+    if (route.saved && !route.dirty && !baselines.has(params.routeId))
       baselines.set(params.routeId, route.points);
   } catch {
     /* gone meanwhile */

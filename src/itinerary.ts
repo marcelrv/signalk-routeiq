@@ -647,7 +647,8 @@ function knownViaVertices(
 ): Map<number, number> {
   const out = new Map<number, number>();
   for (const [idx, v] of viaAt) {
-    if (!Number.isInteger(idx) || idx <= 0 || idx >= coords.length - 1) continue;
+    if (!Number.isInteger(idx) || idx <= 0 || idx >= coords.length - 1)
+      continue;
     if (!Number.isInteger(v) || v < 0 || v >= via.length) continue;
     out.set(idx, v);
   }
