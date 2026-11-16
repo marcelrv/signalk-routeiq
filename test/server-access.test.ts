@@ -5,9 +5,13 @@ import { after, before, describe, it } from "node:test";
 import {
   callerHeaders,
   CurrentsApiHandle,
+  JsonResponse,
   localServerBase,
   loopbackGetJson,
   runWithCaller,
+  TideSource,
+  TimeoutError,
+  warnIfRemoteTidesApiBase,
   watchCurrentsApi,
 } from "../dist/server-access.js";
 import type { ServerAPI } from "@signalk/server-api";
@@ -126,9 +130,7 @@ describe("caller credentials", () => {
         loopbackGetJson(`${base}/two`),
       ),
     ]);
-    const byUrl = Object.fromEntries(
-      seen.map((h, i) => [i, h.authorization]),
-    );
+    const byUrl = Object.fromEntries(seen.map((h, i) => [i, h.authorization]));
     assert.deepStrictEqual(Object.values(byUrl).sort(), [
       "Bearer one",
       "Bearer two",
@@ -316,6 +318,163 @@ describe("API router", () => {
         reject(err instanceof Error ? err : new Error("no handler reached")),
       );
     });
-    assert.deepStrictEqual(seen, { authorization: "Bearer tok", cookie: "c=1" });
+    assert.deepStrictEqual(seen, {
+      authorization: "Bearer tok",
+      cookie: "c=1",
+    });
+  });
+});
+
+describe("slow or dead tide plugins", () => {
+  const ok = (body: unknown): JsonResponse => ({
+    ok: true,
+    status: 200,
+    json: async () => body,
+  });
+  const quiet = <T>(fn: () => Promise<T>): Promise<T> => {
+    const warn = console.warn;
+    console.warn = () => {};
+    return fn().finally(() => (console.warn = warn));
+  };
+
+  it("cuts a loopback GET off at its deadline, even if bytes trickle in", async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200);
+      const t = setInterval(() => res.write(" "), 20);
+      res.on("close", () => clearInterval(t));
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+    const t0 = Date.now();
+    await assert.rejects(loopbackGetJson(url, 150), TimeoutError);
+    assert.ok(Date.now() - t0 < 1000);
+    server.closeAllConnections();
+    server.close();
+  });
+
+  it("skips an unreachable plugin for a while instead of waiting each time", async () => {
+    let calls = 0;
+    const source = new TideSource(
+      "signalk-tides",
+      "http://localhost:1",
+      async () => {
+        calls++;
+        throw Object.assign(new Error("connect"), { code: "ECONNREFUSED" });
+      },
+    );
+    const client = new TidesClient("http://localhost:1", undefined, source);
+    await quiet(async () => {
+      assert.deepStrictEqual(await client.probe(52, 5), {
+        available: false,
+        stations: [],
+      });
+      await assert.rejects(client.findStations(53, 6), /skipped/);
+    });
+    assert.strictEqual(calls, 1);
+  });
+
+  it("treats a redirect as the wrong address, but a refused login as per caller", async () => {
+    let status = 401;
+    let calls = 0;
+    const source = new TideSource("signalk-tides", "http://x", async () => {
+      calls++;
+      return { ok: false, status, json: async () => ({}) };
+    });
+    await quiet(async () => {
+      await assert.rejects(source.get("http://x/a", "a"), /401/);
+      await assert.rejects(source.get("http://x/b", "b"), /401/);
+      status = 301;
+      await assert.rejects(source.get("http://x/c", "c"), /301/);
+      await assert.rejects(source.get("http://x/d", "d"), /skipped/);
+    });
+    assert.strictEqual(calls, 3);
+  });
+
+  it("tries again once the retry time has passed", async () => {
+    let fail = true;
+    const source = new TideSource(
+      "signalk-tides",
+      "http://x",
+      async () => {
+        if (fail) throw new Error("down");
+        return ok([]);
+      },
+      1000,
+      30,
+    );
+    await quiet(() => assert.rejects(source.get("http://x/a", "a")));
+    fail = false;
+    await new Promise((r) => setTimeout(r, 40));
+    assert.deepStrictEqual(await source.get("http://x/a", "a"), []);
+  });
+
+  it("puts a deadline on the in-process handle too", async () => {
+    let calls = 0;
+    const handle: CurrentsApiHandle = {
+      version: 1,
+      providerId: "hung",
+      findStations: () => {
+        calls++;
+        return new Promise(() => {});
+      },
+      getTimeline: () => new Promise(() => {}),
+    };
+    const source = new TideSource(
+      "signalk-tidal-currents",
+      "http://x",
+      undefined,
+      50,
+    );
+    const client = new CurrentsClient(
+      "http://x",
+      () => handle,
+      undefined,
+      source,
+    );
+    await quiet(async () => {
+      await assert.rejects(client.findStations(52, 5), TimeoutError);
+      await assert.rejects(client.findStations(53, 6), /skipped/);
+    });
+    assert.strictEqual(calls, 1);
+  });
+
+  it("keeps cached answers per login", async () => {
+    const seenAuth: (string | undefined)[] = [];
+    const client = new TidesClient("http://x", async () => {
+      seenAuth.push(callerHeaders().authorization);
+      return ok([{ id: "s1", name: "S1", latitude: 52, longitude: 5 }]);
+    });
+    const ask = (authorization?: string) =>
+      runWithCaller({ authorization }, () => client.findStations(52, 5));
+    await ask("Bearer one");
+    await ask("Bearer one");
+    await ask(undefined);
+    await ask("Bearer two");
+    assert.deepStrictEqual(seenAuth, ["Bearer one", undefined, "Bearer two"]);
+  });
+});
+
+describe("retired tidesApiBase", () => {
+  it("warns only when the saved value named another server", () => {
+    const warn = console.warn;
+    const lines: string[] = [];
+    console.warn = (m: string) => lines.push(m);
+    try {
+      assert.strictEqual(warnIfRemoteTidesApiBase(undefined), false);
+      assert.strictEqual(warnIfRemoteTidesApiBase(""), false);
+      assert.strictEqual(
+        warnIfRemoteTidesApiBase("http://localhost:3000"),
+        false,
+      );
+      assert.strictEqual(warnIfRemoteTidesApiBase("http://[::1]:3000"), false);
+      assert.strictEqual(
+        warnIfRemoteTidesApiBase("http://boat.local:3000"),
+        true,
+      );
+    } finally {
+      console.warn = warn;
+    }
+    assert.strictEqual(lines.length, 1);
+    assert.match(lines[0], /boat\.local/);
   });
 });

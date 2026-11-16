@@ -22,6 +22,7 @@ import {
   localServerBase,
   PropertyValuesSurface,
   ServerSettingsSurface,
+  warnIfRemoteTidesApiBase,
   watchCurrentsApi,
 } from "./server-access.js";
 import { CurrentsClient, TidesClient } from "./tides.js";
@@ -99,6 +100,7 @@ export function pluginConstructor(app: ServerAPI) {
       const userOptions: Record<string, unknown> = {
         ...((options ?? {}) as Record<string, unknown>),
       };
+      warnIfRemoteTidesApiBase(userOptions.tidesApiBase);
       for (const key of RETIRED_CONFIG_KEYS) delete userOptions[key];
       config = { ...DEFAULT_CONFIG, ...userOptions };
 

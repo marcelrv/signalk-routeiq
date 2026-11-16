@@ -22,6 +22,7 @@
  * on another port, with SSL on, or with security on and no read-only access.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import * as http from "node:http";
 import * as https from "node:https";
 
@@ -95,7 +96,12 @@ export interface JsonResponse {
 
 export type GetJson = (url: string) => Promise<JsonResponse>;
 
-const LOOPBACK_TIMEOUT_MS = 15_000;
+/** A whole loopback GET (connect, headers and body) must finish within this.
+ *  Generous on purpose: on a Raspberry Pi a long timeline can take seconds,
+ *  and a slow answer must still count. What keeps a dead plugin from holding
+ *  a route for long is not a short timeout but the breaker in `TideSource`
+ *  (one wait, then skipped) and asking all stations at once. */
+export const LOOPBACK_TIMEOUT_MS = 30_000;
 
 /**
  * GET a URL on this server with the caller's credentials. Uses node:http(s)
@@ -103,7 +109,10 @@ const LOOPBACK_TIMEOUT_MS = 15_000;
  * certificate, which fetch would refuse, and this only ever talks to
  * localhost, so certificate checking buys nothing here.
  */
-export const loopbackGetJson: GetJson = (url) =>
+export const loopbackGetJson = (
+  url: string,
+  timeoutMs: number = LOOPBACK_TIMEOUT_MS,
+): Promise<JsonResponse> =>
   new Promise((resolve, reject) => {
     const u = new URL(url);
     const mod = u.protocol === "https:" ? https : http;
@@ -113,12 +122,12 @@ export const loopbackGetJson: GetJson = (url) =>
         method: "GET",
         headers: { accept: "application/json", ...callerHeaders() },
         ...(u.protocol === "https:" ? { rejectUnauthorized: false } : {}),
-        timeout: LOOPBACK_TIMEOUT_MS,
       },
       (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (c: Buffer) => chunks.push(c));
         res.on("end", () => {
+          clearTimeout(deadline);
           const status = res.statusCode ?? 0;
           const text = Buffer.concat(chunks).toString("utf8");
           resolve({
@@ -130,27 +139,152 @@ export const loopbackGetJson: GetJson = (url) =>
         res.on("error", reject);
       },
     );
-    req.on("timeout", () =>
-      req.destroy(new Error(`timed out after ${LOOPBACK_TIMEOUT_MS} ms`)),
+    // A total deadline, not the socket idle timeout: a server that trickles
+    // bytes would otherwise hold the route forever.
+    const deadline = setTimeout(
+      () => req.destroy(new TimeoutError(timeoutMs)),
+      timeoutMs,
     );
-    req.on("error", reject);
+    req.on("error", (e) => {
+      clearTimeout(deadline);
+      reject(e);
+    });
     req.end();
   });
 
-/** Warn once per client when the server refuses the login, instead of
- *  letting tides quietly read as "not installed". */
-export function warnIfRefused(
-  status: number,
-  what: string,
-  warned: { done: boolean },
-): void {
-  if ((status === 401 || status === 403) && !warned.done) {
-    warned.done = true;
-    console.warn(
-      `[routeiq] ${what} refused the request (${status}): the caller's login ` +
-        `does not allow reading it. Tides stay off for such requests.`,
+export class TimeoutError extends Error {
+  constructor(ms: number) {
+    super(`timed out after ${ms} ms`);
+    this.name = "TimeoutError";
+  }
+}
+
+/** Reject with a TimeoutError when `p` takes longer than `ms`. */
+export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new TimeoutError(ms)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
+/** How long a tide source that did not answer is skipped before it is tried
+ *  again. */
+export const UNREACHABLE_RETRY_MS = 60_000;
+
+/**
+ * One tide plugin as a source: the loopback GET with its status handling, the
+ * in-process call with a deadline, and a breaker. When the plugin does not
+ * answer (connection refused, timeout, or a redirect, which means the address
+ * from the settings is not where the server listens), every lookup fails at
+ * once for `UNREACHABLE_RETRY_MS` instead of each waiting out its own
+ * timeout. A departure scan runs dozens of routes, so without this a dead
+ * address would cost a timeout per route. A refused login (401/403) or a
+ * missing plugin (404) is a quick answer and never trips it: the login is
+ * per caller.
+ */
+export class TideSource {
+  private downUntil = 0;
+  private warned = new Set<string>();
+
+  constructor(
+    readonly name: string,
+    readonly base: string,
+    private readonly getJson: GetJson = loopbackGetJson,
+    private readonly timeoutMs = LOOPBACK_TIMEOUT_MS,
+    private readonly retryMs = UNREACHABLE_RETRY_MS,
+  ) {}
+
+  /** GET `url` (on `base`) and return its JSON body. */
+  async get(url: string, what: string): Promise<unknown> {
+    this.checkUp(what);
+    let resp: JsonResponse;
+    try {
+      resp = await this.getJson(url);
+    } catch (e) {
+      this.trip(
+        "unreachable",
+        `not reachable at ${this.base} (${errText(e)}). Check the server's ` +
+          `port and SSL settings.`,
+      );
+      throw new Error(`${what} failed: ${errText(e)}`);
+    }
+    if (resp.status >= 300 && resp.status < 400) {
+      this.trip(
+        "redirect",
+        `answered ${resp.status} (a redirect) at ${this.base}: the server ` +
+          `settings do not match the address it listens on.`,
+      );
+      throw new Error(`${what} failed (${resp.status})`);
+    }
+    if (!resp.ok) {
+      if (resp.status === 401 || resp.status === 403)
+        this.warnOnce(
+          "refused",
+          `refused the request (${resp.status}): the caller's login does ` +
+            `not allow reading it. Tides stay off for such requests.`,
+        );
+      throw new Error(`${what} failed (${resp.status})`);
+    }
+    return resp.json();
+  }
+
+  /** Call the plugin in-process, under the same deadline and breaker. */
+  async call<T>(what: string, fn: () => Promise<T>): Promise<T> {
+    this.checkUp(what);
+    try {
+      return await withTimeout(fn(), this.timeoutMs);
+    } catch (e) {
+      if (e instanceof TimeoutError)
+        this.trip("unreachable", `did not answer in-process (${e.message}).`);
+      throw e;
+    }
+  }
+
+  private checkUp(what: string): void {
+    if (Date.now() < this.downUntil)
+      throw new Error(`${what} skipped: ${this.name} did not answer recently`);
+  }
+
+  private trip(kind: string, message: string): void {
+    this.downUntil = Date.now() + this.retryMs;
+    this.warnOnce(
+      kind,
+      `${message} Tide lookups skip it for ${Math.round(this.retryMs / 1000)} s.`,
     );
   }
+
+  private warnOnce(kind: string, message: string): void {
+    if (this.warned.has(kind)) return;
+    this.warned.add(kind);
+    console.warn(`[routeiq] ${this.name} ${message}`);
+  }
+}
+
+function errText(e: unknown): string {
+  const code = (e as { code?: unknown })?.code;
+  if (typeof code === "string") return code;
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** A short key for the current caller's login, for caches of data fetched
+ *  with it: one caller's answer must not be served to another, who might not
+ *  be allowed to read it. Empty outside a request or without a login. */
+export function callerKey(): string {
+  const h = callerHeaders();
+  if (!h.authorization && !h.cookie) return "";
+  return createHash("sha256")
+    .update(`${h.authorization ?? ""}\n${h.cookie ?? ""}`)
+    .digest("base64url")
+    .slice(0, 16);
 }
 
 // ── In-process currents API (PropertyValues) ────────────────────────
@@ -220,4 +354,28 @@ export function watchCurrentsApi(
     }
   });
   return typeof unsub === "function" ? unsub : () => {};
+}
+
+// ── Retired setting ─────────────────────────────────────────────────
+
+/** The `tidesApiBase` setting is gone (the address now comes from the server
+ *  settings). A saved value that named another server can no longer apply,
+ *  and those tides would stop without a word, so say so. Returns whether it
+ *  warned. */
+export function warnIfRemoteTidesApiBase(value: unknown): boolean {
+  if (typeof value !== "string" || !value.trim()) return false;
+  let host: string;
+  try {
+    host = new URL(value).hostname.replace(/^\[|\]$/g, "");
+  } catch {
+    return false;
+  }
+  if (["localhost", "127.0.0.1", "::1", "0.0.0.0", "::"].includes(host))
+    return false;
+  console.warn(
+    `[routeiq] The Tides API Base URL setting (${value}) is retired: routeiq ` +
+      `now reads tides only from the plugins on this server. Install ` +
+      `signalk-tides / signalk-tidal-currents here to keep tide-aware routing.`,
+  );
+  return true;
 }
