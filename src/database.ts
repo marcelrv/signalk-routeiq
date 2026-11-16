@@ -2050,6 +2050,8 @@ export class RoutingDatabase {
     entry: DatabaseCoverageEntry,
   ): Promise<void> {
     entry.state = "loading";
+    const tombstones = { nodes: new Set<number>(), edges: new Set<string>() };
+    this.loadTombstones.add(tombstones);
     try {
       // Everything is read from the worker, and the navmesh parsed, before
       // the in-memory graph is touched: a load that fails (a worker error, a
@@ -2128,6 +2130,14 @@ export class RoutingDatabase {
       }> = await this.sendMessage("loadNavmeshRegions", {
         dbIndexes: [dbIndex],
       });
+
+      // Nothing awaits from here on, so these are all the deletions made
+      // while the reads above were in flight.
+      deletedNodeIds.push(...tombstones.nodes);
+      for (const key of tombstones.edges) {
+        const [source, target] = key.split(":").map(Number);
+        deletedEdges.push({ source, target });
+      }
 
       // The navmesh's node coordinates as the graph will hold them once this
       // load is applied: this file's nodes, then the ones already loaded,
@@ -2272,6 +2282,8 @@ export class RoutingDatabase {
       // stuck 'loading' forever.
       entry.state = "not_loaded";
       throw err;
+    } finally {
+      this.loadTombstones.delete(tombstones);
     }
   }
 
@@ -3579,10 +3591,26 @@ export class RoutingDatabase {
    *  results), so mutation sites call this even where it may look
    *  redundant. */
   private invalidateBBoxCaches(): void {
+    this.graphGeneration++;
     this.poiGrid = null;
     this.poiIndex = null;
     this.edgeGrid = null;
   }
+
+  /** Bumped on every change to the in-memory graph (each call of
+   *  invalidateBBoxCaches: a load, an edit). A route found at one generation
+   *  and judged at a later one has to re-read its limits and crossings from
+   *  the graph (RoutingEngine.refreshCandidateLimits). */
+  graphGeneration = 0;
+
+  /** Deletions made while a per-file load is reading from the worker, one
+   *  set per load in flight. The load applies its own snapshot of the
+   *  overlay deletions, taken before these happened, so without them it
+   *  would put a node or edge the user just deleted back. */
+  private loadTombstones = new Set<{
+    nodes: Set<number>;
+    edges: Set<string>;
+  }>();
 
   /** Lazy id -> row and whole -> parts maps over `this.pois`, rebuilt from
    *  scratch after any change (see invalidateBBoxCaches). A POI present in
@@ -4096,6 +4124,7 @@ export class RoutingDatabase {
   }
 
   async deleteNode(dbIndex: number, nodeId: number): Promise<void> {
+    for (const t of this.loadTombstones) t.nodes.add(nodeId);
     this.edgesBySource.delete(nodeId);
     for (const [src, edges] of this.edgesBySource) {
       const filtered = edges.filter((e) => e.target !== nodeId);
@@ -4117,6 +4146,7 @@ export class RoutingDatabase {
     source: number,
     target: number,
   ): Promise<void> {
+    for (const t of this.loadTombstones) t.edges.add(`${source}:${target}`);
     const edges = this.edgesBySource.get(source);
     if (edges) {
       const idx = edges.findIndex((e) => e.target === target);
@@ -4130,6 +4160,8 @@ export class RoutingDatabase {
     dbIndex: number,
     node: { id: number; lat: number; lon: number; node_depth?: number },
   ): Promise<void> {
+    // A re-add is the user's latest word on this id.
+    for (const t of this.loadTombstones) t.nodes.delete(node.id);
     await this.sendMessage("insertNode", { dbIndex, ...node });
     // This is an upsert (see handleUpsertNode) — an existing node id can be
     // re-added at a different (lat, lon), which would move it to a
@@ -4168,6 +4200,8 @@ export class RoutingDatabase {
       traffic_mode?: number;
     },
   ): Promise<void> {
+    for (const ts of this.loadTombstones)
+      ts.edges.delete(`${edge.source}:${edge.target}`);
     const s = this.nodes.get(edge.source);
     const t = this.nodes.get(edge.target);
     if (!s || !t) throw new Error("Source or target node not found");

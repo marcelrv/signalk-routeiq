@@ -667,6 +667,8 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
 
   afterEach(async () => {
     await db.close();
+    // A test's overlay edits must not reach the next one.
+    if (fs.existsSync(files[2])) fs.unlinkSync(files[2]);
   });
 
   after(() => {
@@ -718,5 +720,48 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
     // And it loads cleanly on the next try.
     await db.loadDatabaseGraph('east.sqlite');
     assert.strictEqual(db.getEdgeSync(id(rS0), id(rS1))!.min_depth, 7.5);
+  });
+
+  it('an earlier via leg is warned about a seam a later leg\'s load tightened', async () => {
+    // One box, no widening: the leg is found and warned about on west alone.
+    const engine = new RoutingEngine(db, {
+      ...DEFAULT_CONFIG,
+      routingBBoxMargin: 0.005,
+      routingBBoxMaxExtent: 0.005,
+    }) as any;
+    const dims = { draft: 8, beam: 4, airDraft: 10 };
+    const warnings: any[] = [];
+    const leg = await engine.tryRouteSegment(
+      rW0.lat, rW0.lon, rS1.lat, rS1.lon, 0, 0, warnings, dims);
+    assert.ok(leg, 'the leg is found');
+    assert.strictEqual(warnings.length, 1);
+    assert.doesNotMatch(warnings[0].message, /depth/, 'west alone: only the clearance');
+
+    // What a later leg's wider box does.
+    await db.loadDatabaseGraph('east.sqlite');
+    await engine.recheckViaLegs([leg], warnings);
+
+    assert.strictEqual(warnings.length, 1, 'the leg\'s warning is replaced, not added to');
+    assert.match(warnings[0].message, /depth 7\.5m/);
+    assert.match(warnings[0].message, /air draft 5\.0m/);
+  });
+
+  it('a node deleted while a load is reading is not put back by it', async () => {
+    const anyDb = db as any;
+    const send = anyDb.sendMessage.bind(db);
+    anyDb.sendMessage = async (type: string, payload?: unknown) => {
+      // The user deletes S1 after the load took its deletion snapshot.
+      if (type === 'loadNavmeshRegions') await db.deleteNode(0, id(rS1));
+      return send(type, payload);
+    };
+    try {
+      await db.loadDatabaseGraph('east.sqlite');
+    } finally {
+      anyDb.sendMessage = send;
+    }
+    assert.strictEqual(db.getNodeSync(id(rS1)), null, 'S1 stays deleted');
+    assert.strictEqual(db.getEdgeSync(id(rS0), id(rS1)), null);
+    assert.strictEqual(db.getEdgeSync(id(rS1), id(rE0)), null);
+    assert.ok(db.getNodeSync(id(rE0)), 'the rest of the file still loads');
   });
 });
