@@ -168,6 +168,7 @@ type Found = {
   type: string;
   structure?: string;
   partId?: number;
+  passage?: number;
   waitMinutes?: number;
   height?: number;
   waitSeconds?: number;
@@ -280,6 +281,11 @@ describe("route structures: a bridge on a crossing canal is not on the route (#5
       [["bridge", "300", 301, 5]],
     );
     assert.match(crossings[0].name, /^Bridge X/);
+    assert.deepStrictEqual(
+      crossings.map((c) => c.passage),
+      [0],
+      "one pass of X is passage 0",
+    );
   });
 
   it("charges the route one opening wait: only X, as a calculated route", async () => {
@@ -319,6 +325,11 @@ describe("route structures: a bridge on a crossing canal is not on the route (#5
     assert.deepStrictEqual(
       crossings.map((c) => c.structure),
       ["300", "300"],
+    );
+    // Out and back is two passes of one structure: told apart by `passage`.
+    assert.deepStrictEqual(
+      crossings.map((c) => c.passage),
+      [0, 1],
     );
     // Within a metre or two: the fixture's edge lengths and node positions
     // round differently.

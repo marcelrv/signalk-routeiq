@@ -133,6 +133,14 @@ export interface RouteCrossing {
    * structure and carries its own id.
    */
   structure?: string;
+  /**
+   * Which pass through the structure this is: 0, 1, ... in route order, per
+   * type and `structure`. One pass is one run of consecutive route edges
+   * linked to the structure (nearby runs merge); a pass after the route turned
+   * back, or beyond the merge distance, is the next index. Clients key a row
+   * on type + structure + passage; absent (older server) reads as one pass.
+   */
+  passage?: number;
   /** The chamber or span the route uses (a part of the structure). */
   partId?: number;
 }

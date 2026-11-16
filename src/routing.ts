@@ -4988,14 +4988,21 @@ export class RoutingEngine {
           }
           prevLast = run.last;
         }
-        for (const run of merged) {
+        // The pass index: the run's rank among this whole's passes, from 0 in
+        // route order. A pass is one merged run (consecutive hit segments, or
+        // runs closer than MERGE_ROUTE_DIST along the route and not split by
+        // a turn-around); a second pass is a run after a turn-back or beyond
+        // that gap. `passage` repeats per type, so clients key on
+        // type + structure + passage.
+        merged.forEach((run, passage) => {
           // build's object itself (it is keyed for the info lookup below).
           const crossing = build(run.poi);
           // Where the line passes the part, not the nearest route vertex:
           // two structures on one long edge must not share a chainage.
           crossing.distanceFromStart = Math.round(run.chain);
+          crossing.passage = passage;
           out.push({ crossing, chain: run.chain });
-        }
+        });
       }
       out.sort((a, b) => a.chain - b.chain);
       return out.map((e) => e.crossing);
