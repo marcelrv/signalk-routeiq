@@ -1159,7 +1159,7 @@ export class RoutingDatabase {
    *  it. Between two known values the smaller wins. Real builds give both
    *  sides of a seam the same numbers; this only decides the case where a
    *  rebuild left them disagreeing, and it decides it by failing safe. */
-  private static tighterLimit(a: number, b: number): number {
+  static tighterLimit(a: number, b: number): number {
     if (typeof a !== "number" || a < 0) return b;
     if (typeof b !== "number" || b < 0) return a;
     return Math.min(a, b);
@@ -1171,7 +1171,7 @@ export class RoutingDatabase {
    *  between two known values the shallower/more-restrictive one wins.
    *  tighterLimit itself is untouched and still governs max_air_draft/
    *  min_width, which have no such distinction. */
-  private static tighterDepth(
+  static tighterDepth(
     a: number,
     aKnown: boolean,
     b: number,
@@ -2050,7 +2050,15 @@ export class RoutingDatabase {
     entry: DatabaseCoverageEntry,
   ): Promise<void> {
     entry.state = "loading";
+    const tombstones = { nodes: new Set<number>(), edges: new Set<string>() };
+    this.loadTombstones.add(tombstones);
     try {
+      // Everything is read from the worker, and the navmesh parsed, before
+      // the in-memory graph is touched: a load that fails (a worker error, a
+      // bad navmesh row) must leave no half-merged seam behind. spliceEdge
+      // tightens an already-loaded neighbour's copy of a shared edge, and a
+      // route already found would otherwise be judged against limits from a
+      // file that never finished loading.
       const opened: {
         dbIndex: number;
         filename: string;
@@ -2066,16 +2074,6 @@ export class RoutingDatabase {
       } = await this.sendMessage("openDb", { dbPath: entry.path });
       if (opened.refused) throw new FormatRefusal(opened.refused);
       const dbIndex = opened.dbIndex;
-      if (opened.descriptionError) {
-        this.descriptionErrors.set(filename, opened.descriptionError);
-      } else {
-        this.descriptionErrors.delete(filename);
-      }
-      this.hasCrossesLand = this.hasCrossesLand || opened.flags.hasCrossesLand;
-      this.hasCrossesObstacle =
-        this.hasCrossesObstacle || opened.flags.hasCrossesObstacle;
-      this.hasNodeDepth = this.hasNodeDepth || opened.flags.hasNodeDepth;
-      this.hasRegionId = this.hasRegionId || opened.flags.hasRegionId;
 
       // The overlay's own added nodes/edges rows must be merged into memory
       // exactly once across the whole process lifetime, no matter how many
@@ -2095,6 +2093,78 @@ export class RoutingDatabase {
         dbIndexes: [dbIndex],
         includeOverlay,
       });
+
+      // Overlay deletions apply regardless of includeOverlay (they're a
+      // filter, not a merge, and cheap enough to just refetch every load).
+      const deletedNodeIds: number[] =
+        await this.sendMessage("getDeletedNodeIds");
+      const deletedEdges: Array<{ source: number; target: number }> =
+        await this.sendMessage("getDeletedEdgePairs");
+
+      const edges: Array<EdgeRow & { db_index: number }> =
+        await this.sendMessage("loadEdges", {
+          dbIndexes: [dbIndex],
+          includeOverlay,
+        });
+
+      const pois: Array<{
+        id: number;
+        name: string;
+        type_id: number;
+        properties: string | null;
+        lat: number;
+        lon: number;
+        parent_id: number | null;
+        db_index: number;
+      }> = await this.sendMessage("loadPois", { dbIndexes: [dbIndex] });
+
+      const rawRegions: Array<{
+        region_id: number;
+        boundary_geometry: string;
+        vertices: string;
+        triangles: string;
+        triangle_adjacency: string | null;
+        boundary_node_ids: string;
+        depth_ceiling_m: number;
+        db_index: number;
+      }> = await this.sendMessage("loadNavmeshRegions", {
+        dbIndexes: [dbIndex],
+      });
+
+      // Nothing awaits from here on, so these are all the deletions made
+      // while the reads above were in flight.
+      deletedNodeIds.push(...tombstones.nodes);
+      for (const key of tombstones.edges) {
+        const [source, target] = key.split(":").map(Number);
+        deletedEdges.push({ source, target });
+      }
+
+      // The navmesh's node coordinates as the graph will hold them once this
+      // load is applied: this file's nodes, then the ones already loaded,
+      // minus the overlay's deletions.
+      const deletedNodeSet = new Set(deletedNodeIds);
+      const incomingNodes = new Map<number, { lat: number; lon: number }>();
+      for (const n of nodes) incomingNodes.set(n.id, n);
+      const nodeAfterLoad = (id: number) =>
+        deletedNodeSet.has(id)
+          ? undefined
+          : (incomingNodes.get(id) ?? this.nodes.get(id));
+      const newRegions: NavmeshRegionWithDb[] = rawRegions.map((r) => ({
+        ...Navmesh.buildNavmeshRegion(r, nodeAfterLoad),
+        dbIndex,
+      }));
+
+      // Apply. From here on nothing waits on the worker.
+      if (opened.descriptionError) {
+        this.descriptionErrors.set(filename, opened.descriptionError);
+      } else {
+        this.descriptionErrors.delete(filename);
+      }
+      this.hasCrossesLand = this.hasCrossesLand || opened.flags.hasCrossesLand;
+      this.hasCrossesObstacle =
+        this.hasCrossesObstacle || opened.flags.hasCrossesObstacle;
+      this.hasNodeDepth = this.hasNodeDepth || opened.flags.hasNodeDepth;
+      this.hasRegionId = this.hasRegionId || opened.flags.hasRegionId;
 
       const nodeIdSet = this.nodesByDbIndex.get(dbIndex) ?? new Set<number>();
       // Nodes an already-loaded database (or the overlay) also contributed —
@@ -2131,12 +2201,6 @@ export class RoutingDatabase {
       }
       this.nodesByDbIndex.set(dbIndex, nodeIdSet);
 
-      // Overlay deletions apply regardless of includeOverlay (they're a
-      // filter, not a merge, and cheap enough to just refetch every load).
-      const deletedNodeIds: number[] =
-        await this.sendMessage("getDeletedNodeIds");
-      const deletedEdges: Array<{ source: number; target: number }> =
-        await this.sendMessage("getDeletedEdgePairs");
       for (const nid of deletedNodeIds) {
         // Capture coords before deleting — needed to find the grid cell the
         // node was inserted into (a node's id encodes its coordinate, so the
@@ -2148,16 +2212,10 @@ export class RoutingDatabase {
             this.gridRemoveNode(nid, removedCoords.lat, removedCoords.lon);
         }
       }
-      const deletedNodeSet = new Set(deletedNodeIds);
       const deletedEdgeSet = new Set(
         deletedEdges.map((d) => `${d.source}:${d.target}`),
       );
 
-      const edges: Array<EdgeRow & { db_index: number }> =
-        await this.sendMessage("loadEdges", {
-          dbIndexes: [dbIndex],
-          includeOverlay,
-        });
       let edgeCount = 0;
       for (const edge of edges) {
         if (deletedNodeSet.has(edge.source) || deletedNodeSet.has(edge.target))
@@ -2187,34 +2245,8 @@ export class RoutingDatabase {
       // here (M6). buildSpatialIndex() is still used by the bulk loadGraph()
       // path below, where one full build after the whole load is simplest.
 
-      const pois: Array<{
-        id: number;
-        name: string;
-        type_id: number;
-        properties: string | null;
-        lat: number;
-        lon: number;
-        parent_id: number | null;
-        db_index: number;
-      }> = await this.sendMessage("loadPois", { dbIndexes: [dbIndex] });
       for (const p of pois) this.pois.push({ ...p, dbIndex: p.db_index });
 
-      const rawRegions: Array<{
-        region_id: number;
-        boundary_geometry: string;
-        vertices: string;
-        triangles: string;
-        triangle_adjacency: string | null;
-        boundary_node_ids: string;
-        depth_ceiling_m: number;
-        db_index: number;
-      }> = await this.sendMessage("loadNavmeshRegions", {
-        dbIndexes: [dbIndex],
-      });
-      const newRegions: NavmeshRegionWithDb[] = rawRegions.map((r) => ({
-        ...Navmesh.buildNavmeshRegion(r, (id) => this.nodes.get(id)),
-        dbIndex,
-      }));
       this.navmeshRegions.push(...newRegions);
       // Only precompute funnel/anchor edges for the regions this load just
       // added — regions from already-loaded databases were done on their
@@ -2250,6 +2282,8 @@ export class RoutingDatabase {
       // stuck 'loading' forever.
       entry.state = "not_loaded";
       throw err;
+    } finally {
+      this.loadTombstones.delete(tombstones);
     }
   }
 
@@ -3557,10 +3591,26 @@ export class RoutingDatabase {
    *  results), so mutation sites call this even where it may look
    *  redundant. */
   private invalidateBBoxCaches(): void {
+    this.graphGeneration++;
     this.poiGrid = null;
     this.poiIndex = null;
     this.edgeGrid = null;
   }
+
+  /** Bumped on every change to the in-memory graph (each call of
+   *  invalidateBBoxCaches: a load, an edit). A route found at one generation
+   *  and judged at a later one has to re-read its limits and crossings from
+   *  the graph (RoutingEngine.refreshCandidateLimits). */
+  graphGeneration = 0;
+
+  /** Deletions made while a per-file load is reading from the worker, one
+   *  set per load in flight. The load applies its own snapshot of the
+   *  overlay deletions, taken before these happened, so without them it
+   *  would put a node or edge the user just deleted back. */
+  private loadTombstones = new Set<{
+    nodes: Set<number>;
+    edges: Set<string>;
+  }>();
 
   /** Lazy id -> row and whole -> parts maps over `this.pois`, rebuilt from
    *  scratch after any change (see invalidateBBoxCaches). A POI present in
@@ -3919,7 +3969,10 @@ export class RoutingDatabase {
     let totalDist = 0;
     let minDepth = Infinity;
     let minDepthKnown = false;
-    let maxAirDraft = -Infinity;
+    // The lowest known clearance: starts at +Infinity like minWidth (it
+    // started at -Infinity, so Math.min never moved it and every aggregated
+    // segment read as unknown air draft).
+    let maxAirDraft = Infinity;
     let minWidth = Infinity;
     let weightedCostFactor = 0;
     let trafficMode = TRAFFIC_TWO_WAY;
@@ -3976,7 +4029,7 @@ export class RoutingDatabase {
       distance: totalDist,
       min_depth: minDepthKnown ? minDepth : -1,
       min_depth_known: minDepthKnown,
-      max_air_draft: maxAirDraft === -Infinity ? -1 : maxAirDraft,
+      max_air_draft: maxAirDraft === Infinity ? -1 : maxAirDraft,
       min_width: minWidth === Infinity ? -1 : minWidth,
       cost_factor: totalDist > 0 ? weightedCostFactor / totalDist : 1.2,
       distance_to_land: 0,
@@ -4058,6 +4111,10 @@ export class RoutingDatabase {
       edge.traffic_mode = updates.traffic_mode;
     if (updates.cost_factor !== undefined)
       edge.cost_factor = updates.cost_factor;
+    // A route already found reads its limits again on a new generation
+    // (RoutingEngine.refreshCandidateLimits). Not invalidateBBoxCaches: the
+    // edge's geometry, which those caches index, has not changed.
+    this.graphGeneration++;
 
     // Mark the same columns the worker just marked in the overlay, so the
     // live entry already behaves the way it will after the next load — a
@@ -4071,6 +4128,7 @@ export class RoutingDatabase {
   }
 
   async deleteNode(dbIndex: number, nodeId: number): Promise<void> {
+    for (const t of this.loadTombstones) t.nodes.add(nodeId);
     this.edgesBySource.delete(nodeId);
     for (const [src, edges] of this.edgesBySource) {
       const filtered = edges.filter((e) => e.target !== nodeId);
@@ -4092,6 +4150,7 @@ export class RoutingDatabase {
     source: number,
     target: number,
   ): Promise<void> {
+    for (const t of this.loadTombstones) t.edges.add(`${source}:${target}`);
     const edges = this.edgesBySource.get(source);
     if (edges) {
       const idx = edges.findIndex((e) => e.target === target);
@@ -4105,6 +4164,8 @@ export class RoutingDatabase {
     dbIndex: number,
     node: { id: number; lat: number; lon: number; node_depth?: number },
   ): Promise<void> {
+    // A re-add is the user's latest word on this id.
+    for (const t of this.loadTombstones) t.nodes.delete(node.id);
     await this.sendMessage("insertNode", { dbIndex, ...node });
     // This is an upsert (see handleUpsertNode) — an existing node id can be
     // re-added at a different (lat, lon), which would move it to a
@@ -4143,6 +4204,8 @@ export class RoutingDatabase {
       traffic_mode?: number;
     },
   ): Promise<void> {
+    for (const ts of this.loadTombstones)
+      ts.edges.delete(`${edge.source}:${edge.target}`);
     const s = this.nodes.get(edge.source);
     const t = this.nodes.get(edge.target);
     if (!s || !t) throw new Error("Source or target node not found");

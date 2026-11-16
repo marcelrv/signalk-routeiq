@@ -171,6 +171,9 @@ interface RouteCandidate {
   violatingMeters: number;
   cost: number;
   distance: number;
+  /** The graph generation (RoutingDatabase.graphGeneration) the limits,
+   *  crossings and violating meters were read at. */
+  generation: number;
 }
 
 // A* search state
@@ -302,6 +305,22 @@ const ROUTE_PART_TYPES: ReadonlySet<number> = new Set([
  *  the segment is built (a segment names only its two ends, or `nodes` when
  *  it spans several). Read by detectRouteStructures. */
 const segmentHops = new WeakMap<object, number[]>();
+
+/** How tryRouteSegment checked a via leg it returned, so routeViaPoints can
+ *  check it again once the later legs have loaded more regions
+ *  (recheckViaLegs): the addViolationWarnings arguments, the warnings that
+ *  call added, and the graph generation it ran at. */
+interface LegCheck {
+  label: string;
+  startPt: { latitude: number; longitude: number };
+  endPt: { latitude: number; longitude: number };
+  dims: VesselDimensions;
+  env?: RouteEnv;
+  waitOverrides?: WaitOverrides;
+  warnings: RouteWarning[];
+  generation: number;
+}
+const legChecks = new WeakMap<RouteResult, LegCheck>();
 
 /** The straight legs connectUserPoint draws from a user's point to where the
  *  route joins the graph (over land or open water, in no charted water body).
@@ -610,11 +629,9 @@ export class RoutingEngine {
     const maxMargin = this.config.routingBBoxMaxExtent;
 
     const candidates: RouteCandidate[] = [];
-    let previousAttempt: {
-      violatingMeters: number;
-      cost: number;
-      distance: number;
-    } | null = null;
+    // The attempt before this one, by reference: refreshCandidateLimits may
+    // rescore it after a wider box loads a region.
+    let previousAttempt: RouteCandidate | null = null;
     let retriedForPenalty = false;
     // The last A* failure, for the final message when no box finds a path.
     let lastSearchError: RouteSearchError | undefined;
@@ -642,6 +659,10 @@ export class RoutingEngine {
         // Inside the try: a region that fails to load on a wider box must
         // not throw away a route an earlier box already found.
         await this.db.ensureRegionsForBbox(bbox);
+        // Taken before the search: a region another request loads while
+        // this one searches or scores is then caught by
+        // refreshCandidateLimits, not stamped as already seen.
+        const generation = this.db.graphGeneration;
         const result = await this.astarSearch(
           start.latitude,
           start.longitude,
@@ -655,13 +676,29 @@ export class RoutingEngine {
 
         const cost = result.features[0].properties.totalCost ?? 0;
         const distance = result.features[0].properties.totalDistance ?? 0;
-        const violatingMeters = await this.pathViolationMeters(
+        candidates.push({
           result,
+          violatingMeters: await this.pathViolationMeters(
+            result,
+            effectiveDims,
+            env,
+            request,
+          ),
+          cost,
+          distance,
+          generation,
+        });
+        // This attempt's box may have loaded a region that tightened a seam
+        // edge an earlier candidate runs along, and a load while this one was
+        // scored can have done the same to it: rescore all of them (only
+        // those whose generation is behind are touched).
+        await this.refreshCandidateLimits(
+          candidates,
           effectiveDims,
           env,
           request,
         );
-        candidates.push({ result, violatingMeters, cost, distance });
+        const { violatingMeters } = candidates[candidates.length - 1];
 
         const penalized = violatingMeters > 0;
         const stalled =
@@ -690,7 +727,7 @@ export class RoutingEngine {
           `Route search found a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`,
         );
         retriedForPenalty = true;
-        previousAttempt = { violatingMeters, cost, distance };
+        previousAttempt = candidates[candidates.length - 1];
         currentMargin = newMargin;
       } catch (e) {
         // Only an A* failure is worth a wider box. Anything else is a bug:
@@ -719,6 +756,9 @@ export class RoutingEngine {
       }
     }
 
+    // A box that threw may have merged seam edges before it failed
+    // (ensureRegionsForBbox runs inside the try): rescore again.
+    await this.refreshCandidateLimits(candidates, effectiveDims, env, request);
     const best = this.selectBestCandidate(candidates);
     if (best) {
       const result = best.result;
@@ -1072,6 +1112,8 @@ export class RoutingEngine {
       [];
     const allCoordinates: [number, number][] = [];
     const warnings: RouteWarning[] = [];
+    // The legs in route order, for recheckViaLegs.
+    const legs: RouteResult[] = [];
     let totalDistanceMeters = 0;
     let totalCostAccum = 0;
     // Route vertex → via index: where each leg to a via ends. Taken from the
@@ -1167,6 +1209,7 @@ export class RoutingEngine {
 
       viaAt.set(allCoordinates.length - 1, i);
       allSegments.push(...segmentResult.features[0].properties.segments!);
+      legs.push(segmentResult);
       totalDistanceMeters +=
         segmentResult.features[0].properties.totalDistance ?? 0;
       totalCostAccum += segmentResult.features[0].properties.totalCost ?? 0;
@@ -1229,9 +1272,14 @@ export class RoutingEngine {
       );
     }
     allSegments.push(...finalResult.features[0].properties.segments!);
+    legs.push(finalResult);
     totalDistanceMeters +=
       finalResult.features[0].properties.totalDistance ?? 0;
     totalCostAccum += finalResult.features[0].properties.totalCost ?? 0;
+
+    // A later leg's wider box may have loaded a region that tightened a seam
+    // edge an earlier leg runs along.
+    await this.recheckViaLegs(legs, warnings);
 
     const allWarnings = [...warnings, ...(globalWarnings || [])];
 
@@ -1286,11 +1334,9 @@ export class RoutingEngine {
     const segmentMaxMargin = this.config.routingBBoxMaxExtent;
 
     const candidates: RouteCandidate[] = [];
-    let previousAttempt: {
-      violatingMeters: number;
-      cost: number;
-      distance: number;
-    } | null = null;
+    // The attempt before this one, by reference: refreshCandidateLimits may
+    // rescore it after a wider box loads a region.
+    let previousAttempt: RouteCandidate | null = null;
     let retriedForPenalty = false;
     // The last A* failure, for the fallback's message when no box finds a path.
     let lastSearchError: RouteSearchError | undefined;
@@ -1307,6 +1353,10 @@ export class RoutingEngine {
       try {
         // Inside the try, as in calculateRouteImpl.
         await this.db.ensureRegionsForBbox(segmentBbox);
+        // Taken before the search: a region another request loads while
+        // this one searches or scores is then caught by
+        // refreshCandidateLimits, not stamped as already seen.
+        const generation = this.db.graphGeneration;
         const result = await this.astarSearch(
           startLat,
           startLon,
@@ -1320,13 +1370,24 @@ export class RoutingEngine {
 
         const cost = result.features[0].properties.totalCost ?? 0;
         const distance = result.features[0].properties.totalDistance ?? 0;
-        const violatingMeters = await this.pathViolationMeters(
+        candidates.push({
           result,
-          dims,
-          env,
-          waitOverrides,
-        );
-        candidates.push({ result, violatingMeters, cost, distance });
+          violatingMeters: await this.pathViolationMeters(
+            result,
+            dims,
+            env,
+            waitOverrides,
+          ),
+          cost,
+          distance,
+          generation,
+        });
+        // This attempt's box may have loaded a region that tightened a seam
+        // edge an earlier candidate runs along, and a load while this one was
+        // scored can have done the same to it: rescore all of them (only
+        // those whose generation is behind are touched).
+        await this.refreshCandidateLimits(candidates, dims, env, waitOverrides);
+        const { violatingMeters } = candidates[candidates.length - 1];
 
         const penalized = violatingMeters > 0;
         const stalled =
@@ -1354,7 +1415,7 @@ export class RoutingEngine {
           `Route search for ${label} found a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`,
         );
         retriedForPenalty = true;
-        previousAttempt = { violatingMeters, cost, distance };
+        previousAttempt = candidates[candidates.length - 1];
         currentMargin = newMargin;
       } catch (e) {
         // As in calculateRouteImpl: widen only on an A* failure; a bug
@@ -1379,6 +1440,9 @@ export class RoutingEngine {
       }
     }
 
+    // A box that threw may have merged seam edges before it failed
+    // (ensureRegionsForBbox runs inside the try): rescore again.
+    await this.refreshCandidateLimits(candidates, dims, env, waitOverrides);
     const best = this.selectBestCandidate(candidates);
     if (best) {
       if (retriedForPenalty) {
@@ -1386,6 +1450,11 @@ export class RoutingEngine {
           `Route search for ${label} penalized-result retry ${best.violatingMeters > 0 ? "did not clear the penalty" : "won"} (final cost ${best.cost.toFixed(0)}, ${best.violatingMeters.toFixed(0)}m constraint-violating)`,
         );
       }
+      const before = warnings.length;
+      // The generation the winner's limits were last read at, not the
+      // current one: the check below awaits, and refreshCandidateLimits may
+      // have stopped at MAX_REFRESH_PASSES with the winner still behind.
+      const generation = best.generation;
       await this.addViolationWarnings(
         best.result,
         warnings,
@@ -1396,6 +1465,16 @@ export class RoutingEngine {
         env,
         waitOverrides,
       );
+      legChecks.set(best.result, {
+        label,
+        startPt,
+        endPt,
+        dims,
+        env,
+        waitOverrides,
+        warnings: warnings.slice(before),
+        generation,
+      });
       return best.result;
     }
 
@@ -2901,6 +2980,230 @@ export class RoutingEngine {
     }
 
     return result;
+  }
+
+  /**
+   * Re-read a found route's depth, air-draft and width limits from the graph
+   * as it is now, and keep the tighter of each against the segment's own.
+   *
+   * A candidate holds the limits its edges had when its box searched. A
+   * wider box can then load a region whose copy of a shared seam edge is
+   * tighter (spliceEdge folds the two with tighterDepth/tighterLimit), and
+   * the earlier candidate can still win selection or be the route kept after
+   * a later box throws. Without this its segments would miss a shallower or
+   * lower limit it actually passes.
+   *
+   * Only segments whose every covered edge is in the graph are touched
+   * (expandSegmentEdges, with the hops recorded at build); a connector or
+   * synthetic leg keeps what it has. Tighter only, never looser: a merge
+   * only ever tightens, and a segment may carry a stricter value than its
+   * edges on purpose (a crossed-land leg's 0 m).
+   *
+   * @param result - The route; its segments are updated in place.
+   * @returns Whether any segment changed.
+   */
+  private refreshSegmentLimits(result: RouteResult): boolean {
+    const segments = result.features[0]?.properties.segments;
+    if (!segments || segments.length === 0) return false;
+    type Live = {
+      depth: number;
+      depthKnown: boolean;
+      air: number;
+      width: number;
+      complete: boolean;
+    };
+    const live = new Map<number, Live>();
+    for (const u of this.expandSegmentEdges(segments, (s) =>
+      segmentHops.get(s),
+    )) {
+      let l = live.get(u.seg);
+      if (!l) {
+        l = {
+          depth: -1,
+          depthKnown: false,
+          air: -1,
+          width: -1,
+          complete: true,
+        };
+        live.set(u.seg, l);
+      }
+      if (!l.complete) continue;
+      const edge =
+        u.from >= 0 && u.to >= 0 ? this.db.getEdgeSync(u.from, u.to) : null;
+      if (!edge) {
+        l.complete = false;
+        continue;
+      }
+      const d = RoutingDatabase.tighterDepth(
+        l.depth,
+        l.depthKnown,
+        edge.min_depth,
+        edge.min_depth_known ?? edge.min_depth >= 0,
+      );
+      l.depth = d.value;
+      l.depthKnown = d.known;
+      l.air = RoutingDatabase.tighterLimit(l.air, edge.max_air_draft);
+      l.width = RoutingDatabase.tighterLimit(l.width, edge.min_width ?? -1);
+    }
+    let changed = false;
+    for (const [si, l] of live) {
+      const seg = segments[si];
+      if (!l.complete || !seg) continue;
+      const d = RoutingDatabase.tighterDepth(
+        seg.minDepth,
+        seg.minDepthKnown,
+        l.depth,
+        l.depthKnown,
+      );
+      const air = RoutingDatabase.tighterLimit(seg.maxAirDraft, l.air);
+      const width = RoutingDatabase.tighterLimit(seg.minWidth ?? -1, l.width);
+      if (d.value !== seg.minDepth || d.known !== seg.minDepthKnown) {
+        seg.minDepth = d.value;
+        seg.minDepthKnown = d.known;
+        changed = true;
+      }
+      if (air !== seg.maxAirDraft) {
+        seg.maxAirDraft = air;
+        changed = true;
+      }
+      if (width >= 0 && width !== seg.minWidth) {
+        seg.minWidth = width;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  /**
+   * Bring every candidate the graph has changed under since it was scored up
+   * to the graph as it is now: its limits (refreshSegmentLimits) and its
+   * cached crossings, which a newly loaded file's `edge_pois` can add to.
+   * The violating meters are recounted when either may have changed, so
+   * selection and the warnings judge what the route really passes. Its A*
+   * cost stays as searched: it only breaks ties.
+   *
+   * Repeated while a recount's own awaits let another load land, up to
+   * MAX_REFRESH_PASSES (a steady stream of edits must not hold a route
+   * forever).
+   */
+  private async refreshCandidateLimits(
+    candidates: RouteCandidate[],
+    dims: VesselDimensions,
+    env?: RouteEnv,
+    waitOverrides?: WaitOverrides,
+  ): Promise<void> {
+    for (
+      let pass = 0;
+      pass < RoutingEngine.MAX_REFRESH_PASSES &&
+      candidates.some((c) => c.generation !== this.db.graphGeneration);
+      pass++
+    )
+      await this.refreshCandidatesOnce(candidates, dims, env, waitOverrides);
+  }
+
+  private static readonly MAX_REFRESH_PASSES = 4;
+
+  /** One pass of refreshCandidateLimits. */
+  private async refreshCandidatesOnce(
+    candidates: RouteCandidate[],
+    dims: VesselDimensions,
+    env?: RouteEnv,
+    waitOverrides?: WaitOverrides,
+  ): Promise<void> {
+    for (const c of candidates) {
+      // Read per candidate, before anything awaits: a load during an earlier
+      // candidate's recount must not pass for one this candidate has seen.
+      const generation = this.db.graphGeneration;
+      if (c.generation === generation) continue;
+      this.refreshSegmentLimits(c.result);
+      // Only cached with tides on (pathViolationMeters); the next consumer
+      // detects them again.
+      delete c.result.crossings;
+      // Recounted whenever the candidate is behind, not only when this pass
+      // changed something: a pass whose recount threw (a worker error, caught
+      // by the bbox loop) has already tightened the segments and dropped the
+      // crossings, so the retry would see nothing left to change.
+      c.violatingMeters = await this.pathViolationMeters(
+        c.result,
+        dims,
+        env,
+        waitOverrides,
+      );
+      // Stamped only once the recount is in, so one that throws leaves the
+      // candidate behind for the final refresh to try again.
+      c.generation = generation;
+    }
+  }
+
+  /**
+   * Check a via route's legs again once every leg is found: a later leg's
+   * wider box may have loaded a region that tightened a seam edge an earlier
+   * leg runs along, or linked a lock or bridge to one (its `edge_pois`). A
+   * leg whose limits or cached crossings may have changed gets its violation
+   * warning rebuilt in place of the one tryRouteSegment added. The legs'
+   * segments are the merged route's segment objects, so the refresh reaches
+   * it too. Repeated like refreshCandidateLimits.
+   *
+   * @param legs - The legs in route order; ones tryRouteSegment did not
+   *   return (manual, fallback) are skipped.
+   * @param warnings - The via route's warnings, updated in place.
+   */
+  private async recheckViaLegs(
+    legs: RouteResult[],
+    warnings: RouteWarning[],
+  ): Promise<void> {
+    const stale = (leg: RouteResult) => {
+      const check = legChecks.get(leg);
+      return !!check && check.generation !== this.db.graphGeneration;
+    };
+    for (
+      let pass = 0;
+      pass < RoutingEngine.MAX_REFRESH_PASSES && legs.some(stale);
+      pass++
+    )
+      await this.recheckViaLegsOnce(legs, warnings);
+  }
+
+  /** One pass of recheckViaLegs. */
+  private async recheckViaLegsOnce(
+    legs: RouteResult[],
+    warnings: RouteWarning[],
+  ): Promise<void> {
+    for (const leg of legs) {
+      // Per leg, before anything awaits (as in refreshCandidateLimits).
+      const generation = this.db.graphGeneration;
+      const check = legChecks.get(leg);
+      if (!check || check.generation === generation) continue;
+      check.generation = generation;
+      const changed = this.refreshSegmentLimits(leg);
+      // With tides on the warning read the crossings (a new lock or bridge
+      // changes the passage times and so the depth at passage), so it is
+      // rebuilt on any graph change. Asked of check.env, not of the cache:
+      // connectUserPoint deletes leg.crossings when it adds a connector.
+      delete leg.crossings;
+      if (!changed && !check.env) continue;
+      const fresh: RouteWarning[] = [];
+      await this.addViolationWarnings(
+        leg,
+        fresh,
+        check.label,
+        check.startPt,
+        check.endPt,
+        check.dims,
+        check.env,
+        check.waitOverrides,
+      );
+      let at = -1;
+      for (const w of check.warnings) {
+        const i = warnings.indexOf(w);
+        if (i < 0) continue;
+        if (at < 0 || i < at) at = i;
+        warnings.splice(i, 1);
+      }
+      if (at < 0) warnings.push(...fresh);
+      else warnings.splice(at, 0, ...fresh);
+      check.warnings = fresh;
+    }
   }
 
   /**
