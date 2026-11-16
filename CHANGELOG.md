@@ -17,7 +17,9 @@
 
 - A route that passes the same bridge or lock twice within one section of
   the route list (out and back) now shows two rows, each with its own map
-  link and wait, instead of one row with the waits added up (#60).
+  link and wait, instead of one row with the waits added up (#60). The
+  bridges over both ends of one long lock stay one row, and the saved
+  passage profile and GPX waits carry the same `passage` index.
 - Bridges or locks that share a name, such as two locks both called "Lock",
   are no longer merged into one row in the route list. Each keeps its own
   map link. Spans are combined only when they belong to the same structure.

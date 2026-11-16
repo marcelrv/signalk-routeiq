@@ -117,6 +117,7 @@ export interface PassageProfile {
     type: "bridge" | "lock";
     name: string;
     structure?: string;
+    passage?: number; // which pass through `structure`, 0, 1, ...
     distanceFromStart?: number; // m
     seconds: number;
     position?: { latitude: number; longitude: number };
@@ -168,6 +169,7 @@ export function buildPassageProfile(
       type: c.type,
       name: c.name,
       ...(c.structure !== undefined ? { structure: c.structure } : {}),
+      ...(typeof c.passage === "number" ? { passage: c.passage } : {}),
       ...(typeof c.distanceFromStart === "number"
         ? { distanceFromStart: c.distanceFromStart }
         : {}),

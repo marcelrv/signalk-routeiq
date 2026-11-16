@@ -8044,10 +8044,11 @@
 
   /**
    * Groups crossings by type, the server's `structure` id and `passage` (the
-   * pass through it): entries sharing all are spans of the same physical structure. The type is part of the
-   * key because a span carried over a lock head has the lock as its whole, so
-   * the lock and that bridge share one id: keyed by id alone the lock was
-   * merged into the bridge's row and never shown. Entries without an id each
+   * pass through it): entries sharing all three are spans of one structure
+   * passed once. The type is part of the key because a span carried over a
+   * lock head has the lock as its whole, so the lock and that bridge share
+   * one id: keyed by id alone the lock was merged into the bridge's row and
+   * never shown. Entries without an id each
    * stay on their own, never merged by name (many bridges and locks share a
    * name).
    * @param {object[]} crossings Itinerary crossings, in route order.
