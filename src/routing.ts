@@ -26,6 +26,7 @@ import {
   buildItinerary,
   closestCoordIndex,
   cumulativeDistances,
+  limitPair,
 } from "./itinerary.js";
 import {
   CurrentsClient,
@@ -4908,20 +4909,21 @@ export class RoutingEngine {
         // Only mention the tide where it actually moved the figure — with
         // tides off, or where the rise made no difference, the message reads
         // exactly as it always has rather than acquiring unexplained wording.
+        const [depth, need] = limitPair(worstDepth, minDepth);
         reasons.push(
           worstDepth - worstCharted >= RoutingEngine.TIDE_REPORT_MIN_RISE_M
-            ? `depth ${worstDepth.toFixed(1)}m at passage (${worstCharted.toFixed(1)}m charted) < required ${minDepth.toFixed(1)}m`
-            : `depth ${worstDepth.toFixed(1)}m < required ${minDepth.toFixed(1)}m`,
+            ? `depth ${depth}m at passage (${worstCharted.toFixed(1)}m charted) < required ${need}m`
+            : `depth ${depth}m < required ${need}m`,
         );
       }
-      if (worstAirDraft < Infinity)
-        reasons.push(
-          `air draft ${worstAirDraft.toFixed(1)}m < required ${airDraft.toFixed(1)}m`,
-        );
-      if (worstBeam < Infinity)
-        reasons.push(
-          `width ${worstBeam.toFixed(1)}m < required beam ${minBeam.toFixed(1)}m`,
-        );
+      if (worstAirDraft < Infinity) {
+        const [have, need] = limitPair(worstAirDraft, airDraft);
+        reasons.push(`air draft ${have}m < required ${need}m`);
+      }
+      if (worstBeam < Infinity) {
+        const [have, need] = limitPair(worstBeam, minBeam);
+        reasons.push(`width ${have}m < required beam ${need}m`);
+      }
       const distNm = totalViolationDist / 1852;
       warnings.push({
         type: "via_constrained",

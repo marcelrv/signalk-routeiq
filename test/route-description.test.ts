@@ -13,7 +13,7 @@ import {
   depthQualityLevel,
   noticeLevel,
 } from '../dist/route-description.js';
-import { legWarnings } from '../dist/itinerary.js';
+import { legWarnings, limitPair } from '../dist/itinerary.js';
 import {
   describePairs,
   detectDescribeFlags,
@@ -770,10 +770,20 @@ describe('leg warnings', () => {
     assert.deepStrictEqual(legWarnings({ maxAirDraft: 17.06 + 0.01 }, tall), []);
     // Exactly the required height clears, despite the sum's float noise...
     assert.deepStrictEqual(legWarnings({ maxAirDraft: 17.06 }, tall), []);
-    // ...and a real 1 cm shortfall is still a danger.
-    assert.strictEqual(legWarnings({ maxAirDraft: 17.05 }, tall)[0].level, 'danger');
+    // ...and a real 1 cm shortfall is still a danger, printed to the
+    // centimetre because one decimal would read 17.1 against 17.1.
+    const [short] = legWarnings({ maxAirDraft: 17.05 }, tall);
+    assert.strictEqual(short.level, 'danger');
+    assert.strictEqual(short.message, 'Low clearance (17.05m, need 17.06m)');
     // Without a required air draft there is nothing to test against.
     assert.deepStrictEqual(legWarnings({ maxAirDraft: 6.7 }, vessel), []);
+  });
+
+  it('limitPair prints a second decimal only when one would hide the gap', () => {
+    assert.deepStrictEqual(limitPair(6.7, 17.06), ['6.7', '17.1']);
+    assert.deepStrictEqual(limitPair(17.05, 17.06), ['17.05', '17.06']);
+    assert.deepStrictEqual(limitPair(2.29, 2.3), ['2.29', '2.30']);
+    assert.deepStrictEqual(limitPair(2.2, 2.3), ['2.2', '2.3']);
   });
 
   it('a depth exactly at the limit is enough, despite float noise', () => {

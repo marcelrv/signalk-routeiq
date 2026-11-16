@@ -378,12 +378,13 @@ export function legWarnings(
     maxAirDraft !== undefined &&
     belowLimit(maxAirDraft, requiredAirDraft)
   ) {
+    const [have, need] = limitPair(maxAirDraft, requiredAirDraft);
     out.push({
       type: "low_clearance",
       level: "danger",
       maxAirDraft,
       requiredAirDraft: round2(requiredAirDraft),
-      message: `Low clearance (${maxAirDraft.toFixed(1)}m, need ${requiredAirDraft.toFixed(1)}m)`,
+      message: `Low clearance (${have}m, need ${need}m)`,
       ...(at.lowClearance && at.lowClearance.length > 0
         ? { at: at.lowClearance }
         : {}),
@@ -399,6 +400,15 @@ export function legWarnings(
  *  value exactly at the limit short. A real shortfall of 1 cm still is. */
 function belowLimit(value: number, required: number): boolean {
   return value < round2(required);
+}
+
+/** A measured value and the limit it misses, as text: one decimal, or two
+ *  when one decimal would print them the same (17.05 vs 17.06 would both
+ *  read 17.1, a shortfall that looks like none). */
+export function limitPair(value: number, limit: number): [string, string] {
+  const a = value.toFixed(1);
+  const b = limit.toFixed(1);
+  return a === b ? [value.toFixed(2), limit.toFixed(2)] : [a, b];
 }
 
 /** Margins are added in floating point (15.56 + 1.5 = 17.060000000000002). */
