@@ -2957,7 +2957,11 @@
               iconAnchor: [11, 11],
             }),
           });
-          m.bindTooltip(label, { direction: "top", offset: [0, -12] });
+          // A string tooltip is HTML; the label is database text.
+          m.bindTooltip(escapeHtml(label), {
+            direction: "top",
+            offset: [0, -12],
+          });
           m.on("click", function (e) {
             // Without this, the click also bubbles to the map's own click
             // handler (map.on('click', ...)), which treats it as "place a
@@ -6796,7 +6800,9 @@
             highlightText(name, qLower) +
             "</span>" +
             (typeLabel
-              ? '<span class="search-result-type">' + typeLabel + "</span>"
+              ? '<span class="search-result-type">' +
+                escapeHtml(typeLabel) +
+                "</span>"
               : "") +
             "</div>";
         }
