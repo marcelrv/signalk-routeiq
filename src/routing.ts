@@ -1449,8 +1449,10 @@ export class RoutingEngine {
         );
       }
       const before = warnings.length;
-      // Before the check, which awaits (see the bbox loop above).
-      const generation = this.db.graphGeneration;
+      // The generation the winner's limits were last read at, not the
+      // current one: the check below awaits, and refreshCandidateLimits may
+      // have stopped at MAX_REFRESH_PASSES with the winner still behind.
+      const generation = best.generation;
       await this.addViolationWarnings(
         best.result,
         warnings,
