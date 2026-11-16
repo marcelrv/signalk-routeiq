@@ -70,6 +70,15 @@ export interface PoiBBoxResult {
   properties: Record<string, unknown>;
   /** Display facts (spec §2.10.2), read on demand. */
   info: Record<string, unknown>;
+  /** A bridge span's structure kind (`info.kind`: "bridge", "cable", "weir",
+   *  ...): its own, else its bridge whole's (see `spanKind`). Absent on other
+   *  POIs, where no file says, and when `info` was not read. Clients treat
+   *  absent as a bridge. */
+  kind?: string;
+  /** A bridge span whose height is unknown (`info.height_unknown`, its own,
+   *  else its bridge whole's; see `spanHeightUnknown`): any `info.height` is
+   *  only an estimate. Present only when true. */
+  heightUnknown?: boolean;
   lat: number;
   lon: number;
 }
@@ -3308,20 +3317,27 @@ export class RoutingDatabase {
       rows.sort((a, b) => d2(a) - d2(b));
       rows.length = cap;
     }
+    // The spans' bridge wholes are read too, but only for their kind.
     const info = includeInfo
-      ? await this.getPoiInfo(rows.map((r) => r.id))
+      ? await this.getPoiInfo(this.withSpanKindSources(rows.map((r) => r.id)))
       : {};
-    const results: PoiBBoxResult[] = rows.map((poi) => ({
-      id: poi.id,
-      name: poi.name,
-      displayName: this.poiDisplayName(poi),
-      typeId: poi.type_id,
-      parentId: poi.parent_id ?? null,
-      properties: parsePoiJson(poi.properties),
-      info: info[String(poi.id)] ?? {},
-      lat: poi.lat,
-      lon: poi.lon,
-    }));
+    const results: PoiBBoxResult[] = rows.map((poi) => {
+      const kind = this.spanKind(poi.id, info);
+      const heightUnknown = this.spanHeightUnknown(poi.id, info);
+      return {
+        id: poi.id,
+        name: poi.name,
+        displayName: this.poiDisplayName(poi),
+        typeId: poi.type_id,
+        parentId: poi.parent_id ?? null,
+        properties: parsePoiJson(poi.properties),
+        info: info[String(poi.id)] ?? {},
+        ...(kind !== undefined ? { kind } : {}),
+        ...(heightUnknown ? { heightUnknown } : {}),
+        lat: poi.lat,
+        lon: poi.lon,
+      };
+    });
     results.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
     return results;
   }
@@ -3535,6 +3551,89 @@ export class RoutingDatabase {
           whole.type_id === POI_TYPE_BRIDGE));
     return (
       (wholeNamesIt ? whole.name : poi.name) || poi.name || whole?.name || ""
+    );
+  }
+
+  /** The bridge whole a span reads its kind from when it has none of its
+   *  own; undefined for anything else (a span over a lock head is a bridge
+   *  in its own right and has no bridge whole). */
+  private spanKindWhole(id: number): PoiRow | undefined {
+    const row = this.bridgeSpanRow(id);
+    if (!row) return undefined;
+    const whole = this.getPoiParent(row);
+    return whole && whole.type_id === POI_TYPE_BRIDGE ? whole : undefined;
+  }
+
+  /** The POI row of `id` when it is a bridge span, else undefined. */
+  private bridgeSpanRow(id: number): PoiRow | undefined {
+    const row = this.getPoiRow(id);
+    return row && row.type_id === POI_TYPE_BRIDGE_SPAN ? row : undefined;
+  }
+
+  /** A bridge span's `info[key]`: its own when `accept` takes it, else its
+   *  bridge whole's when `accept` takes that; undefined for other POIs. */
+  private spanInfoValue<T>(
+    id: number,
+    info: Record<string, Record<string, unknown>>,
+    key: string,
+    accept: (v: unknown) => v is T,
+  ): T | undefined {
+    if (!this.bridgeSpanRow(id)) return undefined;
+    const own = info[String(id)]?.[key];
+    if (accept(own)) return own;
+    const whole = this.spanKindWhole(id);
+    const w = whole ? info[String(whole.id)]?.[key] : undefined;
+    return accept(w) ? w : undefined;
+  }
+
+  /** `ids` plus the bridge wholes of the spans among them, deduplicated: the
+   *  ids to read `info` for so `spanKind` can answer for every span. */
+  withSpanKindSources(ids: number[]): number[] {
+    const out = new Set(ids);
+    for (const id of ids) {
+      const whole = this.spanKindWhole(id);
+      if (whole) out.add(whole.id);
+    }
+    return [...out];
+  }
+
+  /**
+   * A bridge span's structure kind (spec §2.10.2 `info.kind`: "bridge",
+   * "cable", "weir", ...): the span's own, else its bridge whole's — the
+   * producer usually writes it on the whole only. undefined for any other
+   * POI and where neither says, which readers take as a bridge. `info` must
+   * hold the ids `withSpanKindSources` gave.
+   */
+  spanKind(
+    id: number,
+    info: Record<string, Record<string, unknown>>,
+  ): string | undefined {
+    return this.spanInfoValue(
+      id,
+      info,
+      "kind",
+      (v): v is string => typeof v === "string" && v !== "",
+    );
+  }
+
+  /**
+   * Whether a bridge span's height is unknown (spec §2.10.2
+   * `info.height_unknown`: any `height` given is only an estimate): the
+   * span's own flag when it has one, else its bridge whole's, like
+   * `spanKind`. false for any other POI and where neither says. `info` must
+   * hold the ids `withSpanKindSources` gave.
+   */
+  spanHeightUnknown(
+    id: number,
+    info: Record<string, Record<string, unknown>>,
+  ): boolean {
+    return (
+      this.spanInfoValue(
+        id,
+        info,
+        "height_unknown",
+        (v): v is boolean => typeof v === "boolean",
+      ) === true
     );
   }
 

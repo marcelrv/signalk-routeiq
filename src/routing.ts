@@ -4244,30 +4244,47 @@ export class RoutingEngine {
 
   /**
    * Human-readable span suffix for a bridge crossing, e.g. " (opening span)",
-   * " (opening, closed 6.6m)" or " (fixed, 18.4m)". S-57 gives every span of a
-   * bridge the same OBJNAM, so this is what lets a route report distinguish
-   * which span was crossed.
+   * " (opening, closed 6.6m)", " (fixed, 18.4m)" or, for a structure that is
+   * not a bridge, " (power line, 38.8m)". S-57 gives every span of a bridge
+   * the same OBJNAM, so this is what lets a route report distinguish which
+   * span was crossed.
    *
    * @param subtype - POI `subtype`: "opening", "fixed", or unknown.
    * @param height - Clearance of a fixed span in metres, when known.
    * @param closedHeight - Closed clearance of an opening span in metres, when known.
-   * @returns The suffix, with a leading space, or "" for an unknown subtype.
+   * @param opts - `kind`: the span's structure kind (`info.kind`), absent or
+   *   "bridge" for a bridge; `heightUnknown`: the source has no usable height,
+   *   so `height` (if any) is an estimate, shown as "~".
+   * @returns The suffix, with a leading space, or "" for an unknown subtype
+   *   of a bridge.
    */
   static formatSpanSuffix(
     subtype: string | undefined,
     height: number | undefined,
     closedHeight?: number,
+    opts: { kind?: string; heightUnknown?: boolean } = {},
   ): string {
+    const kind = opts.kind && opts.kind !== "bridge" ? opts.kind : undefined;
+    const label =
+      kind === undefined
+        ? undefined
+        : kind === "cable"
+          ? "power line"
+          : kind.replace(/_/g, " ");
     if (subtype === "opening") {
+      const prefix = label ? `${label}, ` : "";
       return typeof closedHeight === "number"
-        ? ` (opening, closed ${closedHeight.toFixed(1)}m)`
-        : " (opening span)";
+        ? ` (${prefix}opening, closed ${closedHeight.toFixed(1)}m)`
+        : ` (${prefix}opening span)`;
     }
-    if (subtype === "fixed") {
-      return typeof height === "number"
-        ? ` (fixed, ${height.toFixed(1)}m)`
-        : " (fixed span)";
-    }
+    const h =
+      typeof height === "number"
+        ? `${opts.heightUnknown ? "~" : ""}${height.toFixed(1)}m`
+        : opts.heightUnknown
+          ? "height unknown"
+          : undefined;
+    if (label) return h ? ` (${label}, ${h})` : ` (${label})`;
+    if (subtype === "fixed") return h ? ` (fixed, ${h})` : " (fixed span)";
     return "";
   }
 
@@ -4825,17 +4842,21 @@ export class RoutingEngine {
       spanOf.set(crossing, { poi, base: name, closedHeight });
       return crossing;
     });
-    // `info.height` (display) only for the spans that were listed.
+    // Display facts only for the spans that were listed: `info.height`, and
+    // the kind and height-unknown flag (`spanKind`, `spanHeightUnknown`: the
+    // span's own, else its bridge whole's).
     if (spanOf.size > 0) {
       const info = await this.db.getPoiInfo(
-        [...spanOf.values()].map((e) => e.poi.id),
+        this.db.withSpanKindSources([...spanOf.values()].map((e) => e.poi.id)),
       );
       for (const [c, e] of spanOf) {
-        const h = info[String(e.poi.id)]?.height;
-        if (typeof h === "number" && Number.isFinite(h)) {
-          c.height = h;
-          c.name = `${e.base}${RoutingEngine.formatSpanSuffix(c.subtype, h, e.closedHeight)}`;
-        }
+        const own = info[String(e.poi.id)];
+        const h = own?.height;
+        if (typeof h === "number" && Number.isFinite(h)) c.height = h;
+        if (this.db.spanHeightUnknown(e.poi.id, info)) c.heightUnknown = true;
+        const kind = this.db.spanKind(e.poi.id, info);
+        if (kind !== undefined) c.kind = kind;
+        c.name = `${e.base}${RoutingEngine.formatSpanSuffix(c.subtype, c.height, e.closedHeight, { kind: c.kind, heightUnknown: c.heightUnknown })}`;
       }
     }
     const lockCrossings = detectForGroup(lockPois, (poi) => {

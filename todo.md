@@ -124,13 +124,14 @@ turn text).
   over cumulative distance below the map, with the vessel's draft/air-draft
   as threshold lines, so shallow spots and low bridges are visible at a
   glance.
-- **Power-line icon for overhead cables ("hoogspanningslijn")** — cables are
-  drawn with the bridge symbol (`poiIcon` in `public/app.js` and
-  `plotterext/panel.js`) because the pipeline writes them as fixed bridges
-  with nothing to tell them apart. Needs a marker from the pipeline first
-  (`kind: "cable"` on the POI properties, tracked as Step 4 item 5 in
-  `signalk-router-pipeline/NEXT_PHASES.md`); then a power-line icon in both
-  `poiIcon` copies, falling back to the bridge icon when the marker is absent.
+- ~~Power-line icon for overhead cables ("hoogspanningslijn")~~ — **done**
+  (branch `feature-cable-icon`). The pipeline writes `kind` in `info`, mostly
+  on the bridge whole only; the server resolves it per span (`spanKind` in
+  `src/database.ts`) onto `GET /pois` results (`kind`) and route crossings
+  (`kind`, `heightUnknown`, name suffix "(power line, ~25.5m)"). Both
+  `poiIcon` copies draw a pylon for `cable`, in slate instead of the
+  fixed-bridge red. Other kinds (weir, flood_barrier, ...) still use the
+  bridge icons; their name only says the kind.
 - ~~Click a route section → select it in the route pane~~ — **done** in the
   webapp (branch `feat/route-pane-map-links`). Not possible in the Freeboard
   panel: the host draws the route and sends no tap events for route lines.

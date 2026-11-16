@@ -2828,9 +2828,30 @@
     return POI_TYPE_NAMES[poi.typeId] || null;
   }
 
+  /** Marker colour of an overhead power line (bridge POI of kind "cable"). */
+  const CABLE_COLOR = "#64748b";
+
+  /** Words for a structure kind that is not a bridge: "cable" is a power line,
+   *  others are shown as the producer names them ("flood_barrier" → "flood
+   *  barrier"). */
+  function kindLabel(kind) {
+    return kind === "cable" ? "power line" : String(kind).replace(/_/g, " ");
+  }
+
   function poiIcon(type, props, size) {
     size = size || 22;
     if (type === "bridge") {
+      // An overhead power line (`kind` "cable", sent by the server; absent
+      // means a bridge) gets a pylon, whatever its subtype.
+      if (props.kind === "cable") {
+        return (
+          '<svg width="' +
+          size +
+          '" height="' +
+          size +
+          '" viewBox="0 0 22 22"><polyline points="7,19 11,3 15,19" stroke="white" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/><line x1="5" y1="7" x2="17" y2="7" stroke="white" stroke-width="2" stroke-linecap="round"/><line x1="8.7" y1="12.5" x2="13.3" y2="12.5" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M5 7 Q3 11 1 11 M17 7 Q19 11 21 11" stroke="white" stroke-width="1.2" fill="none" stroke-linecap="round"/></svg>'
+        );
+      }
       if (props.subtype === "opening") {
         return (
           '<svg width="' +
@@ -2893,18 +2914,31 @@
           const info = p.info || {};
           const t = poiTypeName(p);
           if (!t) continue;
+          // The structure kind of a span (server-resolved, whole's if the
+          // span has none); absent means a bridge.
+          const kind = p.kind;
           const subtypeColors = subtypeColor[t];
           let color =
-            subtypeColors && props.subtype
-              ? subtypeColors[props.subtype]
-              : typeColor[t] || "#6d96c0";
-          const iconHtml = poiIcon(t, props);
+            t === "bridge" && kind === "cable"
+              ? CABLE_COLOR
+              : subtypeColors && props.subtype
+                ? subtypeColors[props.subtype]
+                : typeColor[t] || "#6d96c0";
+          const iconHtml = poiIcon(t, { subtype: props.subtype, kind: kind });
           let label = p.displayName || p.name || "POI";
           if (t === "bridge") {
+            if (kind && kind !== "bridge")
+              label += " (" + kindLabel(kind) + ")";
             if (props.subtype === "fixed") {
-              if (info.height_unknown === true) label += " — height unknown";
-              else if (typeof info.height === "number" && info.height < 999)
-                label += " — " + info.height + "m";
+              const hasHeight =
+                typeof info.height === "number" && info.height < 999;
+              // heightUnknown (server-resolved, the whole's if the span has
+              // no flag): any height given is only an estimate.
+              if (p.heightUnknown === true)
+                label += hasHeight
+                  ? " — ~" + info.height + "m"
+                  : " — height unknown";
+              else if (hasHeight) label += " — " + info.height + "m";
             } else if (props.subtype === "opening") {
               // Closed clearance: below it you need not wait for an opening.
               const ch = props.closed_height;
@@ -2927,7 +2961,11 @@
               iconAnchor: [11, 11],
             }),
           });
-          m.bindTooltip(label, { direction: "top", offset: [0, -12] });
+          // A string tooltip is HTML; the label is database text.
+          m.bindTooltip(escapeHtml(label), {
+            direction: "top",
+            offset: [0, -12],
+          });
           m.on("click", function (e) {
             // Without this, the click also bubbles to the map's own click
             // handler (map.on('click', ...)), which treats it as "place a
@@ -6744,9 +6782,16 @@
               props = {};
             }
           }
-          var color = getSearchColor(t, props);
-          var iconHtml = poiIcon(t, props, 16);
-          var typeLabel = t.charAt(0).toUpperCase() + t.slice(1);
+          // Search returns wholes, which carry their kind in `info`.
+          var kind = item.info && item.info.kind;
+          var color =
+            t === "bridge" && kind === "cable"
+              ? CABLE_COLOR
+              : getSearchColor(t, props);
+          var iconHtml = poiIcon(t, { subtype: props.subtype, kind: kind }, 16);
+          var typeName =
+            t === "bridge" && kind && kind !== "bridge" ? kindLabel(kind) : t;
+          var typeLabel = typeName.charAt(0).toUpperCase() + typeName.slice(1);
           html +=
             '<div class="search-result-item" data-idx="' +
             i +
@@ -6760,7 +6805,9 @@
             highlightText(name, qLower) +
             "</span>" +
             (typeLabel
-              ? '<span class="search-result-type">' + typeLabel + "</span>"
+              ? '<span class="search-result-type">' +
+                escapeHtml(typeLabel) +
+                "</span>"
               : "") +
             "</div>";
         }
@@ -7398,27 +7445,25 @@
           const grouped = groupCrossingsByStructure(legCrossings);
           const icons = [];
           for (const [, entries] of grouped) {
-            const e0 = entries[0];
-            const color =
-              e0.type === "lock"
-                ? "#f59e0b"
-                : entries.some((e) => e.subtype === "fixed")
-                  ? "#ef4444"
-                  : "#22c55e";
+            const { main, color, bridges, cable } = crossingGroupStyle(entries);
             icons.push(
               '<span class="node-crossing-icon' +
-                crossingLinkClass(e0) +
+                crossingLinkClass(main) +
                 '"' +
-                crossingLinkAttrs(e0) +
+                crossingLinkAttrs(main) +
                 ' style="background:' +
                 color +
                 '">' +
-                poiIcon(e0.type, { subtype: e0.subtype }, 14) +
+                poiIcon(
+                  main.type,
+                  { subtype: main.subtype, kind: main.kind },
+                  14,
+                ) +
                 "</span>",
             );
             // If both fixed and opening exist, show the opening icon too
-            const opening = entries.find((e) => e.subtype === "opening");
-            if (opening && entries.some((e) => e.subtype === "fixed")) {
+            const opening = bridges.find((e) => e.subtype === "opening");
+            if (opening && bridges.some((e) => e.subtype === "fixed")) {
               icons.push(
                 '<span class="node-crossing-icon' +
                   crossingLinkClass(opening) +
@@ -7426,6 +7471,20 @@
                   crossingLinkAttrs(opening) +
                   ' style="background:#22c55e">' +
                   poiIcon("bridge", { subtype: "opening" }, 14) +
+                  "</span>",
+              );
+            }
+            // A power-line span of a bridge gets its own pylon
+            if (cable) {
+              icons.push(
+                '<span class="node-crossing-icon' +
+                  crossingLinkClass(cable) +
+                  '"' +
+                  crossingLinkAttrs(cable) +
+                  ' style="background:' +
+                  CABLE_COLOR +
+                  '">' +
+                  poiIcon("bridge", { kind: "cable" }, 14) +
                   "</span>",
               );
             }
@@ -7633,27 +7692,26 @@
           if (legCrossings.length > 0) {
             const grouped = groupCrossingsByStructure(legCrossings);
             for (const [, entries] of grouped) {
-              const e0 = entries[0];
-              // Color: fixed bridge = red, lock = yellow, opening = green
-              const color =
-                e0.type === "lock"
-                  ? "#f59e0b"
-                  : entries.some((e) => e.subtype === "fixed")
-                    ? "#ef4444"
-                    : "#22c55e";
+              // Color: fixed bridge = red, lock = yellow, opening = green,
+              // power line = slate
+              const { main, color, bridges, cable } =
+                crossingGroupStyle(entries);
               // Span info (subtype/height) is baked into c.name by the server
               // when known (e.g. "... (opening span)", "... (opening, closed
               // 6.6m)" / "... (fixed, 18.4m)").
               // Only synthesize a separate badge for older/raw data that lacks it.
               let info = "";
+              // A crossing with a non-bridge `kind` always has its suffix
+              // ("(power line, 38.8m)") from the server.
               if (
-                e0.type === "bridge" &&
+                main.type === "bridge" &&
+                !(main.kind && main.kind !== "bridge") &&
                 !/\((?:opening(?: span|,[^)]*)|fixed(?:,[^)]*)?)\)/.test(
-                  e0.name,
+                  main.name,
                 )
               ) {
-                const fixedEntry = entries.find((e) => e.subtype === "fixed");
-                const hasOpening = entries.some((e) => e.subtype === "opening");
+                const fixedEntry = bridges.find((e) => e.subtype === "fixed");
+                const hasOpening = bridges.some((e) => e.subtype === "opening");
                 if (fixedEntry && fixedEntry.height) {
                   info = fmtHeight(fixedEntry.height);
                   if (hasOpening) info += " / opening";
@@ -7669,16 +7727,27 @@
               );
               html +=
                 '<div class="leg-crossing' +
-                crossingLinkClass(e0) +
+                crossingLinkClass(main) +
                 '"' +
-                crossingLinkAttrs(e0) +
+                crossingLinkAttrs(main) +
                 ">" +
                 '<span class="leg-crossing-icon" style="background:' +
                 color +
                 '">' +
-                poiIcon(e0.type, { subtype: e0.subtype }, 16) +
+                poiIcon(
+                  main.type,
+                  { subtype: main.subtype, kind: main.kind },
+                  16,
+                ) +
                 "</span>" +
-                escapeHtml(e0.name) +
+                (cable
+                  ? '<span class="leg-crossing-icon" style="background:' +
+                    CABLE_COLOR +
+                    '">' +
+                    poiIcon("bridge", { kind: "cable" }, 16) +
+                    "</span>"
+                  : "") +
+                escapeHtml(main.name) +
                 (info
                   ? '<span class="crossing-type"> ' + info + "</span>"
                   : "") +
@@ -7976,6 +8045,33 @@
       grouped.get(key).push(c);
     }
     return grouped;
+  }
+
+  /**
+   * How one structure group is drawn. A span's own `kind` wins over its
+   * whole's, so a bridge can have a power-line span: the group then shows the
+   * bridge (from its non-cable spans) plus a pylon badge, whatever the order.
+   * @param {object[]} entries Crossings of one structure.
+   * @returns {{main: object, color: string, bridges: object[],
+   *   cable: object|undefined}} `main` is the entry named and linked,
+   *   `bridges` the entries the bridge badge and height come from, `cable` the
+   *   power-line entry to badge separately (undefined when `main` is one).
+   */
+  function crossingGroupStyle(entries) {
+    const e0 = entries[0];
+    if (e0.type === "lock")
+      return { main: e0, color: "#f59e0b", bridges: entries, cable: undefined };
+    const nonCable = entries.filter((e) => e.kind !== "cable");
+    if (nonCable.length === 0)
+      return { main: e0, color: CABLE_COLOR, bridges: [], cable: undefined };
+    return {
+      main: nonCable[0],
+      color: nonCable.some((e) => e.subtype === "fixed")
+        ? "#ef4444"
+        : "#22c55e",
+      bridges: nonCable,
+      cable: entries.find((e) => e.kind === "cable"),
+    };
   }
   /**
    * Crossings with a position can be clicked to pan the map to them.
