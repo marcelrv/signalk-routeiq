@@ -1,66 +1,72 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 — 2026-11-16
+
+First stable release.
+
+### Upgrade notes
+
+- **Download your routing database again.** Databases built before this
+  release are marked "unsupported" and not loaded.
+- **Tides API Base URL is gone.** The tide plugins are found on this server
+  automatically. With security on, the user asking for a route needs read
+  access to tide data.
+- Saved values of removed settings (see Removed) are ignored.
 
 ### Added
 
-- Click a bridge or lock in the route list to centre the map on it, in the
-  webapp and the Freeboard panel.
-- Click the route line to select and open that section in the route list;
-  it stays highlighted until Esc, a map click or a new route.
-- Route crossings carry the database's `structure` id, when it has one, and
-  a `passage` index telling separate passes through one structure apart.
-- Itinerary points carry `coordIndex`, their vertex on the route geometry,
-  so a client can match legs to the route line without searching for them.
+- Routes saved to Signal K and GPX exports keep their passage timing:
+  duration, waits, departure and arrival (#50).
+- Leg warnings are marked danger, caution or info; click one to show where
+  it applies on the map (#59).
+- A bridge clearance below the air draft is a danger warning.
+- Click a bridge or lock in the route list to centre the map on it; click
+  the route line to open that section in the route list.
+- Overhead power lines get their own icon instead of showing as bridges.
+- Unnamed route ends are named after a nearby harbour, lock, bridge or
+  their water.
+- `signalk-tidal-currents` is called in-process when it supports it; an
+  unresponsive tide plugin is skipped for a minute.
+- **API:** crossings carry `structure` and `passage`; itinerary points carry
+  `coordIndex`; leg warnings carry `level` and `at`; route ends carry `name`
+  and `nameSource`.
 
 ### Fixed
 
-- In Freeboard, a calculated route keeps its vias: they show by name on the
-  chart, survive a save, and Optimise routes through them again instead of
-  through every waypoint. Moving or adding a point on the chart makes it a
-  via, and only the legs next to it change. Routes saved before this update
-  have no named vias and route straight from start to end.
-- A route that passes the same bridge or lock twice within one section of
-  the route list (out and back) now shows two rows, each with its own map
-  link and wait, instead of one row with the waits added up (#60). The
-  bridges over both ends of one long lock stay one row, and the saved
-  passage profile and GPX waits carry the same `passage` index.
-- Bridges or locks that share a name, such as two locks both called "Lock",
-  are no longer merged into one row in the route list. Each keeps its own
-  map link. Spans are combined only when they belong to the same structure.
-- A route section picked on the line now stays highlighted as a whole: the
-  map line is split where the route list's legs begin and end.
-- Hovering the route line highlights the section a click selects, not the
-  whole stretch between vias; the leg context menu still shows the whole leg
-  it acts on.
+- Only bridges and locks the route actually passes are listed and charged
+  a wait (#57).
+- Freeboard keeps a route's vias through save and Optimise.
+- Passing the same bridge or lock twice shows two rows, each with its own
+  wait (#60).
+- A lock with a bridge over its head is listed with its wait.
+- Bridges or locks sharing a name are no longer merged.
+- Routes from a harbour with a shallow exit no longer fail to find a path.
+- Routes crossing between regions are checked against both regions' limits.
+- Depth, width and air-draft limits compare to the centimetre.
+- Selecting or hovering the route line highlights exactly one route-list
+  section.
+- Crossings with an invalid position get no map link (#62).
+- Tides no longer read as "not installed" with SSL, another port or
+  security on.
 
 ### Changed
 
-- Tidal current now comes only from `signalk-tidal-currents` stations; away
-  from them no current is assumed. `signalk-tides` supplies tide heights
-  only, for the depth at the time of passage.
-- **API:** `tide.source` on route results and saved passage profiles, and
-  `source` on `GET /router/tides/status`, is now `"stations"` or `"heights"`.
-  `"heights"` replaces `"height-estimate"`: it means only tide heights were
-  known and no current was applied. Clients that checked for
-  `"height-estimate"` should check for `"heights"`; older saved profiles may
-  still carry the old value.
-- `tide.stations` lists the tide-height stations as well as the current
-  stations when both were used.
-- The route summary shows the tide's time difference only when a current
-  was applied.
+- Tidal current comes only from `signalk-tidal-currents` stations;
+  `signalk-tides` supplies heights only.
+- **API:** `tide.source` is `"stations"` or `"heights"` (was
+  `"height-estimate"`); `tide.stations` also lists height stations.
+- The tide time difference shows only when a current was applied.
 - Default average speed is 5 kn (was 6).
 
 ### Removed
 
-- Plugin settings: Default Min Coast Distance (a client can still send
-  `minCoastDistance` per request; there is no default), Max Tidal Current,
-  Wrong Way Penalty and Line-of-Sight Sample Interval. Waypoint
+- Settings: Tides API Base URL, Default Min Coast Distance, Max Tidal
+  Current, Wrong Way Penalty, Line-of-Sight Sample Interval. Waypoint
   Simplification Tolerance, Line-of-Sight Search Radius, Eager-load Region,
-  Proactive Load Radius and Max Loaded Regions are now fixed internal
-  defaults. A value saved for any of them is ignored.
+  Proactive Load Radius and Max Loaded Regions are now fixed.
 - `defaultCoastDistance` and `maxTidalCurrentKnots` from
   `GET /router/config`.
+- Support for routing databases in the old POI format.
 
 ## 0.1.0-alpha.10 — 2026-11-09
 
