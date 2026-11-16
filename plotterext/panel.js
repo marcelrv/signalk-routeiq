@@ -97,7 +97,7 @@ let selectedId = null;
 let busy = false;
 let engineReady = false;
 let tidesAvailable = false;
-let cfg = { averageSpeedKnots: 6 };
+let cfg = { averageSpeedKnots: 5 };
 let units = { distance: "naut-mile" };
 // Per-route calculation session:
 //   requestPoints — the user's original start/via/end (survives re-calcs)
@@ -1447,7 +1447,7 @@ async function searchPois() {
  */
 function summaryLine(result) {
   const distM = result.totalDistance || 0;
-  const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 6;
+  const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 5;
   const tideActive =
     result.tide &&
     result.tide.enabled &&
@@ -2058,7 +2058,7 @@ function fmtDistance(meters) {
 
 /** Sailing time for a distance at the configured average speed, as h:mm. */
 function fmtDuration(meters) {
-  const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 6;
+  const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 5;
   const totalMinutes = Math.round((meters / 1852 / speed) * 60);
   return (
     Math.floor(totalMinutes / 60) +

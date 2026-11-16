@@ -463,7 +463,7 @@ export interface PluginConfig {
   // routingBBoxMargin — deliberately not in the settings schema. 0 disables.
   coverageGapMeters: number; // meters, default 1500 — internal, not user-facing
   lineOfSightSearchRadius: number; // meters, default 0 (smoothing off) — internal
-  averageSpeedKnots: number; // knots, default 6.0
+  averageSpeedKnots: number; // knots, default 5.0
   // Typical wait at an opening span or a lock, in minutes. Applied to the ETA
   // only — never to the routing cost — so it cannot change which way a route
   // goes, only how long it is expected to take. A fixed bridge is either
@@ -561,7 +561,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   maxPenaltyDetourRatio: 3.0,
   coverageGapMeters: 1500,
   lineOfSightSearchRadius: 0,
-  averageSpeedKnots: 6.0,
+  averageSpeedKnots: 5.0,
   lockWaitMinutes: 60,
   bridgeWaitMinutes: 30,
   waypointTolerance: 30,

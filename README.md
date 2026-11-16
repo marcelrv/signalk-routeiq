@@ -72,7 +72,7 @@ These settings are available under Server → Plugin Config → RouteIQ:
 | Draft Safety Margin (m) | 0.3 | Under-keel clearance added to the vessel's design draft |
 | Air Draft Safety Margin (m) | 1.5 | Mast clearance added to the vessel's design air draft |
 | Beam Safety Margin (m) | 2.0 | Width clearance added to the vessel's design beam |
-| Average Speed (kn) | 6.0 | Cruising speed used to estimate route duration / ETA |
+| Average Speed (kn) | 5.0 | Cruising speed used to estimate route duration / ETA |
 | Typical Lock Wait (min) | 60 | Time allowed for each lock on the route, counted towards duration and ETA. Adjustable per route under ☰ → Routing |
 | Typical Opening Bridge Wait (min) | 30 | Time allowed for each opening bridge. Fixed spans cost nothing |
 | Consider Tides by Default | off | Factor in tidal currents when calculating routes (needs `signalk-tidal-currents` and/or `signalk-tides`); can be overridden per request |
