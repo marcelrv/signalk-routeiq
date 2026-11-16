@@ -20,7 +20,12 @@ import {
   TRAFFIC_ONE_WAY_REV,
 } from "./database.js";
 import type { FunnelResult, NavmeshRegion } from "./navmesh.js";
-import { attachWaters, buildRouteDescription } from "./route-description.js";
+import {
+  attachWaters,
+  buildRouteDescription,
+  ENDPOINT_POI_RADIUS_M,
+  nameEndpoints,
+} from "./route-description.js";
 import {
   bearingDeg,
   buildItinerary,
@@ -274,6 +279,13 @@ const ROUTE_PART_TYPES: ReadonlySet<number> = new Set([
  *  the segment is built (a segment names only its two ends, or `nodes` when
  *  it spans several). Read by detectRouteStructures. */
 const segmentHops = new WeakMap<object, number[]>();
+
+/** The straight legs connectUserPoint draws from a user's point to where the
+ *  route joins the graph (over land or open water, in no charted water body).
+ *  Recorded where they are built, because their from/to (-1) look the same
+ *  as the cut edge pieces next to them. Read by finalizeRoute to count the
+ *  water reach of the end names from where the route joins the graph. */
+const connectorLegs = new WeakSet<object>();
 
 /**
  * Hand a segment's graph edges and lock ids on to the piece of it that
@@ -1554,9 +1566,10 @@ export class RoutingEngine {
       toLon: number,
       toLat: number,
     ) => {
-      if (!this.config.lineOfSightSearchRadius) return;
       const seg = segments[segIdx];
       if (!seg) return;
+      connectorLegs.add(seg);
+      if (!this.config.lineOfSightSearchRadius) return;
       if (this.db.isLineCrossingLand(fromLat, fromLon, toLat, toLon, 5)) {
         seg.minDepth = 0;
         seg.minDepthKnown = true;
@@ -3615,13 +3628,37 @@ export class RoutingEngine {
         // compression, line-of-sight) spans several, and only edges are in
         // the databases' sequence tables.
         // `seg` ties each edge to its route segment, for warning locations.
-        const units = this.expandSegmentEdges(segments).map((u) => ({
-          ...u,
-          distance:
-            segments[u.seg].nodes && segments[u.seg].nodes!.length >= 2
-              ? (this.db.getEdgeSync(u.from, u.to)?.distance ?? 0)
-              : (segments[u.seg].distance ?? 0),
-        }));
+        // A piece of an edge cut at the user's point (from or to -1) keeps
+        // the edge's nodes only in segmentHops (keepSegmentEdges); read them
+        // so the piece lies in that edge's water, not in none. Its distance
+        // is the clipped piece, shared over the edges it covers.
+        const cutHops = (seg: (typeof segments)[number]) =>
+          (seg.from === -1 || seg.to === -1) && !seg.nodes
+            ? segmentHops.get(seg)
+            : undefined;
+        const units = this.expandSegmentEdges(segments, cutHops).map((u) => {
+          const seg = segments[u.seg];
+          let distance: number;
+          if (seg.nodes && seg.nodes.length >= 2) {
+            distance = this.db.getEdgeSync(u.from, u.to)?.distance ?? 0;
+          } else {
+            const hops = cutHops(seg);
+            if (hops && hops.length > 2) {
+              let full = 0;
+              for (let k = 0; k + 1 < hops.length; k++)
+                full +=
+                  this.db.getEdgeSync(hops[k], hops[k + 1])?.distance ?? 0;
+              const edge = this.db.getEdgeSync(u.from, u.to)?.distance ?? 0;
+              distance =
+                full > 0
+                  ? ((seg.distance ?? 0) * edge) / full
+                  : (seg.distance ?? 0) / (hops.length - 1);
+            } else {
+              distance = seg.distance ?? 0;
+            }
+          }
+          return { ...u, distance };
+        });
         const described = await this.db.describeRoute(
           units,
           waitOverrides?.lang,
@@ -3644,6 +3681,32 @@ export class RoutingEngine {
           },
         ];
       }
+    }
+
+    // What to call the two ends, for clients that have no name for them.
+    // Skipped with the description: a departure scan reads only times.
+    if (waitOverrides?.describe !== false) {
+      // The straight connectors from the user's points to the graph
+      // (connectorLegs, drawn by connectUserPoint) lie in no water, so the
+      // water reach is counted from where the route joins it. The cut edge
+      // piece next to a connector also has from/to -1 but is water, so it is
+      // not counted.
+      let startConnector = 0;
+      for (const seg of segments) {
+        if (!connectorLegs.has(seg)) break;
+        startConnector += seg.distance ?? 0;
+      }
+      let endConnector = 0;
+      for (let k = segments.length - 1; k >= 0; k--) {
+        if (!connectorLegs.has(segments[k])) break;
+        endConnector += segments[k].distance ?? 0;
+      }
+      nameEndpoints(
+        itinerary,
+        route.description,
+        (lat, lon) => this.db.nearestPoiName(lat, lon, ENDPOINT_POI_RADIUS_M),
+        { start: startConnector, end: endConnector },
+      );
     }
 
     route.totalSeconds = Math.round(totalSec);

@@ -11,6 +11,8 @@ import {
   attachWaters,
   buildRouteDescription,
   depthQualityLevel,
+  ENDPOINT_WATER_REACH_M,
+  nameEndpoints,
   noticeLevel,
 } from '../dist/route-description.js';
 import { legWarnings } from '../dist/itinerary.js';
@@ -157,7 +159,15 @@ function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'routeiq-desc-'));
 }
 
-async function routeAcross(dir: string, lang?: string, opts: { loadAll?: string[] } = {}) {
+async function routeAcross(
+  dir: string,
+  lang?: string,
+  opts: {
+    loadAll?: string[];
+    start?: { latitude: number; longitude: number };
+    end?: { latitude: number; longitude: number };
+  } = {},
+) {
   const db = new RoutingDatabase(dir, true);
   await db.init();
   await db.loadGraph();
@@ -166,8 +176,8 @@ async function routeAcross(dir: string, lang?: string, opts: { loadAll?: string[
   engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
   try {
     const route = await engine.calculateRoute({
-      start: { latitude: LAT, longitude: LONS[0] },
-      end: { latitude: LAT, longitude: LONS[5] },
+      start: opts.start ?? { latitude: LAT, longitude: LONS[0] },
+      end: opts.end ?? { latitude: LAT, longitude: LONS[5] },
       minCoastDistance: 0,
       ...(lang ? { lang } : {}),
     });
@@ -209,6 +219,58 @@ describe('route description from a routing database', () => {
       const quality = d[1].warnings.find(w => w.type === 'depth_quality')!;
       assert.deepStrictEqual(at(quality), [[3, 5]]);
       assert.deepStrictEqual(quality.at![0].bounds, [LONS[3], LAT, LONS[5], LAT]);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('names the start and end after the water they lie in when no POI is near', async () => {
+    const { db, route } = await routeAcross(dir, undefined, { loadAll: ['a_navlines.sqlite'] });
+    try {
+      const it = route.itinerary!;
+      assert.deepStrictEqual([it[0].name, it[0].nameSource], ['Kanaal', 'water']);
+      const end = it[it.length - 1];
+      assert.deepStrictEqual([end.name, end.nameSource], ['Meer', 'water']);
+      assert.ok(it.slice(1, -1).every(p => p.name === undefined), 'only the ends are named');
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('counts the water reach at both ends from where the connector joins the graph', async () => {
+    // Both points about 700 m off the graph: longer than the reach on its
+    // own, so the ends are named only if the connectors are left out.
+    const off = 700 / 111320;
+    const { db, route } = await routeAcross(dir, undefined, {
+      loadAll: ['a_navlines.sqlite'],
+      start: { latitude: LAT + off, longitude: LONS[0] },
+      end: { latitude: LAT + off, longitude: LONS[5] },
+    });
+    try {
+      const it = route.itinerary!;
+      assert.deepStrictEqual([it[0].name, it[0].nameSource], ['Kanaal', 'water']);
+      const end = it[it.length - 1];
+      assert.deepStrictEqual([end.name, end.nameSource], ['Meer', 'water']);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('names an end that lies inside a named edge after its water', async () => {
+    // The start 15% along the first Kanaal edge (just off it), so the route
+    // cuts that edge at the start: the piece left (about 580 m, longer than
+    // the reach) must still read as Kanaal.
+    const { db, route } = await routeAcross(dir, undefined, {
+      loadAll: ['a_navlines.sqlite'],
+      start: { latitude: LAT + 20 / 111320, longitude: LONS[0] + 0.15 * (LONS[1] - LONS[0]) },
+    });
+    try {
+      const it = route.itinerary!;
+      assert.deepStrictEqual([it[0].name, it[0].nameSource], ['Kanaal', 'water']);
+      // Kanaal starts where the 20 m connector joins the cut edge.
+      const kanaal = route.description!.find(l => l.name)!;
+      assert.strictEqual(kanaal.name, 'Kanaal');
+      assert.ok(kanaal.distanceFromStart < 50, `${kanaal.distanceFromStart}`);
     } finally {
       await db.close();
     }
@@ -755,5 +817,56 @@ describe('leg warnings', () => {
   it('lists the worst first', () => {
     const ws = legWarnings({ minDepth: 1.5, minDepthAtPassage: 2.5, minWidth: 3 }, vessel);
     assert.deepStrictEqual(ws.map((w) => [w.type, w.level]), [['narrow', 'danger'], ['shallow', 'caution']]);
+  });
+});
+
+describe('nameEndpoints', () => {
+  const ends = (total: number): any[] => [
+    { kind: 'start', latitude: 52, longitude: 5, distanceFromStart: 0, coordIndex: 0 },
+    { kind: 'end', latitude: 52, longitude: 5.1, distanceFromStart: total, coordIndex: 9 },
+  ];
+  const leg = (from: number, dist: number, name?: string): any => ({
+    distanceFromStart: from, distance: dist, ...(name ? { name } : {}), warnings: [],
+  });
+
+  it('prefers a nearby POI over the water', () => {
+    const it = ends(5000);
+    nameEndpoints(it, [leg(0, 5000, 'Kanaal')], (_lat, lon) => (lon === 5 ? 'Jachthaven' : undefined));
+    assert.deepStrictEqual([it[0].name, it[0].nameSource], ['Jachthaven', 'poi']);
+    assert.deepStrictEqual([it[1].name, it[1].nameSource], ['Kanaal', 'water']);
+  });
+
+  it('looks past an unnamed basin at the quay, but not further than the reach', () => {
+    const it = ends(10000);
+    const r = ENDPOINT_WATER_REACH_M;
+    nameEndpoints(
+      it,
+      [leg(0, r - 100), leg(r - 100, 4000, 'Rivier'), leg(r + 3900, 4000, 'Meer'), leg(r + 7900, 10000 - r - 7900)],
+      () => undefined,
+    );
+    assert.strictEqual(it[0].name, 'Rivier');
+    // The end lies in an unnamed stretch longer than the reach: no name.
+    assert.strictEqual(it[1].name, undefined);
+    assert.strictEqual(it[1].nameSource, undefined);
+    // Just inside the reach, the named water before it counts.
+    const near = ends(5000 + r - 100);
+    nameEndpoints(near, [leg(0, 5000, 'Rivier'), leg(5000, r - 100)], () => undefined);
+    assert.deepStrictEqual([near[1].name, near[1].nameSource], ['Rivier', 'water']);
+  });
+
+  it('counts the reach from where the connector to the graph ends', () => {
+    const it = ends(10000);
+    // 900 m of connector at each end, then 300 m of unnamed water.
+    const d = [leg(0, 1200), leg(1200, 7600, 'IJmeer'), leg(8800, 1200)];
+    nameEndpoints(it, d, () => undefined);
+    assert.ok(it.every(p => p.name === undefined), 'beyond the reach without the connectors');
+    nameEndpoints(it, d, () => undefined, { start: 900, end: 900 });
+    assert.deepStrictEqual(it.map(p => p.name), ['IJmeer', 'IJmeer']);
+  });
+
+  it('leaves both ends unnamed without POIs or a description', () => {
+    const it = ends(5000);
+    nameEndpoints(it, undefined, () => undefined);
+    assert.ok(it.every(p => p.name === undefined && p.nameSource === undefined));
   });
 });

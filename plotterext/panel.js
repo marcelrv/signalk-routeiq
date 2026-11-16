@@ -546,9 +546,14 @@ function onPicked(_name, picked) {
   onAction({ actionId, target: picked.target });
 }
 
-function fmtPoint(p) {
-  if (p.name && p.name !== "Start" && p.name !== "Destination") return p.name;
+/** A point's position as "lat, lon". */
+function fmtPos(p) {
   return p.position[1].toFixed(4) + ", " + p.position[0].toFixed(4);
+}
+
+/** A point's real name, else its position. */
+function fmtPoint(p) {
+  return isPlaceholderName(p.name) ? fmtPos(p) : p.name.trim();
 }
 
 /** The Plan section (pick hosts only) mirrors `planning` until the draft has
@@ -779,8 +784,13 @@ async function refreshRoutes(autoSelectId) {
     selectedId = null;
   } else {
     for (const r of routes) {
+      // An unsaved stand-in name shows the name Save will suggest.
+      const s = sessions.get(r.routeId);
+      const suggested = s && s.rev === r.rev ? s.suggestedName : undefined;
+      const name =
+        suggested && isPlaceholderRouteName(r.name) ? suggested : r.name;
       const label =
-        (r.name || "Unnamed route") +
+        (name || "Unnamed route") +
         " (" +
         r.pointCount +
         " pts" +
@@ -958,22 +968,74 @@ async function calculate(forcedRequestPoints, known) {
   // points, so a linked endpoint still sits on its waypoint.
   const first = requestPoints[0],
     last = requestPoints[requestPoints.length - 1];
-  if (first.name) newPoints[0].name = first.name;
-  if (last.name) newPoints[newPoints.length - 1].name = last.name;
+  // An end the user never named (blank, or a placeholder this panel gave it)
+  // takes the server's name for it: a nearby POI, else the water it is in.
+  // A name an earlier calculation took from the server counts as unnamed
+  // too, so an end moved on the chart is named afresh instead of keeping
+  // the name of where it was.
+  const itin = result.itinerary || [];
+  const endName = (p, auto, i) => {
+    const own = auto && p.name === auto.name ? auto.was : p.name;
+    const fromServer = isPlaceholderName(own)
+      ? (itin.length > 1 && itin[i].name) || undefined
+      : undefined;
+    return {
+      own,
+      name: fromServer || own,
+      auto: fromServer ? { name: fromServer, was: own } : undefined,
+    };
+  };
+  const firstEnd = endName(first, session?.autoNames?.first, 0);
+  const lastEnd = endName(last, session?.autoNames?.last, itin.length - 1);
+  const firstName = firstEnd.name;
+  const lastName = lastEnd.name;
+  if (firstName) newPoints[0].name = firstName;
+  if (lastName) newPoints[newPoints.length - 1].name = lastName;
   if (first.href) newPoints[0].href = first.href;
   if (last.href) newPoints[newPoints.length - 1].href = last.href;
 
+  // The session keeps the request with the ends' own names (the stand-ins,
+  // not the server's), so a later run on it reads them as unnamed again.
+  const withOwnName = (p, own) => {
+    const q = { ...p };
+    if (own) q.name = own;
+    else delete q.name;
+    return q;
+  };
+  const storedRequest = [
+    withOwnName(first, firstEnd.own),
+    ...requestPoints.slice(1, -1),
+    withOwnName(last, lastEnd.own),
+  ];
   sessions.set(routeId, {
-    requestPoints,
+    requestPoints: storedRequest,
     generated: newPoints,
     revertPoints: session?.revertPoints ?? points,
+    autoNames: { first: firstEnd.auto, last: lastEnd.auto },
+    suggestedName: routeNameFor(firstName, lastName),
+    suggestedDescription: routeDescriptionFor(
+      { ...first, name: firstName },
+      requestPoints.slice(1, -1),
+      { ...last, name: lastName },
+      result,
+    ),
   });
-  await client.call("route.replace", { routeId, points: newPoints });
+  const replaced = await client.call("route.replace", {
+    routeId,
+    points: newPoints,
+  });
+  // The route's rev right after our replace: a later rev means it was edited
+  // on the chart, and the suggestions no longer describe it.
+  const stored = sessions.get(routeId);
+  if (stored) stored.rev = replaced?.rev;
   // Tide probes sit on the request points, so only a changed request (a new
   // via, a moved end) needs a fresh check — a plain re-run does not.
   if (!samePoints(requestPoints, session?.requestPoints)) {
     tideCheckedFor = undefined;
   }
+  // The host's route.dirty event for this replace can arrive before the rev
+  // is known, so the route list is drawn again now that it is.
+  if (stored) await refreshRoutes();
 
   setStatus(
     "route-status",
@@ -981,6 +1043,84 @@ async function calculate(forcedRequestPoints, known) {
     "ok",
   );
   renderSummary(result);
+}
+
+/**
+ * Whether a route point's name says nothing: blank, or one of the stand-ins
+ * this panel and the host hand out ("Start", "Destination", "Via 2", "WP7").
+ * @param {string} [name] The point's name.
+ * @returns {boolean} True when the server's name for that end should be used.
+ */
+function isPlaceholderName(name) {
+  const n = (name || "").trim();
+  return !n || /^(Start|Destination|Via \d+|WP\d+)$/.test(n);
+}
+
+/**
+ * The route name the webapp shows (its updateRouteTitle): "A → B", else
+ * "Route to B" or "From A", from the ends' real names.
+ * @param {string} [startName] The first point's name.
+ * @param {string} [endName] The last point's name.
+ * @returns {string} The name, or "" when neither end has a real name.
+ */
+function routeNameFor(startName, endName) {
+  const sn = isPlaceholderName(startName) ? "" : startName.trim();
+  const dn = isPlaceholderName(endName) ? "" : endName.trim();
+  if (sn && dn) return sn + " → " + dn;
+  if (dn) return "Route to " + dn;
+  if (sn) return "From " + sn;
+  return "";
+}
+
+/** Last line of the descriptions we write. */
+const DESCRIPTION_MARK = "Planned with RouteIQ";
+
+/**
+ * Whether a route description is one of ours as written by
+ * routeDescriptionFor, unchanged: "Start: …", "Destination: …", an optional
+ * "Via: …", the distance/time line, then DESCRIPTION_MARK, and nothing else.
+ * A line the user added or removed makes it theirs.
+ * @param {string} text The route's description.
+ * @returns {boolean} True when Save may replace it.
+ */
+function isGeneratedDescription(text) {
+  const lines = text.trim().split("\n");
+  if (lines.length !== 4 && lines.length !== 5) return false;
+  if (lines[lines.length - 1].trim() !== DESCRIPTION_MARK) return false;
+  if (!lines[0].startsWith("Start: ")) return false;
+  if (!lines[1].startsWith("Destination: ")) return false;
+  return lines.length === 4 || lines[2].startsWith("Via: ");
+}
+
+/**
+ * A plain-text route description for the host's save dialog, like the top of
+ * the webapp's route pane: start, destination and vias (name and position),
+ * then the distance/time line shown in this panel.
+ * @param {{position: number[], name?: string}} start The first request point.
+ * @param {{position: number[], name?: string}[]} vias The via request points.
+ * @param {{position: number[], name?: string}} end The last request point.
+ * @param {object} result The route result.
+ * @returns {string} The description.
+ */
+function routeDescriptionFor(start, vias, end, result) {
+  const named = (p) =>
+    isPlaceholderName(p.name) ? fmtPos(p) : p.name.trim() + "  ·  " + fmtPos(p);
+  const lines = ["Start: " + named(start), "Destination: " + named(end)];
+  if (vias.length) lines.push("Via: " + vias.map(named).join("  |  "));
+  lines.push(summaryLine(result));
+  lines.push(DESCRIPTION_MARK);
+  return lines.join("\n");
+}
+
+/**
+ * Whether a route's name is a stand-in this panel or the host gave it, so a
+ * name built from the route's ends may replace it on save. A name the user
+ * typed is kept.
+ * @param {string|null} [name] The route's current name.
+ * @returns {boolean} True when the name may be replaced.
+ */
+function isPlaceholderRouteName(name) {
+  return !name || !name.trim() || /^RouteIQ to /i.test(name.trim());
 }
 
 async function revert() {
@@ -1003,14 +1143,32 @@ async function save() {
   const r = selectedRoute();
   if (!r) return;
   // dialog:true → the host prompts for name/description (its Route Details
-  // dialog in Freeboard-SK) and persists through the user's session.
+  // dialog in Freeboard-SK, filled in with `name`) and persists through the
+  // user's session. A stand-in name ("RouteIQ to destination") is replaced
+  // by one built from the route's ends, as the webapp names its routes.
+  const params = { routeId: r.routeId, dialog: true };
+  const session = sessions.get(r.routeId);
+  if (session?.suggestedName || session?.suggestedDescription) {
+    const current = await client.call("route.get", { routeId: r.routeId });
+    // Suggestions describe the route as calculated: once it has been edited
+    // on the chart they no longer fit, until the next calculation.
+    if (samePoints(current?.points, session.generated)) {
+      if (session.suggestedName && isPlaceholderRouteName(current?.name))
+        params.name = session.suggestedName;
+      // A route with no description, or with one exactly as we write them
+      // (for an earlier calculation), gets the current one; anything the
+      // user changed or added is kept.
+      const text = current?.description;
+      if (
+        session.suggestedDescription &&
+        (!text?.trim() || isGeneratedDescription(text))
+      )
+        params.description = session.suggestedDescription;
+    }
+  }
   // The call stays open until the user answers that dialog, so the bus's
   // default 10 s call timeout must not apply (0 = no timeout).
-  await client.call(
-    "route.save",
-    { routeId: r.routeId, dialog: true },
-    { timeoutMs: 0 },
-  );
+  await client.call("route.save", params, { timeoutMs: 0 });
 }
 
 /* ---------- route creation ---------- */
@@ -1242,15 +1400,13 @@ async function searchPois() {
 
 /* ---------- result summary + itinerary ---------- */
 
-function renderSummary(result) {
-  clearHighlight();
-  // Feature k runs from vertex k to k+1.
-  routeVertices = [];
-  for (const f of result.features || []) {
-    const c = f.geometry?.coordinates || [];
-    if (routeVertices.length === 0 && c.length > 0) routeVertices.push(c[0]);
-    if (c.length > 1) routeVertices.push(c[c.length - 1]);
-  }
+/**
+ * The route's distance/time line: distance, total time at the configured
+ * speed, waiting, and the tide effect when tides were used.
+ * @param {object} result The route result.
+ * @returns {string} The line.
+ */
+function summaryLine(result) {
   const distM = result.totalDistance || 0;
   const speed = cfg.averageSpeedKnots > 0 ? cfg.averageSpeedKnots : 6;
   const tideActive =
@@ -1288,7 +1444,19 @@ function renderSummary(result) {
       }
     }
   }
-  $("sum-line").textContent = line;
+  return line;
+}
+
+function renderSummary(result) {
+  clearHighlight();
+  // Feature k runs from vertex k to k+1.
+  routeVertices = [];
+  for (const f of result.features || []) {
+    const c = f.geometry?.coordinates || [];
+    if (routeVertices.length === 0 && c.length > 0) routeVertices.push(c[0]);
+    if (c.length > 1) routeVertices.push(c[c.length - 1]);
+  }
+  $("sum-line").textContent = summaryLine(result);
 
   const warnings = $("warnings");
   warnings.innerHTML = "";

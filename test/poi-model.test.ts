@@ -306,6 +306,11 @@ describe('POIs: wholes, parts, info on demand', () => {
     assert.strictEqual(near?.parentId, 300);
   });
 
+  it('names a position after the nearest named POI, a span by its bridge whole', async () => {
+    assert.strictEqual(db.nearestPoiName(LAT + 0.0002, lonOf(1), 100), 'Test Bridge');
+    assert.strictEqual(db.nearestPoiName(LAT + 0.5, lonOf(1), 100), undefined);
+  });
+
   it('does not hold info in memory: it is read from the file when asked', async () => {
     const row = db.getPoiRow(301) as unknown as Record<string, unknown>;
     assert.ok(row && !('info' in row), 'the loaded POI row has no info');
