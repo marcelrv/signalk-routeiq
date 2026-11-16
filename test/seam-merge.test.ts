@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import assert from 'node:assert';
-import { after, before, describe, it } from 'node:test';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase } from '../dist/database.js';
 import { RoutingEngine } from '../dist/routing.js';
@@ -591,5 +591,132 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
         'the west file\'s known air draft should still win over -1');
       assert.strictEqual(edge.min_width, 50.0, 'the files\' width should survive the overlay placeholder');
     });
+  });
+});
+
+// A route found in an earlier, narrower bounding box must be judged against
+// the graph as it is after a wider box loaded more regions. Loading the east
+// file folds its shallower copy of the shared S0-S1 seam edge into the edge
+// the west file loaded (spliceEdge keeps the tighter value); the route the
+// first box found still runs along that edge, and can be the one returned.
+//
+//   W0 ---- W1 ---- S0 ==== S1          (west file; first box)
+//                   S0 ==== S1 ---- E0  (east file; only the wider box)
+//
+// W0-W1 is under a 5 m clearance, so the first route is penalized and the
+// box widens. The wider box loads east (its bounding box starts east of the
+// first box), which makes S0-S1 7.5 m deep instead of 12 m. A* there finds
+// the same path, now more penalized and so costlier, and the first box's
+// route wins the tie on violating meters by its lower cost.
+describe('a route kept from an earlier box reports seam limits a later load tightened', () => {
+  const dir = './test/fixtures/seam-refresh';
+  const files = ['west.sqlite', 'east.sqlite', 'user-edits.sqlite'].map(f => path.join(dir, f));
+  const rW0 = P(52.000, 4.900);
+  const rW1 = P(52.010, 4.950);
+  const rS0 = P(52.000, 5.000);
+  const rS1 = P(52.010, 5.050);
+  const rE0 = P(52.000, 5.100);
+  const id = (p: Pt) => nodeIdFor(p.lat, p.lon);
+
+  function build(
+    file: string, country: string, bbox: typeof WEST_BBOX, nodes: Pt[],
+    edges: Array<[Pt, Pt, number, number]>, // a, b, min_depth, max_air_draft
+  ): void {
+    const raw = new DatabaseSync(file, { open: true });
+    const run = (sql: string, params: unknown[] = []) => raw.prepare(sql).run(...(params as any[]));
+    run(`CREATE TABLE metadata (id INTEGER PRIMARY KEY AUTOINCREMENT, country TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL, description TEXT, last_update_date TEXT NOT NULL, bounding_box TEXT)`);
+    run(`INSERT INTO metadata (country, name, description, last_update_date, bounding_box)
+         VALUES (?, ?, 'Seam refresh fixture', '2026-01-01T00:00:00Z', ?)`, [country, country, JSON.stringify(bbox)]);
+    run(`CREATE TABLE nodes (id INTEGER PRIMARY KEY, lat REAL, lon REAL, resolution REAL DEFAULT 0.0, node_depth REAL DEFAULT -1, region_id INTEGER)`);
+    for (const p of nodes) run(`INSERT INTO nodes (id, lat, lon, region_id) VALUES (?, ?, ?, 1)`, [id(p), p.lat, p.lon]);
+    run(`CREATE TABLE edges (source INTEGER, target INTEGER, distance REAL, min_depth REAL, max_air_draft REAL,
+      min_width REAL, cost_factor REAL DEFAULT 1.0, distance_to_land REAL, edge_type_id INTEGER DEFAULT 0,
+      traffic_mode INTEGER DEFAULT 0, edge_kind_id INTEGER DEFAULT 0)`);
+    for (const [a, b, depth, air] of edges) {
+      const d = Math.round(haversine(a.lat, a.lon, b.lat, b.lon));
+      for (const [from, to] of [[a, b], [b, a]]) {
+        run(`INSERT INTO edges (source, target, distance, min_depth, max_air_draft, min_width, cost_factor, distance_to_land, edge_type_id, traffic_mode, edge_kind_id)
+             VALUES (?, ?, ?, ?, ?, 50.0, 1.0, 500, 1, 0, 0)`, [id(from), id(to), d, depth, air]);
+      }
+    }
+    run(`CREATE TABLE pois (id INTEGER PRIMARY KEY, name TEXT, type_id INTEGER, properties TEXT, lat REAL, lon REAL)`);
+    upgradeToPoiModel(raw);
+    raw.close();
+  }
+
+  let db: RoutingDatabase;
+
+  before(async () => {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    for (const f of files) if (fs.existsSync(f)) fs.unlinkSync(f);
+    build(files[0], 'REFW', { min_lat: 51.99, min_lon: 4.89, max_lat: 52.02, max_lon: 5.051 },
+      [rW0, rW1, rS0, rS1], [[rW0, rW1, 12, 5], [rW1, rS0, 12, 40], [rS0, rS1, 12, 40]]);
+    // Starts east of the first box (around W0..S1 at 0.005° it ends at
+    // 5.055), inside the doubled one (5.06).
+    build(files[1], 'REFE', { min_lat: 51.99, min_lon: 5.058, max_lat: 52.02, max_lon: 5.11 },
+      [rS0, rS1, rE0], [[rS0, rS1, 7.5, 40], [rS1, rE0, 12, 40]]);
+  });
+
+  beforeEach(async () => {
+    db = new RoutingDatabase(dir, true);
+    await db.init();
+    await db.loadGraph();
+    await db.loadDatabaseGraph('west.sqlite');
+  });
+
+  afterEach(async () => {
+    await db.close();
+  });
+
+  after(() => {
+    for (const f of files) if (fs.existsSync(f)) fs.unlinkSync(f);
+  });
+
+  it('the returned route carries the tightened seam depth and warns about it', async () => {
+    assert.strictEqual(db.getEdgeSync(id(rS0), id(rS1))!.min_depth, 12);
+    const engine = new RoutingEngine(db, {
+      ...DEFAULT_CONFIG,
+      routingBBoxMargin: 0.005,
+      routingBBoxMaxExtent: 0.01,
+    });
+    // Needs 8.3 m: clear of the west file's 12 m, not of the east's 7.5 m.
+    engine.setVesselDimensions({ draft: 8, beam: 4, airDraft: 10 });
+
+    const route = await engine.calculateRoute({
+      start: { latitude: rW0.lat, longitude: rW0.lon },
+      end: { latitude: rS1.lat, longitude: rS1.lon },
+      minCoastDistance: 0,
+    });
+
+    // The wider box did load east, and the merge tightened the seam edge.
+    assert.strictEqual(db.getEdgeSync(id(rS0), id(rS1))!.min_depth, 7.5);
+    const depths = route.features.map((f: any) => f.properties.minDepth)
+      .filter((d: unknown): d is number => typeof d === 'number' && d >= 0);
+    assert.ok(depths.length > 0, 'the route has charted segments');
+    assert.strictEqual(Math.min(...depths), 7.5,
+      'the route reports the 7.5 m the seam edge now has, not the 12 m it had when found');
+    const text = JSON.stringify(route.warnings ?? []);
+    assert.match(text, /depth 7\.5m/, `a depth warning names the tightened seam: ${text}`);
+  });
+
+  it('a load that fails part-way leaves the loaded seam edge as it was', async () => {
+    const anyDb = db as any;
+    const send = anyDb.sendMessage.bind(db);
+    anyDb.sendMessage = async (type: string, payload?: unknown) => {
+      if (type === 'loadNavmeshRegions') throw new Error('synthetic navmesh read failure');
+      return send(type, payload);
+    };
+    await assert.rejects(db.loadDatabaseGraph('east.sqlite'), /synthetic navmesh read failure/);
+    anyDb.sendMessage = send;
+
+    const edge = db.getEdgeSync(id(rS0), id(rS1))!;
+    assert.strictEqual(edge.min_depth, 12, 'the failed file\'s 7.5 m is not merged in');
+    assert.strictEqual(db.getEdgeSync(id(rS1), id(rE0)), null, 'nor are its own edges');
+    assert.strictEqual(db.getNodeSync(id(rE0)), null, 'nor its nodes');
+
+    // And it loads cleanly on the next try.
+    await db.loadDatabaseGraph('east.sqlite');
+    assert.strictEqual(db.getEdgeSync(id(rS0), id(rS1))!.min_depth, 7.5);
   });
 });

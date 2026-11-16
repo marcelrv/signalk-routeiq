@@ -1159,7 +1159,7 @@ export class RoutingDatabase {
    *  it. Between two known values the smaller wins. Real builds give both
    *  sides of a seam the same numbers; this only decides the case where a
    *  rebuild left them disagreeing, and it decides it by failing safe. */
-  private static tighterLimit(a: number, b: number): number {
+  static tighterLimit(a: number, b: number): number {
     if (typeof a !== "number" || a < 0) return b;
     if (typeof b !== "number" || b < 0) return a;
     return Math.min(a, b);
@@ -1171,7 +1171,7 @@ export class RoutingDatabase {
    *  between two known values the shallower/more-restrictive one wins.
    *  tighterLimit itself is untouched and still governs max_air_draft/
    *  min_width, which have no such distinction. */
-  private static tighterDepth(
+  static tighterDepth(
     a: number,
     aKnown: boolean,
     b: number,
@@ -2051,6 +2051,12 @@ export class RoutingDatabase {
   ): Promise<void> {
     entry.state = "loading";
     try {
+      // Everything is read from the worker, and the navmesh parsed, before
+      // the in-memory graph is touched: a load that fails (a worker error, a
+      // bad navmesh row) must leave no half-merged seam behind. spliceEdge
+      // tightens an already-loaded neighbour's copy of a shared edge, and a
+      // route already found would otherwise be judged against limits from a
+      // file that never finished loading.
       const opened: {
         dbIndex: number;
         filename: string;
@@ -2066,16 +2072,6 @@ export class RoutingDatabase {
       } = await this.sendMessage("openDb", { dbPath: entry.path });
       if (opened.refused) throw new FormatRefusal(opened.refused);
       const dbIndex = opened.dbIndex;
-      if (opened.descriptionError) {
-        this.descriptionErrors.set(filename, opened.descriptionError);
-      } else {
-        this.descriptionErrors.delete(filename);
-      }
-      this.hasCrossesLand = this.hasCrossesLand || opened.flags.hasCrossesLand;
-      this.hasCrossesObstacle =
-        this.hasCrossesObstacle || opened.flags.hasCrossesObstacle;
-      this.hasNodeDepth = this.hasNodeDepth || opened.flags.hasNodeDepth;
-      this.hasRegionId = this.hasRegionId || opened.flags.hasRegionId;
 
       // The overlay's own added nodes/edges rows must be merged into memory
       // exactly once across the whole process lifetime, no matter how many
@@ -2095,6 +2091,70 @@ export class RoutingDatabase {
         dbIndexes: [dbIndex],
         includeOverlay,
       });
+
+      // Overlay deletions apply regardless of includeOverlay (they're a
+      // filter, not a merge, and cheap enough to just refetch every load).
+      const deletedNodeIds: number[] =
+        await this.sendMessage("getDeletedNodeIds");
+      const deletedEdges: Array<{ source: number; target: number }> =
+        await this.sendMessage("getDeletedEdgePairs");
+
+      const edges: Array<EdgeRow & { db_index: number }> =
+        await this.sendMessage("loadEdges", {
+          dbIndexes: [dbIndex],
+          includeOverlay,
+        });
+
+      const pois: Array<{
+        id: number;
+        name: string;
+        type_id: number;
+        properties: string | null;
+        lat: number;
+        lon: number;
+        parent_id: number | null;
+        db_index: number;
+      }> = await this.sendMessage("loadPois", { dbIndexes: [dbIndex] });
+
+      const rawRegions: Array<{
+        region_id: number;
+        boundary_geometry: string;
+        vertices: string;
+        triangles: string;
+        triangle_adjacency: string | null;
+        boundary_node_ids: string;
+        depth_ceiling_m: number;
+        db_index: number;
+      }> = await this.sendMessage("loadNavmeshRegions", {
+        dbIndexes: [dbIndex],
+      });
+
+      // The navmesh's node coordinates as the graph will hold them once this
+      // load is applied: this file's nodes, then the ones already loaded,
+      // minus the overlay's deletions.
+      const deletedNodeSet = new Set(deletedNodeIds);
+      const incomingNodes = new Map<number, { lat: number; lon: number }>();
+      for (const n of nodes) incomingNodes.set(n.id, n);
+      const nodeAfterLoad = (id: number) =>
+        deletedNodeSet.has(id)
+          ? undefined
+          : (incomingNodes.get(id) ?? this.nodes.get(id));
+      const newRegions: NavmeshRegionWithDb[] = rawRegions.map((r) => ({
+        ...Navmesh.buildNavmeshRegion(r, nodeAfterLoad),
+        dbIndex,
+      }));
+
+      // Apply. From here on nothing waits on the worker.
+      if (opened.descriptionError) {
+        this.descriptionErrors.set(filename, opened.descriptionError);
+      } else {
+        this.descriptionErrors.delete(filename);
+      }
+      this.hasCrossesLand = this.hasCrossesLand || opened.flags.hasCrossesLand;
+      this.hasCrossesObstacle =
+        this.hasCrossesObstacle || opened.flags.hasCrossesObstacle;
+      this.hasNodeDepth = this.hasNodeDepth || opened.flags.hasNodeDepth;
+      this.hasRegionId = this.hasRegionId || opened.flags.hasRegionId;
 
       const nodeIdSet = this.nodesByDbIndex.get(dbIndex) ?? new Set<number>();
       // Nodes an already-loaded database (or the overlay) also contributed —
@@ -2131,12 +2191,6 @@ export class RoutingDatabase {
       }
       this.nodesByDbIndex.set(dbIndex, nodeIdSet);
 
-      // Overlay deletions apply regardless of includeOverlay (they're a
-      // filter, not a merge, and cheap enough to just refetch every load).
-      const deletedNodeIds: number[] =
-        await this.sendMessage("getDeletedNodeIds");
-      const deletedEdges: Array<{ source: number; target: number }> =
-        await this.sendMessage("getDeletedEdgePairs");
       for (const nid of deletedNodeIds) {
         // Capture coords before deleting — needed to find the grid cell the
         // node was inserted into (a node's id encodes its coordinate, so the
@@ -2148,16 +2202,10 @@ export class RoutingDatabase {
             this.gridRemoveNode(nid, removedCoords.lat, removedCoords.lon);
         }
       }
-      const deletedNodeSet = new Set(deletedNodeIds);
       const deletedEdgeSet = new Set(
         deletedEdges.map((d) => `${d.source}:${d.target}`),
       );
 
-      const edges: Array<EdgeRow & { db_index: number }> =
-        await this.sendMessage("loadEdges", {
-          dbIndexes: [dbIndex],
-          includeOverlay,
-        });
       let edgeCount = 0;
       for (const edge of edges) {
         if (deletedNodeSet.has(edge.source) || deletedNodeSet.has(edge.target))
@@ -2187,34 +2235,8 @@ export class RoutingDatabase {
       // here (M6). buildSpatialIndex() is still used by the bulk loadGraph()
       // path below, where one full build after the whole load is simplest.
 
-      const pois: Array<{
-        id: number;
-        name: string;
-        type_id: number;
-        properties: string | null;
-        lat: number;
-        lon: number;
-        parent_id: number | null;
-        db_index: number;
-      }> = await this.sendMessage("loadPois", { dbIndexes: [dbIndex] });
       for (const p of pois) this.pois.push({ ...p, dbIndex: p.db_index });
 
-      const rawRegions: Array<{
-        region_id: number;
-        boundary_geometry: string;
-        vertices: string;
-        triangles: string;
-        triangle_adjacency: string | null;
-        boundary_node_ids: string;
-        depth_ceiling_m: number;
-        db_index: number;
-      }> = await this.sendMessage("loadNavmeshRegions", {
-        dbIndexes: [dbIndex],
-      });
-      const newRegions: NavmeshRegionWithDb[] = rawRegions.map((r) => ({
-        ...Navmesh.buildNavmeshRegion(r, (id) => this.nodes.get(id)),
-        dbIndex,
-      }));
       this.navmeshRegions.push(...newRegions);
       // Only precompute funnel/anchor edges for the regions this load just
       // added — regions from already-loaded databases were done on their

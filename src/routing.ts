@@ -612,11 +612,9 @@ export class RoutingEngine {
     const maxMargin = this.config.routingBBoxMaxExtent;
 
     const candidates: RouteCandidate[] = [];
-    let previousAttempt: {
-      violatingMeters: number;
-      cost: number;
-      distance: number;
-    } | null = null;
+    // The attempt before this one, by reference: refreshCandidateLimits may
+    // rescore it after a wider box loads a region.
+    let previousAttempt: RouteCandidate | null = null;
     let retriedForPenalty = false;
     // The last A* failure, for the final message when no box finds a path.
     let lastSearchError: RouteSearchError | undefined;
@@ -664,6 +662,14 @@ export class RoutingEngine {
           request,
         );
         candidates.push({ result, violatingMeters, cost, distance });
+        // This attempt's box may have loaded a region that tightened a seam
+        // edge an earlier candidate runs along; rescore those first.
+        await this.refreshCandidateLimits(
+          candidates.slice(0, -1),
+          effectiveDims,
+          env,
+          request,
+        );
 
         const penalized = violatingMeters > 0;
         const stalled =
@@ -692,7 +698,7 @@ export class RoutingEngine {
           `Route search found a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`,
         );
         retriedForPenalty = true;
-        previousAttempt = { violatingMeters, cost, distance };
+        previousAttempt = candidates[candidates.length - 1];
         currentMargin = newMargin;
       } catch (e) {
         // Only an A* failure is worth a wider box. Anything else is a bug:
@@ -721,6 +727,9 @@ export class RoutingEngine {
       }
     }
 
+    // A box that threw may have merged seam edges before it failed
+    // (ensureRegionsForBbox runs inside the try): rescore again.
+    await this.refreshCandidateLimits(candidates, effectiveDims, env, request);
     const best = this.selectBestCandidate(candidates);
     if (best) {
       const result = best.result;
@@ -1283,11 +1292,9 @@ export class RoutingEngine {
     const segmentMaxMargin = this.config.routingBBoxMaxExtent;
 
     const candidates: RouteCandidate[] = [];
-    let previousAttempt: {
-      violatingMeters: number;
-      cost: number;
-      distance: number;
-    } | null = null;
+    // The attempt before this one, by reference: refreshCandidateLimits may
+    // rescore it after a wider box loads a region.
+    let previousAttempt: RouteCandidate | null = null;
     let retriedForPenalty = false;
     // The last A* failure, for the fallback's message when no box finds a path.
     let lastSearchError: RouteSearchError | undefined;
@@ -1324,6 +1331,14 @@ export class RoutingEngine {
           waitOverrides,
         );
         candidates.push({ result, violatingMeters, cost, distance });
+        // This attempt's box may have loaded a region that tightened a seam
+        // edge an earlier candidate runs along; rescore those first.
+        await this.refreshCandidateLimits(
+          candidates.slice(0, -1),
+          dims,
+          env,
+          waitOverrides,
+        );
 
         const penalized = violatingMeters > 0;
         const stalled =
@@ -1351,7 +1366,7 @@ export class RoutingEngine {
           `Route search for ${label} found a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`,
         );
         retriedForPenalty = true;
-        previousAttempt = { violatingMeters, cost, distance };
+        previousAttempt = candidates[candidates.length - 1];
         currentMargin = newMargin;
       } catch (e) {
         // As in calculateRouteImpl: widen only on an A* failure; a bug
@@ -1376,6 +1391,9 @@ export class RoutingEngine {
       }
     }
 
+    // A box that threw may have merged seam edges before it failed
+    // (ensureRegionsForBbox runs inside the try): rescore again.
+    await this.refreshCandidateLimits(candidates, dims, env, waitOverrides);
     const best = this.selectBestCandidate(candidates);
     if (best) {
       if (retriedForPenalty) {
@@ -2898,6 +2916,121 @@ export class RoutingEngine {
     }
 
     return result;
+  }
+
+  /**
+   * Re-read a found route's depth, air-draft and width limits from the graph
+   * as it is now, and keep the tighter of each against the segment's own.
+   *
+   * A candidate holds the limits its edges had when its box searched. A
+   * wider box can then load a region whose copy of a shared seam edge is
+   * tighter (spliceEdge folds the two with tighterDepth/tighterLimit), and
+   * the earlier candidate can still win selection or be the route kept after
+   * a later box throws. Without this its segments would miss a shallower or
+   * lower limit it actually passes.
+   *
+   * Only segments whose every covered edge is in the graph are touched
+   * (expandSegmentEdges, with the hops recorded at build); a connector or
+   * synthetic leg keeps what it has. Tighter only, never looser: a merge
+   * only ever tightens, and a segment may carry a stricter value than its
+   * edges on purpose (a crossed-land leg's 0 m).
+   *
+   * @param result - The route; its segments are updated in place.
+   * @returns Whether any segment changed.
+   */
+  private refreshSegmentLimits(result: RouteResult): boolean {
+    const segments = result.features[0]?.properties.segments;
+    if (!segments || segments.length === 0) return false;
+    type Live = {
+      depth: number;
+      depthKnown: boolean;
+      air: number;
+      width: number;
+      complete: boolean;
+    };
+    const live = new Map<number, Live>();
+    for (const u of this.expandSegmentEdges(segments, (s) =>
+      segmentHops.get(s),
+    )) {
+      let l = live.get(u.seg);
+      if (!l) {
+        l = {
+          depth: -1,
+          depthKnown: false,
+          air: -1,
+          width: -1,
+          complete: true,
+        };
+        live.set(u.seg, l);
+      }
+      if (!l.complete) continue;
+      const edge =
+        u.from >= 0 && u.to >= 0 ? this.db.getEdgeSync(u.from, u.to) : null;
+      if (!edge) {
+        l.complete = false;
+        continue;
+      }
+      const d = RoutingDatabase.tighterDepth(
+        l.depth,
+        l.depthKnown,
+        edge.min_depth,
+        edge.min_depth_known ?? edge.min_depth >= 0,
+      );
+      l.depth = d.value;
+      l.depthKnown = d.known;
+      l.air = RoutingDatabase.tighterLimit(l.air, edge.max_air_draft);
+      l.width = RoutingDatabase.tighterLimit(l.width, edge.min_width ?? -1);
+    }
+    let changed = false;
+    for (const [si, l] of live) {
+      const seg = segments[si];
+      if (!l.complete || !seg) continue;
+      const d = RoutingDatabase.tighterDepth(
+        seg.minDepth,
+        seg.minDepthKnown,
+        l.depth,
+        l.depthKnown,
+      );
+      const air = RoutingDatabase.tighterLimit(seg.maxAirDraft, l.air);
+      const width = RoutingDatabase.tighterLimit(seg.minWidth ?? -1, l.width);
+      if (d.value !== seg.minDepth || d.known !== seg.minDepthKnown) {
+        seg.minDepth = d.value;
+        seg.minDepthKnown = d.known;
+        changed = true;
+      }
+      if (air !== seg.maxAirDraft) {
+        seg.maxAirDraft = air;
+        changed = true;
+      }
+      if (width >= 0 && width !== seg.minWidth) {
+        seg.minWidth = width;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  /**
+   * Bring every candidate's limits up to the graph as it is now
+   * (refreshSegmentLimits) and recount the violating meters of each one that
+   * changed, so selection and the warnings judge what the route really
+   * passes. Its A* cost stays as searched: it only breaks ties.
+   */
+  private async refreshCandidateLimits(
+    candidates: RouteCandidate[],
+    dims: VesselDimensions,
+    env?: RouteEnv,
+    waitOverrides?: WaitOverrides,
+  ): Promise<void> {
+    for (const c of candidates) {
+      if (!this.refreshSegmentLimits(c.result)) continue;
+      c.violatingMeters = await this.pathViolationMeters(
+        c.result,
+        dims,
+        env,
+        waitOverrides,
+      );
+    }
   }
 
   /**
