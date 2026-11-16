@@ -168,6 +168,7 @@ type Found = {
   type: string;
   structure?: string;
   partId?: number;
+  passage?: number;
   waitMinutes?: number;
   height?: number;
   waitSeconds?: number;
@@ -280,6 +281,11 @@ describe("route structures: a bridge on a crossing canal is not on the route (#5
       [["bridge", "300", 301, 5]],
     );
     assert.match(crossings[0].name, /^Bridge X/);
+    assert.deepStrictEqual(
+      crossings.map((c) => c.passage),
+      [0],
+      "one pass of X is passage 0",
+    );
   });
 
   it("charges the route one opening wait: only X, as a calculated route", async () => {
@@ -319,6 +325,11 @@ describe("route structures: a bridge on a crossing canal is not on the route (#5
     assert.deepStrictEqual(
       crossings.map((c) => c.structure),
       ["300", "300"],
+    );
+    // Out and back is two passes of one structure: told apart by `passage`.
+    assert.deepStrictEqual(
+      crossings.map((c) => c.passage),
+      [0, 1],
     );
     // Within a metre or two: the fixture's edge lengths and node positions
     // round differently.
@@ -1252,5 +1263,99 @@ describe("route structures: a connector that cuts the first edge keeps its links
       ["80"],
     );
     assert.deepStrictEqual(segments[1].lockIds, [80]);
+  });
+});
+
+describe("route structures: the pass through a structure (#60)", () => {
+  let fx: Fixture;
+  before(async () => {
+    // Route 1..6 along x, 200 m between nodes. Lock 700: chamber 701 on edges
+    // 2-3, 3-4, 4-5 (x 200..800), a span over each head (702 on 1-2 at
+    // x = 100, 703 on 5-6 at x = 900), 800 m apart. Bridge 710 has two spans
+    // just as far apart (711 on 1-2, 712 on 5-6).
+    fx = await openFixture([
+      {
+        country: "PAS",
+        nodes: line(6, 200),
+        edges: [
+          [1, 2],
+          [2, 3],
+          [3, 4],
+          [4, 5],
+          [5, 6],
+        ],
+        pois: [
+          { id: 700, type: LOCK, name: "Long lock", x: 500, y: 0 },
+          { id: 701, type: CHAMBER, parent: 700, x: 500, y: 0 },
+          {
+            id: 702,
+            type: SPAN,
+            parent: 700,
+            name: "Lower head",
+            x: 100,
+            y: 0,
+          },
+          {
+            id: 703,
+            type: SPAN,
+            parent: 700,
+            name: "Upper head",
+            x: 900,
+            y: 0,
+          },
+          { id: 710, type: BRIDGE, name: "Long bridge", x: 500, y: 0 },
+          { id: 711, type: SPAN, parent: 710, x: 100, y: 0 },
+          { id: 712, type: SPAN, parent: 710, x: 900, y: 0 },
+        ],
+        edgePois: [
+          [2, 3, 701],
+          [3, 4, 701],
+          [4, 5, 701],
+          [1, 2, 702],
+          [5, 6, 703],
+          [1, 2, 711],
+          [5, 6, 712],
+        ],
+      },
+    ]);
+  });
+  after(() => fx.close());
+
+  const passes = (cs: Found[], structure: string, type: string) =>
+    cs
+      .filter((c) => c.structure === structure && c.type === type)
+      .map((c) => [c.partId, c.passage]);
+
+  it("keeps the spans over both heads of a long lock in one pass", async () => {
+    const { crossings } = await detect(fx, [1, 2, 3, 4, 5, 6]);
+    assert.deepStrictEqual(passes(crossings, "700", "bridge"), [
+      [702, 0],
+      [703, 0],
+    ]);
+    assert.deepStrictEqual(passes(crossings, "700", "lock"), [[701, 0]]);
+  });
+
+  it("counts a bridge run beyond the merge distance as another pass", async () => {
+    // Not a lock: a structure met again further on is a second pass (a loop
+    // round an island under the same bridge looks just like this).
+    const { crossings } = await detect(fx, [1, 2, 3, 4, 5, 6]);
+    assert.deepStrictEqual(passes(crossings, "710", "bridge"), [
+      [711, 0],
+      [712, 1],
+    ]);
+  });
+
+  it("counts out and back through the lock as two passes", async () => {
+    const { crossings } = await detect(fx, [1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1]);
+    assert.deepStrictEqual(passes(crossings, "700", "bridge"), [
+      [702, 0],
+      [703, 0],
+      [703, 1],
+      [702, 1],
+    ]);
+    assert.deepStrictEqual(passes(crossings, "700", "lock"), [
+      [701, 0],
+      [701, 1],
+    ]);
   });
 });

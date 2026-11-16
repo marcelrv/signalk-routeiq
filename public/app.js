@@ -8031,11 +8031,24 @@
   }
 
   /**
-   * Groups crossings by type and the server's `structure` id: entries sharing
-   * both are spans of the same physical structure. The type is part of the
-   * key because a span carried over a lock head has the lock as its whole, so
-   * the lock and that bridge share one id: keyed by id alone the lock was
-   * merged into the bridge's row and never shown. Entries without an id each
+   * The grouping key of a crossing: type + the server's `structure` id + its
+   * `passage` (which pass through the structure; absent from an older server,
+   * read as one pass). Without a structure id the entry is its own key.
+   */
+  function crossingGroupKey(c) {
+    if (!c.structure) return c;
+    return (
+      c.type + ":" + c.structure + ":" + (c.passage == null ? "" : c.passage)
+    );
+  }
+
+  /**
+   * Groups crossings by type, the server's `structure` id and `passage` (the
+   * pass through it): entries sharing all three are spans of one structure
+   * passed once. The type is part of the key because a span carried over a
+   * lock head has the lock as its whole, so the lock and that bridge share
+   * one id: keyed by id alone the lock was merged into the bridge's row and
+   * never shown. Entries without an id each
    * stay on their own, never merged by name (many bridges and locks share a
    * name).
    * @param {object[]} crossings Itinerary crossings, in route order.
@@ -8044,7 +8057,7 @@
   function groupCrossingsByStructure(crossings) {
     const grouped = new Map();
     for (const c of crossings) {
-      const key = c.structure ? c.type + ":" + c.structure : c;
+      const key = crossingGroupKey(c);
       if (!grouped.has(key)) grouped.set(key, []);
       grouped.get(key).push(c);
     }

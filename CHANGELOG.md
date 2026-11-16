@@ -8,12 +8,18 @@
   webapp and the Freeboard panel.
 - Click the route line to select and open that section in the route list;
   it stays highlighted until Esc, a map click or a new route.
-- Route crossings carry the database's `structure` id, when it has one.
+- Route crossings carry the database's `structure` id, when it has one, and
+  a `passage` index telling separate passes through one structure apart.
 - Itinerary points carry `coordIndex`, their vertex on the route geometry,
   so a client can match legs to the route line without searching for them.
 
 ### Fixed
 
+- A route that passes the same bridge or lock twice within one section of
+  the route list (out and back) now shows two rows, each with its own map
+  link and wait, instead of one row with the waits added up (#60). The
+  bridges over both ends of one long lock stay one row, and the saved
+  passage profile and GPX waits carry the same `passage` index.
 - Bridges or locks that share a name, such as two locks both called "Lock",
   are no longer merged into one row in the route list. Each keeps its own
   map link. Spans are combined only when they belong to the same structure.

@@ -3740,41 +3740,35 @@ export class RoutingEngine {
     // a head and the edge data has already said they are distinct.
     let groupEndSpan = extent(sorted[0])[1];
     let groupEndPoint = sorted[0].distanceFromStart ?? 0;
-    // Detection lists one crossing per passage per structure, so the same
-    // structure (of the same type: a lock and the bridge over its head share
-    // the lock's id) twice is the route passing it again, after turning back:
-    // a passage of its own with its own wait, however close.
-    const passageKey = (c: RouteCrossing): string | undefined =>
+    // Detection numbers each pass through a structure (`passage`, per type: a
+    // lock and the bridge over its head share the lock's id). Another pass of
+    // a structure already in the group is the route passing it again, after
+    // turning back: a group of its own with its own wait, however close. The
+    // same pass listed twice (the spans over both heads of a long lock) stays
+    // together. No `passage` reads as one pass, as on the clients.
+    const structureKey = (c: RouteCrossing): string | undefined =>
       c.structure === undefined ? undefined : `${c.type}:${c.structure}`;
-    // Except inside a locking: the bridges over both heads of a long lock
-    // share the lock's id and are one passage. Per structure, the end of the
-    // group's lock span for it (with the usual tolerance, as span claiming).
-    let groupKeys = new Set<string>();
-    let lockEnds = new Map<string, number>();
+    let groupPasses = new Map<string, number | undefined>();
     const note = (c: RouteCrossing) => {
-      const key = passageKey(c);
-      if (key) groupKeys.add(key);
-      if (c.lockSpan && c.structure !== undefined)
-        lockEnds.set(
-          c.structure,
-          Math.max(lockEnds.get(c.structure) ?? -Infinity, c.lockSpan[1]),
-        );
+      const key = structureKey(c);
+      if (key) groupPasses.set(key, c.passage);
+    };
+    const anotherPass = (c: RouteCrossing): boolean => {
+      const key = structureKey(c);
+      return (
+        key !== undefined &&
+        groupPasses.has(key) &&
+        groupPasses.get(key) !== c.passage
+      );
     };
     note(sorted[0]);
     for (let i = 1; i < sorted.length; i++) {
       const c = sorted[i];
       const [start, end] = extent(c);
       const from = c.lockSpan ? groupEndPoint : groupEndSpan;
-      const key = passageKey(c);
-      const inLock =
-        c.type !== "lock" &&
-        c.structure !== undefined &&
-        (c.distanceFromStart ?? 0) <=
-          (lockEnds.get(c.structure) ?? -Infinity) +
-            RoutingEngine.CROSSING_GROUP_METRES;
       if (
         start - from <= RoutingEngine.CROSSING_GROUP_METRES &&
-        !(key && groupKeys.has(key) && !inLock)
+        !anotherPass(c)
       ) {
         groups[groups.length - 1].push(c);
         groupEndSpan = Math.max(groupEndSpan, end);
@@ -3783,8 +3777,7 @@ export class RoutingEngine {
         groups.push([c]);
         groupEndSpan = end;
         groupEndPoint = c.distanceFromStart ?? 0;
-        groupKeys = new Set();
-        lockEnds = new Map();
+        groupPasses = new Map();
       }
       note(c);
     }
@@ -4982,20 +4975,38 @@ export class RoutingEngine {
             !run.afterTurn &&
             run.first - prevLast < MERGE_ROUTE_DIST
           ) {
-            merged[merged.length - 1] = nearer(run, prev) ? run : prev;
+            // A turn-back that starts the merged run stays with it, whichever
+            // hit is kept: it is what tells this pass from the one before.
+            merged[merged.length - 1] = nearer(run, prev)
+              ? { ...run, ...(prev.afterTurn ? { afterTurn: true } : {}) }
+              : prev;
           } else {
             merged.push(run);
           }
           prevLast = run.last;
         }
-        for (const run of merged) {
+        // The pass index, from 0 in route order. A run after a turn-back is
+        // always the next pass. A run split off only by the MERGE_ROUTE_DIST
+        // gap is the next pass too (a loop round an island under the same
+        // bridge), except under a lock whole: a lock is passed twice only by
+        // turning back, so its runs that far apart are parts of one locking
+        // (the spans over both heads of a long lock). `passage` counts per
+        // type, so clients key on type + structure + passage.
+        const groupWhole = this.db.getPoiParent({
+          parent_id: group[0].parentId,
+        });
+        const lockWhole = groupWhole?.type_id === POI_TYPE_LOCK;
+        let passage = -1;
+        merged.forEach((run, i) => {
+          if (i === 0 || run.afterTurn || !lockWhole) passage++;
           // build's object itself (it is keyed for the info lookup below).
           const crossing = build(run.poi);
           // Where the line passes the part, not the nearest route vertex:
           // two structures on one long edge must not share a chainage.
           crossing.distanceFromStart = Math.round(run.chain);
+          crossing.passage = passage;
           out.push({ crossing, chain: run.chain });
-        }
+        });
       }
       out.sort((a, b) => a.chain - b.chain);
       return out.map((e) => e.crossing);
