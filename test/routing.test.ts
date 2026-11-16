@@ -374,6 +374,59 @@ describe('Itinerary', async () => {
     assert.deepStrictEqual(kept, [0, 10, coords.length - 1]);
   });
 
+  it('keeps a pinned via vertex on a straight stretch', () => {
+    const kept = simplifyIndices(coords, 30, [4]);
+    assert.deepStrictEqual(kept, [0, 4, 10, coords.length - 1]);
+  });
+
+  it('marks start, vias and end on the waypoints', () => {
+    const via = [{ latitude: 52.0, longitude: 4.04 }, { latitude: 52.03, longitude: 4.1 }];
+    const { waypoints, itinerary } = buildItinerary(coords, segments, [], via, 30);
+    assert.deepStrictEqual(
+      waypoints.map((w) => [w.kind, w.viaIndex]),
+      [['start', undefined], ['via', 0], [undefined, undefined], ['via', 1], ['end', undefined]],
+    );
+    assert.deepStrictEqual(
+      itinerary.filter((p) => p.kind === 'via').map((p) => [p.coordIndex, p.viaIndex]),
+      [[4, 0], [13, 1]],
+    );
+  });
+
+  it('puts each via on its own pass of an out-and-back route', () => {
+    // East along lat 52.0 and back west: every vertex is visited twice.
+    const out: [number, number][] = [];
+    for (let i = 0; i <= 10; i++) out.push([4.0 + i * 0.01, 52.0]);
+    const route = [...out, ...out.slice(0, -1).reverse().map(([lon]) => [lon, 52.0001] as [number, number])];
+    const segs = route.slice(1).map(() => ({ distance: 700, maxAirDraft: -1 }));
+    const via = [{ latitude: 52.0, longitude: 4.03 }, { latitude: 52.0, longitude: 4.03 }];
+    const { waypoints } = buildItinerary(route, segs, [], via, 30);
+    const vias = waypoints.filter((w) => w.kind === 'via');
+    assert.strictEqual(vias.length, 2);
+    assert.ok(vias[1].latitude > 52.00005, 'second via on the way back');
+  });
+
+  it('takes the via vertices from the router when it reports them', () => {
+    // Out east along lat 52.0 and back west a little north of it. The via's
+    // raw position lies nearest the way back, but the leg to it ended on the
+    // way out (vertex 3).
+    const out: [number, number][] = [];
+    for (let i = 0; i <= 10; i++) out.push([4.0 + i * 0.01, 52.0]);
+    const route = [...out, ...out.slice(0, -1).reverse().map(([lon]) => [lon, 52.0001] as [number, number])];
+    const segs = route.slice(1).map(() => ({ distance: 700, maxAirDraft: -1 }));
+    const via = [{ latitude: 52.0001, longitude: 4.03 }];
+    const { waypoints } = buildItinerary(route, segs, [], via, 30, undefined, new Map([[3, 0]]));
+    const vias = waypoints.filter((w) => w.kind === 'via');
+    assert.strictEqual(vias.length, 1);
+    assert.strictEqual(vias[0].latitude, 52.0, 'via on the way out');
+  });
+
+  it('ignores reported via vertices that are not a vertex of their own', () => {
+    const via = [{ latitude: 52.0, longitude: 4.04 }];
+    const viaAt = new Map([[0, 0], [coords.length - 1, 0], [coords.length + 5, 0], [4, 7]]);
+    const { waypoints } = buildItinerary(coords, segments, [], via, 30, undefined, viaAt);
+    assert.strictEqual(waypoints.filter((w) => w.kind === 'via').length, 0);
+  });
+
   it('keeps every point when tolerance is 0', () => {
     const kept = simplifyIndices(coords, 0);
     assert.strictEqual(kept.length, coords.length);

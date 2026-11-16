@@ -26,6 +26,11 @@ Kept as one-line pointers only — see git history / source for detail:
 - **Left-click-to-route / right-click-context-menu swap** — `map.on('click', …)`
   places start/dest/via in `public/index.html`; `contextmenu` opens the marker
   menu.
+- **Freeboard: vias survive recalculation and saving** — the panel names the
+  start/via/end points (server marks them in `waypoints[].kind`, vias always
+  kept by the simplification) and diffs chart edits against the calculated
+  or loaded route (`deriveRequestPoints` in `plotterext/panel.js`), so the
+  generated `WPn` points are never sent back as vias.
 - **Undo/redo stack** for waypoint edits — toolbar buttons + Ctrl+Z/Ctrl+Y in
   `public/index.html`.
 - **GRIB current overlay** on the map (gridded field, distinct from harmonic

@@ -15,6 +15,11 @@
 
 ### Fixed
 
+- In Freeboard, a calculated route keeps its vias: they show by name on the
+  chart, survive a save, and Optimise routes through them again instead of
+  through every waypoint. Moving or adding a point on the chart makes it a
+  via, and only the legs next to it change. Routes saved before this update
+  have no named vias and route straight from start to end.
 - A route that passes the same bridge or lock twice within one section of
   the route list (out and back) now shows two rows, each with its own map
   link and wait, instead of one row with the waits added up (#60). The

@@ -85,10 +85,14 @@ function haversineM(
  * Douglas-Peucker on [lon, lat] coordinates with tolerance in meters.
  * Returns the kept indices (sorted, always including first and last).
  * The simplified line deviates at most `toleranceM` from the original.
+ * `pinned` indices (the via vertices) are always kept, however straight the
+ * line runs through them, and each stretch between them is simplified on
+ * its own.
  */
 export function simplifyIndices(
   coords: LonLat[],
   toleranceM: number,
+  pinned: Iterable<number> = [],
 ): number[] {
   if (coords.length <= 2 || toleranceM <= 0) {
     return coords.map((_, i) => i);
@@ -104,8 +108,16 @@ export function simplifyIndices(
 
   const keep = new Array<boolean>(coords.length).fill(false);
   keep[0] = keep[coords.length - 1] = true;
+  for (const i of pinned) {
+    if (Number.isInteger(i) && i > 0 && i < coords.length - 1) keep[i] = true;
+  }
 
-  const stack: Array<[number, number]> = [[0, coords.length - 1]];
+  const stack: Array<[number, number]> = [];
+  for (let a = 0, b = 1; b < coords.length; b++) {
+    if (!keep[b]) continue;
+    stack.push([a, b]);
+    a = b;
+  }
   while (stack.length > 0) {
     const [a, b] = stack.pop()!;
     if (b - a < 2) continue;
@@ -436,6 +448,10 @@ export interface ItineraryResult {
  * @param vessel     what the vessel needs; when given, legs too shallow or
  *                   narrow for it, or under a clearance too low, carry
  *                   `leg.warnings`
+ * @param viaAt      where each via is on the route, as vertex index → via
+ *                   index: the vertex where the leg to that via ends (a
+ *                   skipped via has none). Without it each via is looked up
+ *                   as the nearest vertex (`viaVertices`).
  */
 export function buildItinerary(
   coords: LonLat[],
@@ -444,6 +460,7 @@ export function buildItinerary(
   via: Array<{ latitude: number; longitude: number }>,
   toleranceM: number,
   vessel?: VesselNeeds,
+  viaAt?: ReadonlyMap<number, number>,
 ): ItineraryResult {
   if (coords.length < 2) {
     return {
@@ -457,7 +474,10 @@ export function buildItinerary(
 
   const cum = cumulativeDistances(coords, segments);
   const totalKm = cum[cum.length - 1] / 1000;
-  const kept = simplifyIndices(coords, toleranceM);
+  const viaIdxByCoord = viaAt
+    ? knownViaVertices(coords, via, viaAt)
+    : viaVertices(coords, via);
+  const kept = simplifyIndices(coords, toleranceM, viaIdxByCoord.keys());
 
   // Annotate crossings with chainage along the route, keeping one the
   // detector already placed (where the line passes the structure, which on a
@@ -503,14 +523,8 @@ export function buildItinerary(
   const entries = new Map<number, ItineraryPoint["kind"]>();
   entries.set(0, "start");
   for (const t of turns) entries.set(t.idx, "turn");
-  const viaIdxByCoord = new Map<number, number>();
-  for (let v = 0; v < via.length; v++) {
-    const idx = closestCoordIndex(coords, via[v].latitude, via[v].longitude);
-    if (idx > 0 && idx < coords.length - 1) {
-      entries.set(idx, "via"); // via wins over a coinciding turn
-      viaIdxByCoord.set(idx, v);
-    }
-  }
+  // A via wins over a coinciding turn.
+  for (const idx of viaIdxByCoord.keys()) entries.set(idx, "via");
   entries.set(coords.length - 1, "end");
 
   const indices = [...entries.keys()].sort((a, b) => a - b);
@@ -673,10 +687,62 @@ export function buildItinerary(
   });
 
   return {
-    waypoints: kept.map((idx) => ({
-      latitude: coords[idx][1],
-      longitude: coords[idx][0],
-    })),
+    waypoints: kept.map((idx) => {
+      const wp: RouteWaypoint = {
+        latitude: coords[idx][1],
+        longitude: coords[idx][0],
+      };
+      if (idx === 0) wp.kind = "start";
+      else if (idx === coords.length - 1) wp.kind = "end";
+      else if (viaIdxByCoord.has(idx)) {
+        wp.kind = "via";
+        wp.viaIndex = viaIdxByCoord.get(idx);
+      }
+      return wp;
+    }),
     itinerary,
   };
+}
+
+/**
+ * The via vertices the router reported, minus any that is not a vertex of
+ * its own (the start, the end, out of range) or names no via.
+ */
+function knownViaVertices(
+  coords: LonLat[],
+  via: Array<{ latitude: number; longitude: number }>,
+  viaAt: ReadonlyMap<number, number>,
+): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const [idx, v] of viaAt) {
+    if (!Number.isInteger(idx) || idx <= 0 || idx >= coords.length - 1)
+      continue;
+    if (!Number.isInteger(v) || v < 0 || v >= via.length) continue;
+    out.set(idx, v);
+  }
+  return out;
+}
+
+/**
+ * The route vertex of each via, as a map vertex index → via index. Vias are
+ * found in order, each after the previous one's vertex, so a route that
+ * passes the same place twice (out and back) still puts every via on the
+ * right pass. A via that falls on the start or end vertex has no vertex of
+ * its own and is left out.
+ */
+function viaVertices(
+  coords: LonLat[],
+  via: Array<{ latitude: number; longitude: number }>,
+): Map<number, number> {
+  const out = new Map<number, number>();
+  let from = 0;
+  for (let v = 0; v < via.length && from < coords.length; v++) {
+    const rest = coords.slice(from);
+    const idx =
+      from + closestCoordIndex(rest, via[v].latitude, via[v].longitude);
+    if (idx > 0 && idx < coords.length - 1) out.set(idx, v);
+    // The next via lies further along: the route reached this one first.
+    from = idx + 1;
+  }
+  return out;
 }

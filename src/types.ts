@@ -151,6 +151,11 @@ export interface RouteCrossing {
 export interface RouteWaypoint {
   latitude: number;
   longitude: number;
+  // Which request point this waypoint is: the start, the end, or a via
+  // (`viaIndex` into the request's `via`). Absent on the waypoints in between.
+  // A via is always kept as a waypoint by the simplification.
+  kind?: "start" | "via" | "end";
+  viaIndex?: number;
 }
 
 // An entry of the human-readable route itinerary: start/end, via points and
