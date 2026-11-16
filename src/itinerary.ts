@@ -341,13 +341,13 @@ export function legWarnings(
 ): LegWarning[] {
   const out: LegWarning[] = [];
   const { minDepth, minDepthAtPassage, minWidth, maxAirDraft } = agg;
-  if (minDepth !== undefined && minDepth < vessel.requiredDepth) {
+  if (minDepth !== undefined && belowLimit(minDepth, vessel.requiredDepth)) {
     const tideAdds =
       minDepthAtPassage !== undefined && minDepthAtPassage > minDepth;
     out.push({
       type: "shallow",
       level:
-        tideAdds && minDepthAtPassage >= vessel.requiredDepth
+        tideAdds && !belowLimit(minDepthAtPassage, vessel.requiredDepth)
           ? "caution"
           : "danger",
       minDepth,
@@ -361,7 +361,7 @@ export function legWarnings(
       ...(at.shallow && at.shallow.length > 0 ? { at: at.shallow } : {}),
     });
   }
-  if (minWidth !== undefined && minWidth < vessel.requiredWidth) {
+  if (minWidth !== undefined && belowLimit(minWidth, vessel.requiredWidth)) {
     out.push({
       type: "narrow",
       level: minWidth < vessel.beam ? "danger" : "caution",
@@ -376,7 +376,7 @@ export function legWarnings(
   if (
     requiredAirDraft !== undefined &&
     maxAirDraft !== undefined &&
-    clearanceTooLow(maxAirDraft, requiredAirDraft)
+    belowLimit(maxAirDraft, requiredAirDraft)
   ) {
     out.push({
       type: "low_clearance",
@@ -393,11 +393,12 @@ export function legWarnings(
   return out.sort((a, b) => levelRank(a.level) - levelRank(b.level));
 }
 
-/** Under the required air draft, compared at centimetre precision so the
- *  float noise of adding the margin (16.06 + 1.0 = 17.060000000000002) does
- *  not call a 17.06 m clearance too low. A real shortfall of 1 cm still is. */
-function clearanceTooLow(clearance: number, required: number): boolean {
-  return clearance < round2(required);
+/** Under a required depth, width or air draft, compared at centimetre
+ *  precision so the float noise of adding the margin (1.1 + 0.2 =
+ *  1.3000000000000003, 16.06 + 1.0 = 17.060000000000002) does not call a
+ *  value exactly at the limit short. A real shortfall of 1 cm still is. */
+function belowLimit(value: number, required: number): boolean {
+  return value < round2(required);
 }
 
 /** Margins are added in floating point (16.06 + 1 = 17.060000000000002). */
@@ -564,20 +565,20 @@ export function buildItinerary(
           if (
             typeof seg.minDepth === "number" &&
             seg.minDepthKnown &&
-            seg.minDepth < vessel.requiredDepth
+            belowLimit(seg.minDepth, vessel.requiredDepth)
           )
             shallowRuns.add(s);
           if (
             typeof seg.minWidth === "number" &&
             seg.minWidth >= 0 &&
-            seg.minWidth < vessel.requiredWidth
+            belowLimit(seg.minWidth, vessel.requiredWidth)
           )
             narrowRuns.add(s);
           if (
             vessel.requiredAirDraft !== undefined &&
             typeof seg.maxAirDraft === "number" &&
             seg.maxAirDraft >= 0 &&
-            clearanceTooLow(seg.maxAirDraft, vessel.requiredAirDraft)
+            belowLimit(seg.maxAirDraft, vessel.requiredAirDraft)
           )
             lowClearanceRuns.add(s);
         }

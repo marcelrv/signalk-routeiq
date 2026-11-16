@@ -773,6 +773,17 @@ describe('leg warnings', () => {
     assert.deepStrictEqual(legWarnings({ maxAirDraft: 6.7 }, vessel), []);
   });
 
+  it('a depth or width exactly at the limit is enough, despite float noise', () => {
+    // draft 1.1 + margin 0.2, beam 2.5 + margin 0.1: both sums carry noise.
+    const v = { requiredDepth: 1.1 + 0.2, beam: 2.5, requiredWidth: 2.5 + 0.1 };
+    assert.deepStrictEqual(legWarnings({ minDepth: 1.3, minWidth: 2.6 }, v), []);
+    // A tide that brings it exactly to the limit makes it a caution.
+    assert.strictEqual(legWarnings({ minDepth: 1.0, minDepthAtPassage: 1.3 }, v)[0].level, 'caution');
+    const ws = legWarnings({ minDepth: 1.29, minWidth: 2.59 }, v);
+    assert.deepStrictEqual(ws.map((w) => [w.type, w.level]), [['shallow', 'danger'], ['narrow', 'caution']]);
+    assert.deepStrictEqual([(ws[0] as any).requiredDepth, (ws[1] as any).requiredWidth], [1.3, 2.6]);
+  });
+
   it('lists the worst first', () => {
     const ws = legWarnings({ minDepth: 1.5, minDepthAtPassage: 2.5, minWidth: 3 }, vessel);
     assert.deepStrictEqual(ws.map((w) => [w.type, w.level]), [['narrow', 'danger'], ['shallow', 'caution']]);
