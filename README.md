@@ -7,11 +7,9 @@
 
 # SignalK RouteIQ Nautical Route Planner
 
-> ⚠️ **Alpha release.** RouteIQ is under active development. Routing data currently only
-> covers a small set of test regions (parts of the Netherlands and the US East Coast) —
-> it is **not yet suitable for real-world passage planning**. Use it for testing and
-> feedback only, always verify routes against official charts, and do not rely on it
-> for actual navigation.
+> ⚠️ **Not for navigation.** Routing data currently covers the Netherlands (inland and
+> coastal); more regions will follow. Routes are computed from chart data that can be
+> incomplete or out of date: always verify them against official charts and notices.
 
 An offline-first, vessel-aware nautical route planner designed to run natively as a webapp and plugin within the Signal K ecosystem. Optimized for inland waterways and coastal navigation, it dynamically calculates safe routes based on a vessel's physical dimensions (draft, beam, air draft) and user safety preferences.
 
@@ -175,7 +173,7 @@ Apache License 2.0 - see LICENSE file for details
 
 ## Contributing
 
-This is an alpha-stage project. Bug reports and feedback are very welcome — please open an issue or pull request on GitHub.
+Bug reports, feedback and region requests are very welcome — please open an issue or pull request on GitHub.
 
 ## Acknowledgments
 
