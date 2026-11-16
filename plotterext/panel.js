@@ -1226,13 +1226,14 @@ async function calculate(forcedRequestPoints, known) {
 
 /**
  * Whether a route point's name says nothing: blank, or one of the stand-ins
- * this panel and the host hand out ("Start", "Destination", "Via 2", "WP7").
+ * this panel and the host hand out ("Start", "Destination", "Via 2", "WP7",
+ * "Point 3").
  * @param {string} [name] The point's name.
  * @returns {boolean} True when the server's name for that end should be used.
  */
 function isPlaceholderName(name) {
   const n = (name || "").trim();
-  return !n || /^(Start|Destination|Via \d+|WP\d+)$/.test(n);
+  return !n || /^(Start|Destination|Via \d+|WP\d+|Point \d+)$/.test(n);
 }
 
 /**
@@ -1307,9 +1308,11 @@ async function revert() {
   if (!session?.revertPoints) return;
   // Same naming rule as above: these came back from the host, and a route drawn
   // on the chart rather than imported can have points with no name at all.
+  // Not "WPn": that name marks a point this panel generated (isFillerPoint),
+  // and the next calculation would leave every restored point out.
   const points = session.revertPoints.map((p, i) => ({
     ...p,
-    name: p.name || "WP" + (i + 1),
+    name: p.name || "Point " + (i + 1),
   }));
   await client.call("route.replace", { routeId: selectedId, points });
   tideCheckedFor = undefined;
