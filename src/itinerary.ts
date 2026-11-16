@@ -394,14 +394,14 @@ export function legWarnings(
 }
 
 /** Under a required depth, width or air draft, compared at centimetre
- *  precision so the float noise of adding the margin (1.1 + 0.2 =
- *  1.3000000000000003, 16.06 + 1.0 = 17.060000000000002) does not call a
+ *  precision so the float noise of adding the margin (2.1 + 0.2 =
+ *  2.3000000000000003, 15.56 + 1.5 = 17.060000000000002) does not call a
  *  value exactly at the limit short. A real shortfall of 1 cm still is. */
 function belowLimit(value: number, required: number): boolean {
   return value < round2(required);
 }
 
-/** Margins are added in floating point (16.06 + 1 = 17.060000000000002). */
+/** Margins are added in floating point (15.56 + 1.5 = 17.060000000000002). */
 function round2(m: number): number {
   return Math.round(m * 100) / 100;
 }

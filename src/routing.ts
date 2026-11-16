@@ -309,9 +309,9 @@ function keepSegmentEdges(
 const FALLBACK_MAX_DIST = 50;
 
 /** A vessel limit (dimension + safety margin) to the centimetre. The sum is
- *  floating point — 1.1 + 0.2 is 1.3000000000000003, 16.06 + 1.0 is
+ *  floating point — 2.1 + 0.2 is 2.3000000000000003, 15.56 + 1.5 is
  *  17.060000000000002 — and unrounded it calls a charted value exactly at the
- *  limit (1.3 m deep, 17.06 m clearance) a violation. */
+ *  limit (2.3 m deep, 17.06 m clearance) a violation. */
 function toCm(m: number): number {
   return Math.round(m * 100) / 100;
 }
