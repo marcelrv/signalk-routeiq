@@ -765,6 +765,10 @@ describe('leg warnings', () => {
       },
     ]);
     assert.deepStrictEqual(legWarnings({ maxAirDraft: 17.06 + 0.01 }, tall), []);
+    // Exactly the required height clears, despite the sum's float noise...
+    assert.deepStrictEqual(legWarnings({ maxAirDraft: 17.06 }, tall), []);
+    // ...and a real 1 cm shortfall is still a danger.
+    assert.strictEqual(legWarnings({ maxAirDraft: 17.05 }, tall)[0].level, 'danger');
     // Without a required air draft there is nothing to test against.
     assert.deepStrictEqual(legWarnings({ maxAirDraft: 6.7 }, vessel), []);
   });

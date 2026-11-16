@@ -376,7 +376,7 @@ export function legWarnings(
   if (
     requiredAirDraft !== undefined &&
     maxAirDraft !== undefined &&
-    maxAirDraft < requiredAirDraft
+    clearanceTooLow(maxAirDraft, requiredAirDraft)
   ) {
     out.push({
       type: "low_clearance",
@@ -391,6 +391,13 @@ export function legWarnings(
   }
   // Danger before caution; a stable sort keeps shallow before narrow.
   return out.sort((a, b) => levelRank(a.level) - levelRank(b.level));
+}
+
+/** Under the required air draft, compared at centimetre precision so the
+ *  float noise of adding the margin (16.06 + 1.0 = 17.060000000000002) does
+ *  not call a 17.06 m clearance too low. A real shortfall of 1 cm still is. */
+function clearanceTooLow(clearance: number, required: number): boolean {
+  return clearance < round2(required);
 }
 
 /** Margins are added in floating point (16.06 + 1 = 17.060000000000002). */
@@ -570,7 +577,7 @@ export function buildItinerary(
             vessel.requiredAirDraft !== undefined &&
             typeof seg.maxAirDraft === "number" &&
             seg.maxAirDraft >= 0 &&
-            seg.maxAirDraft < vessel.requiredAirDraft
+            clearanceTooLow(seg.maxAirDraft, vessel.requiredAirDraft)
           )
             lowClearanceRuns.add(s);
         }

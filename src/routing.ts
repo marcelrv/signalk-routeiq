@@ -2768,7 +2768,7 @@ export class RoutingEngine {
     const segments = result.features[0]?.properties.segments;
     if (!segments) return 0;
     const minDepth = this.requiredDepth(dims);
-    const minAirDraft = (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft;
+    const minAirDraft = this.requiredAirDraft(dims);
     const minBeam = (dims.beam ?? 4.0) + this.config.safetyMarginBeam;
 
     const coords = result.features[0]?.geometry.coordinates ?? [];
@@ -2945,9 +2945,16 @@ export class RoutingEngine {
     return (dims.draft ?? 2.0) + this.config.safetyMarginDraft;
   }
 
-  /** Air draft plus mast clearance margin; an unknown air draft counts as 0. */
+  /** Air draft plus mast clearance margin; an unknown air draft counts as 0.
+   *  Rounded to the centimetre: 16.06 + 1.0 is 17.060000000000002 in floating
+   *  point, which would call a charted 17.06 m clearance too low. The search
+   *  cost, the violation audit and the warnings all use this one figure. */
   private requiredAirDraft(dims: VesselDimensions): number {
-    return (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft;
+    return (
+      Math.round(
+        ((dims.airDraft ?? 0) + this.config.safetyMarginAirDraft) * 100,
+      ) / 100
+    );
   }
 
   /**
@@ -3096,8 +3103,7 @@ export class RoutingEngine {
     if (
       typeof edge.max_air_draft === "number" &&
       edge.max_air_draft >= 0 &&
-      edge.max_air_draft <
-        (dims.airDraft ?? 0) + this.config.safetyMarginAirDraft
+      edge.max_air_draft < this.requiredAirDraft(dims)
     ) {
       penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
       if (skipReasons) skipReasons.airDraft++;
