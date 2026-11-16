@@ -3170,11 +3170,12 @@ export class RoutingEngine {
       if (!check || check.generation === generation) continue;
       check.generation = generation;
       const changed = this.refreshSegmentLimits(leg);
-      // Cached by addViolationWarnings with tides on; a new lock or bridge
-      // changes the passage times and so the depth at passage.
-      const hadCrossings = leg.crossings !== undefined;
+      // With tides on the warning read the crossings (a new lock or bridge
+      // changes the passage times and so the depth at passage), so it is
+      // rebuilt on any graph change. Asked of check.env, not of the cache:
+      // connectUserPoint deletes leg.crossings when it adds a connector.
       delete leg.crossings;
-      if (!changed && !hadCrossings) continue;
+      if (!changed && !check.env) continue;
       const fresh: RouteWarning[] = [];
       await this.addViolationWarnings(
         leg,

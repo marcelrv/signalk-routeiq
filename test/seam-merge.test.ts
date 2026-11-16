@@ -814,6 +814,42 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
     assert.match(warnings[0].message, /air draft 5\.0m/);
   });
 
+  it('with tides on, a via leg is re-warned on a graph change that leaves its limits alone', async () => {
+    const engine = new RoutingEngine(db, {
+      ...DEFAULT_CONFIG,
+      routingBBoxMargin: 0.005,
+      routingBBoxMaxExtent: 0.005,
+    }) as any;
+    const dims = { draft: 8, beam: 4, airDraft: 10 };
+    const env = {
+      departureMs: Date.parse('2026-08-12T00:00:00Z'),
+      offsetSec: 0,
+      speedMs: 3,
+      flow: { sample: () => ({ u: 0, v: 0 }) },
+      heights: undefined,
+    };
+    const warnings: any[] = [];
+    const leg = await engine.tryRouteSegment(
+      rW0.lat, rW0.lon, rS1.lat, rS1.lon, 0, 0, warnings, dims, undefined, env);
+    assert.ok(leg, 'the leg is found');
+    assert.strictEqual(warnings.length, 1);
+    // What connectUserPoint does when it adds a start connector.
+    delete leg.crossings;
+    // A load that links a lock to the leg (edge_pois) but changes no limit.
+    db.graphGeneration++;
+
+    let rebuilt = 0;
+    const add = engine.addViolationWarnings.bind(engine);
+    engine.addViolationWarnings = async (...args: unknown[]) => {
+      rebuilt++;
+      return add(...args);
+    };
+    await engine.recheckViaLegs([leg], warnings);
+
+    assert.strictEqual(rebuilt, 1, 'the leg\'s warning is rebuilt with the crossings as they are now');
+    assert.strictEqual(warnings.length, 1, 'and replaces the old one');
+  });
+
   it('a node deleted while a load is reading is not put back by it', async () => {
     const anyDb = db as any;
     const send = anyDb.sendMessage.bind(db);
