@@ -155,6 +155,12 @@ export interface ItineraryPoint {
   courseToNext?: number; // degrees true, chord course to the next itinerary point
   turn?: number; // signed course change at this point (deg, + = starboard)
   viaIndex?: number; // 0-based index of the matching request via point
+  // Start and end only: what to call this end when the client has no name of
+  // its own for it. The nearest named harbour, lock or bridge within
+  // ENDPOINT_POI_RADIUS_M ("poi"), else the named water the route starts or
+  // ends in ("water"). Absent when neither is known.
+  name?: string;
+  nameSource?: "poi" | "water";
   leg?: {
     distance: number; // meters, sum of graph edges to the next itinerary point
     minDepth?: number; // m, only when known (>= 0 in the graph)

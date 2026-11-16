@@ -3326,21 +3326,17 @@ export class RoutingDatabase {
     return results;
   }
 
-  async getNearestPoi(
+  /**
+   * The nearest part or harbour (as on the map) within `maxDistanceMeters`,
+   * and its distance in metres; null when there is none. `accept` narrows
+   * the candidates further.
+   */
+  private nearestPoiRow(
     lat: number,
     lon: number,
-    maxDistanceMeters: number = 250,
-  ): Promise<{
-    id: number;
-    name: string;
-    typeId: number;
-    parentId: number | null;
-    properties: Record<string, unknown>;
-    info: Record<string, unknown>;
-    latitude: number;
-    longitude: number;
-    distance: number;
-  } | null> {
+    maxDistanceMeters: number,
+    accept?: (poi: PoiRow) => boolean,
+  ): { row: PoiRow; distance: number } | null {
     if (!this.poiGrid) this.poiGrid = this.buildPoiGrid();
     let best: PoiRow | null = null;
     let bestDist = Infinity;
@@ -3366,14 +3362,58 @@ export class RoutingDatabase {
           if (!KNOWN_POI_TYPES.has(poi.type_id)) continue;
           if (POI_WHOLE_TYPES.has(poi.type_id)) continue;
           const d = this.haversineMeters(lat, lon, poi.lat, poi.lon);
-          if (d < bestDist && d <= maxDistanceMeters) {
+          if (
+            d < bestDist &&
+            d <= maxDistanceMeters &&
+            (!accept || accept(poi))
+          ) {
             bestDist = d;
             best = poi;
           }
         }
       }
     }
-    if (!best) return null;
+    return best ? { row: best, distance: bestDist } : null;
+  }
+
+  /**
+   * The name to call a position by when it lies at a point of interest: the
+   * display name (a chamber or bridge span reads as its whole) of the nearest
+   * named part or harbour within `maxDistanceMeters`. Undefined when there
+   * is none.
+   */
+  nearestPoiName(
+    lat: number,
+    lon: number,
+    maxDistanceMeters: number,
+  ): string | undefined {
+    const found = this.nearestPoiRow(
+      lat,
+      lon,
+      maxDistanceMeters,
+      (poi) => this.poiDisplayName(poi).trim() !== "",
+    );
+    return found ? this.poiDisplayName(found.row).trim() : undefined;
+  }
+
+  async getNearestPoi(
+    lat: number,
+    lon: number,
+    maxDistanceMeters: number = 250,
+  ): Promise<{
+    id: number;
+    name: string;
+    typeId: number;
+    parentId: number | null;
+    properties: Record<string, unknown>;
+    info: Record<string, unknown>;
+    latitude: number;
+    longitude: number;
+    distance: number;
+  } | null> {
+    const found = this.nearestPoiRow(lat, lon, maxDistanceMeters);
+    if (!found) return null;
+    const { row: best, distance: bestDist } = found;
     const info = await this.getPoiInfo([best.id]);
     return {
       id: best.id,
