@@ -20,7 +20,7 @@
 - Chart actions (`actions` capability: Set start / Add via / Set destination, Optimise route / Best departure time) and the panel's 📍 pick buttons (`map.pick`) only hand the panel coordinates or a route handle; a plan becomes a draft route via `route.create` once start and destination are known. Every capability newer than the original set goes in the manifest's `optional` list (an unknown id in `requires` makes the extension incompatible with that host), and the panel gates each use on `client.hasCapability()`.
 - The `signalk-plotterext-bus` client library (npm dependency) is served from its `node_modules` dist at `/plotterext/signalk-routeiq/bus/`; the panel imports `./bus/extension.js`.
 - Extension assets are deliberately **not** under `/plugins/*` (admin-gated) and the package must **not** rely on the `signalk-webapp` keyword for them.
-- `averageSpeedKnots` and `defaultCoastDistance` are exposed to clients via `GET /router/config`; ETA in both UIs derives from the plugin-config average speed.
+- `averageSpeedKnots` (with the lock/bridge waits and `considerTides`) is exposed to clients via `GET /router/config`; ETA in both UIs derives from the plugin-config average speed.
 
 ## Data Pipeline (moved out of this repo)
 - The chart-ingestion/graph-generation pipeline (`enc_preprocessor.py`, `nautical_routing_pipeline.py`, `add_pois_to_db.py`, `deploy_to_data_repo.py`, `generate_coastline.py`) no longer lives here — it moved to its own repo, **signalk-router-pipeline** (local checkout: `/home/node/signalkdev/signalk-router-pipeline`). This repo (`routeiq`) now only contains the **runtime consumer** of the compiled `.sqlite` databases.
@@ -65,8 +65,10 @@
 - `routingDataDir` (was `routingDatabase`): path to a **directory** containing one or more `.sqlite` routing graph files.
 - `routingBBoxMargin` (deg, default 0.1): initial bounding box margin
 - `routingBBoxMaxExtent` (deg, default 10.0): max bbox before full-graph fallback
-- `lineOfSightSampleInterval` (m, default 500): LOS sample spacing
-- `lineOfSightSearchRadius` (m, default 800): LOS node search radius
+- `lineOfSightSearchRadius` (m, default 0 = smoothing off): LOS node search radius. Internal.
+- **Retired settings** (`RETIRED_CONFIG_KEYS` in `src/types.ts`): `start()` deletes these from the saved config before merging defaults, so a value saved when the field was on the settings page never applies. Listed there: the internal tuning keys (`routingBBoxMargin`, `routingBBoxMaxExtent`, `lineOfSightSearchRadius`, `waypointTolerance`, `eagerLoadAtPosition`, `loadRadiusNm`, `maxLoadedRegions`, which keep fixed `DEFAULT_CONFIG` values) and the removed ones (`wrongWayPenalty`, `lineOfSightSampleInterval`, `defaultCoastDistance`, `maxTidalCurrentKnots`). Retiring a setting = remove it from `schema()` and add it here; a test checks the schema offers none of them.
+- **No coast-distance default**: a route keeps a coast clearance only when the request sends `minCoastDistance` (nm). Factory databases carry no `distance_to_land` (it reads 9999), so a server default did nothing there.
+- **Tides**: currents come only from `signalk-tidal-currents` stations (`prepareStationFlowField`; zero flow beyond 20 km of a station). `signalk-tides` supplies heights only (`prepareTideHeights`), for depth at passage. With heights but no current stations, `RouteResult.tide.source` is `"heights"` and the flow is zero (`noCurrentField`). Never estimate a current from heights again.
 
 ## Node.js / TypeScript (root, src/)
 - Package manager: `npm` (not yarn, pnpm).

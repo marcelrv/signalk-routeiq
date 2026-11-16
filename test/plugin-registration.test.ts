@@ -93,3 +93,18 @@ describe('plugin registration while still disabled', () => {
     );
   });
 });
+
+// Settings retired from the settings page must stay off it: start() strips
+// their saved values, so a field still on the page would save a value that is
+// then silently ignored.
+describe('settings schema', () => {
+  it('offers none of the retired settings', async () => {
+    const { RETIRED_CONFIG_KEYS } = await import('../dist/types.js');
+    const plugin = pluginConstructor({} as unknown as ServerAPI);
+    const props = Object.keys(
+      (plugin.schema({}) as { properties: Record<string, unknown> }).properties,
+    );
+    const offered = RETIRED_CONFIG_KEYS.filter((k: string) => props.includes(k));
+    assert.deepStrictEqual(offered, []);
+  });
+});
