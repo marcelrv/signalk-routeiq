@@ -14,6 +14,11 @@
 
 ### Fixed
 
+- In Freeboard, a calculated route keeps its vias: they show by name on the
+  chart, survive a save, and Optimise routes through them again instead of
+  through every waypoint. Moving or adding a point on the chart makes it a
+  via, and only the legs next to it change. Routes saved before this update
+  have no named vias and route straight from start to end.
 - Bridges or locks that share a name, such as two locks both called "Lock",
   are no longer merged into one row in the route list. Each keeps its own
   map link. Spans are combined only when they belong to the same structure.

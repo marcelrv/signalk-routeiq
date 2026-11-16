@@ -102,12 +102,18 @@ let units = { distance: "naut-mile" };
 // Per-route calculation session:
 //   requestPoints — the user's original start/via/end (survives re-calcs)
 //   generated     — the points we last wrote with route.replace
+//   requestAt     — per generated point, the index of the request point it
+//                   is (start, a via, the end), or -1 for a point in between
 //   revertPoints  — the points before our first replace (for Revert)
 //   result        — the engine's last result, minus its geometry features:
 //                   sent back on save so the server can attach its passage
 //                   profile (times, waits) to the saved route resource
 //   profiledRev   — the host rev the profile was last attached for
 const sessions = new Map();
+// Points of a stored route as it was loaded, for routes this panel has not
+// calculated: an edit made on the chart afterwards is told apart from the
+// route as saved by comparing against this (see currentRequestPoints).
+const baselines = new Map();
 // Click-start / via / destination planning, fed by chart actions and by
 // map.pick. Until the destination is known there is no route on the chart
 // (a route needs two points), so the start and any early vias live here;
@@ -754,6 +760,10 @@ async function checkEngine() {
 async function onRouteEvent(name, params) {
   if (name === "route.hidden" && params?.routeId) {
     sessions.delete(params.routeId);
+    baselines.delete(params.routeId);
+  }
+  if (name === "route.visible" || name === "route.saved") {
+    await rememberBaseline(params);
   }
   // The planning draft is done once it leaves the chart or the user saves
   // it — from then on it is an ordinary route.
@@ -901,30 +911,132 @@ async function run(fn) {
   }
 }
 
+function samePosition(p, q) {
+  const EPS = 1e-7;
+  return (
+    Math.abs(p.position[0] - q.position[0]) < EPS &&
+    Math.abs(p.position[1] - q.position[1]) < EPS
+  );
+}
+
 function samePoints(a, b) {
   if (!a || !b || a.length !== b.length) return false;
-  const EPS = 1e-7;
-  return a.every(
-    (p, i) =>
-      Math.abs(p.position[0] - b[i].position[0]) < EPS &&
-      Math.abs(p.position[1] - b[i].position[1]) < EPS,
-  );
+  return a.every((p, i) => samePosition(p, b[i]));
+}
+
+/**
+ * Whether a route point is one this panel put in between the request points
+ * ("WP7"): the start, the vias and the end carry a real name (or a waypoint
+ * link), so a saved route says which of its points the user chose.
+ * @param {{name?: string, href?: string}} p The route point.
+ * @returns {boolean} True for a point in between.
+ */
+function isFillerPoint(p) {
+  return !p.href && /^WP[1-9]\d*$/.test((p.name || "").trim());
+}
+
+/**
+ * The start/via/end a route on the chart asks for. The ends are always its
+ * first and last point. A point in between is a via when it was one in
+ * `base` (the route as calculated or loaded) and is still in place, when the
+ * user moved or added it on the chart, or when it carries a real name; the
+ * generated points in between are left out, so the route is routed through
+ * the user's points only and the legs nobody touched come out the same.
+ * Without `base`, the names alone decide.
+ * @param {object[]} points The route's current points.
+ * @param {{points: object[], request: function(number): ?object}} [base]
+ *   The earlier points, and for each index the request point it was (null
+ *   for a point in between).
+ * @returns {object[]} The request points, start first.
+ */
+function deriveRequestPoints(points, base) {
+  if (points.length < 2) return points;
+  const out = [points[0]];
+  let from = 1; // base is matched in order: a route can pass a spot twice
+  for (let i = 1; i < points.length - 1; i++) {
+    const p = points[i];
+    let k = -1;
+    if (base) {
+      for (let m = from; m < base.points.length - 1; m++) {
+        if (samePosition(base.points[m], p)) {
+          k = m;
+          break;
+        }
+      }
+    }
+    if (k < 0) {
+      // Moved or added on the chart (or no base to tell): the user's point.
+      if (base || !isFillerPoint(p)) out.push(p);
+      continue;
+    }
+    from = k + 1;
+    const orig = base.request(k);
+    if (orig) {
+      // Renamed on the chart: the new name wins.
+      out.push(
+        p.name && p.name !== base.points[k].name
+          ? { ...orig, name: p.name }
+          : orig,
+      );
+    } else if (!isFillerPoint(p)) {
+      out.push(p); // a generated point the user gave a name of its own
+    }
+  }
+  out.push(points[points.length - 1]);
+  return out;
 }
 
 /**
  * The start/via/end to route a visible route by. Re-running on a route we
- * generated reuses the user's original start/via/end instead of treating
- * every generated waypoint as a via; once the user has edited it on the
- * chart, its current points are the request.
+ * calculated, unchanged, reuses the user's start/via/end exactly; a route
+ * edited on the chart, or a stored one, is read point by point
+ * (deriveRequestPoints), so a generated waypoint never becomes a via.
  */
 async function currentRequestPoints(routeId) {
-  const { points } = await client.call("route.get", { routeId });
+  const route = await client.call("route.get", { routeId });
+  const points = route.points;
   const session = sessions.get(routeId);
-  const requestPoints =
-    session && samePoints(points, session.generated)
-      ? session.requestPoints
-      : points;
-  return { points, requestPoints };
+  if (session && samePoints(points, session.generated)) {
+    return { points, requestPoints: session.requestPoints };
+  }
+  let base = null;
+  if (session) {
+    base = {
+      points: session.generated,
+      request: (k) =>
+        session.requestAt?.[k] >= 0
+          ? session.requestPoints[session.requestAt[k]]
+          : null,
+    };
+  } else {
+    if (route.saved && !route.dirty) baselines.set(routeId, points);
+    const loaded = baselines.get(routeId);
+    if (loaded) {
+      base = {
+        points: loaded,
+        request: (k) => (isFillerPoint(loaded[k]) ? null : loaded[k]),
+      };
+    }
+  }
+  return { points, requestPoints: deriveRequestPoints(points, base) };
+}
+
+/**
+ * Remember how a stored route looked when it came onto the chart (or was
+ * saved), unless this panel calculated it and so knows its points already.
+ * @param {{routeId: string, saved?: boolean, dirty?: boolean}} params The
+ *   route.visible / route.saved event.
+ */
+async function rememberBaseline(params) {
+  if (!params?.routeId || !params.saved || params.dirty) return;
+  if (sessions.has(params.routeId)) return;
+  try {
+    const route = await client.call("route.get", { routeId: params.routeId });
+    if (route.saved && !route.dirty)
+      baselines.set(params.routeId, route.points);
+  } catch {
+    /* gone meanwhile */
+  }
 }
 
 /**
@@ -944,9 +1056,16 @@ async function calculate(forcedRequestPoints, known) {
   const session = sessions.get(routeId);
   const derived = known ?? (await currentRequestPoints(routeId));
   const points = derived.points;
-  const requestPoints = Array.isArray(forcedRequestPoints)
+  const asked = Array.isArray(forcedRequestPoints)
     ? forcedRequestPoints
     : derived.requestPoints;
+  // A via with no name of its own is numbered by its place in the route, so
+  // it reads as a via on the chart and is recognised as one once saved.
+  const requestPoints = asked.map((p, i) =>
+    i > 0 && i < asked.length - 1 && isPlaceholderName(p.name)
+      ? { ...p, name: "Via " + i }
+      : p,
+  );
 
   const toLatLon = (p) => ({
     latitude: p.position[1],
@@ -977,6 +1096,7 @@ async function calculate(forcedRequestPoints, known) {
   // The engine returns simplified, navigable waypoints (bounded deviation
   // from the computed path). Fall back to raw geometry for older servers.
   const coords = (result.waypoints || []).map((w) => [w.longitude, w.latitude]);
+  const fromWaypoints = coords.length >= 2;
   if (coords.length < 2) {
     for (const f of result.features || []) {
       for (const c of f.geometry?.coordinates || []) {
@@ -1031,6 +1151,24 @@ async function calculate(forcedRequestPoints, known) {
   if (lastName) newPoints[newPoints.length - 1].name = lastName;
   if (first.href) newPoints[0].href = first.href;
   if (last.href) newPoints[newPoints.length - 1].href = last.href;
+  // The vias keep their names too, which is what tells them apart from the
+  // generated points once the route is saved and loaded again. The server
+  // marks the waypoint of each via (an older one does not: then the vias are
+  // known only until the route is edited or saved). A waypoint link stays
+  // only when the route really passes through the waypoint.
+  const requestAt = newPoints.map(() => -1);
+  requestAt[0] = 0;
+  requestAt[newPoints.length - 1] = requestPoints.length - 1;
+  if (fromWaypoints) {
+    result.waypoints.forEach((w, i) => {
+      const via = w.kind === "via" ? requestPoints[w.viaIndex + 1] : null;
+      if (!via || i === 0 || i === newPoints.length - 1) return;
+      requestAt[i] = w.viaIndex + 1;
+      newPoints[i].name = via.name;
+      if (via.href && samePosition(via, newPoints[i]))
+        newPoints[i].href = via.href;
+    });
+  }
 
   // The session keeps the request with the ends' own names (the stand-ins,
   // not the server's), so a later run on it reads them as unnamed again.
@@ -1045,9 +1183,11 @@ async function calculate(forcedRequestPoints, known) {
     ...requestPoints.slice(1, -1),
     withOwnName(last, lastEnd.own),
   ];
+  baselines.delete(routeId);
   sessions.set(routeId, {
     requestPoints: storedRequest,
     generated: newPoints,
+    requestAt,
     revertPoints: session?.revertPoints ?? points,
     result: { ...result, features: [] },
     autoNames: { first: firstEnd.auto, last: lastEnd.auto },
