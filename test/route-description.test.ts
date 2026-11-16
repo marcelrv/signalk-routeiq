@@ -256,6 +256,26 @@ describe('route description from a routing database', () => {
     }
   });
 
+  it('names an end that lies inside a named edge after its water', async () => {
+    // The start 15% along the first Kanaal edge (just off it), so the route
+    // cuts that edge at the start: the piece left (about 580 m, longer than
+    // the reach) must still read as Kanaal.
+    const { db, route } = await routeAcross(dir, undefined, {
+      loadAll: ['a_navlines.sqlite'],
+      start: { latitude: LAT + 20 / 111320, longitude: LONS[0] + 0.15 * (LONS[1] - LONS[0]) },
+    });
+    try {
+      const it = route.itinerary!;
+      assert.deepStrictEqual([it[0].name, it[0].nameSource], ['Kanaal', 'water']);
+      // Kanaal starts where the 20 m connector joins the cut edge.
+      const kanaal = route.description!.find(l => l.name)!;
+      assert.strictEqual(kanaal.name, 'Kanaal');
+      assert.ok(kanaal.distanceFromStart < 50, `${kanaal.distanceFromStart}`);
+    } finally {
+      await db.close();
+    }
+  });
+
   it('puts the part inside each itinerary leg on leg.waters', async () => {
     const { db, route } = await routeAcross(dir, undefined, { loadAll: ['a_navlines.sqlite'] });
     try {

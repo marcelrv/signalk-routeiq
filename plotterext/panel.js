@@ -772,7 +772,8 @@ async function refreshRoutes(autoSelectId) {
   } else {
     for (const r of routes) {
       // An unsaved stand-in name shows the name Save will suggest.
-      const suggested = sessions.get(r.routeId)?.suggestedName;
+      const s = sessions.get(r.routeId);
+      const suggested = s && s.rev === r.rev ? s.suggestedName : undefined;
       const name =
         suggested && isPlaceholderRouteName(r.name) ? suggested : r.name;
       const label =
@@ -966,6 +967,7 @@ async function calculate(forcedRequestPoints, known) {
       ? (itin.length > 1 && itin[i].name) || undefined
       : undefined;
     return {
+      own,
       name: fromServer || own,
       auto: fromServer ? { name: fromServer, was: own } : undefined,
     };
@@ -979,8 +981,21 @@ async function calculate(forcedRequestPoints, known) {
   if (first.href) newPoints[0].href = first.href;
   if (last.href) newPoints[newPoints.length - 1].href = last.href;
 
+  // The session keeps the request with the ends' own names (the stand-ins,
+  // not the server's), so a later run on it reads them as unnamed again.
+  const withOwnName = (p, own) => {
+    const q = { ...p };
+    if (own) q.name = own;
+    else delete q.name;
+    return q;
+  };
+  const storedRequest = [
+    withOwnName(first, firstEnd.own),
+    ...requestPoints.slice(1, -1),
+    withOwnName(last, lastEnd.own),
+  ];
   sessions.set(routeId, {
-    requestPoints,
+    requestPoints: storedRequest,
     generated: newPoints,
     revertPoints: session?.revertPoints ?? points,
     autoNames: { first: firstEnd.auto, last: lastEnd.auto },
@@ -992,12 +1007,22 @@ async function calculate(forcedRequestPoints, known) {
       result,
     ),
   });
-  await client.call("route.replace", { routeId, points: newPoints });
+  const replaced = await client.call("route.replace", {
+    routeId,
+    points: newPoints,
+  });
+  // The route's rev right after our replace: a later rev means it was edited
+  // on the chart, and the suggestions no longer describe it.
+  const stored = sessions.get(routeId);
+  if (stored) stored.rev = replaced?.rev;
   // Tide probes sit on the request points, so only a changed request (a new
   // via, a moved end) needs a fresh check — a plain re-run does not.
   if (!samePoints(requestPoints, session?.requestPoints)) {
     tideCheckedFor = undefined;
   }
+  // The host's route.dirty event for this replace can arrive before the rev
+  // is known, so the route list is drawn again now that it is.
+  if (stored) await refreshRoutes();
 
   setStatus(
     "route-status",
@@ -1014,7 +1039,8 @@ async function calculate(forcedRequestPoints, known) {
  * @returns {boolean} True when the server's name for that end should be used.
  */
 function isPlaceholderName(name) {
-  return !name || /^(Start|Destination|Via \d+|WP\d+)$/.test(name.trim());
+  const n = (name || "").trim();
+  return !n || /^(Start|Destination|Via \d+|WP\d+)$/.test(n);
 }
 
 /**
@@ -1033,9 +1059,25 @@ function routeNameFor(startName, endName) {
   return "";
 }
 
-/** Last line of the descriptions we write, so a re-save can tell ours from
- * the user's. */
+/** Last line of the descriptions we write. */
 const DESCRIPTION_MARK = "Planned with RouteIQ";
+
+/**
+ * Whether a route description is one of ours as written by
+ * routeDescriptionFor, unchanged: "Start: …", "Destination: …", an optional
+ * "Via: …", the distance/time line, then DESCRIPTION_MARK, and nothing else.
+ * A line the user added or removed makes it theirs.
+ * @param {string} text The route's description.
+ * @returns {boolean} True when Save may replace it.
+ */
+function isGeneratedDescription(text) {
+  const lines = text.trim().split("\n");
+  if (lines.length !== 4 && lines.length !== 5) return false;
+  if (lines[lines.length - 1].trim() !== DESCRIPTION_MARK) return false;
+  if (!lines[0].startsWith("Start: ")) return false;
+  if (!lines[1].startsWith("Destination: ")) return false;
+  return lines.length === 4 || lines[2].startsWith("Via: ");
+}
 
 /**
  * A plain-text route description for the host's save dialog, like the top of
@@ -1093,15 +1135,23 @@ async function save() {
   // by one built from the route's ends, as the webapp names its routes.
   const params = { routeId: r.routeId, dialog: true };
   const session = sessions.get(r.routeId);
-  if (session?.suggestedName && isPlaceholderRouteName(r.name))
-    params.name = session.suggestedName;
-  // A route with no description, or with one we wrote for an earlier
-  // calculation, gets the current one; the user's own text is kept.
-  if (session?.suggestedDescription) {
-    const current = (await client.call("route.get", { routeId: r.routeId }))
-      ?.description;
-    if (!current?.trim() || current.trim().endsWith(DESCRIPTION_MARK))
-      params.description = session.suggestedDescription;
+  if (session?.suggestedName || session?.suggestedDescription) {
+    const current = await client.call("route.get", { routeId: r.routeId });
+    // Suggestions describe the route as calculated: once it has been edited
+    // on the chart they no longer fit, until the next calculation.
+    if (samePoints(current?.points, session.generated)) {
+      if (session.suggestedName && isPlaceholderRouteName(current?.name))
+        params.name = session.suggestedName;
+      // A route with no description, or with one exactly as we write them
+      // (for an earlier calculation), gets the current one; anything the
+      // user changed or added is kept.
+      const text = current?.description;
+      if (
+        session.suggestedDescription &&
+        (!text?.trim() || isGeneratedDescription(text))
+      )
+        params.description = session.suggestedDescription;
+    }
   }
   // The call stays open until the user answers that dialog, so the bus's
   // default 10 s call timeout must not apply (0 = no timeout).

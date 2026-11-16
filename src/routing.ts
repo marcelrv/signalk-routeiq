@@ -3628,13 +3628,37 @@ export class RoutingEngine {
         // compression, line-of-sight) spans several, and only edges are in
         // the databases' sequence tables.
         // `seg` ties each edge to its route segment, for warning locations.
-        const units = this.expandSegmentEdges(segments).map((u) => ({
-          ...u,
-          distance:
-            segments[u.seg].nodes && segments[u.seg].nodes!.length >= 2
-              ? (this.db.getEdgeSync(u.from, u.to)?.distance ?? 0)
-              : (segments[u.seg].distance ?? 0),
-        }));
+        // A piece of an edge cut at the user's point (from or to -1) keeps
+        // the edge's nodes only in segmentHops (keepSegmentEdges); read them
+        // so the piece lies in that edge's water, not in none. Its distance
+        // is the clipped piece, shared over the edges it covers.
+        const cutHops = (seg: (typeof segments)[number]) =>
+          (seg.from === -1 || seg.to === -1) && !seg.nodes
+            ? segmentHops.get(seg)
+            : undefined;
+        const units = this.expandSegmentEdges(segments, cutHops).map((u) => {
+          const seg = segments[u.seg];
+          let distance: number;
+          if (seg.nodes && seg.nodes.length >= 2) {
+            distance = this.db.getEdgeSync(u.from, u.to)?.distance ?? 0;
+          } else {
+            const hops = cutHops(seg);
+            if (hops && hops.length > 2) {
+              let full = 0;
+              for (let k = 0; k + 1 < hops.length; k++)
+                full +=
+                  this.db.getEdgeSync(hops[k], hops[k + 1])?.distance ?? 0;
+              const edge = this.db.getEdgeSync(u.from, u.to)?.distance ?? 0;
+              distance =
+                full > 0
+                  ? ((seg.distance ?? 0) * edge) / full
+                  : (seg.distance ?? 0) / (hops.length - 1);
+            } else {
+              distance = seg.distance ?? 0;
+            }
+          }
+          return { ...u, distance };
+        });
         const described = await this.db.describeRoute(
           units,
           waitOverrides?.lang,
