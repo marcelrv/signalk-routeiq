@@ -1698,11 +1698,14 @@ function renderItinerary(itinerary) {
 
       // Group crossings of one structure (a bridge can have a fixed and an
       // opening span) — same presentation as the webapp's route leg details.
-      // Entries without the server's structure id stay separate: names are
-      // not unique, so two same-named locks are two places.
+      // Keyed by type too: a span over a lock head has the lock as its whole,
+      // so the lock and that bridge share one id, and keyed by id alone the
+      // lock disappeared into the bridge's row. Entries without the server's
+      // structure id stay separate: names are not unique, so two same-named
+      // locks are two places.
       const grouped = new Map();
       for (const c of p.leg.crossings || []) {
-        const key = c.structure || c;
+        const key = c.structure ? c.type + ":" + c.structure : c;
         if (!grouped.has(key)) grouped.set(key, []);
         grouped.get(key).push(c);
       }
