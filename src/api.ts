@@ -24,6 +24,7 @@ import {
   savedCoordinates,
 } from "./passage-profile.js";
 import { RoutingEngine } from "./routing.js";
+import { runWithCaller } from "./server-access.js";
 import {
   PluginConfig,
   RouteResult,
@@ -287,6 +288,17 @@ export class ApiHandler {
     this.config = config;
     this.app = app;
     this.router = Router();
+    // Tide lookups made while answering a request go back to this server
+    // over HTTP with the caller's own login (src/server-access.ts).
+    this.router.use((req, _res, next) =>
+      runWithCaller(
+        {
+          authorization: req.headers.authorization,
+          cookie: req.headers.cookie,
+        },
+        next,
+      ),
+    );
     this.setupRoutes();
   }
 

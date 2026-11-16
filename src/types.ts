@@ -473,7 +473,6 @@ export interface PluginConfig {
   waypointTolerance: number; // meters, max deviation when simplifying to waypoints (default 30) — internal
   catalogUrl: string; // URL to the routing-index.json catalog for downloadable databases
   considerTides: boolean; // default for the per-request "use tides" toggle
-  tidesApiBase: string; // base URL of the server hosting signalk-tides
   // §4a: when true (default since 2026-07-20), startup only peeks each
   // file's metadata/coverage (cheap), and individual databases load into
   // memory on demand — the first time a route request needs them, or via
@@ -568,7 +567,6 @@ export const DEFAULT_CONFIG: PluginConfig = {
   catalogUrl:
     "https://raw.githubusercontent.com/marcelrv/signalk-router-data/main/routing-index.json",
   considerTides: false,
-  tidesApiBase: "http://localhost:3000",
   dynamicLoading: true,
   eagerLoadAtPosition: true,
   loadRadiusNm: 0,
@@ -590,6 +588,9 @@ export const RETIRED_CONFIG_KEYS: readonly string[] = [
   "lineOfSightSampleInterval",
   // retired 2026-11-16: a no-op on factory databases (no distance_to_land)
   "defaultCoastDistance",
+  // retired 2026-11-16: the tide plugins are reached in-process or on this
+  // server's own address (src/server-access.ts)
+  "tidesApiBase",
   // retired 2026-11-16: only scaled the height-derived current estimate,
   // which is gone (currents come from current stations only)
   "maxTidalCurrentKnots",

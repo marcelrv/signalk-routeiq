@@ -17,6 +17,13 @@ import {
   setPlotterExtensionRunning,
 } from "./plotterext.js";
 import { RoutingEngine } from "./routing.js";
+import {
+  CurrentsApiHandle,
+  localServerBase,
+  PropertyValuesSurface,
+  ServerSettingsSurface,
+  watchCurrentsApi,
+} from "./server-access.js";
 import { CurrentsClient, TidesClient } from "./tides.js";
 import { DEFAULT_CONFIG, PluginConfig, RETIRED_CONFIG_KEYS } from "./types.js";
 
@@ -26,7 +33,7 @@ import { DEFAULT_CONFIG, PluginConfig, RETIRED_CONFIG_KEYS } from "./types.js";
  * server versions / are augmented at runtime), so callers cast into this
  * shape once at each boundary instead of reaching for `any`.
  */
-interface SkAppSurface {
+interface SkAppSurface extends ServerSettingsSurface, PropertyValuesSurface {
   getSelfPath?(path: string): unknown;
   getPath?(path: string): unknown;
   subscriptionmanager?: {
@@ -55,6 +62,11 @@ export function pluginConstructor(app: ServerAPI) {
   let config: PluginConfig = { ...DEFAULT_CONFIG };
   let vesselDimensions = { draft: 0, beam: 4, airDraft: 0 };
   let subscriptionCancelled: (() => void) | null = null;
+  // signalk-tidal-currents' in-process API, once it has emitted one (see
+  // server-access.ts). Kept across stop/start: the provider's handle reads its
+  // own live state and rejects while that plugin is stopped.
+  let currentsApi: CurrentsApiHandle | null = null;
+  let stopWatchingCurrentsApi: (() => void) | null = null;
   let positionSubscriptionCancelled: (() => void) | null = null;
   // Last position we ran an eager-load for; used to throttle so a moving
   // vessel doesn't re-evaluate coverage on every position delta.
@@ -150,6 +162,19 @@ export function pluginConstructor(app: ServerAPI) {
           reloadPluginAsync(dataDir, generation),
         );
 
+      // Follow signalk-tidal-currents' in-process API (PropertyValues).
+      stopWatchingCurrentsApi?.();
+      stopWatchingCurrentsApi = watchCurrentsApi(
+        app as unknown as SkAppSurface,
+        (handle) => {
+          if (handle !== currentsApi)
+            console.log(
+              `[routeiq] Using ${handle.providerId} in-process for tidal currents`,
+            );
+          currentsApi = handle;
+        },
+      );
+
       // Re-initialize database/routing engine with (possibly updated) config
       void runLifecycle("Initialization", (generation) =>
         initPluginAsync(app, generation),
@@ -167,6 +192,9 @@ export function pluginConstructor(app: ServerAPI) {
       // Remove the extension from the plotterExtensions collection so hosts
       // stop offering it (presence == enabled per the extensions spec)
       setPlotterExtensionRunning(false);
+
+      stopWatchingCurrentsApi?.();
+      stopWatchingCurrentsApi = null;
 
       // Awaiting the transition means this resolves only once teardown is
       // really done, as the server-api docs ask, instead of leaving the rest of
@@ -245,13 +273,6 @@ export function pluginConstructor(app: ServerAPI) {
               "Factor the tide into route calculation. Needs a tide data plugin: signalk-tidal-currents (current stations: the only source of tidal current) and/or signalk-tides (tide heights, for the depth at the time of passage). Away from current stations no current is assumed. With neither installed, routes fall back to plain distance. Clients can override per request.",
             default: DEFAULT_CONFIG.considerTides,
           },
-          tidesApiBase: {
-            type: "string",
-            title: "Tides API Base URL",
-            description:
-              "Server hosting the tide/current data plugins (default: this server)",
-            default: DEFAULT_CONFIG.tidesApiBase,
-          },
           catalogUrl: {
             type: "string",
             title: "Database Catalog URL",
@@ -312,6 +333,17 @@ export function pluginConstructor(app: ServerAPI) {
       return router;
     },
   };
+
+  /** Give an engine its tide clients: signalk-tides over HTTP on this
+   *  server, signalk-tidal-currents in-process when it has emitted its
+   *  handle, else over HTTP too. The address is read from the server settings
+   *  each time an engine is built, so a changed port applies after a restart
+   *  of the plugin. */
+  function attachTideClients(engine: RoutingEngine): void {
+    const base = localServerBase(app as unknown as SkAppSurface);
+    engine.setTidesClient(new TidesClient(base));
+    engine.setCurrentsClient(new CurrentsClient(base, () => currentsApi));
+  }
 
   /**
    * Where routing databases go when the user hasn't named a directory: a
@@ -497,12 +529,7 @@ export function pluginConstructor(app: ServerAPI) {
       );
 
       const engine = new RoutingEngine(db, config);
-      engine.setTidesClient(
-        new TidesClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase),
-      );
-      engine.setCurrentsClient(
-        new CurrentsClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase),
-      );
+      attachTideClients(engine);
 
       // Release anything a previous initialization published. Signal K normally
       // calls stop() first, but two start()s without one would otherwise drop a
@@ -605,12 +632,7 @@ export function pluginConstructor(app: ServerAPI) {
       );
 
       const engine = new RoutingEngine(db, config, currentDims);
-      engine.setTidesClient(
-        new TidesClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase),
-      );
-      engine.setCurrentsClient(
-        new CurrentsClient(config.tidesApiBase || DEFAULT_CONFIG.tidesApiBase),
-      );
+      attachTideClients(engine);
       if (!isCurrent()) {
         await discardDatabase(db, "superseded hot reload");
         return;

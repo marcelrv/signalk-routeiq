@@ -60,7 +60,7 @@ RouteIQ can be used two ways: as its own standalone web app (served by the plugi
 4. Click the ☰ menu icon in the top-right corner of the screen to open the Routing / Charts / View settings, and use **Manage Routing Data** there to download a routing database for your area.
 5. Set your vessel dimensions (or let RouteIQ auto-detect them from `design.draft` etc. if your Signal K server provides them) and start planning routes.
 
-Want tide-aware routing? Install and enable a tide data plugin first — [`signalk-tidal-currents`](https://github.com/marcelrv/signalk-tidal-currents) for real harmonic current stations, and/or [`signalk-tides`](https://github.com/openwatersio/signalk-tides) for tide heights — then turn on "Consider Tides" in RouteIQ's settings (☰ menu → Routing) or per request. Currents come only from the current stations: away from them RouteIQ assumes no current, rather than guessing one. Tide heights, where available, set the depth at the time of passage.
+Want tide-aware routing? Install and enable a tide data plugin first — [`signalk-tidal-currents`](https://github.com/marcelrv/signalk-tidal-currents) for real harmonic current stations, and/or [`signalk-tides`](https://github.com/openwatersio/signalk-tides) for tide heights — then turn on "Consider Tides" in RouteIQ's settings (☰ menu → Routing) or per request. Currents come only from the current stations: away from them RouteIQ assumes no current, rather than guessing one. Tide heights, where available, set the depth at the time of passage. RouteIQ finds both plugins on its own server without any setting: it calls `signalk-tidal-currents` directly in-process when that version offers it, and otherwise reaches them through the server's own address (HTTP or HTTPS, taken from the server settings) using the login of whoever asked for the route. With security on, that user needs read access to the tide data.
 
 ## Configuration
 
@@ -76,14 +76,13 @@ These settings are available under Server → Plugin Config → RouteIQ:
 | Typical Lock Wait (min) | 60 | Time allowed for each lock on the route, counted towards duration and ETA. Adjustable per route under ☰ → Routing |
 | Typical Opening Bridge Wait (min) | 30 | Time allowed for each opening bridge. Fixed spans cost nothing |
 | Consider Tides by Default | off | Factor in tidal currents when calculating routes (needs `signalk-tidal-currents` and/or `signalk-tides`); can be overridden per request |
-| Tides API Base URL | this server | Server hosting the tide/current data plugins, if not this one |
 | Database Catalog URL | signalk-router-data catalog | Where to look for downloadable routing databases |
 | Dynamic Database Loading | on | Load each region into memory only when a route actually needs it, instead of loading everything at startup. Recommended when you have multiple regional databases installed |
 | Max Loaded Graph Edges | from available memory | With dynamic loading on, caps how much routing graph stays in memory; the least-recently-used regions are unloaded between routes to stay under it |
 
 With dynamic loading on, RouteIQ also loads the region under the vessel as soon as it has a position, so it is ready to route.
 
-Settings that used to be here and are gone: Default Min Coast Distance (a no-op on current routing databases, which carry no distance to land; a client can still send `minCoastDistance` per request), Max Tidal Current (it scaled a current guessed from tide heights, which is no longer made), Wrong Way Penalty and Line-of-Sight Sample Interval (nothing read them), and Waypoint Simplification Tolerance, Line-of-Sight Search Radius, Eager-load Region, Proactive Load Radius and Max Loaded Regions (now fixed internal defaults). A value saved for any of them is ignored.
+Settings that used to be here and are gone: Default Min Coast Distance (a no-op on current routing databases, which carry no distance to land; a client can still send `minCoastDistance` per request), Max Tidal Current (it scaled a current guessed from tide heights, which is no longer made), Tides API Base URL (the tide plugins are now found automatically, see above), Wrong Way Penalty and Line-of-Sight Sample Interval (nothing read them), and Waypoint Simplification Tolerance, Line-of-Sight Search Radius, Eager-load Region, Proactive Load Radius and Max Loaded Regions (now fixed internal defaults). A value saved for any of them is ignored.
 
 ## Safety Constraints & Routing
 

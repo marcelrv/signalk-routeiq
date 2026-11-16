@@ -17,6 +17,13 @@
  * interface; the engine only ever sees sample(lat, lon, t) → (u, v).
  */
 
+import {
+  CurrentsApiHandle,
+  GetJson,
+  loopbackGetJson,
+  warnIfRefused,
+} from "./server-access.js";
+
 export interface FlowVector {
   u: number; // m/s, east component
   v: number; // m/s, north component
@@ -116,9 +123,13 @@ function pruneCache<T>(
 /**
  * Client for the signalk-tides REST API with response caching, so a 24 h
  * departure scan (dozens of route calculations) reuses one set of fetches.
+ * Reached over HTTP on this server (signalk-tides offers nothing in-process),
+ * with the caller's login — see server-access.ts.
  */
 export class TidesClient {
   private baseUrl: string;
+  private getJson: GetJson;
+  private refused = { done: false };
   private stationCache = new Map<
     string,
     { at: number; data: TideStationInfo[] }
@@ -129,12 +140,22 @@ export class TidesClient {
   >();
   private static CACHE_TTL_MS = 6 * 3600_000;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, getJson: GetJson = loopbackGetJson) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.getJson = getJson;
   }
 
   private api(path: string): string {
     return `${this.baseUrl}/signalk/v2/api/tides${path}`;
+  }
+
+  private async get(url: string, what: string): Promise<unknown> {
+    const resp = await this.getJson(url);
+    if (!resp.ok) {
+      warnIfRefused(resp.status, "signalk-tides", this.refused);
+      throw new Error(`${what} failed (${resp.status})`);
+    }
+    return resp.json();
   }
 
   /** Nearest stations (the API returns up to 10, closest first). */
@@ -143,12 +164,10 @@ export class TidesClient {
     const hit = this.stationCache.get(key);
     if (hit && Date.now() - hit.at < TidesClient.CACHE_TTL_MS) return hit.data;
 
-    const resp = await fetch(
+    const raw = (await this.get(
       this.api(`/stations?latitude=${lat}&longitude=${lon}`),
-    );
-    if (!resp.ok)
-      throw new Error(`tides station search failed (${resp.status})`);
-    const raw = (await resp.json()) as Array<Record<string, unknown>>;
+      "tides station search",
+    )) as Array<Record<string, unknown>>;
     const data = (Array.isArray(raw) ? raw : [])
       .filter(
         (s) =>
@@ -184,12 +203,10 @@ export class TidesClient {
         `?start=${encodeURIComponent(new Date(s).toISOString())}` +
         `&end=${encodeURIComponent(new Date(e).toISOString())}`,
     );
-    const resp = await fetch(url);
-    if (!resp.ok)
-      throw new Error(
-        `tides timeline failed for ${stationId} (${resp.status})`,
-      );
-    const data = (await resp.json()) as TimelineResponse;
+    const data = (await this.get(
+      url,
+      `tides timeline for ${stationId}`,
+    )) as TimelineResponse;
     pruneCache(this.timelineCache, TidesClient.CACHE_TTL_MS);
     this.timelineCache.set(key, { at: Date.now(), data });
     return data;
@@ -363,12 +380,17 @@ interface CurrentTimelineDto {
 }
 
 /**
- * Client for the signalk-tidal-currents plugin REST API
- * (/signalk/v2/api/currents) — real harmonic current stations with
- * flood/ebb axes. Responses are cached so departure scans reuse fetches.
+ * Client for the signalk-tidal-currents plugin — real harmonic current
+ * stations with flood/ebb axes. Calls the plugin in-process through its
+ * `currentsApi` handle when it has emitted one, else its REST API
+ * (/signalk/v2/api/currents) on this server with the caller's login — see
+ * server-access.ts. Responses are cached so departure scans reuse fetches.
  */
 export class CurrentsClient {
   private baseUrl: string;
+  private getJson: GetJson;
+  private handle: () => CurrentsApiHandle | null;
+  private refused = { done: false };
   private stationCache = new Map<
     string,
     { at: number; data: CurrentStationDto[] }
@@ -379,12 +401,27 @@ export class CurrentsClient {
   >();
   private static CACHE_TTL_MS = 6 * 3600_000;
 
-  constructor(baseUrl: string) {
+  constructor(
+    baseUrl: string,
+    handle: () => CurrentsApiHandle | null = () => null,
+    getJson: GetJson = loopbackGetJson,
+  ) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.handle = handle;
+    this.getJson = getJson;
   }
 
   private api(path: string): string {
     return `${this.baseUrl}/signalk/v2/api/currents${path}`;
+  }
+
+  private async get(url: string, what: string): Promise<unknown> {
+    const resp = await this.getJson(url);
+    if (!resp.ok) {
+      warnIfRefused(resp.status, "signalk-tidal-currents", this.refused);
+      throw new Error(`${what} failed (${resp.status})`);
+    }
+    return resp.json();
   }
 
   /** Nearest vector-capable current stations to a position. */
@@ -393,12 +430,15 @@ export class CurrentsClient {
     const hit = this.stationCache.get(key);
     if (hit && Date.now() - hit.at < CurrentsClient.CACHE_TTL_MS)
       return hit.data;
-    const resp = await fetch(
-      this.api(`/stations?latitude=${lat}&longitude=${lon}&limit=10`),
-    );
-    if (!resp.ok)
-      throw new Error(`currents station search failed (${resp.status})`);
-    const raw = (await resp.json()) as CurrentStationDto[];
+    const handle = this.handle();
+    const raw = (
+      handle
+        ? await handle.findStations(lat, lon, 10)
+        : await this.get(
+            this.api(`/stations?latitude=${lat}&longitude=${lon}&limit=10`),
+            "currents station search",
+          )
+    ) as CurrentStationDto[];
     const data = (Array.isArray(raw) ? raw : []).filter((s) => s.vectorCapable);
     pruneCache(this.stationCache, CurrentsClient.CACHE_TTL_MS);
     this.stationCache.set(key, { at: Date.now(), data });
@@ -417,17 +457,21 @@ export class CurrentsClient {
     const hit = this.timelineCache.get(key);
     if (hit && Date.now() - hit.at < CurrentsClient.CACHE_TTL_MS)
       return hit.data;
-    const url = this.api(
-      `/stations/${stationId}/timeline` +
-        `?start=${encodeURIComponent(new Date(s).toISOString())}` +
-        `&end=${encodeURIComponent(new Date(e).toISOString())}&step=10`,
-    );
-    const resp = await fetch(url);
-    if (!resp.ok)
-      throw new Error(
-        `currents timeline failed for ${stationId} (${resp.status})`,
-      );
-    const data = (await resp.json()) as CurrentTimelineDto;
+    const startIso = new Date(s).toISOString();
+    const endIso = new Date(e).toISOString();
+    const handle = this.handle();
+    const data = (
+      handle
+        ? await handle.getTimeline(stationId, startIso, endIso, 10)
+        : await this.get(
+            this.api(
+              `/stations/${stationId}/timeline` +
+                `?start=${encodeURIComponent(startIso)}` +
+                `&end=${encodeURIComponent(endIso)}&step=10`,
+            ),
+            `currents timeline for ${stationId}`,
+          )
+    ) as CurrentTimelineDto;
     pruneCache(this.timelineCache, CurrentsClient.CACHE_TTL_MS);
     this.timelineCache.set(key, { at: Date.now(), data });
     return data;
