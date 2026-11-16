@@ -8077,7 +8077,8 @@
    * Crossings with a position can be clicked to pan the map to them.
    * @param {object} c An itinerary crossing.
    * @returns {{latitude: number, longitude: number}|null} Its position, or
-   *   null when it has no usable one.
+   *   null when it has no usable one (missing, or outside ±90/±180, which
+   *   Leaflet would clamp to somewhere else).
    */
   function crossingLatLng(c) {
     const p = c && c.position;
@@ -8085,8 +8086,8 @@
       p &&
       typeof p.latitude === "number" &&
       typeof p.longitude === "number" &&
-      isFinite(p.latitude) &&
-      isFinite(p.longitude)
+      Math.abs(p.latitude) <= 90 &&
+      Math.abs(p.longitude) <= 180
     )
       return p;
     return null;

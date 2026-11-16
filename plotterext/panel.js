@@ -1979,10 +1979,14 @@ function renderItinerary(itinerary) {
         }
         row.append(cn, cdist);
         const cpos = e0.position;
+        // An out-of-range position (bad data) stays plain text: the host
+        // would clamp it and centre the map somewhere else.
         if (
           cpos &&
           typeof cpos.latitude === "number" &&
           typeof cpos.longitude === "number" &&
+          Math.abs(cpos.latitude) <= 90 &&
+          Math.abs(cpos.longitude) <= 180 &&
           client.hasCapability("map")
         ) {
           makeMapLink(row, () =>

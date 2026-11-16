@@ -15,7 +15,7 @@ import {
   nameEndpoints,
   noticeLevel,
 } from '../dist/route-description.js';
-import { legWarnings } from '../dist/itinerary.js';
+import { legWarnings, limitPair } from '../dist/itinerary.js';
 import {
   describePairs,
   detectDescribeFlags,
@@ -812,6 +812,60 @@ describe('leg warnings', () => {
     ]);
     assert.strictEqual(legWarnings({ minWidth: 4.0 }, vessel)[0].level, 'caution');
     assert.strictEqual(legWarnings({ minWidth: 5.9 }, vessel)[0].level, 'caution');
+  });
+
+  it('a clearance under the air draft plus margin is a danger, like shallow water', () => {
+    // Air draft 15.56 + the default 1.5 margin is 17.060000000000002 in
+    // floating point (the sum behind the original report); the payload
+    // carries it rounded.
+    const tall = { ...vessel, requiredAirDraft: 15.56 + 1.5 };
+    assert.notStrictEqual(tall.requiredAirDraft, 17.06); // the fixture is noisy
+    assert.deepStrictEqual(legWarnings({ maxAirDraft: 6.7 }, tall), [
+      {
+        type: 'low_clearance',
+        level: 'danger',
+        maxAirDraft: 6.7,
+        requiredAirDraft: 17.06,
+        message: 'Low clearance (6.7m, need 17.1m)',
+      },
+    ]);
+    assert.deepStrictEqual(legWarnings({ maxAirDraft: 17.06 + 0.01 }, tall), []);
+    // Exactly the required height clears, despite the sum's float noise...
+    assert.deepStrictEqual(legWarnings({ maxAirDraft: 17.06 }, tall), []);
+    // ...and a real 1 cm shortfall is still a danger, printed to the
+    // centimetre because one decimal would read 17.1 against 17.1.
+    const [short] = legWarnings({ maxAirDraft: 17.05 }, tall);
+    assert.strictEqual(short.level, 'danger');
+    assert.strictEqual(short.message, 'Low clearance (17.05m, need 17.06m)');
+    // Without a required air draft there is nothing to test against.
+    assert.deepStrictEqual(legWarnings({ maxAirDraft: 6.7 }, vessel), []);
+  });
+
+  it('limitPair prints a second decimal only when one would hide the gap', () => {
+    assert.deepStrictEqual(limitPair(6.7, 17.06), ['6.7', '17.1']);
+    assert.deepStrictEqual(limitPair(17.05, 17.06), ['17.05', '17.06']);
+    assert.deepStrictEqual(limitPair(2.29, 2.3), ['2.29', '2.30']);
+    assert.deepStrictEqual(limitPair(2.2, 2.3), ['2.2', '2.3']);
+  });
+
+  it('a depth exactly at the limit is enough, despite float noise', () => {
+    // draft 2.1 + margin 0.2 is 2.3000000000000003.
+    const v = { requiredDepth: 2.1 + 0.2, beam: 4.0, requiredWidth: 6.0 };
+    assert.notStrictEqual(v.requiredDepth, 2.3); // the fixture is noisy
+    assert.deepStrictEqual(legWarnings({ minDepth: 2.3 }, v), []);
+    // A tide that brings it exactly to the limit makes it a caution.
+    assert.strictEqual(legWarnings({ minDepth: 1.0, minDepthAtPassage: 2.3 }, v)[0].level, 'caution');
+    const [w] = legWarnings({ minDepth: 2.29 }, v);
+    assert.deepStrictEqual([w.type, w.level, (w as any).requiredDepth], ['shallow', 'danger', 2.3]);
+  });
+
+  it('a width exactly at the limit is enough, despite float noise', () => {
+    // beam 2.2 + margin 0.1 is 2.3000000000000003.
+    const v = { requiredDepth: 1.0, beam: 2.2, requiredWidth: 2.2 + 0.1 };
+    assert.notStrictEqual(v.requiredWidth, 2.3); // the fixture is noisy
+    assert.deepStrictEqual(legWarnings({ minWidth: 2.3 }, v), []);
+    const [w] = legWarnings({ minWidth: 2.29 }, v);
+    assert.deepStrictEqual([w.type, w.level, (w as any).requiredWidth], ['narrow', 'caution', 2.3]);
   });
 
   it('lists the worst first', () => {
