@@ -678,27 +678,29 @@ export class RoutingEngine {
 
         const cost = result.features[0].properties.totalCost ?? 0;
         const distance = result.features[0].properties.totalDistance ?? 0;
-        const violatingMeters = await this.pathViolationMeters(
-          result,
-          effectiveDims,
-          env,
-          request,
-        );
         candidates.push({
           result,
-          violatingMeters,
+          violatingMeters: await this.pathViolationMeters(
+            result,
+            effectiveDims,
+            env,
+            request,
+          ),
           cost,
           distance,
           generation,
         });
         // This attempt's box may have loaded a region that tightened a seam
-        // edge an earlier candidate runs along; rescore those first.
+        // edge an earlier candidate runs along, and a load while this one was
+        // scored can have done the same to it: rescore all of them (only
+        // those whose generation is behind are touched).
         await this.refreshCandidateLimits(
-          candidates.slice(0, -1),
+          candidates,
           effectiveDims,
           env,
           request,
         );
+        const { violatingMeters } = candidates[candidates.length - 1];
 
         const penalized = violatingMeters > 0;
         const stalled =
@@ -1365,27 +1367,24 @@ export class RoutingEngine {
 
         const cost = result.features[0].properties.totalCost ?? 0;
         const distance = result.features[0].properties.totalDistance ?? 0;
-        const violatingMeters = await this.pathViolationMeters(
-          result,
-          dims,
-          env,
-          waitOverrides,
-        );
         candidates.push({
           result,
-          violatingMeters,
+          violatingMeters: await this.pathViolationMeters(
+            result,
+            dims,
+            env,
+            waitOverrides,
+          ),
           cost,
           distance,
           generation,
         });
         // This attempt's box may have loaded a region that tightened a seam
-        // edge an earlier candidate runs along; rescore those first.
-        await this.refreshCandidateLimits(
-          candidates.slice(0, -1),
-          dims,
-          env,
-          waitOverrides,
-        );
+        // edge an earlier candidate runs along, and a load while this one was
+        // scored can have done the same to it: rescore all of them (only
+        // those whose generation is behind are touched).
+        await this.refreshCandidateLimits(candidates, dims, env, waitOverrides);
+        const { violatingMeters } = candidates[candidates.length - 1];
 
         const penalized = violatingMeters > 0;
         const stalled =
@@ -3113,19 +3112,23 @@ export class RoutingEngine {
       // candidate's recount must not pass for one this candidate has seen.
       const generation = this.db.graphGeneration;
       if (c.generation === generation) continue;
-      c.generation = generation;
-      const changed = this.refreshSegmentLimits(c.result);
+      this.refreshSegmentLimits(c.result);
       // Only cached with tides on (pathViolationMeters); the next consumer
       // detects them again.
-      const hadCrossings = c.result.crossings !== undefined;
       delete c.result.crossings;
-      if (!changed && !hadCrossings) continue;
+      // Recounted whenever the candidate is behind, not only when this pass
+      // changed something: a pass whose recount threw (a worker error, caught
+      // by the bbox loop) has already tightened the segments and dropped the
+      // crossings, so the retry would see nothing left to change.
       c.violatingMeters = await this.pathViolationMeters(
         c.result,
         dims,
         env,
         waitOverrides,
       );
+      // Stamped only once the recount is in, so one that throws leaves the
+      // candidate behind for the final refresh to try again.
+      c.generation = generation;
     }
   }
 

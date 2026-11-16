@@ -4111,6 +4111,10 @@ export class RoutingDatabase {
       edge.traffic_mode = updates.traffic_mode;
     if (updates.cost_factor !== undefined)
       edge.cost_factor = updates.cost_factor;
+    // A route already found reads its limits again on a new generation
+    // (RoutingEngine.refreshCandidateLimits). Not invalidateBBoxCaches: the
+    // edge's geometry, which those caches index, has not changed.
+    this.graphGeneration++;
 
     // Mark the same columns the worker just marked in the overlay, so the
     // live entry already behaves the way it will after the next load — a

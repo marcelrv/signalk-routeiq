@@ -850,6 +850,50 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
     assert.strictEqual(warnings.length, 1, 'and replaces the old one');
   });
 
+  it('an earlier via leg is warned about a limit an edge edit tightened', async () => {
+    const engine = new RoutingEngine(db, {
+      ...DEFAULT_CONFIG,
+      routingBBoxMargin: 0.005,
+      routingBBoxMaxExtent: 0.005,
+    }) as any;
+    const warnings: any[] = [];
+    const leg = await engine.tryRouteSegment(
+      rW0.lat, rW0.lon, rS1.lat, rS1.lon, 0, 0, warnings, { draft: 8, beam: 4, airDraft: 10 });
+    assert.ok(leg, 'the leg is found');
+    assert.doesNotMatch(warnings[0].message, /depth/);
+
+    // A user edit while later legs are searched.
+    await db.updateEdge(0, id(rS0), id(rS1), { min_depth: 6 });
+    await engine.recheckViaLegs([leg], warnings);
+
+    assert.strictEqual(warnings.length, 1);
+    assert.match(warnings[0].message, /depth 6\.0m/);
+  });
+
+  it('a candidate whose recount throws stays behind, so a later refresh retries it', async () => {
+    const engine = new RoutingEngine(db, {
+      ...DEFAULT_CONFIG,
+      routingBBoxMargin: 0.005,
+      routingBBoxMaxExtent: 0.005,
+    }) as any;
+    const dims = { draft: 8, beam: 4, airDraft: 10 };
+    const leg = await engine.tryRouteSegment(
+      rW0.lat, rW0.lon, rS1.lat, rS1.lon, 0, 0, [], dims);
+    const before = db.graphGeneration;
+    const c = { result: leg, violatingMeters: 0, cost: 0, distance: 0, generation: before };
+    await db.loadDatabaseGraph('east.sqlite'); // tightens S0-S1 to 7.5 m
+
+    const recount = engine.pathViolationMeters.bind(engine);
+    engine.pathViolationMeters = async () => { throw new Error('synthetic POI lookup failure'); };
+    await assert.rejects(engine.refreshCandidateLimits([c], dims), /synthetic POI lookup failure/);
+    assert.strictEqual(c.generation, before, 'not stamped as current with the old count');
+
+    engine.pathViolationMeters = recount;
+    await engine.refreshCandidateLimits([c], dims);
+    assert.strictEqual(c.generation, db.graphGeneration);
+    assert.ok(c.violatingMeters > 0, 'the retry counts the tightened seam');
+  });
+
   it('a node deleted while a load is reading is not put back by it', async () => {
     const anyDb = db as any;
     const send = anyDb.sendMessage.bind(db);
