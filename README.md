@@ -1,8 +1,3 @@
-<!-- Markdown, not an <img> tag: the App Store's README renderer does not allow
-     inline HTML and printed the tag as literal text. Absolute raw URL for the
-     same reason the screenshots below use one — a relative path does not
-     resolve on npmjs.com. -->
-
 ![RouteIQ icon](https://raw.githubusercontent.com/marcelrv/signalk-routeiq/main/public/icon.svg)
 
 # SignalK RouteIQ Nautical Route Planner
@@ -29,8 +24,6 @@ An offline-first, vessel-aware nautical route planner designed to run natively a
 - **Downloadable Routing Data**: Fetch pre-compiled regional routing databases on demand from within the app — no manual data prep required
 
 ## Screenshots
-
-<!-- Absolute raw URLs, not relative paths, so these also render on npmjs.com. -->
 
 | | |
 |---|---|
