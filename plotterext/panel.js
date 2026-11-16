@@ -990,12 +990,18 @@ function deriveRequestPoints(points, base) {
     from = k + 1;
     const orig = base.request(k);
     if (orig) {
-      // Renamed on the chart: the new name wins.
-      out.push(
-        p.name && p.name !== base.points[k].name
-          ? { ...orig, name: p.name }
-          : orig,
-      );
+      // Renamed or relinked on the chart: the change wins. The link is
+      // compared with the point as written, which has one only when the
+      // route passes exactly through the waypoint, so a via whose link was
+      // left off there keeps it.
+      const was = base.points[k];
+      const via = { ...orig };
+      if (p.name && p.name !== was.name) via.name = p.name;
+      if ((p.href || "") !== (was.href || "")) {
+        if (p.href) via.href = p.href;
+        else delete via.href;
+      }
+      out.push(via);
     } else if (!isFillerPoint(p)) {
       out.push(p); // a generated point the user gave a name of its own
     }
