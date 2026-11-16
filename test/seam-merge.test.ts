@@ -734,6 +734,42 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
     assert.match(JSON.stringify(route.warnings ?? []), /depth 7\.5m/);
   });
 
+  it('a region loaded during the final refresh is caught before selection', async () => {
+    const engine = new RoutingEngine(db, {
+      ...DEFAULT_CONFIG,
+      routingBBoxMargin: 0.005,
+      routingBBoxMaxExtent: 0.005,
+    }) as any;
+    engine.setVesselDimensions({ draft: 8, beam: 4, airDraft: 10 });
+    const score = engine.pathViolationMeters.bind(engine);
+    let calls = 0;
+    engine.pathViolationMeters = async (...args: unknown[]) => {
+      calls++;
+      if (calls === 1) {
+        // While the candidate is scored: an edit makes W1-S0 11 m, so the
+        // final refresh has a change to recount.
+        for (const [a, b] of [[rW1, rS0], [rS0, rW1]])
+          db.getEdgeSync(id(a), id(b))!.min_depth = 11;
+        (db as any).graphGeneration++;
+      } else if (calls === 2) {
+        // That recount awaits, and another request's load lands.
+        await db.loadDatabaseGraph('east.sqlite');
+      }
+      return score(...args);
+    };
+
+    const route = await engine.calculateRoute({
+      start: { latitude: rW0.lat, longitude: rW0.lon },
+      end: { latitude: rS1.lat, longitude: rS1.lon },
+      minCoastDistance: 0,
+    });
+
+    assert.ok(calls >= 3, 'the refresh ran again after the load');
+    const depths = route.features.map((f: any) => f.properties.minDepth)
+      .filter((d: unknown): d is number => typeof d === 'number' && d >= 0);
+    assert.strictEqual(Math.min(...depths), 7.5);
+  });
+
   it('a load that fails part-way leaves the loaded seam edge as it was', async () => {
     const anyDb = db as any;
     const send = anyDb.sendMessage.bind(db);

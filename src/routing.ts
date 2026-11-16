@@ -3077,8 +3077,30 @@ export class RoutingEngine {
    * The violating meters are recounted when either may have changed, so
    * selection and the warnings judge what the route really passes. Its A*
    * cost stays as searched: it only breaks ties.
+   *
+   * Repeated while a recount's own awaits let another load land, up to
+   * MAX_REFRESH_PASSES (a steady stream of edits must not hold a route
+   * forever).
    */
   private async refreshCandidateLimits(
+    candidates: RouteCandidate[],
+    dims: VesselDimensions,
+    env?: RouteEnv,
+    waitOverrides?: WaitOverrides,
+  ): Promise<void> {
+    for (
+      let pass = 0;
+      pass < RoutingEngine.MAX_REFRESH_PASSES &&
+      candidates.some((c) => c.generation !== this.db.graphGeneration);
+      pass++
+    )
+      await this.refreshCandidatesOnce(candidates, dims, env, waitOverrides);
+  }
+
+  private static readonly MAX_REFRESH_PASSES = 4;
+
+  /** One pass of refreshCandidateLimits. */
+  private async refreshCandidatesOnce(
     candidates: RouteCandidate[],
     dims: VesselDimensions,
     env?: RouteEnv,
@@ -3108,9 +3130,11 @@ export class RoutingEngine {
   /**
    * Check a via route's legs again once every leg is found: a later leg's
    * wider box may have loaded a region that tightened a seam edge an earlier
-   * leg runs along. A leg whose limits changed gets its violation warning
-   * rebuilt in place of the one tryRouteSegment added. The legs' segments
-   * are the merged route's segment objects, so the refresh reaches it too.
+   * leg runs along, or linked a lock or bridge to one (its `edge_pois`). A
+   * leg whose limits or cached crossings may have changed gets its violation
+   * warning rebuilt in place of the one tryRouteSegment added. The legs'
+   * segments are the merged route's segment objects, so the refresh reaches
+   * it too. Repeated like refreshCandidateLimits.
    *
    * @param legs - The legs in route order; ones tryRouteSegment did not
    *   return (manual, fallback) are skipped.
@@ -3120,14 +3144,35 @@ export class RoutingEngine {
     legs: RouteResult[],
     warnings: RouteWarning[],
   ): Promise<void> {
+    const stale = (leg: RouteResult) => {
+      const check = legChecks.get(leg);
+      return !!check && check.generation !== this.db.graphGeneration;
+    };
+    for (
+      let pass = 0;
+      pass < RoutingEngine.MAX_REFRESH_PASSES && legs.some(stale);
+      pass++
+    )
+      await this.recheckViaLegsOnce(legs, warnings);
+  }
+
+  /** One pass of recheckViaLegs. */
+  private async recheckViaLegsOnce(
+    legs: RouteResult[],
+    warnings: RouteWarning[],
+  ): Promise<void> {
     for (const leg of legs) {
       // Per leg, before anything awaits (as in refreshCandidateLimits).
       const generation = this.db.graphGeneration;
       const check = legChecks.get(leg);
       if (!check || check.generation === generation) continue;
       check.generation = generation;
-      if (!this.refreshSegmentLimits(leg)) continue;
+      const changed = this.refreshSegmentLimits(leg);
+      // Cached by addViolationWarnings with tides on; a new lock or bridge
+      // changes the passage times and so the depth at passage.
+      const hadCrossings = leg.crossings !== undefined;
       delete leg.crossings;
+      if (!changed && !hadCrossings) continue;
       const fresh: RouteWarning[] = [];
       await this.addViolationWarnings(
         leg,
