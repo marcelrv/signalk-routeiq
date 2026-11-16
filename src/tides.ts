@@ -389,6 +389,10 @@ interface CurrentTimelineDto {
  * those fetched over HTTP per login, so one caller's answer is never served
  * to another (the in-process answers need no login and are shared).
  */
+/** A stable number per in-process handle, for cache keys. */
+const handleIds = new WeakMap<CurrentsApiHandle, number>();
+let nextHandleId = 1;
+
 export class CurrentsClient {
   private baseUrl: string;
   private source: TideSource;
@@ -423,9 +427,14 @@ export class CurrentsClient {
     return this.source.get(url, what);
   }
 
-  /** Cache-key prefix: the login for HTTP answers, none in-process. */
+  /** Cache-key prefix: the login for HTTP answers; in-process, the handle
+   *  itself, so a handle the provider replaced (after its restart, say) never
+   *  serves its predecessor's answers. */
   private keyPrefix(handle: CurrentsApiHandle | null): string {
-    return handle ? "ip" : `http:${callerKey()}`;
+    if (!handle) return `http:${callerKey()}`;
+    let id = handleIds.get(handle);
+    if (id === undefined) handleIds.set(handle, (id = nextHandleId++));
+    return `ip${id}`;
   }
 
   /** Nearest vector-capable current stations to a position. */

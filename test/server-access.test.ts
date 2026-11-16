@@ -478,3 +478,21 @@ describe("retired tidesApiBase", () => {
     assert.match(lines[0], /boat\.local/);
   });
 });
+
+describe("CurrentsClient cache across handles", () => {
+  it("does not serve a replaced handle's answers", async () => {
+    const make = (id: string): CurrentsApiHandle => ({
+      version: 1,
+      providerId: id,
+      findStations: async () => [
+        { id, name: id, latitude: 52, longitude: 5, vectorCapable: true },
+      ],
+      getTimeline: async () => ({ timeline: [] }),
+    });
+    let handle = make("A");
+    const client = new CurrentsClient("http://x", () => handle);
+    assert.strictEqual((await client.findStations(52, 5))[0].id, "A");
+    handle = make("B");
+    assert.strictEqual((await client.findStations(52, 5))[0].id, "B");
+  });
+});
