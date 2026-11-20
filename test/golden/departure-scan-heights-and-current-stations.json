@@ -1,0 +1,74 @@
+[
+  {
+    "arrivalTime": "2026-08-11T00:35:51.774Z",
+    "departureTime": "2026-08-11T00:00:00.000Z",
+    "index": 0,
+    "totalDistance": 6008,
+    "totalSeconds": 2152,
+    "totalSecondsNoTide": 2336
+  },
+  {
+    "arrivalTime": "2026-08-11T01:05:51.774Z",
+    "departureTime": "2026-08-11T00:30:00.000Z",
+    "index": 1,
+    "totalDistance": 6008,
+    "totalSeconds": 2152,
+    "totalSecondsNoTide": 2336
+  },
+  {
+    "arrivalTime": "2026-08-11T01:35:51.774Z",
+    "departureTime": "2026-08-11T01:00:00.000Z",
+    "index": 2,
+    "totalDistance": 6008,
+    "totalSeconds": 2152,
+    "totalSecondsNoTide": 2336
+  },
+  {
+    "arrivalTime": "2026-08-11T02:05:51.774Z",
+    "departureTime": "2026-08-11T01:30:00.000Z",
+    "index": 3,
+    "totalDistance": 6008,
+    "totalSeconds": 2152,
+    "totalSecondsNoTide": 2336
+  },
+  {
+    "arrivalTime": "2026-08-11T02:35:51.774Z",
+    "departureTime": "2026-08-11T02:00:00.000Z",
+    "index": 4,
+    "totalDistance": 6008,
+    "totalSeconds": 2152,
+    "totalSecondsNoTide": 2336
+  },
+  {
+    "arrivalTime": "2026-08-11T03:05:51.774Z",
+    "departureTime": "2026-08-11T02:30:00.000Z",
+    "index": 5,
+    "totalDistance": 6008,
+    "totalSeconds": 2152,
+    "totalSecondsNoTide": 2336
+  },
+  {
+    "arrivalTime": "2026-08-11T03:35:51.774Z",
+    "departureTime": "2026-08-11T03:00:00.000Z",
+    "index": 6,
+    "totalDistance": 6008,
+    "totalSeconds": 2152,
+    "totalSecondsNoTide": 2336
+  },
+  {
+    "arrivalTime": "2026-08-11T04:05:51.774Z",
+    "departureTime": "2026-08-11T03:30:00.000Z",
+    "index": 7,
+    "totalDistance": 6008,
+    "totalSeconds": 2152,
+    "totalSecondsNoTide": 2336
+  },
+  {
+    "arrivalTime": "2026-08-11T04:11:10.731Z",
+    "departureTime": "2026-08-11T04:00:00.000Z",
+    "index": 8,
+    "totalDistance": 2396,
+    "totalSeconds": 671,
+    "totalSecondsNoTide": 931
+  }
+]

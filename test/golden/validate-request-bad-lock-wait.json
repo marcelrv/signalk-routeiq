@@ -1,0 +1,17 @@
+{
+  "request": {
+    "end": {
+      "latitude": 52.1,
+      "longitude": 5.1
+    },
+    "lockWaitMinutes": "long",
+    "start": {
+      "latitude": 52,
+      "longitude": 5
+    }
+  },
+  "result": {
+    "error": "Invalid lockWaitMinutes — expected 0..1440 minutes",
+    "warnings": []
+  }
+}

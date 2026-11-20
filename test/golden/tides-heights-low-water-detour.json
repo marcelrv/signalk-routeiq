@@ -1,0 +1,138 @@
+{
+  "ok": {
+    "arrivalTime": "2026-08-11T00:38:55.725Z",
+    "crossings": [],
+    "departureTime": "2026-08-11T00:00:00.000Z",
+    "features": [
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              5,
+              52
+            ],
+            [
+              4.984,
+              51.984
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 2089,
+          "edgeTypeId": 1,
+          "maxAirDraft": 20,
+          "minDepth": 10,
+          "minDepthKnown": true,
+          "seconds": 812.1,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              4.984,
+              51.984
+            ],
+            [
+              5.035,
+              52
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 3919,
+          "edgeTypeId": 1,
+          "maxAirDraft": 20,
+          "minDepth": 10,
+          "minDepthKnown": true,
+          "seconds": 1523.6,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      }
+    ],
+    "itinerary": [
+      {
+        "coordIndex": 0,
+        "courseToNext": 212,
+        "distanceFromStart": 0,
+        "kind": "start",
+        "latitude": 52,
+        "leg": {
+          "distance": 2089,
+          "maxAirDraft": 20,
+          "minDepth": 10,
+          "minWidth": 10,
+          "seconds": 812
+        },
+        "longitude": 5
+      },
+      {
+        "coordIndex": 1,
+        "courseToNext": 63,
+        "distanceFromStart": 2089,
+        "kind": "turn",
+        "latitude": 51.984,
+        "leg": {
+          "distance": 3919,
+          "maxAirDraft": 20,
+          "minDepth": 10,
+          "minWidth": 10,
+          "seconds": 1524
+        },
+        "longitude": 4.984,
+        "turn": -149
+      },
+      {
+        "coordIndex": 2,
+        "distanceFromStart": 6008,
+        "kind": "end",
+        "latitude": 52,
+        "longitude": 5.035
+      }
+    ],
+    "tide": {
+      "depthAware": false,
+      "enabled": true,
+      "estimated": true,
+      "source": "heights",
+      "stations": [
+        "north",
+        "south",
+        "east"
+      ]
+    },
+    "timingAssumptions": {
+      "averageSpeedKnots": 5,
+      "bridgeWaitMinutes": 30,
+      "lockWaitMinutes": 60
+    },
+    "totalCost": 6008,
+    "totalDistance": 6008,
+    "totalSeconds": 2336,
+    "totalSecondsNoTide": 2336,
+    "type": "FeatureCollection",
+    "waypoints": [
+      {
+        "kind": "start",
+        "latitude": 52,
+        "longitude": 5
+      },
+      {
+        "latitude": 51.984,
+        "longitude": 4.984
+      },
+      {
+        "kind": "end",
+        "latitude": 52,
+        "longitude": 5.035
+      }
+    ]
+  }
+}

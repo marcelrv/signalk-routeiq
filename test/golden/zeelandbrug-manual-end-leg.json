@@ -1,0 +1,75 @@
+{
+  "ok": {
+    "crossings": [],
+    "features": [
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.885,
+              51.613
+            ],
+            [
+              3.896,
+              51.609
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 880,
+          "maxAirDraft": -1,
+          "minDepth": -1,
+          "minDepthKnown": false,
+          "mode": "manual",
+          "seconds": 342.1,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      }
+    ],
+    "itinerary": [
+      {
+        "coordIndex": 0,
+        "courseToNext": 120,
+        "distanceFromStart": 0,
+        "kind": "start",
+        "latitude": 51.613,
+        "leg": {
+          "distance": 880,
+          "seconds": 342
+        },
+        "longitude": 3.885
+      },
+      {
+        "coordIndex": 1,
+        "distanceFromStart": 880,
+        "kind": "end",
+        "latitude": 51.609,
+        "longitude": 3.896
+      }
+    ],
+    "timingAssumptions": {
+      "averageSpeedKnots": 5,
+      "bridgeWaitMinutes": 30,
+      "lockWaitMinutes": 60
+    },
+    "totalCost": 880,
+    "totalDistance": 880,
+    "totalSeconds": 342,
+    "type": "FeatureCollection",
+    "waypoints": [
+      {
+        "kind": "start",
+        "latitude": 51.613,
+        "longitude": 3.885
+      },
+      {
+        "kind": "end",
+        "latitude": 51.609,
+        "longitude": 3.896
+      }
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "request": {
+    "airDraft": 14,
+    "beam": 3.5,
+    "bridgeWaitMinutes": 0,
+    "draft": 1.8,
+    "end": {
+      "latitude": 52.1,
+      "longitude": 5.1
+    },
+    "lockWaitMinutes": 10,
+    "minCoastDistance": 0.5,
+    "start": {
+      "latitude": 52,
+      "longitude": 5
+    }
+  },
+  "result": {
+    "error": null,
+    "warnings": []
+  }
+}

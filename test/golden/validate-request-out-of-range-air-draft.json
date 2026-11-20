@@ -1,0 +1,21 @@
+{
+  "request": {
+    "end": {
+      "latitude": 52.1,
+      "longitude": 5.1
+    },
+    "start": {
+      "latitude": 52,
+      "longitude": 5
+    }
+  },
+  "result": {
+    "error": null,
+    "warnings": [
+      {
+        "message": "Ignored the supplied air draft (100000) — expected a number between 0 and 150 meters. Routed with the air draft configured on the server instead; check the vessel dimensions in Signal K.",
+        "type": "vessel_dimension_ignored"
+      }
+    ]
+  }
+}
