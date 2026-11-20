@@ -35,7 +35,14 @@ export interface RoutingRequest {
   beam?: number; // Override vessel beam
   airDraft?: number; // Override vessel air draft
   departureTime?: string; // ISO 8601; default now. Only meaningful with tides.
-  useTides?: boolean; // Override config.considerTides for this request
+  useTides?: boolean; // Override the engine's default (EngineOptions.defaultUseTides)
+  // Average speed through the water, knots. Default EngineOptions.defaultSpeedKnots.
+  speedKnots?: number;
+  // Safety margins added to the vessel dimensions, metres. Default
+  // EngineOptions.defaultSafetyMargin*M.
+  safetyMarginDraft?: number;
+  safetyMarginBeam?: number;
+  safetyMarginAirDraft?: number;
   // Override the configured waits for this request. Local knowledge beats a
   // default: a lock that always has a chamber ready is not an hour.
   lockWaitMinutes?: number;
@@ -46,6 +53,38 @@ export interface RoutingRequest {
   // Set false to skip the route description. The departure scan does, because
   // it only needs the times and nobody reads a description for each step.
   describe?: boolean;
+}
+
+/**
+ * The inputs a route was actually calculated with: the request's values where
+ * it gave them, the engine's defaults for the rest. Echoed on every successful
+ * result (`RouteResult.inputs`) so a client can see what the numbers rest on
+ * without knowing the engine's configuration. Distances in metres, speed in
+ * knots, waits in minutes.
+ */
+export interface RouteInputs {
+  draft: number;
+  beam: number;
+  airDraft: number;
+  /** Speed through the water, knots (never below 0.5). */
+  speedKnots: number;
+  safetyMarginDraft: number;
+  safetyMarginBeam: number;
+  safetyMarginAirDraft: number;
+  /** ISO 8601 instant the request asked for; null when it gave none (the
+   *  tide calculations then start at the time of the request, which the
+   *  result's own `departureTime` reports). */
+  departureTime: string | null;
+  useTides: boolean;
+  lockWaitMinutes: number;
+  bridgeWaitMinutes: number;
+  /** Nautical miles of coast clearance asked for; 0 = none. */
+  minCoastDistance: number;
+  /** Language the route description was requested in; null when none. */
+  lang: string | null;
+  describe: boolean;
+  /** Version of the routing core that produced the result. */
+  coreVersion: string;
 }
 
 // Edge attributes from routing database
@@ -288,6 +327,8 @@ export interface RouteWarning {
 
 export interface RouteResult {
   type: "FeatureCollection";
+  /** The effective inputs this route was calculated with (see RouteInputs). */
+  inputs?: RouteInputs;
   warnings?: RouteWarning[];
   totalDistance?: number;
   totalCost?: number;
