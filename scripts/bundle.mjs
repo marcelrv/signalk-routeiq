@@ -11,7 +11,7 @@
 // database.ts (inlined into dist/index.js) finds it in the same directory.
 //
 // External: node built-ins and the root package's runtime dependencies.
-// routeiq-core is a workspace devDependency and is inlined, so the published
+// routeiq-core is a workspace package, not a dependency, and is inlined, so the published
 // package needs nothing from a registry beyond its own dependencies.
 import { readFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

@@ -108,9 +108,7 @@ try {
   run('npm', ['install', tarball, '--no-audit', '--no-fund'], installDir);
   const pluginRoot = join(installDir, 'node_modules', 'signalk-routeiq');
   const installed = JSON.parse(readFileSync(join(pluginRoot, 'package.json'), 'utf8'));
-  // devDependencies stay in a published manifest but are never installed, so
-  // they are not checked; the node_modules check below covers them.
-  for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
+  for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
     assert.ok(
       !(installed[field] && 'routeiq-core' in installed[field]),
       `installed package.json lists routeiq-core under ${field}`,

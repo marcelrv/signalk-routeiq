@@ -94,7 +94,8 @@ export function pluginConstructor(app: ServerAPI) {
       console.log(
         "[routeiq] Starting SignalK RouteIQ Nautical Route Planner Plugin...",
       );
-      console.log(`[routeiq] routeiq-core ${CORE_VERSION}`);
+      // Optional call: test stand-ins for the server app have no debug().
+      app.debug?.(`routeiq-core ${CORE_VERSION}`);
 
       // Merge received configuration with defaults, minus every key that is
       // no longer a user setting (see RETIRED_CONFIG_KEYS) so a stale saved
