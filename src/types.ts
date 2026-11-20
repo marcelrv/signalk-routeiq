@@ -26,6 +26,7 @@ export type {
   VesselDimensions,
   LegMode,
   RoutingRequest,
+  RouteInputs,
   EdgeAttributes,
   SearchNode,
   RouteCrossing,

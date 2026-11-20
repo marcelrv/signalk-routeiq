@@ -16,7 +16,17 @@ import {
   MAX_POIS_IN_BBOX,
   RoutingDatabase,
 } from "./database.js";
-import { GpxExporter } from "routeiq-core";
+import {
+  DEFAULT_REQUEST_LIMITS,
+  GpxExporter,
+  VESSEL_DIM_KEYS,
+  VESSEL_DIM_MAX_M,
+  checkRequestConstraints,
+  coerceVesselDimension,
+  validateRouteRequest,
+  type ConstraintFields,
+  type RequestLimits,
+} from "routeiq-core";
 import {
   buildPassageProfile,
   geometryHash,
@@ -26,6 +36,7 @@ import {
 import { PROVIDER } from "./provider.js";
 import { RoutingEngine } from "./routing.js";
 import { runWithCaller } from "./server-access.js";
+import { VesselState, fillRequest } from "./vessel-state.js";
 import {
   PluginConfig,
   RouteResult,
@@ -48,85 +59,24 @@ interface SkResourcesApp {
   };
 }
 
-/** A coordinate as it arrives from a client: leaflet `{lat, lng}`, `{lat, lon}`
- *  or the canonical `{latitude, longitude}`. Every field is optional because
- *  this is unvalidated request body — the handlers narrow it before use. */
-interface LooseCoordinate {
-  latitude?: number;
-  longitude?: number;
-  lat?: number;
-  lng?: number;
-  lon?: number;
-}
-
 /** Cap on `via` array length — each via point triggers a sequential A* search,
  *  and /route is unauthenticated, so an unbounded array is a CPU DoS vector. */
 const MAX_VIA_POINTS = 25;
 
-/** Plausible upper bounds (meters) per vessel dimension. A value outside them
- *  never reaches the engine, because a bad dimension fails *open* on a safety
- *  constraint instead of erroring: getEdgePenalty compares `edge.min_depth <
- *  draft + safetyMarginDraft`, so a string draft makes that sum a string and
- *  every comparison NaN-false (no edge is ever too shallow), and a negative
- *  draft puts the threshold below every real depth. Same shape for air draft
- *  and beam. Recognisable spellings of a real number are still read (see
- *  coerceVesselDimension) — it's the unreadable ones that must not slip
- *  through. */
-const VESSEL_DIM_MAX_M: Record<VesselDimensionKey, number> = {
-  draft: 30,
-  beam: 100,
-  airDraft: 150,
+/** What this plugin's API accepts in a route request: the shared validator
+ *  (routeiq-core) with the plugin's own limits. */
+const PLUGIN_REQUEST_LIMITS: RequestLimits = {
+  ...DEFAULT_REQUEST_LIMITS,
+  maxVias: MAX_VIA_POINTS,
+  allowManualLegs: true,
+  acceptCoordinateAliases: true,
+  strict: false,
+  ignoredDimensionHint: (label) =>
+    `Routed with the ${label} configured on the server instead; ` +
+    `check the vessel dimensions in Signal K.`,
 };
 
-type VesselDimensionKey = "draft" | "beam" | "airDraft";
-
-const VESSEL_DIM_KEYS: VesselDimensionKey[] = ["draft", "beam", "airDraft"];
-
-/** Human wording for warnings/errors — "airDraft" reads badly in prose. */
-const VESSEL_DIM_LABEL: Record<VesselDimensionKey, string> = {
-  draft: "draft",
-  beam: "beam",
-  airDraft: "air draft",
-};
-
-/** Turns a dimension supplied by a client — or read straight off a Signal K
- *  path — into meters.
- *
- *  Beyond a plain number this accepts the two shapes that legitimately reach
- *  us carrying a perfectly good value:
- *   - a numeric string, from a form field or a settings file that stored the
- *     draft as text ("2");
- *   - Signal K's own `design.draft`, whose value is an *object*
- *     (`{maximum, minimum, current}`), plus the `{value: ...}` delta wrapper.
- *     A UI reading `vessels/self` directly gets that object, not a scalar.
- *
- *  Anything else (an empty string, "2 meters", a bare object) is undefined —
- *  never NaN, and never a string that would survive into an arithmetic
- *  comparison. See VESSEL_DIM_MAX_M for why that distinction is a safety
- *  property and not just tidiness. */
-export function coerceVesselDimension(
-  value: unknown,
-  depth = 0,
-): number | undefined {
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? value : undefined;
-  }
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (trimmed === "") return undefined;
-    const parsed = Number(trimmed);
-    return Number.isFinite(parsed) ? parsed : undefined;
-  }
-  // Bounded so a hand-crafted body of nested wrappers can't recurse forever.
-  if (typeof value === "object" && value !== null && depth < 4) {
-    const obj = value as Record<string, unknown>;
-    for (const key of ["value", "maximum", "current"] as const) {
-      const nested = coerceVesselDimension(obj[key], depth + 1);
-      if (nested !== undefined) return nested;
-    }
-  }
-  return undefined;
-}
+export { coerceVesselDimension };
 
 /** Shared validation for the draft/beam/airDraft trio, which arrives both as
  *  the global default (PUT /vessel) and as per-request overrides (POST /route,
@@ -159,30 +109,19 @@ export function pickVesselDimensions(
   return { dims };
 }
 
-/** Short, log-safe rendering of a rejected value, for the warning text. */
-function describeValue(value: unknown): string {
-  let text: string;
-  try {
-    text = typeof value === "string" ? value : JSON.stringify(value);
-  } catch {
-    text = String(value);
-  }
-  if (text === undefined) text = String(value);
-  return text.length > 60 ? text.slice(0, 57) + "…" : text;
-}
-
-/** Normalizes the vessel-dimension and coast-distance overrides on a routing
- *  request in place (null -> undefined, so the engine falls back to the
- *  configured defaults).
+/** Normalizes the vessel-dimension, coast-distance and wait overrides on a
+ *  routing request in place (null -> undefined, so the engine falls back to
+ *  its defaults). A thin wrapper over the shared validator in routeiq-core
+ *  (`checkRequestConstraints`) with this plugin's limits.
  *
  *  An unusable *vessel dimension* is dropped rather than rejected, and
  *  reported as a route warning: a client that sends a malformed draft (the
  *  webapp used to forward Signal K's `design.draft` object verbatim) should
- *  still get a route. Dropping it is what makes that safe — the engine then
- *  falls back to the configured vessel dimensions, and failing those to its
- *  own conservative defaults (2.0 m draft, 4.0 m beam), so the depth and
- *  air-draft constraints keep applying. Keeping the bad value would disable
- *  them silently; see VESSEL_DIM_MAX_M.
+ *  still get a route. Dropping it is what makes that safe — the plugin then
+ *  fills in the vessel dimensions configured on the server, and failing those
+ *  the engine's own conservative defaults, so the depth and air-draft
+ *  constraints keep applying. Keeping the bad value would disable them
+ *  silently; see VESSEL_DIM_MAX_M.
  *
  *  minCoastDistance is still a hard error: it is a plain scalar with no
  *  competing wire shapes, so a bad one means a broken client rather than a
@@ -191,63 +130,28 @@ export function validateRequestConstraints(request: RoutingRequest): {
   error: string | null;
   warnings: RouteWarning[];
 } {
-  const warnings: RouteWarning[] = [];
   const body = request as unknown as Record<string, unknown>;
-  for (const key of VESSEL_DIM_KEYS) {
-    const raw = body[key];
-    if (raw === undefined || raw === null) {
-      request[key] = undefined;
-      continue;
-    }
-    const value = coerceVesselDimension(raw);
-    if (value === undefined || value < 0 || value > VESSEL_DIM_MAX_M[key]) {
-      request[key] = undefined;
-      warnings.push({
-        type: "vessel_dimension_ignored",
-        message:
-          `Ignored the supplied ${VESSEL_DIM_LABEL[key]} (${describeValue(raw)}) — ` +
-          `expected a number between 0 and ${VESSEL_DIM_MAX_M[key]} meters. ` +
-          `Routed with the ${VESSEL_DIM_LABEL[key]} configured on the server instead; ` +
-          `check the vessel dimensions in Signal K.`,
-      });
-      continue;
-    }
-    request[key] = value;
-  }
-
-  if (request.minCoastDistance === null) request.minCoastDistance = undefined;
-  if (request.minCoastDistance !== undefined) {
-    if (
-      typeof request.minCoastDistance !== "number" ||
-      !Number.isFinite(request.minCoastDistance)
-    ) {
-      return {
-        error: "Invalid minCoastDistance — expected a number in nautical miles",
-        warnings,
-      };
-    }
-    if (request.minCoastDistance < 0 || request.minCoastDistance > 100) {
-      return {
-        error: "Invalid minCoastDistance — expected 0..100 nautical miles",
-        warnings,
-      };
+  const out: ConstraintFields = {};
+  const checked = checkRequestConstraints(
+    body as ConstraintFields,
+    PLUGIN_REQUEST_LIMITS,
+    out,
+  );
+  const target = body;
+  for (const [key, value] of Object.entries(out)) {
+    // The dimensions are always written (an absent one reads undefined); any
+    // other field only when the request carried it, so a request without
+    // them is left without the key.
+    if ((VESSEL_DIM_KEYS as readonly string[]).includes(key)) {
+      target[key] = value;
+    } else if (target[key] !== undefined) {
+      target[key] = value;
     }
   }
-
-  // Waits are per-request overrides of the configured defaults. Zero is
-  // meaningful (a lock that never holds you up), so only the range is checked.
-  for (const key of ["lockWaitMinutes", "bridgeWaitMinutes"] as const) {
-    if (request[key] === null) request[key] = undefined;
-    if (request[key] === undefined) continue;
-    const v = request[key];
-    if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 24 * 60) {
-      return {
-        error: `Invalid ${key} — expected 0..1440 minutes`,
-        warnings,
-      };
-    }
-  }
-  return { error: null, warnings };
+  return {
+    error: checked.error ? checked.error.message : null,
+    warnings: checked.warnings,
+  };
 }
 
 /**
@@ -279,11 +183,19 @@ export class ApiHandler {
   private db: RoutingDatabase | null;
   private config: PluginConfig;
   private app: ServerAPI;
+  /** The vessel dimensions this plugin plans with; every request that reaches
+   *  the engine is filled from here (see vessel-state.ts). */
+  readonly vessel: VesselState;
   private initError: string | null = null;
   /** Callback invoked after a database download to hot-reload the routing engine */
   public onReloadRequested: ((dataDir: string) => Promise<void>) | null = null;
 
-  constructor(config: PluginConfig, app: ServerAPI) {
+  constructor(
+    config: PluginConfig,
+    app: ServerAPI,
+    vessel: VesselState = new VesselState(),
+  ) {
+    this.vessel = vessel;
     this.routingEngine = null;
     this.db = null;
     this.config = config;
@@ -502,93 +414,16 @@ export class ApiHandler {
       return;
     }
     try {
-      const request: RoutingRequest = req.body;
-
-      if (!request.start || !request.end) {
-        res.status(400).json({
-          error: "Missing required fields: start and end coordinates",
-        });
+      const validated = validateRouteRequest(req.body, PLUGIN_REQUEST_LIMITS);
+      if (!validated.ok) {
+        res.status(400).json({ error: validated.error.message });
         return;
       }
-
-      // Normalize leaflet {lat, lng} / {lat, lon} to {latitude, longitude}
-      const norm = (p: LooseCoordinate) => {
-        if (typeof p.latitude !== "number") p.latitude = p.lat;
-        if (typeof p.longitude !== "number") p.longitude = p.lng ?? p.lon;
-      };
-      norm(request.start);
-      norm(request.end);
-
-      if (
-        typeof request.start.latitude !== "number" ||
-        typeof request.start.longitude !== "number" ||
-        typeof request.end.latitude !== "number" ||
-        typeof request.end.longitude !== "number"
-      ) {
-        res.status(400).json({
-          error: "Invalid coordinate format. Expected {latitude, longitude}",
-        });
-        return;
-      }
-
-      // Normalize via points and per-leg modes ('auto' is the default; only
-      // 'manual' changes behavior — anything else is rejected).
-      if (request.via !== undefined && !Array.isArray(request.via)) {
-        res.status(400).json({
-          error:
-            "Invalid via — expected an array of {latitude, longitude, mode?}",
-        });
-        return;
-      }
-      for (const v of request.via || []) {
-        norm(v);
-        if (typeof v.latitude !== "number" || typeof v.longitude !== "number") {
-          res.status(400).json({
-            error:
-              "Invalid via coordinate format. Expected {latitude, longitude}",
-          });
-          return;
-        }
-        if (v.mode !== undefined && v.mode !== "auto" && v.mode !== "manual") {
-          res
-            .status(400)
-            .json({ error: "Invalid via mode — expected 'auto' or 'manual'" });
-          return;
-        }
-      }
-      if (request.via && request.via.length > MAX_VIA_POINTS) {
-        res
-          .status(400)
-          .json({ error: `Too many via points (max ${MAX_VIA_POINTS})` });
-        return;
-      }
-      if (
-        request.endMode !== undefined &&
-        request.endMode !== "auto" &&
-        request.endMode !== "manual"
-      ) {
-        res
-          .status(400)
-          .json({ error: "Invalid endMode — expected 'auto' or 'manual'" });
-        return;
-      }
-
-      if (
-        request.departureTime !== undefined &&
-        !Number.isFinite(Date.parse(request.departureTime))
-      ) {
-        res.status(400).json({
-          error: "Invalid departureTime — expected an ISO 8601 date string",
-        });
-        return;
-      }
-
-      const constraints = validateRequestConstraints(request);
-      if (constraints.error) {
-        res.status(400).json({ error: constraints.error });
-        return;
-      }
+      this.noteUnknownFields(validated.unknownFields);
+      const constraints = { warnings: validated.warnings };
       this.logConstraintWarnings(constraints.warnings);
+      // The engine holds no vessel state: fill the boat, speed and margins in.
+      const request = fillRequest(validated.request, this.vessel, this.config);
 
       const route: RouteResult =
         await this.routingEngine!.calculateRoute(request);
@@ -611,6 +446,14 @@ export class ApiHandler {
 
   /** A dropped dimension is visible in the route pane, but the server log is
    *  where it can be traced back to the client that sent it. */
+  private noteUnknownFields(fields: string[]): void {
+    if (fields.length > 0) {
+      this.app.debug?.(
+        `[routeiq] Ignored unknown request fields: ${fields.join(", ")}`,
+      );
+    }
+  }
+
   private logConstraintWarnings(warnings: RouteWarning[]): void {
     for (const warning of warnings) {
       console.warn(`[routeiq] ${warning.message}`);
@@ -634,38 +477,26 @@ export class ApiHandler {
       return;
     }
     try {
-      const { scanHours, stepMinutes, ...request } =
-        req.body as RoutingRequest & {
-          scanHours?: number;
-          stepMinutes?: number;
-        };
-      if (!request.start || !request.end) {
-        res.status(400).json({
-          error: "Missing required fields: start and end coordinates",
-        });
+      const rawBody: unknown = req.body;
+      const isObject =
+        typeof rawBody === "object" &&
+        rawBody !== null &&
+        !Array.isArray(rawBody);
+      const { scanHours, stepMinutes, ...scanRequest } = (
+        isObject ? rawBody : {}
+      ) as Record<string, unknown>;
+      const validated = validateRouteRequest(
+        isObject ? scanRequest : rawBody,
+        PLUGIN_REQUEST_LIMITS,
+      );
+      if (!validated.ok) {
+        res.status(400).json({ error: validated.error.message });
         return;
       }
-      if (request.via && request.via.length > MAX_VIA_POINTS) {
-        res
-          .status(400)
-          .json({ error: `Too many via points (max ${MAX_VIA_POINTS})` });
-        return;
-      }
-      if (
-        request.departureTime !== undefined &&
-        !Number.isFinite(Date.parse(request.departureTime))
-      ) {
-        res.status(400).json({
-          error: "Invalid departureTime — expected an ISO 8601 date string",
-        });
-        return;
-      }
-      const constraints = validateRequestConstraints(request);
-      if (constraints.error) {
-        res.status(400).json({ error: constraints.error });
-        return;
-      }
+      this.noteUnknownFields(validated.unknownFields);
+      const constraints = { warnings: validated.warnings };
       this.logConstraintWarnings(constraints.warnings);
+      const request = fillRequest(validated.request, this.vessel, this.config);
       const hours = Math.min(48, Math.max(1, Number(scanHours) || 24));
       const step = Math.min(240, Math.max(10, Number(stepMinutes) || 60));
 
@@ -1125,8 +956,8 @@ export class ApiHandler {
       return;
     }
     try {
-      const vessel = this.routingEngine!.vesselDims;
-      const cfg = this.routingEngine!.config;
+      const vessel = this.vessel.get();
+      const cfg = this.config;
       const effectiveDraft =
         Math.round(
           ((vessel.draft ?? 2.0) + (cfg.safetyMarginDraft ?? 0.3)) * 10,
@@ -1173,8 +1004,8 @@ export class ApiHandler {
         res.status(400).json({ error: picked.error });
         return;
       }
-      this.routingEngine!.setVesselDimensions(picked.dims);
-      res.json({ success: true, vessel: this.routingEngine!.vesselDims });
+      this.vessel.update(picked.dims);
+      res.json({ success: true, vessel: this.vessel.get() });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       res.status(500).json({ error: message });

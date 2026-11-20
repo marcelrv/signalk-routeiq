@@ -48,13 +48,13 @@ import {
   BBox,
   DepartureScanStep,
   LegMode,
-  PluginConfig,
+  RouteInputs,
   RouteCrossing,
   RouteResult,
   RouteWarning,
   RoutingRequest,
-  VesselDimensions,
 } from "./types.js";
+import { type EngineOptions, resolveRouteInputs } from "routeiq-core";
 
 function isInsideBBox(lat: number, lon: number, bbox: BBox): boolean {
   return (
@@ -64,17 +64,6 @@ function isInsideBBox(lat: number, lon: number, bbox: BBox): boolean {
     lon <= bbox.maxLon
   );
 }
-
-/**
- * Per-request environmental context for time-dependent routing.
- * Built once in calculateRoute and threaded through the search paths —
- * never stored on the engine, so concurrent requests stay isolated.
- */
-/** Per-request replacements for the configured waits, carried to finalizeRoute. */
-type WaitOverrides = Pick<
-  RoutingRequest,
-  "lockWaitMinutes" | "bridgeWaitMinutes" | "lang" | "describe" | "airDraft"
->;
 
 /**
  * Whether a vessel can pass under an opening span without waiting for it to
@@ -314,9 +303,8 @@ interface LegCheck {
   label: string;
   startPt: { latitude: number; longitude: number };
   endPt: { latitude: number; longitude: number };
-  dims: VesselDimensions;
+  inputs: RouteInputs;
   env?: RouteEnv;
-  waitOverrides?: WaitOverrides;
   warnings: RouteWarning[];
   generation: number;
 }
@@ -372,38 +360,23 @@ function toCm(m: number): number {
 
 export class RoutingEngine {
   private db: RoutingDatabase;
-  private _config: PluginConfig;
-  private vesselDimensions: VesselDimensions;
+  private _options: EngineOptions;
   private tides: TideHeightProvider | null = null;
   private currents: CurrentProvider | null = null;
 
-  constructor(
-    db: RoutingDatabase,
-    config: PluginConfig,
-    vesselDimensions?: VesselDimensions,
-  ) {
-    this.db = db;
-    this._config = config;
-    this.vesselDimensions = vesselDimensions || {
-      draft: 0, // unknown until SignalK provides it
-      beam: 4, // reaseonable default until SignalK provides it
-      airDraft: 0,
-    };
-  }
-
   /**
-   * Update vessel dimensions
+   * The engine keeps no vessel or user state: draft, beam, air draft, speed,
+   * margins, waits and the tide choice come with each request (see
+   * resolveRouteInputs), the options below are only the defaults and the
+   * search tuning.
    */
-  setVesselDimensions(dimensions: VesselDimensions): void {
-    this.vesselDimensions = { ...this.vesselDimensions, ...dimensions };
+  constructor(db: RoutingDatabase, options: EngineOptions) {
+    this.db = db;
+    this._options = options;
   }
 
-  get vesselDims(): VesselDimensions {
-    return { ...this.vesselDimensions };
-  }
-
-  get config(): PluginConfig {
-    return this._config;
+  get options(): EngineOptions {
+    return this._options;
   }
 
   setTidesClient(client: TideHeightProvider | null): void {
@@ -429,17 +402,16 @@ export class RoutingEngine {
    * plain distance-based behavior, bit-identical to before this feature).
    */
   private async prepareEnv(
-    request: RoutingRequest,
+    inputs: RouteInputs,
     anchors: Array<{ latitude: number; longitude: number }>,
   ): Promise<RouteEnv | undefined> {
-    const wantTides = request.useTides ?? this.config.considerTides;
-    if (!wantTides || (!this.tides && !this.currents)) return undefined;
+    if (!inputs.useTides || (!this.tides && !this.currents)) return undefined;
 
-    const parsed = request.departureTime
-      ? Date.parse(request.departureTime)
+    const parsed = inputs.departureTime
+      ? Date.parse(inputs.departureTime)
       : NaN;
     const departureMs = Number.isFinite(parsed) ? parsed : Date.now();
-    const speedMs = Math.max(0.5, this.config.averageSpeedKnots) * KNOTS_TO_MS;
+    const speedMs = inputs.speedKnots * KNOTS_TO_MS;
 
     // Travel window estimate: 3× the direct distance at STW covers detours,
     // clamped to sane bounds so timeline fetches stay small.
@@ -497,9 +469,12 @@ export class RoutingEngine {
    * touching the body of the actual search logic.
    */
   async calculateRoute(request: RoutingRequest): Promise<RouteResult> {
+    // Resolved once, before anything is counted or loaded: strict mode refuses
+    // an incomplete request here.
+    const inputs = resolveRouteInputs(request, this._options);
     this.db.beginRoute();
     try {
-      return await this.calculateRouteImpl(request);
+      return await this.calculateRouteImpl(request, inputs);
     } finally {
       this.db.endRoute();
     }
@@ -507,20 +482,13 @@ export class RoutingEngine {
 
   private async calculateRouteImpl(
     request: RoutingRequest,
+    inputs: RouteInputs,
   ): Promise<RouteResult> {
-    const {
-      start,
-      end,
-      via = [],
-      minCoastDistance,
-      draft,
-      beam,
-      airDraft,
-    } = request;
+    const { start, end, via = [] } = request;
     // No coast clearance unless the request asks for one: the factory
     // databases carry no distance_to_land, so a server-wide default was a
     // no-op there (and the setting for it is retired).
-    const effectiveCoastDistance = minCoastDistance ?? 0;
+    const effectiveCoastDistance = inputs.minCoastDistance;
 
     // §4a dynamic loading: no-op in non-dynamic mode. In dynamic mode, load
     // (inline, before the search runs) any not-yet-loaded database whose
@@ -528,15 +496,6 @@ export class RoutingEngine {
     // only for this phase, not the full transit-bbox a route might also
     // pass through (PHASE_4_DESIGN.md §4a.1 task 4 is that follow-up).
     await this.db.ensureRegionsLoaded([start, end, ...via]);
-
-    // Build per-request effective dimensions without mutating shared engine state.
-    // Concurrent requests each get their own local copy, avoiding race conditions.
-    const effectiveDims: VesselDimensions = {
-      draft: draft !== undefined ? draft : this.vesselDimensions.draft,
-      beam: beam !== undefined ? beam : this.vesselDimensions.beam,
-      airDraft:
-        airDraft !== undefined ? airDraft : this.vesselDimensions.airDraft,
-    };
 
     const coastDistanceMeters = effectiveCoastDistance * 1852;
 
@@ -549,12 +508,12 @@ export class RoutingEngine {
       const navmeshRoute = await this.trySameRegionNavmeshRoute(
         start,
         end,
-        effectiveDims,
+        inputs,
       );
       if (navmeshRoute) {
         // Prepared before the warnings, not after: they now read depths at the
         // time of passage and need the tide to do it.
-        const sameRegionEnv = await this.prepareEnv(request, [start, end]);
+        const sameRegionEnv = await this.prepareEnv(inputs, [start, end]);
         const violationWarnings: RouteWarning[] = [];
         await this.addViolationWarnings(
           navmeshRoute,
@@ -562,18 +521,11 @@ export class RoutingEngine {
           "destination",
           start,
           end,
-          effectiveDims,
+          inputs,
           sameRegionEnv,
-          request,
         );
         if (violationWarnings.length) navmeshRoute.warnings = violationWarnings;
-        await this.finalizeRoute(
-          navmeshRoute,
-          effectiveDims,
-          [],
-          sameRegionEnv,
-          request,
-        );
+        await this.finalizeRoute(navmeshRoute, inputs, [], sameRegionEnv);
         return navmeshRoute;
       }
     }
@@ -599,7 +551,7 @@ export class RoutingEngine {
       );
 
     // Tidal flow field for time-dependent costs (undefined = tides off/unavailable)
-    const env = await this.prepareEnv(request, [start, ...via, end]);
+    const env = await this.prepareEnv(inputs, [start, ...via, end]);
 
     // Build bounding box with initial margin, try A* with expansion on failure
     const bboxWarnings: RouteWarning[] = [];
@@ -610,11 +562,10 @@ export class RoutingEngine {
         end,
         via,
         coastDistanceMeters,
-        effectiveDims,
+        inputs,
         bboxWarnings,
         env,
         request.endMode,
-        request,
       );
     }
     // Fall through for non-via routes (bbox search below)
@@ -625,8 +576,8 @@ export class RoutingEngine {
     // outright failure, since the real route may just be sitting outside
     // the current box. The best result seen across attempts is kept —
     // see isBetterCandidate for the fewer-violating-meters-first ordering.
-    let currentMargin = this.config.routingBBoxMargin;
-    const maxMargin = this.config.routingBBoxMaxExtent;
+    let currentMargin = this._options.bboxMarginDeg;
+    const maxMargin = this._options.bboxMaxExtentDeg;
 
     const candidates: RouteCandidate[] = [];
     // The attempt before this one, by reference: refreshCandidateLimits may
@@ -669,7 +620,7 @@ export class RoutingEngine {
           end.latitude,
           end.longitude,
           coastDistanceMeters,
-          effectiveDims,
+          inputs,
           bbox,
           env,
         );
@@ -678,12 +629,7 @@ export class RoutingEngine {
         const distance = result.features[0].properties.totalDistance ?? 0;
         candidates.push({
           result,
-          violatingMeters: await this.pathViolationMeters(
-            result,
-            effectiveDims,
-            env,
-            request,
-          ),
+          violatingMeters: await this.pathViolationMeters(result, inputs, env),
           cost,
           distance,
           generation,
@@ -692,12 +638,7 @@ export class RoutingEngine {
         // edge an earlier candidate runs along, and a load while this one was
         // scored can have done the same to it: rescore all of them (only
         // those whose generation is behind are touched).
-        await this.refreshCandidateLimits(
-          candidates,
-          effectiveDims,
-          env,
-          request,
-        );
+        await this.refreshCandidateLimits(candidates, inputs, env);
         const { violatingMeters } = candidates[candidates.length - 1];
 
         const penalized = violatingMeters > 0;
@@ -758,7 +699,7 @@ export class RoutingEngine {
 
     // A box that threw may have merged seam edges before it failed
     // (ensureRegionsForBbox runs inside the try): rescore again.
-    await this.refreshCandidateLimits(candidates, effectiveDims, env, request);
+    await this.refreshCandidateLimits(candidates, inputs, env);
     const best = this.selectBestCandidate(candidates);
     if (best) {
       const result = best.result;
@@ -780,9 +721,8 @@ export class RoutingEngine {
         "destination",
         start,
         end,
-        effectiveDims,
+        inputs,
         env,
-        request,
       );
 
       // Attach any warning types
@@ -792,7 +732,7 @@ export class RoutingEngine {
         ...violationWarnings,
       ];
       if (result.warnings.length === 0) delete result.warnings;
-      await this.finalizeRoute(result, effectiveDims, [], env, request);
+      await this.finalizeRoute(result, inputs, [], env);
       return result;
     }
 
@@ -805,9 +745,8 @@ export class RoutingEngine {
       end,
       coastDistanceMeters,
       via,
-      effectiveDims,
+      inputs,
       env,
-      request,
       true,
       lastSearchError,
     );
@@ -881,10 +820,26 @@ export class RoutingEngine {
     // Safe for a scan that stops early: an async generator runs `finally` on
     // .return(), which is what both the `signal.aborted` returns below and a
     // consumer that stops iterating trigger.
+    // The effective inputs are fixed once for the whole scan (strict mode
+    // refuses an incomplete request here, before the first step) and handed to
+    // every step in the request, so all steps plan against the same boat.
+    const inputs = resolveRouteInputs(request, this._options);
+    const fixed: RoutingRequest = {
+      ...request,
+      draft: inputs.draft,
+      beam: inputs.beam,
+      airDraft: inputs.airDraft,
+      speedKnots: inputs.speedKnots,
+      safetyMarginDraft: inputs.safetyMarginDraft,
+      safetyMarginBeam: inputs.safetyMarginBeam,
+      safetyMarginAirDraft: inputs.safetyMarginAirDraft,
+      lockWaitMinutes: inputs.lockWaitMinutes,
+      bridgeWaitMinutes: inputs.bridgeWaitMinutes,
+    };
     this.db.beginRoute();
     try {
       yield* this.streamDeparturesInner(
-        request,
+        fixed,
         scanHours,
         stepMinutes,
         signal,
@@ -1004,9 +959,8 @@ export class RoutingEngine {
     end: { latitude: number; longitude: number },
     coastDistanceMeters: number,
     _via: Array<{ latitude: number; longitude: number }>,
-    dims: VesselDimensions,
+    inputs: RouteInputs,
     env?: RouteEnv,
-    waitOverrides?: WaitOverrides,
     // When this result is a LEG of a via route it must stay un-finalized:
     // finalizeRoute ends in splitToSegmentFeatures, which replaces
     // features[0] with per-segment features that carry no
@@ -1062,7 +1016,7 @@ export class RoutingEngine {
             exit.lat,
             exit.lon,
             coastDistanceMeters,
-            dims,
+            inputs,
             undefined,
             env,
           );
@@ -1078,8 +1032,7 @@ export class RoutingEngine {
       await this.connectUserPoint(start, route, "start");
       await this.connectUserPoint(end, route, "end");
 
-      if (finalize)
-        await this.finalizeRoute(route, dims, [], env, waitOverrides);
+      if (finalize) await this.finalizeRoute(route, inputs, [], env);
       return route;
     }
 
@@ -1100,11 +1053,10 @@ export class RoutingEngine {
     end: { latitude: number; longitude: number },
     via: Array<{ latitude: number; longitude: number; mode?: LegMode }>,
     coastDistanceMeters: number,
-    dims: VesselDimensions,
+    inputs: RouteInputs,
     globalWarnings?: RouteWarning[],
     env?: RouteEnv,
     endMode?: LegMode,
-    waitOverrides?: WaitOverrides,
   ): Promise<RouteResult> {
     let currentStart = start;
     let elapsedSec = 0; // time offset of the current leg's departure
@@ -1133,8 +1085,8 @@ export class RoutingEngine {
     const spanLat = maxPtLat - minPtLat;
     const spanLon = maxPtLon - minPtLon;
     const adaptiveMargin = Math.min(
-      this.config.routingBBoxMaxExtent,
-      Math.max(this.config.routingBBoxMargin, spanLat * 0.3, spanLon * 0.2),
+      this._options.bboxMaxExtentDeg,
+      Math.max(this._options.bboxMarginDeg, spanLat * 0.3, spanLon * 0.2),
     );
 
     for (let i = 0; i < via.length; i++) {
@@ -1175,10 +1127,9 @@ export class RoutingEngine {
           coastDistanceMeters,
           i,
           warnings,
-          dims,
+          inputs,
           segmentBbox,
           legEnv,
-          waitOverrides,
         );
       }
       if (!segmentResult) {
@@ -1217,6 +1168,7 @@ export class RoutingEngine {
         segmentResult.features[0].geometry.coordinates,
         segmentResult.features[0].properties.segments!,
         env,
+        inputs,
         elapsedSec,
       );
       currentStart = nextPoint;
@@ -1246,10 +1198,9 @@ export class RoutingEngine {
         coastDistanceMeters,
         -1,
         warnings,
-        dims,
+        inputs,
         finalBbox,
         env ? { ...env, offsetSec: elapsedSec } : undefined,
-        waitOverrides,
         finalFailure,
       );
     }
@@ -1302,7 +1253,7 @@ export class RoutingEngine {
     // Connect only the overall end coordinate (start is handled per-segment above)
     await this.connectUserPoint(end, result, "end");
 
-    await this.finalizeRoute(result, dims, via, env, waitOverrides, viaAt);
+    await this.finalizeRoute(result, inputs, via, env, viaAt);
     return result;
   }
 
@@ -1319,10 +1270,9 @@ export class RoutingEngine {
     coastDistanceMeters: number,
     viaIndex: number,
     warnings: RouteWarning[],
-    dims: VesselDimensions,
+    inputs: RouteInputs,
     bbox?: BBox,
     env?: RouteEnv,
-    waitOverrides?: WaitOverrides,
     // Filled with why the segment failed when this returns null.
     failure: { reason?: string } = {},
   ): Promise<RouteResult | null> {
@@ -1330,8 +1280,8 @@ export class RoutingEngine {
     const startPt = { latitude: startLat, longitude: startLon };
     const endPt = { latitude: endLat, longitude: endLon };
 
-    let currentMargin = this.config.routingBBoxMargin;
-    const segmentMaxMargin = this.config.routingBBoxMaxExtent;
+    let currentMargin = this._options.bboxMarginDeg;
+    const segmentMaxMargin = this._options.bboxMaxExtentDeg;
 
     const candidates: RouteCandidate[] = [];
     // The attempt before this one, by reference: refreshCandidateLimits may
@@ -1363,7 +1313,7 @@ export class RoutingEngine {
           endLat,
           endLon,
           coastDistanceMeters,
-          dims,
+          inputs,
           segmentBbox,
           env,
         );
@@ -1372,12 +1322,7 @@ export class RoutingEngine {
         const distance = result.features[0].properties.totalDistance ?? 0;
         candidates.push({
           result,
-          violatingMeters: await this.pathViolationMeters(
-            result,
-            dims,
-            env,
-            waitOverrides,
-          ),
+          violatingMeters: await this.pathViolationMeters(result, inputs, env),
           cost,
           distance,
           generation,
@@ -1386,7 +1331,7 @@ export class RoutingEngine {
         // edge an earlier candidate runs along, and a load while this one was
         // scored can have done the same to it: rescore all of them (only
         // those whose generation is behind are touched).
-        await this.refreshCandidateLimits(candidates, dims, env, waitOverrides);
+        await this.refreshCandidateLimits(candidates, inputs, env);
         const { violatingMeters } = candidates[candidates.length - 1];
 
         const penalized = violatingMeters > 0;
@@ -1442,7 +1387,7 @@ export class RoutingEngine {
 
     // A box that threw may have merged seam edges before it failed
     // (ensureRegionsForBbox runs inside the try): rescore again.
-    await this.refreshCandidateLimits(candidates, dims, env, waitOverrides);
+    await this.refreshCandidateLimits(candidates, inputs, env);
     const best = this.selectBestCandidate(candidates);
     if (best) {
       if (retriedForPenalty) {
@@ -1461,17 +1406,15 @@ export class RoutingEngine {
         label,
         startPt,
         endPt,
-        dims,
+        inputs,
         env,
-        waitOverrides,
       );
       legChecks.set(best.result, {
         label,
         startPt,
         endPt,
-        dims,
+        inputs,
         env,
-        waitOverrides,
         warnings: warnings.slice(before),
         generation,
       });
@@ -1496,11 +1439,10 @@ export class RoutingEngine {
           endPt,
           coastDistanceMeters,
           [],
-          dims,
+          inputs,
           env,
-          // No waits here: this is a via leg, left un-finalized (below) so the
-          // merged route is scheduled once, as a whole.
-          undefined,
+          // This is a via leg, left un-finalized (below) so the merged route is
+          // scheduled once, as a whole.
           false,
           lastSearchError,
         );
@@ -1654,7 +1596,7 @@ export class RoutingEngine {
   ): RouteWarning {
     const m = Math.round(meters);
     const gap =
-      this.config.coverageGapMeters > 0 && m > this.config.coverageGapMeters;
+      this._options.coverageGapM > 0 && m > this._options.coverageGapM;
     const where =
       position === "start"
         ? "from the start position to the nearest charted waterway"
@@ -1714,7 +1656,7 @@ export class RoutingEngine {
       const seg = segments[segIdx];
       if (!seg) return;
       connectorLegs.add(seg);
-      if (!this.config.lineOfSightSearchRadius) return;
+      if (!this._options.losSearchRadiusM) return;
       if (this.db.isLineCrossingLand(fromLat, fromLon, toLat, toLon, 5)) {
         seg.minDepth = 0;
         seg.minDepthKnown = true;
@@ -2151,7 +2093,7 @@ export class RoutingEngine {
   private async trySameRegionNavmeshRoute(
     start: { latitude: number; longitude: number },
     end: { latitude: number; longitude: number },
-    _dims: VesselDimensions,
+    _inputs: RouteInputs,
   ): Promise<RouteResult | null> {
     const startRegion = this.db.findNavmeshRegionAt(
       start.latitude,
@@ -2332,7 +2274,7 @@ export class RoutingEngine {
     endLat: number,
     endLon: number,
     minCoastDistanceMeters: number,
-    dims: VesselDimensions,
+    inputs: RouteInputs,
     bbox?: BBox,
     env?: RouteEnv,
     // false: search from the literal nearest nodes, without the "better
@@ -2385,7 +2327,7 @@ export class RoutingEngine {
       throw new RouteSearchError("Could not find routing nodes near end point");
     }
 
-    const minDepth = this.requiredDepth(dims);
+    const minDepth = this.requiredDepth(inputs);
 
     // When the endpoints are judged, in the tide's terms. The start is judged
     // at departure; the end at a rough transit estimate away, since the real
@@ -2776,7 +2718,7 @@ export class RoutingEngine {
         const penalty = this.getEdgePenalty(
           edge,
           minCoastDistanceMeters,
-          dims,
+          inputs,
           skipReasons,
           env?.heights
             ? {
@@ -2881,7 +2823,7 @@ export class RoutingEngine {
           endLat,
           endLon,
           minCoastDistanceMeters,
-          dims,
+          inputs,
           bbox,
           env,
           false,
@@ -2906,15 +2848,15 @@ export class RoutingEngine {
         causes.push(`${skipReasons.obstacle} edge(s) blocked by an obstacle`);
       if (skipReasons.draft > 0)
         causes.push(
-          `${skipReasons.draft} edge(s) too shallow for draft ${dims.draft}m`,
+          `${skipReasons.draft} edge(s) too shallow for draft ${inputs.draft}m`,
         );
       if (skipReasons.airDraft > 0)
         causes.push(
-          `${skipReasons.airDraft} edge(s) with insufficient air draft for airDraft ${dims.airDraft}m`,
+          `${skipReasons.airDraft} edge(s) with insufficient air draft for airDraft ${inputs.airDraft}m`,
         );
       if (skipReasons.beam > 0)
         causes.push(
-          `${skipReasons.beam} edge(s) too narrow for beam ${dims.beam}m`,
+          `${skipReasons.beam} edge(s) too narrow for beam ${inputs.beam}m`,
         );
       if (skipReasons.coastDistance > 0)
         causes.push(
@@ -2941,7 +2883,7 @@ export class RoutingEngine {
 
       throw new RouteSearchError(
         `No route found between the given points — ${detail} ` +
-          `(vessel dims: draft=${dims.draft}m, beam=${dims.beam}m, airDraft=${dims.airDraft}m, minCoastDistance=${(minCoastDistanceMeters / 1852).toFixed(2)}nm)`,
+          `(vessel dims: draft=${inputs.draft}m, beam=${inputs.beam}m, airDraft=${inputs.airDraft}m, minCoastDistance=${(minCoastDistanceMeters / 1852).toFixed(2)}nm)`,
       );
     }
 
@@ -3088,9 +3030,8 @@ export class RoutingEngine {
    */
   private async refreshCandidateLimits(
     candidates: RouteCandidate[],
-    dims: VesselDimensions,
+    inputs: RouteInputs,
     env?: RouteEnv,
-    waitOverrides?: WaitOverrides,
   ): Promise<void> {
     for (
       let pass = 0;
@@ -3098,7 +3039,7 @@ export class RoutingEngine {
       candidates.some((c) => c.generation !== this.db.graphGeneration);
       pass++
     )
-      await this.refreshCandidatesOnce(candidates, dims, env, waitOverrides);
+      await this.refreshCandidatesOnce(candidates, inputs, env);
   }
 
   private static readonly MAX_REFRESH_PASSES = 4;
@@ -3106,9 +3047,8 @@ export class RoutingEngine {
   /** One pass of refreshCandidateLimits. */
   private async refreshCandidatesOnce(
     candidates: RouteCandidate[],
-    dims: VesselDimensions,
+    inputs: RouteInputs,
     env?: RouteEnv,
-    waitOverrides?: WaitOverrides,
   ): Promise<void> {
     for (const c of candidates) {
       // Read per candidate, before anything awaits: a load during an earlier
@@ -3123,12 +3063,7 @@ export class RoutingEngine {
       // changed something: a pass whose recount threw (a worker error, caught
       // by the bbox loop) has already tightened the segments and dropped the
       // crossings, so the retry would see nothing left to change.
-      c.violatingMeters = await this.pathViolationMeters(
-        c.result,
-        dims,
-        env,
-        waitOverrides,
-      );
+      c.violatingMeters = await this.pathViolationMeters(c.result, inputs, env);
       // Stamped only once the recount is in, so one that throws leaves the
       // candidate behind for the final refresh to try again.
       c.generation = generation;
@@ -3189,9 +3124,8 @@ export class RoutingEngine {
         check.label,
         check.startPt,
         check.endPt,
-        check.dims,
+        check.inputs,
         check.env,
-        check.waitOverrides,
       );
       let at = -1;
       for (const w of check.warnings) {
@@ -3222,15 +3156,14 @@ export class RoutingEngine {
    */
   private async pathViolationMeters(
     result: RouteResult,
-    dims: VesselDimensions,
+    inputs: RouteInputs,
     env?: RouteEnv,
-    waitOverrides?: WaitOverrides,
   ): Promise<number> {
     const segments = result.features[0]?.properties.segments;
     if (!segments) return 0;
-    const minDepth = this.requiredDepth(dims);
-    const minAirDraft = this.requiredAirDraft(dims);
-    const minBeam = this.requiredWidth(dims);
+    const minDepth = this.requiredDepth(inputs);
+    const minAirDraft = this.requiredAirDraft(inputs);
+    const minBeam = this.requiredWidth(inputs);
 
     const coords = result.features[0]?.geometry.coordinates ?? [];
     // Reuse crossings this same result already carries (an earlier consumer
@@ -3248,7 +3181,7 @@ export class RoutingEngine {
       segments,
       env,
       crossings,
-      waitOverrides,
+      inputs,
     );
     let meters = 0;
     for (let i = 0; i < segments.length; i++) {
@@ -3316,7 +3249,7 @@ export class RoutingEngine {
     candidates: RouteCandidate[],
   ): RouteCandidate | null {
     if (candidates.length === 0) return null;
-    const ratio = this.config.maxPenaltyDetourRatio ?? 0;
+    const ratio = this._options.maxPenaltyDetourRatio;
 
     // A route with no measured distance can't be judged as a detour; it stays
     // eligible rather than being silently dropped.
@@ -3352,7 +3285,7 @@ export class RoutingEngine {
       const aIsCleaner = violatingMetersA < violatingMetersB;
       const cleanerDistance = aIsCleaner ? distanceA : distanceB;
       const dirtierDistance = aIsCleaner ? distanceB : distanceA;
-      const ratio = this.config.maxPenaltyDetourRatio ?? 0;
+      const ratio = this._options.maxPenaltyDetourRatio;
       if (
         ratio > 0 &&
         dirtierDistance > 0 &&
@@ -3402,20 +3335,20 @@ export class RoutingEngine {
    *
    *  `??`, not `||`: a draft of 0 is a real answer (an unknown draft is
    *  `undefined`), and treating it as 2 m was a bug once already. */
-  private requiredDepth(dims: VesselDimensions): number {
-    return toCm((dims.draft ?? 2.0) + this.config.safetyMarginDraft);
+  private requiredDepth(inputs: RouteInputs): number {
+    return toCm(inputs.draft + inputs.safetyMarginDraft);
   }
 
   /** Width the vessel needs: beam plus the configured side margin. The
    *  search cost, the violation audit and the leg warnings all use this. */
-  private requiredWidth(dims: VesselDimensions): number {
-    return toCm((dims.beam ?? 4.0) + this.config.safetyMarginBeam);
+  private requiredWidth(inputs: RouteInputs): number {
+    return toCm(inputs.beam + inputs.safetyMarginBeam);
   }
 
   /** Air draft plus mast clearance margin; an unknown air draft counts as 0.
    *  The search cost, the violation audit and the warnings all use this. */
-  private requiredAirDraft(dims: VesselDimensions): number {
-    return toCm((dims.airDraft ?? 0) + this.config.safetyMarginAirDraft);
+  private requiredAirDraft(inputs: RouteInputs): number {
+    return toCm(inputs.airDraft + inputs.safetyMarginAirDraft);
   }
 
   /**
@@ -3482,19 +3415,20 @@ export class RoutingEngine {
     segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
     env: RouteEnv | undefined,
     crossings: RouteCrossing[],
-    waitOverrides?: WaitOverrides,
+    inputs: RouteInputs,
   ): Promise<Array<number | undefined>> {
     if (!env) return segments.map(() => undefined);
     const waits = this.crossingWaitSchedule(
       coords,
       segments,
       crossings,
-      waitOverrides,
+      inputs,
     );
     const { perSegment } = this.walkPassageClock(
       coords,
       segments,
       env,
+      inputs,
       env.offsetSec,
       waits,
     );
@@ -3609,7 +3543,7 @@ export class RoutingEngine {
   private getEdgePenalty(
     edge: EdgeRow,
     minCoastDistanceMeters: number,
-    dims: VesselDimensions,
+    inputs: RouteInputs,
     skipReasons?: SearchSkipReasons,
     tide?: EdgeTideContext,
   ): number {
@@ -3627,13 +3561,13 @@ export class RoutingEngine {
     if (
       typeof edge.max_air_draft === "number" &&
       edge.max_air_draft >= 0 &&
-      edge.max_air_draft < this.requiredAirDraft(dims)
+      edge.max_air_draft < this.requiredAirDraft(inputs)
     ) {
       penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
       if (skipReasons) skipReasons.airDraft++;
     }
 
-    const minDepth = this.requiredDepth(dims);
+    const minDepth = this.requiredDepth(inputs);
     const edgeDepthKnown = edge.min_depth_known ?? edge.min_depth >= 0;
     if (
       typeof edge.min_depth === "number" &&
@@ -3664,7 +3598,7 @@ export class RoutingEngine {
     if (
       typeof edge.min_width === "number" &&
       edge.min_width >= 0 &&
-      edge.min_width < this.requiredWidth(dims)
+      edge.min_width < this.requiredWidth(inputs)
     ) {
       penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
       if (skipReasons) skipReasons.beam++;
@@ -3699,7 +3633,7 @@ export class RoutingEngine {
     lat2: number,
     lon2: number,
   ): boolean {
-    if (!this.config.lineOfSightSearchRadius) {
+    if (!this._options.losSearchRadiusM) {
       return true;
     }
     const dist = this.haversineDistance(lat1, lon1, lat2, lon2);
@@ -3712,7 +3646,7 @@ export class RoutingEngine {
       return false;
     }
 
-    const searchRadius = this.config.lineOfSightSearchRadius;
+    const searchRadius = this._options.losSearchRadiusM;
     for (let i = 1; i < numSamples; i++) {
       const t = i / numSamples;
       // Pure linear interpolation in degree-space: this correctly places points
@@ -3804,12 +3738,10 @@ export class RoutingEngine {
     coords: Array<[number, number]>,
     segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
     crossings: RouteCrossing[],
-    overrides?: WaitOverrides,
+    inputs: RouteInputs,
   ): Array<{ atMetres: number; seconds: number }> {
-    const lockDefault =
-      overrides?.lockWaitMinutes ?? this.config.lockWaitMinutes ?? 60;
-    const bridgeDefault =
-      overrides?.bridgeWaitMinutes ?? this.config.bridgeWaitMinutes ?? 30;
+    const lockDefault = inputs.lockWaitMinutes;
+    const bridgeDefault = inputs.bridgeWaitMinutes;
 
     // Chainage for each crossing, derived the same way buildItinerary does it
     // — that runs later, off the segment times this schedule feeds into.
@@ -3834,11 +3766,10 @@ export class RoutingEngine {
     }
 
     // An opening span low enough to clear while closed is not something to
-    // wait for. Request air draft first, then the vessel's own.
-    const airDraft = overrides?.airDraft ?? this.vesselDimensions?.airDraft;
-    const margin = this.config.safetyMarginAirDraft ?? 1.5;
+    // wait for. The request's air draft and margin, or the engine defaults.
     for (const c of crossings) {
-      if (passesClosedSpan(c, airDraft, margin)) c.passesClosed = true;
+      if (passesClosedSpan(c, inputs.airDraft, inputs.safetyMarginAirDraft))
+        c.passesClosed = true;
     }
 
     // Locks the route demonstrably passed through, from the edges it used, at
@@ -3968,8 +3899,8 @@ export class RoutingEngine {
       for (const c of group) {
         if (!c.passesClosed) continue;
         c.note =
-          `passes closed (air draft ${airDraft!.toFixed(1)} m + ` +
-          `${margin.toFixed(1)} m margin < closed ${c.closedHeight!.toFixed(1)} m)` +
+          `passes closed (air draft ${inputs.airDraft.toFixed(1)} m + ` +
+          `${inputs.safetyMarginAirDraft.toFixed(1)} m margin < closed ${c.closedHeight!.toFixed(1)} m)` +
           (owner ? "" : ", no wait");
       }
       if (!owner) continue; // fixed or passable spans only — nothing to wait for
@@ -4089,10 +4020,9 @@ export class RoutingEngine {
    */
   private async finalizeRoute(
     route: RouteResult,
-    dims: VesselDimensions,
+    inputs: RouteInputs,
     via: Array<{ latitude: number; longitude: number }> = [],
     env?: RouteEnv,
-    waitOverrides?: WaitOverrides,
     viaAt?: ReadonlyMap<number, number>,
   ): Promise<void> {
     const feature = route.features[0];
@@ -4115,7 +4045,7 @@ export class RoutingEngine {
       coords,
       segments,
       route.crossings,
-      waitOverrides,
+      inputs,
     );
     const waitSec = waits.reduce((t, w) => t + w.seconds, 0);
 
@@ -4123,20 +4053,27 @@ export class RoutingEngine {
     // connectUserPoint too — this runs after all geometry mutations). Returns
     // moving time and waiting time together, with the tide sampled at the real
     // clock time on each leg.
-    const totalSec = this.annotateSegmentTimes(coords, segments, env, 0, waits);
+    const totalSec = this.annotateSegmentTimes(
+      coords,
+      segments,
+      env,
+      inputs,
+      0,
+      waits,
+    );
 
     const { waypoints, itinerary } = buildItinerary(
       coords,
       segments,
       route.crossings || [],
       via,
-      this.config.waypointTolerance ?? 30,
+      this._options.waypointToleranceM,
       {
-        requiredDepth: this.requiredDepth(dims),
-        beam: dims.beam ?? 4.0,
-        requiredWidth: this.requiredWidth(dims),
+        requiredDepth: this.requiredDepth(inputs),
+        beam: inputs.beam,
+        requiredWidth: this.requiredWidth(inputs),
         // Same threshold as the via_constrained check in reportViolations.
-        requiredAirDraft: this.requiredAirDraft(dims),
+        requiredAirDraft: this.requiredAirDraft(inputs),
       },
       viaAt,
     );
@@ -4144,7 +4081,7 @@ export class RoutingEngine {
     route.itinerary = itinerary;
 
     // Where the route runs, by water. A failure here never fails the route.
-    if (waitOverrides?.describe !== false) {
+    if (inputs.describe) {
       try {
         // One unit per graph edge: an aggregated segment (collinear
         // compression, line-of-sight) spans several, and only edges are in
@@ -4183,7 +4120,7 @@ export class RoutingEngine {
         });
         const described = await this.db.describeRoute(
           units,
-          waitOverrides?.lang,
+          inputs.lang ?? undefined,
         );
         const geometry = {
           coords: coords as Array<[number, number]>,
@@ -4207,7 +4144,7 @@ export class RoutingEngine {
 
     // What to call the two ends, for clients that have no name for them.
     // Skipped with the description: a departure scan reads only times.
-    if (waitOverrides?.describe !== false) {
+    if (inputs.describe) {
       // The straight connectors from the user's points to the graph
       // (connectorLegs, drawn by connectUserPoint) lie in no water, so the
       // water reach is counted from where the route joins it. The cut edge
@@ -4237,12 +4174,12 @@ export class RoutingEngine {
     // crossingWaitSchedule read — the saved passage profile reports them.
     route.calculatedAt = new Date().toISOString();
     route.timingAssumptions = {
-      averageSpeedKnots: Math.max(0.5, this.config.averageSpeedKnots),
-      lockWaitMinutes:
-        waitOverrides?.lockWaitMinutes ?? this.config.lockWaitMinutes ?? 60,
-      bridgeWaitMinutes:
-        waitOverrides?.bridgeWaitMinutes ?? this.config.bridgeWaitMinutes ?? 30,
+      averageSpeedKnots: inputs.speedKnots,
+      lockWaitMinutes: inputs.lockWaitMinutes,
+      bridgeWaitMinutes: inputs.bridgeWaitMinutes,
     };
+    // The effective inputs, as a copy: nothing downstream may change them.
+    route.inputs = { ...inputs };
     if (env) {
       const totalDistance =
         feature.properties.totalDistance ??
@@ -4421,6 +4358,7 @@ export class RoutingEngine {
     coords: Array<[number, number]>,
     segments: Array<{ distance: number }>,
     env: RouteEnv | undefined,
+    inputs: RouteInputs,
     startOffsetSec: number,
     waits: Array<{ atMetres: number; seconds: number }>,
   ): {
@@ -4433,9 +4371,7 @@ export class RoutingEngine {
     }>;
     totalSec: number;
   } {
-    const speedMs =
-      env?.speedMs ??
-      Math.max(0.5, this.config.averageSpeedKnots) * KNOTS_TO_MS;
+    const speedMs = env?.speedMs ?? inputs.speedKnots * KNOTS_TO_MS;
     const perSegment: Array<{
       atMs: number | undefined;
       sog: number;
@@ -4505,6 +4441,7 @@ export class RoutingEngine {
     coords: Array<[number, number]>,
     segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
     env: RouteEnv | undefined,
+    inputs: RouteInputs,
     startOffsetSec: number,
     waits: Array<{ atMetres: number; seconds: number }> = [],
   ): number {
@@ -4512,6 +4449,7 @@ export class RoutingEngine {
       coords,
       segments,
       env,
+      inputs,
       startOffsetSec,
       waits,
     );
@@ -5438,20 +5376,19 @@ export class RoutingEngine {
     label: string,
     startPt: { latitude: number; longitude: number },
     endPt: { latitude: number; longitude: number },
-    dims: VesselDimensions,
+    inputs: RouteInputs,
     env?: RouteEnv,
-    waitOverrides?: WaitOverrides,
   ): Promise<void> {
     if (!result.features[0] || !result.features[0].properties.segments) return;
     const coords = result.features[0].geometry.coordinates;
     const segments = result.features[0].properties.segments!;
-    const minDepth = this.requiredDepth(dims);
-    const airDraft = this.requiredAirDraft(dims);
+    const minDepth = this.requiredDepth(inputs);
+    const airDraft = this.requiredAirDraft(inputs);
     // Beam is tested exactly as pathViolationMeters tests it. The two must
     // agree: that function decides a route is violating and may now be KEPT
     // anyway once maxPenaltyDetourRatio bounds the detour, so anything it
     // counts and this does not is a violation the helm is never told about.
-    const minBeam = this.requiredWidth(dims);
+    const minBeam = this.requiredWidth(inputs);
 
     let totalViolationSegments = 0;
     let totalViolationDist = 0;
@@ -5474,7 +5411,7 @@ export class RoutingEngine {
       segments,
       env,
       crossings,
-      waitOverrides,
+      inputs,
     );
     let worstDepth = Infinity;
     // The charted figure behind the worst passage depth, so the message can
@@ -5631,7 +5568,7 @@ export class RoutingEngine {
    * the intermediate grid nodes.
    */
   private async smoothPath(path: number[]): Promise<number[]> {
-    if (path.length <= 2 || !this.config.lineOfSightSearchRadius) return path;
+    if (path.length <= 2 || !this._options.losSearchRadiusM) return path;
 
     const smoothed: number[] = [path[0]];
     let i = 0;
