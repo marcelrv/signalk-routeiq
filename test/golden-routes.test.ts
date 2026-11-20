@@ -42,6 +42,7 @@ import { after, before, describe, it } from 'node:test';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { validateRequestConstraints } from '../dist-tsc/api.js';
 import { RoutingDatabase } from '../dist-tsc/database.js';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import type { CurrentsClient, TidesClient } from '../dist-tsc/tide-providers.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
@@ -179,7 +180,7 @@ function newEngine(
 }
 
 async function openDb(dir: string): Promise<RoutingDatabase> {
-  const db = new RoutingDatabase(dir);
+  const db = createDirectoryDatabase(dir);
   await db.init();
   await db.loadGraph();
   return db;

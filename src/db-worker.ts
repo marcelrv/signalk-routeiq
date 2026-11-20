@@ -1,6 +1,6 @@
 import { parentPort } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
-import { OVERLAY_EDITABLE_COLUMNS } from "./types.js";
+import { OVERLAY_DB_INDEX, OVERLAY_EDITABLE_COLUMNS } from "./routing-store.js";
 import {
   DescribeFlags,
   describePairs,
@@ -137,10 +137,16 @@ function isDepthKnown(value: number, unknownSentinel: number | null): boolean {
 // below that walks `handles` must skip `null` slots.
 const handles: (DbHandle | null)[] = [];
 const filenames: string[] = [];
-/** Sentinel dbIndex used to tag rows that came from the user-edits overlay
- *  rather than any real per-file handle — never matches a real dbIndex, so
- *  overlay rows are never touched by a per-file unload. */
-const OVERLAY_DB_INDEX = -1;
+/** Open every region file read-only (set by the `configure` message before
+ *  anything is opened). The overlay is never opened in this mode. */
+let readOnly = false;
+/** Open a region file: read-only when configured so, which also means no
+ *  journal or lock side file is ever created next to it. */
+function openRegionFile(path: string): DatabaseSync {
+  return readOnly
+    ? new DatabaseSync(path, { readOnly: true })
+    : new DatabaseSync(path);
+}
 let hasCrossesLand = false;
 let hasCrossesObstacle = false;
 let hasNodeDepth = false;
@@ -357,6 +363,11 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
   const { id, type, payload } = msg;
   try {
     switch (type) {
+      case "configure": {
+        readOnly =
+          (payload as { readOnly?: boolean } | undefined)?.readOnly === true;
+        break;
+      }
       case "init": {
         const { dbPaths } = payload!;
         hasCrossesLand = false;
@@ -369,7 +380,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
         const formatErrors: Record<string, string> = {};
         for (const dbPath of dbPaths) {
           try {
-            const db = new DatabaseSync(dbPath);
+            const db = openRegionFile(dbPath);
             const row = db
               .prepare("SELECT COUNT(*) as count FROM nodes")
               .get() as unknown as { count: number } | undefined;
@@ -465,7 +476,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
         for (const dbPath of dbPaths) {
           let db: DatabaseSync | null = null;
           try {
-            db = new DatabaseSync(dbPath);
+            db = openRegionFile(dbPath);
             const row = db
               .prepare("SELECT COUNT(*) as count FROM nodes")
               .get() as unknown as { count: number } | undefined;
@@ -530,7 +541,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
         // slot, so a dbIndex is assigned once and never reused for the life
         // of the worker.
         const { dbPath } = payload!;
-        const db = new DatabaseSync(dbPath);
+        const db = openRegionFile(dbPath);
         const row = db
           .prepare("SELECT COUNT(*) as count FROM nodes")
           .get() as unknown as { count: number } | undefined;
@@ -616,6 +627,14 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
       }
       case "openOverlay": {
         const { overlayPath } = payload!;
+        if (readOnly) {
+          parentPort!.postMessage({
+            id,
+            type,
+            error: "Overlay is not available in read-only mode",
+          });
+          break;
+        }
         try {
           const db = new DatabaseSync(overlayPath, { open: true });
           db.prepare(

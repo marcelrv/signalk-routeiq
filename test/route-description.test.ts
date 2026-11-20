@@ -5,6 +5,7 @@ import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase } from '../dist-tsc/database.js';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import {
@@ -169,7 +170,7 @@ async function routeAcross(
     end?: { latitude: number; longitude: number };
   } = {},
 ) {
-  const db = new RoutingDatabase(dir, true);
+  const db = createDirectoryDatabase(dir, true);
   await db.init();
   await db.loadGraph();
   for (const f of opts.loadAll ?? []) await db.loadDatabaseGraph(f);
@@ -310,7 +311,7 @@ describe('route description from a routing database', () => {
   });
 
   it('does not describe the departure-scan steps', async () => {
-    const db = new RoutingDatabase(dir, true);
+    const db = createDirectoryDatabase(dir, true);
     await db.init();
     await db.loadGraph();
     await db.loadDatabaseGraph('a_navlines.sqlite');
@@ -607,7 +608,7 @@ describe('id collisions between regional files', () => {
     dirs.push(dir);
     buildDb(path.join(dir, 'a_navlines.sqlite'), 'AAA');
     buildDb(path.join(dir, 'b_navlines.sqlite'), 'BBB', { sequences: [{ id: 12, a: 2, b: 4, wb: 100, origin: 1, quality: 4 }, { id: 11, a: 0, b: 2, wb: 100, origin: 1, quality: 4 }, { id: 21, a: 4, b: 5, wb: 200, origin: 2, quality: 0 }] });
-    const db = new RoutingDatabase(dir, true);
+    const db = createDirectoryDatabase(dir, true);
     await db.init();
     await db.loadGraph();
     try {
@@ -628,7 +629,7 @@ describe('id collisions between regional files', () => {
     dirs.push(dir);
     buildDb(path.join(dir, 'a_navlines.sqlite'), 'AAA');
     buildDb(path.join(dir, 'b_navlines.sqlite'), 'BBB', { sequences: [{ id: 12, a: 2, b: 4, wb: 100, origin: 1, quality: 4 }, { id: 11, a: 0, b: 2, wb: 100, origin: 1, quality: 4 }, { id: 21, a: 4, b: 5, wb: 200, origin: 2, quality: 0 }] });
-    const db = new RoutingDatabase(dir, true);
+    const db = createDirectoryDatabase(dir, true);
     await db.init();
     await db.loadGraph();
     await db.loadDatabaseGraph('a_navlines.sqlite');
@@ -678,7 +679,7 @@ describe('real navline database', { skip: !isCurrentFormat(REAL) }, () => {
   after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
   async function nijmegenMaastricht(lang?: string) {
-    const db = new RoutingDatabase(dir, true);
+    const db = createDirectoryDatabase(dir, true);
     await db.init();
     await db.loadGraph();
     const engine = new RoutingEngine(db, testOptions({ ...DEFAULT_CONFIG }, { draft: 1.0, beam: 3, airDraft: 0 }));

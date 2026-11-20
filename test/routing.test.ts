@@ -4,6 +4,7 @@ import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase } from '../dist-tsc/database.js';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
@@ -111,7 +112,7 @@ describe('RoutingEngine', () => {
     }));
 
     // Open via RoutingDatabase with the fixtures directory
-    db = new RoutingDatabase(fixturesDir);
+    db = createDirectoryDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
 

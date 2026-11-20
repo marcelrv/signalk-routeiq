@@ -1,10 +1,32 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { basename, join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { Worker } from "node:worker_threads";
-import { BBox, PoiResult, OVERLAY_EDITABLE_COLUMNS } from "./types.js";
+import { existsSync, readFileSync } from "node:fs";
+import { basename } from "node:path";
 import * as Navmesh from "routeiq-core";
-import type { DescribeWorkerResult } from "routeiq-core";
+import type {
+  BBox,
+  DataVersionEntry,
+  DescribeWorkerResult,
+  PoiResult,
+} from "routeiq-core";
+import {
+  GraphEditError,
+  OVERLAY_DB_INDEX,
+  OVERLAY_EDITABLE_COLUMNS,
+  type OverlayStore,
+  type PeekedFile,
+  type RegionFileEntry,
+  type RegionMetadata,
+  type RegionStats,
+  type RoutingStore,
+} from "./routing-store.js";
+import { SqliteWorkerStore } from "./sqlite-worker-store.js";
+
+export {
+  GraphEditError,
+  OVERLAY_EDITABLE_COLUMNS,
+  type OverlayStore,
+  type RegionFileEntry,
+  type RoutingStore,
+} from "./routing-store.js";
 
 // Node type constants (encoded in the node ID via coordinate hashing)
 export const NODE_TYPE_COASTAL = 0;
@@ -117,41 +139,6 @@ export function isSailableEdge(edge: EdgeRow): boolean {
     edge.crosses_obstacle !== 1
   );
 }
-
-/** Suffix marking an installed database the user has switched off. The file
- *  stays on disk and stays listed by the Data Manager, but nothing ever loads
- *  it into the graph. Renaming (rather than a config list) keeps the state
- *  self-evident on disk and matches the convention that predates the UI
- *  switch — data/ already carried hand-renamed *.sqlite.disabled files. */
-export const DISABLED_SUFFIX = ".disabled";
-
-/** True for `<name>.sqlite.disabled`. */
-export function isDisabledFile(filename: string): boolean {
-  return filename.endsWith(".sqlite" + DISABLED_SUFFIX);
-}
-
-/** The plain `<name>.sqlite` identity of a file in either state. Every
- *  coverageIndex key, API filename, and catalog match uses this form, so
- *  toggling a database never changes how it is referred to. */
-export function baseFilename(filename: string): string {
-  return isDisabledFile(filename)
-    ? filename.slice(0, -DISABLED_SUFFIX.length)
-    : filename;
-}
-
-/** Both scan sites (init, reloadMetadata) accept a database file in either
- *  state; user-edits.sqlite is the overlay store, never a routing region. */
-function isRoutingDatabaseFile(filename: string): boolean {
-  return (
-    (filename.endsWith(".sqlite") || isDisabledFile(filename)) &&
-    baseFilename(filename) !== "user-edits.sqlite"
-  );
-}
-
-/** dbIndex reserved for the user-edits overlay, mirroring db-worker.ts's own
- *  OVERLAY_DB_INDEX — an overlay row is authored by the user, not by any
- *  routing database file, and outranks a file row it duplicates. */
-const OVERLAY_DB_INDEX = -1;
 
 /** OVERLAY_EDITABLE_COLUMNS as a set, for the membership checks on the merge
  *  path — the shared array is the contract, this is just how it is asked. */
@@ -279,26 +266,13 @@ export interface DatabaseCoverageEntry {
   /** True while the on-disk file carries the .disabled suffix. Kept alongside
    *  `state` because `path` must point at the real file for peekMetadata. */
   disabled: boolean;
-  meta: {
-    id: number;
-    country: string;
-    name: string;
-    description: string | null;
-    lastUpdateDate: string;
-    tags: string | null;
-    boundingBox: string | null;
-    boundaryGeometry: string | null;
-    schemaVersion: number | null;
-    contributor: string | null;
-    url: string | null;
-    filename: string;
-  } | null;
+  meta: RegionMetadata | null;
   /** Row counts read directly off the file (peekMetadata's short-lived
    *  handle in dynamic mode; getMetadata()'s bulk-load round-trip in
    *  non-dynamic mode) -- available regardless of load state, unlike the
    *  in-memory graph, so a not-yet-loaded database can still report the
    *  same stats a loaded one shows. */
-  stats: { nodes: number; edges: number; pois: number } | null;
+  stats: RegionStats | null;
 }
 
 export interface EdgeSnapResult {
@@ -312,23 +286,140 @@ export interface EdgeSnapResult {
   edge: EdgeRow;
 }
 
-/** The worker refused to open a file (see formatRefusal in db-worker.ts). */
+/** The store refused to open a file (see formatRefusal in db-worker.ts). */
 class FormatRefusal extends Error {}
 
+/** How regions are brought into memory.
+ *
+ *  - `dynamic`: a region loads when a route, a position or an API call needs
+ *    it, and least-recently-used regions are evicted past `maxLoadedRegions` /
+ *    `maxLoadedRegionEdges`.
+ *  - `pinned`: `loadGraph` loads every enabled listed region; nothing is ever
+ *    loaded or evicted on demand (`ensureRegionsLoaded`,
+ *    `ensureRegionsForBbox` and the `eagerLoad*` methods do nothing) and the
+ *    caps do not apply. Memory use is the sum of the listed regions, known
+ *    up front.
+ *  - `bulk`: every enabled region is opened and loaded in one pass by
+ *    `loadGraph`, through handles opened together; no per-region load or
+ *    unload exists (the original non-dynamic mode). */
+export type RegionPolicy = "dynamic" | "pinned" | "bulk";
+
+export type RegionFileList =
+  | RegionFileEntry[]
+  | (() => RegionFileEntry[] | Promise<RegionFileEntry[]>);
+
+export interface RoutingDatabaseOptions {
+  /** The region files that exist, or a function returning that list (called
+   *  by `init` and by `reloadMetadata`, so a caller can re-scan after files
+   *  were added, removed or switched). The database never lists a directory
+   *  itself. A file with `enabled: false` is peeked for its metadata but never
+   *  loaded. */
+  files: RegionFileList;
+  /** Where the file list comes from, for the "no files" error message. */
+  fileSource?: string;
+  /** Default `dynamic`. */
+  policy?: RegionPolicy;
+  /** `dynamic` only: keep at most this many regions loaded; 0 = unlimited. */
+  maxLoadedRegions?: number;
+  /** `dynamic` only: keep at most this many edges loaded across regions
+   *  (weighted by size, see eviction); 0 = unlimited. */
+  maxLoadedRegionEdges?: number;
+  /** Open region files read-only, open no overlay, write nothing anywhere
+   *  (no caches, temp files or SQLite side files), and reject every graph
+   *  edit with a `GraphEditError` (`READ_ONLY`). */
+  readOnly?: boolean;
+  /** Persistence. Default: a `SqliteWorkerStore` (SQLite files read in a
+   *  worker thread). */
+  store?: RoutingStore;
+  /** Graph-edit persistence. Default: the store itself when it also
+   *  implements `OverlayStore` (the SQLite store does); null = none. Always
+   *  none when `readOnly`. */
+  overlay?: OverlayStore | null;
+  /** Where the SQLite overlay lives; the overlay is opened (and created) at
+   *  `init`. Without a path (and without an explicit `overlay`) graph edits
+   *  reject with `GraphEditError` (`NO_OVERLAY`). */
+  overlayPath?: string | null;
+  /** GeoJSON of inland waterway lines for the map; null = none. */
+  waterwaysPath?: string | null;
+  /** GeoJSON of land polygons for the land-crossing check; null = none. */
+  landPolygonsPath?: string | null;
+}
+
+/** Whether a store also keeps graph edits. */
+function isOverlayStore(
+  store: RoutingStore,
+): store is RoutingStore & OverlayStore {
+  return typeof (store as Partial<OverlayStore>).openOverlay === "function";
+}
+
+/** One region file's state, as `getStatus` reports it. */
+export interface RegionFileStatus {
+  filename: string;
+  state: DatabaseCoverageEntry["state"];
+  enabled: boolean;
+  formatError: string | null;
+  descriptionError: string | null;
+  stats: RegionStats | null;
+  /** The file's data version (see `getDataVersion`). */
+  version: DataVersionEntry;
+}
+
+export interface DatabaseStatus {
+  files: RegionFileStatus[];
+  /** Counts over `files`. */
+  counts: {
+    listed: number;
+    enabled: number;
+    loaded: number;
+    loading: number;
+    notLoaded: number;
+    disabled: number;
+    unsupported: number;
+  };
+  policy: RegionPolicy;
+  readOnly: boolean;
+  /** Whether a graph-edit overlay is open. */
+  overlayPresent: boolean;
+  graphLoaded: boolean;
+}
+
+/** One point's coverage in `checkCoverage`. */
+export interface PointCoverage {
+  lat: number;
+  lon: number;
+  /** Enabled regions whose coverage box contains the point. */
+  regions: Array<{ filename: string; loaded: boolean }>;
+  served: boolean;
+  loaded: boolean;
+}
+
+/** `checkCoverage` answer: which enabled regions serve the points, and
+ *  whether they are in memory. Answered from the coverage index only. */
+export interface CoverageCheck {
+  points: PointCoverage[];
+  /** Every point is inside at least one enabled region. */
+  served: boolean;
+  /** Every point is served by at least one region that is loaded now. */
+  loaded: boolean;
+  /** The distinct enabled regions involved (all that serve any point, or
+   *  that overlap the box), with their loaded flag. */
+  regions: Array<{ filename: string; loaded: boolean }>;
+}
+
 export class RoutingDatabase {
-  private worker: Worker | null = null;
-  private messageIdCounter = 0;
-  private pending = new Map<
-    number,
-    {
-      resolve: (value: any) => void;
-      reject: (reason: any) => void;
-      // Accumulated rows of a chunked reply; absent until the first chunk lands,
-      // which is what distinguishes a zero-row final marker from a finished one.
-      chunks?: unknown[][];
-    }
-  >();
-  private dbDir: string;
+  private store: RoutingStore;
+  /** Graph-edit persistence; null in read-only mode or when none was given. */
+  private overlay: OverlayStore | null;
+  private overlayPath: string | null;
+  private overlayOpen = false;
+  private readOnly: boolean;
+  private policy: RegionPolicy;
+  private fileList: RegionFileList;
+  private fileSource: string;
+  /** Entries of the last file list read, by path. */
+  private entryByPath: Map<string, RegionFileEntry> = new Map();
+  private waterwaysPath: string | null;
+  private landPolygonsPath: string | null;
   private nodes: Map<
     number,
     {
@@ -391,6 +482,8 @@ export class RoutingDatabase {
    *  When true, init() only peeks metadata/coverage and loadGraph() is a
    *  no-op; individual databases load on demand via loadDatabaseGraph(),
    *  triggered by ensureRegionsLoaded() or the /databases/load endpoint. */
+  /** Regions are loaded one file at a time (policy dynamic or pinned);
+   *  false = the bulk path (policy bulk). */
   private dynamicLoading: boolean;
 
   /** filename -> coverage/state. Built by peekMetadata in dynamic mode
@@ -479,16 +572,61 @@ export class RoutingDatabase {
    *  first pass. See enforceRegionCap. */
   private capEnforcement: Promise<void> | null = null;
 
-  constructor(
-    dbDir: string,
-    dynamicLoading: boolean = false,
-    maxLoadedRegions: number = 0,
-    maxLoadedRegionEdges: number = 0,
-  ) {
-    this.dbDir = dbDir;
-    this.dynamicLoading = dynamicLoading;
-    this.maxLoadedRegions = maxLoadedRegions;
-    this.maxLoadedRegionEdges = maxLoadedRegionEdges;
+  constructor(options: RoutingDatabaseOptions) {
+    this.readOnly = options.readOnly === true;
+    this.policy = options.policy ?? "dynamic";
+    this.dynamicLoading = this.policy !== "bulk";
+    // The caps are the dynamic policy's; pinned never evicts.
+    this.maxLoadedRegions =
+      this.policy === "dynamic" ? (options.maxLoadedRegions ?? 0) : 0;
+    this.maxLoadedRegionEdges =
+      this.policy === "dynamic" ? (options.maxLoadedRegionEdges ?? 0) : 0;
+    this.fileList = options.files;
+    this.fileSource = options.fileSource ?? "the region file list";
+    this.store =
+      options.store ?? new SqliteWorkerStore({ readOnly: this.readOnly });
+    if (this.readOnly) {
+      this.overlay = null;
+    } else if (options.overlay !== undefined) {
+      this.overlay = options.overlay;
+    } else {
+      this.overlay = isOverlayStore(this.store) ? this.store : null;
+    }
+    this.overlayPath =
+      this.readOnly || !this.overlay ? null : (options.overlayPath ?? null);
+    this.waterwaysPath = options.waterwaysPath ?? null;
+    this.landPolygonsPath = options.landPolygonsPath ?? null;
+  }
+
+  /** The overlay to write a graph edit to; rejects when there is none
+   *  (read-only, or no overlay was configured). Checked before an edit
+   *  touches the in-memory graph. */
+  private requireOverlay(): OverlayStore {
+    if (this.readOnly) throw new GraphEditError("READ_ONLY");
+    if (!this.overlay || !this.overlayOpen) {
+      throw new GraphEditError("NO_OVERLAY");
+    }
+    return this.overlay;
+  }
+
+  /** Read the file list and remember each entry by path. */
+  private async listFiles(): Promise<RegionFileEntry[]> {
+    const list =
+      typeof this.fileList === "function"
+        ? await this.fileList()
+        : this.fileList;
+    this.entryByPath = new Map(list.map((e) => [e.path, e]));
+    return list;
+  }
+
+  /** The plain filename a listed file is known by (coverage index key). */
+  private keyOfPath(path: string): string {
+    const entry = this.entryByPath.get(path);
+    return entry?.name ?? basename(path.replace(/\\/g, "/"));
+  }
+
+  private isEnabledPath(path: string): boolean {
+    return this.entryByPath.get(path)?.enabled !== false;
   }
 
   /** Sum of stats.edges across every currently-loaded region, *and* every
@@ -519,8 +657,19 @@ export class RoutingDatabase {
     this.regionLastUsedAt.set(filename, ++this.lruCounter);
   }
 
+  /** True for the `dynamic` policy (regions load and unload on demand);
+   *  false for `pinned` and `bulk`. */
   isDynamicLoadingEnabled(): boolean {
-    return this.dynamicLoading;
+    return this.policy === "dynamic";
+  }
+
+  /** The region loading policy this database was built with. */
+  getPolicy(): RegionPolicy {
+    return this.policy;
+  }
+
+  isReadOnly(): boolean {
+    return this.readOnly;
   }
 
   /** See activeRouteCount. Called by RoutingEngine.calculateRoute. */
@@ -560,102 +709,19 @@ export class RoutingDatabase {
     return result;
   }
 
-  private sendMessage(type: string, payload?: any): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const id = ++this.messageIdCounter;
-      this.pending.set(id, { resolve, reject });
-      this.worker!.postMessage({ id, type, payload });
-    });
-  }
-
   async init(): Promise<void> {
-    let allFiles: string[];
-    try {
-      allFiles = readdirSync(this.dbDir).filter(isRoutingDatabaseFile);
-    } catch (err: any) {
-      throw new Error(
-        `Cannot read routing data directory "${this.dbDir}": ${err.message}`,
-      );
+    // A failing file list (an unreadable directory, say) propagates as it is.
+    const listed = await this.listFiles();
+    // Only an empty list is fatal. A list holding nothing but disabled files
+    // initialises fine with an empty graph: GET /databases answers 503 while
+    // `db` is null, so throwing here would leave the Data Manager unable to
+    // list — and therefore unable to re-enable — the very files the user just
+    // switched off.
+    if (listed.length === 0) {
+      throw new Error(`No .sqlite files found in ${this.fileSource}`);
     }
-    // Only a directory with no routing database at all is fatal. A directory
-    // holding nothing but *.sqlite.disabled initialises fine with an empty
-    // graph: GET /databases answers 503 while `db` is null, so throwing here
-    // would leave the Data Manager unable to list — and therefore unable to
-    // re-enable — the very files the user just switched off.
-    if (allFiles.length === 0) {
-      throw new Error(
-        `No .sqlite files found in routing data directory: ${this.dbDir}`,
-      );
-    }
-    const files = allFiles.filter((f) => !isDisabledFile(f));
-    const disabledFiles = allFiles.filter(isDisabledFile);
-
-    const workerPath = join(
-      dirname(fileURLToPath(import.meta.url)),
-      "db-worker.js",
-    );
-    this.worker = new Worker(workerPath);
-
-    this.worker.on(
-      "message",
-      (msg: {
-        id: number;
-        type: string;
-        result?: any;
-        error?: string;
-        chunk?: boolean;
-        chunkIndex?: number;
-        totalChunks?: number;
-      }) => {
-        const pending = this.pending.get(msg.id);
-        if (!pending) return;
-
-        if (msg.error) {
-          this.pending.delete(msg.id);
-          pending.reject(new Error(msg.error));
-          return;
-        }
-
-        // Edge-loading chunked response
-        if (msg.chunk === true && msg.totalChunks !== undefined) {
-          // Initialize accumulator on first chunk
-          if (!pending.chunks) {
-            pending.chunks = [];
-          }
-          pending.chunks.push(msg.result);
-          // Resolve when all chunks arrive
-          if (pending.chunks.length === msg.totalChunks) {
-            this.pending.delete(msg.id);
-            pending.resolve(pending.chunks.flat());
-          }
-          return;
-        }
-        // Final marker (chunk=false) — normally already resolved by the last
-        // chunk above. Exception: zero rows means the worker's chunk loop never
-        // ran and this marker is the *only* message sent — resolve here with an
-        // empty array, or this promise (and loadGraph() with it) hangs forever.
-        if (msg.chunk === false) {
-          if (!pending.chunks) {
-            this.pending.delete(msg.id);
-            pending.resolve([]);
-          }
-          return;
-        }
-
-        this.pending.delete(msg.id);
-        pending.resolve(msg.result);
-      },
-    );
-
-    this.worker.on("error", (err) => {
-      for (const [, p] of this.pending) {
-        p.reject(err);
-      }
-      this.pending.clear();
-    });
-
-    const dbPaths = files.map((f) => join(this.dbDir, f));
-    const disabledPaths = disabledFiles.map((f) => join(this.dbDir, f));
+    const dbPaths = listed.filter((f) => f.enabled).map((f) => f.path);
+    const disabledPaths = listed.filter((f) => !f.enabled).map((f) => f.path);
 
     if (!this.dynamicLoading) {
       // Legacy path (dynamicLoading explicitly set to false): open every
@@ -663,14 +729,24 @@ export class RoutingDatabase {
       // default (flipped 2026-07-20, see types.ts) — kept for deployments
       // that genuinely have one region file and want today's simpler
       // eager-load behavior instead of the on-demand path.
-      const schema = await this.sendMessage("init", { dbPaths });
+      const schema = await this.store.openAll(dbPaths);
       this.hasCrossesLand = schema.hasCrossesLand;
       this.hasCrossesObstacle = schema.hasCrossesObstacle;
       this.hasNodeDepth = schema.hasNodeDepth;
       this.hasRegionId = schema.hasRegionId;
-      const filenames: string[] = schema.filenames || [];
+      // The store reports by basename; the coverage index is keyed by the
+      // plain filename.
+      const keyOfBasename = new Map(
+        dbPaths.map((p) => [
+          basename(p.replace(/\\/g, "/")),
+          this.keyOfPath(p),
+        ]),
+      );
       this.descriptionErrors = new Map(
-        Object.entries(schema.descriptionErrors ?? {}),
+        Object.entries(schema.descriptionErrors ?? {}).map(([f, m]) => [
+          keyOfBasename.get(f) ?? f,
+          m,
+        ]),
       );
       // Files the worker refused (format generation, or built before the POI
       // model) were never opened; list them with their message instead.
@@ -680,8 +756,8 @@ export class RoutingDatabase {
       );
       this.bulkFileList = dbPaths
         .filter((p) => !refusedPaths.includes(p))
-        .map((p, i) => ({
-          filename: filenames[i] || basename(p.replace(/\\/g, "/")),
+        .map((p) => ({
+          filename: this.keyOfPath(p),
           path: p,
         }));
       // Bulk mode never opens disabled files, but the Data Manager still has
@@ -696,33 +772,16 @@ export class RoutingDatabase {
       // without opening a lasting handle for any of them (§4a task 1). Real
       // graph data loads later, on demand — see loadDatabaseGraph() and
       // ensureRegionsLoaded().
-      const peeked: Array<{
-        path: string;
-        filename: string;
-        coverage: {
-          boundingBox: DatabaseCoverageEntry["bbox"];
-          boundaryGeometry: DatabaseCoverageEntry["boundary"];
-        };
-        meta: DatabaseCoverageEntry["meta"];
-        flags: {
-          hasCrossesLand: boolean;
-          hasCrossesObstacle: boolean;
-          hasNodeDepth: boolean;
-          hasRegionId: boolean;
-          hasEdgeKind: boolean;
-        };
-        stats: DatabaseCoverageEntry["stats"];
-        formatError: string | null;
-      }> = await this.sendMessage("peekMetadata", {
+      const peeked: PeekedFile[] = await this.store.peekMetadata(
         // Disabled files are peeked too — a short-lived read-only handle, so
         // their cards keep name/coverage/stats and the coverage map can still
         // draw them. Only their `state` keeps them out of the graph.
-        dbPaths: [...dbPaths, ...disabledPaths],
-      });
+        [...dbPaths, ...disabledPaths],
+      );
 
       this.coverageIndex.clear();
       for (const p of peeked) {
-        const disabled = isDisabledFile(p.filename);
+        const disabled = !this.isEnabledPath(p.path);
         // A disabled file's schema flags must not widen the engine's
         // capabilities — nothing from it ever enters the graph.
         if (!disabled && !p.formatError) {
@@ -732,7 +791,7 @@ export class RoutingDatabase {
           this.hasNodeDepth = this.hasNodeDepth || p.flags.hasNodeDepth;
           this.hasRegionId = this.hasRegionId || p.flags.hasRegionId;
         }
-        const key = baseFilename(p.filename);
+        const key = this.keyOfPath(p.path);
         this.coverageIndex.set(key, {
           filename: key,
           path: p.path,
@@ -751,38 +810,25 @@ export class RoutingDatabase {
         });
       }
       console.log(
-        `[routeiq] Dynamic loading enabled: peeked ${peeked.length} database(s) in ${this.dbDir}, none loaded yet`,
+        `[routeiq] Dynamic loading enabled: peeked ${peeked.length} database(s) in ${this.fileSource}, none loaded yet`,
       );
     }
 
-    // Open overlay (user-edits.sqlite) — created if not exists
-    const overlayPath = join(this.dbDir, "user-edits.sqlite");
-    await this.sendMessage("openOverlay", { overlayPath });
-    console.log(`[routeiq] User-edits overlay ready: ${overlayPath}`);
+    // Open the graph-edit overlay (created if it does not exist). Never in
+    // read-only mode: nothing is created or opened then.
+    if (this.overlay && this.overlayPath) {
+      await this.overlay.openOverlay(this.overlayPath);
+      this.overlayOpen = true;
+      console.log(`[routeiq] User-edits overlay ready: ${this.overlayPath}`);
+    }
   }
 
   private regionIdCol(): string {
     return this.hasRegionId ? "region_id" : "0 AS region_id";
   }
 
-  async getMetadata(): Promise<
-    Array<{
-      id: number;
-      country: string;
-      name: string;
-      description: string | null;
-      lastUpdateDate: string;
-      tags: string | null;
-      boundingBox: string | null;
-      boundaryGeometry: string | null;
-      schemaVersion: number | null;
-      contributor: string | null;
-      url: string | null;
-      filename: string;
-      stats: { nodes: number; edges: number; pois: number };
-    }>
-  > {
-    return this.sendMessage("getMetadata");
+  async getMetadata(): Promise<Array<RegionMetadata & { stats: RegionStats }>> {
+    return this.store.getMetadata();
   }
 
   /** Backing data for GET .../databases — one record per entry in
@@ -923,6 +969,140 @@ export class RoutingDatabase {
     };
   }
 
+  /** Structured status: every listed file with its state, the counts, the
+   *  loading policy, and whether the database is read-only or has an
+   *  overlay. Format refusals and description errors appear per file (the
+   *  same messages GET /databases shows). */
+  getStatus(): DatabaseStatus {
+    const files: RegionFileStatus[] = [];
+    const counts = {
+      listed: 0,
+      enabled: 0,
+      loaded: 0,
+      loading: 0,
+      notLoaded: 0,
+      disabled: 0,
+      unsupported: 0,
+    };
+    for (const entry of this.coverageIndex.values()) {
+      counts.listed++;
+      if (entry.state === "loaded") counts.loaded++;
+      else if (entry.state === "loading") counts.loading++;
+      else if (entry.state === "not_loaded") counts.notLoaded++;
+      else if (entry.state === "disabled") counts.disabled++;
+      else if (entry.state === "unsupported") counts.unsupported++;
+      files.push({
+        filename: entry.filename,
+        state: entry.state,
+        enabled: !entry.disabled,
+        formatError: entry.formatError ?? null,
+        descriptionError: this.descriptionErrors.get(entry.filename) ?? null,
+        stats: entry.stats,
+        version: RoutingDatabase.versionOf(entry),
+      });
+    }
+    counts.enabled = counts.listed - counts.disabled;
+    return {
+      files,
+      counts,
+      policy: this.policy,
+      readOnly: this.readOnly,
+      overlayPresent: this.overlayOpen,
+      graphLoaded: this.graphLoaded,
+    };
+  }
+
+  private static versionOf(entry: DatabaseCoverageEntry): DataVersionEntry {
+    const date = entry.meta?.lastUpdateDate;
+    return {
+      filename: entry.filename,
+      lastUpdateDate: typeof date === "string" && date !== "" ? date : null,
+    };
+  }
+
+  /** The data version of the regions in memory (`scope: "loaded"`, the
+   *  default) or of every listed file (`"all"`), sorted by filename: each
+   *  file's name and the `last_update_date` of its metadata. A file's
+   *  metadata carries no build id or hash, so none is reported. This is what
+   *  a route result echoes as `inputs.data`. */
+  getDataVersion(scope: "loaded" | "all" = "loaded"): DataVersionEntry[] {
+    const out: DataVersionEntry[] = [];
+    for (const entry of this.coverageIndex.values()) {
+      if (scope === "loaded" && entry.state !== "loaded") continue;
+      out.push(RoutingDatabase.versionOf(entry));
+    }
+    return out.sort((a, b) =>
+      a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0,
+    );
+  }
+
+  /** Which enabled regions serve the given points (or box), and whether they
+   *  are in memory. Answered from the coverage index alone: nothing is
+   *  loaded, opened or read. Disabled and format-refused files never serve.
+   *
+   *  For points, `served` is true when every point lies in at least one
+   *  enabled region's coverage box and `loaded` when every point is served
+   *  by a region that is loaded now. For a box, `served` is true when it
+   *  overlaps an enabled region and `loaded` when every region it overlaps
+   *  is loaded (those are the regions a search of the box would need). */
+  checkCoverage(
+    target: Array<{ lat: number; lon: number }> | BBox,
+  ): CoverageCheck {
+    const enabled = Array.from(this.coverageIndex.values()).filter(
+      (e) => e.state !== "disabled" && e.state !== "unsupported" && e.bbox,
+    );
+    const regionsAt = (
+      pred: (b: NonNullable<(typeof enabled)[0]["bbox"]>) => boolean,
+    ) =>
+      enabled
+        .filter((e) => pred(e.bbox!))
+        .map((e) => ({ filename: e.filename, loaded: e.state === "loaded" }));
+    if (!Array.isArray(target)) {
+      const box = target;
+      const regions = regionsAt(
+        (b) =>
+          b.min_lat <= box.maxLat &&
+          b.max_lat >= box.minLat &&
+          b.min_lon <= box.maxLon &&
+          b.max_lon >= box.minLon,
+      );
+      return {
+        points: [],
+        regions,
+        served: regions.length > 0,
+        loaded: regions.length > 0 && regions.every((r) => r.loaded),
+      };
+    }
+    const points: PointCoverage[] = target.map((pt) => {
+      const regions = regionsAt(
+        (b) =>
+          pt.lat >= b.min_lat &&
+          pt.lat <= b.max_lat &&
+          pt.lon >= b.min_lon &&
+          pt.lon <= b.max_lon,
+      );
+      return {
+        lat: pt.lat,
+        lon: pt.lon,
+        regions,
+        served: regions.length > 0,
+        loaded: regions.some((r) => r.loaded),
+      };
+    });
+    const union = new Map<string, boolean>();
+    for (const pt of points)
+      for (const r of pt.regions) union.set(r.filename, r.loaded);
+    return {
+      points,
+      regions: Array.from(union, ([filename, loaded]) => ({
+        filename,
+        loaded,
+      })),
+      served: points.length > 0 && points.every((pt) => pt.served),
+      loaded: points.length > 0 && points.every((pt) => pt.loaded),
+    };
+  }
+
   /** For a "no routing nodes" error: when a refused file covers the point, a
    *  suffix saying why it is not in use ("" otherwise). */
   unsupportedCoverageNote(lat: number, lon: number): string {
@@ -949,18 +1129,9 @@ export class RoutingDatabase {
   ): Promise<DatabaseCoverageEntry[]> {
     if (disabledPaths.length === 0) return [];
     try {
-      const peeked: Array<{
-        path: string;
-        filename: string;
-        coverage: {
-          boundingBox: DatabaseCoverageEntry["bbox"];
-          boundaryGeometry: DatabaseCoverageEntry["boundary"];
-        };
-        meta: DatabaseCoverageEntry["meta"];
-        stats: DatabaseCoverageEntry["stats"];
-      }> = await this.sendMessage("peekMetadata", { dbPaths: disabledPaths });
+      const peeked = await this.store.peekMetadata(disabledPaths);
       return peeked.map((p) => {
-        const key = baseFilename(p.filename);
+        const key = this.keyOfPath(p.path);
         return {
           filename: key,
           path: p.path,
@@ -988,23 +1159,14 @@ export class RoutingDatabase {
     formatErrors: Record<string, string>,
   ): Promise<DatabaseCoverageEntry[]> {
     if (paths.length === 0) return [];
-    let peeked: Array<{
-      path: string;
-      filename: string;
-      coverage: {
-        boundingBox: DatabaseCoverageEntry["bbox"];
-        boundaryGeometry: DatabaseCoverageEntry["boundary"];
-      };
-      meta: DatabaseCoverageEntry["meta"];
-      stats: DatabaseCoverageEntry["stats"];
-    }> = [];
+    let peeked: PeekedFile[] = [];
     try {
-      peeked = await this.sendMessage("peekMetadata", { dbPaths: paths });
+      peeked = await this.store.peekMetadata(paths);
     } catch (e) {
       console.warn(`[routeiq] Could not peek refused database(s): ${e}`);
     }
     return paths.map((path) => {
-      const filename = basename(path.replace(/\\/g, "/")) || path;
+      const filename = this.keyOfPath(path) || path;
       const p = peeked.find((x) => x.path === path);
       return {
         filename,
@@ -1032,9 +1194,9 @@ export class RoutingDatabase {
    * entries for files no longer found on disk.
    */
   async reloadMetadata(): Promise<void> {
-    let files: string[];
+    let files: RegionFileEntry[];
     try {
-      files = readdirSync(this.dbDir).filter(isRoutingDatabaseFile);
+      files = await this.listFiles();
     } catch {
       return;
     }
@@ -1044,9 +1206,9 @@ export class RoutingDatabase {
     }
 
     // Both states go through the same peek — mergeMetadataIntoCoverageIndex
-    // reads the .disabled suffix off each peeked filename to decide the state,
-    // which is what makes an enable/disable visible without a restart.
-    const dbPaths = files.map((f) => join(this.dbDir, f));
+    // reads each listed file's `enabled` flag to decide the state, which is
+    // what makes an enable/disable visible without a restart.
+    const dbPaths = files.map((f) => f.path);
 
     try {
       // Reuse the existing main worker's peekMetadata support instead of
@@ -1055,17 +1217,7 @@ export class RoutingDatabase {
       // it again, without touching `handles` — so a metadata refresh can
       // never disturb any database this worker already has loaded (unlike
       // `init`, which would reset `handles` and drop them).
-      const peeked: Array<{
-        path: string;
-        filename: string;
-        coverage: {
-          boundingBox: DatabaseCoverageEntry["bbox"];
-          boundaryGeometry: DatabaseCoverageEntry["boundary"];
-        };
-        meta: DatabaseCoverageEntry["meta"];
-        stats: DatabaseCoverageEntry["stats"];
-        formatError?: string | null;
-      }> = await this.sendMessage("peekMetadata", { dbPaths });
+      const peeked = await this.store.peekMetadata(dbPaths);
 
       this.mergeMetadataIntoCoverageIndex(peeked);
     } catch (err) {
@@ -1084,25 +1236,13 @@ export class RoutingDatabase {
    *  `peeked` and are still 'not_loaded' are dropped (the file is gone from
    *  disk); a 'loading'/'loaded' entry is left alone even if its file
    *  vanished, since this method never touches in-memory graph data. */
-  private mergeMetadataIntoCoverageIndex(
-    peeked: Array<{
-      path: string;
-      filename: string;
-      coverage: {
-        boundingBox: DatabaseCoverageEntry["bbox"];
-        boundaryGeometry: DatabaseCoverageEntry["boundary"];
-      };
-      meta: DatabaseCoverageEntry["meta"];
-      stats: DatabaseCoverageEntry["stats"];
-      formatError?: string | null;
-    }>,
-  ): void {
+  private mergeMetadataIntoCoverageIndex(peeked: PeekedFile[]): void {
     const seen = new Set<string>();
     for (const p of peeked) {
       // Key on the plain .sqlite identity so a database keeps the same name
       // across a toggle — the suffix is a state, not a new database.
-      const key = baseFilename(p.filename);
-      const disabled = isDisabledFile(p.filename);
+      const key = this.keyOfPath(p.path);
+      const disabled = !this.isEnabledPath(p.path);
       seen.add(key);
       const existing = this.coverageIndex.get(key);
       // The on-disk suffix wins over the remembered state: that is precisely
@@ -1345,6 +1485,19 @@ export class RoutingDatabase {
   }
 
   async loadGraph(): Promise<void> {
+    if (this.policy === "pinned") {
+      // Pinned: every enabled region is loaded here, once, and stays. A file
+      // that cannot be loaded fails the call rather than leaving a gap the
+      // caller was promised there would not be.
+      const toLoad = Array.from(this.coverageIndex.values()).filter(
+        (e) => e.state === "not_loaded",
+      );
+      for (const entry of toLoad) {
+        await this.loadDatabaseGraph(entry.filename);
+      }
+      this.graphLoaded = true;
+      return;
+    }
     if (this.dynamicLoading) {
       // Dynamic mode never bulk-loads at startup — init()'s peekMetadata
       // already built the coverage index, which is enough to mark the
@@ -1356,14 +1509,7 @@ export class RoutingDatabase {
       return;
     }
 
-    const allNodes: Array<{
-      id: number;
-      lat: number;
-      lon: number;
-      node_depth: number;
-      node_depth_known?: boolean;
-      region_id?: number;
-    }> = await this.sendMessage("loadNodes");
+    const allNodes = await this.store.loadNodes();
     // Bulk mode opens every file at once, so a node two overlapping files both
     // author arrives twice and the Map silently collapses it. Those ids are
     // exactly the ones whose edges can arrive twice as well — see spliceEdge.
@@ -1380,10 +1526,12 @@ export class RoutingDatabase {
     }
 
     // Apply overlay deletions — remove nodes/edges the user deleted
-    const deletedNodeIds: number[] =
-      await this.sendMessage("getDeletedNodeIds");
-    const deletedEdges: Array<{ source: number; target: number }> =
-      await this.sendMessage("getDeletedEdgePairs");
+    const deletedNodeIds: number[] = this.overlay
+      ? await this.overlay.getDeletedNodeIds()
+      : [];
+    const deletedEdges: Array<{ source: number; target: number }> = this.overlay
+      ? await this.overlay.getDeletedEdgePairs()
+      : [];
 
     for (const nid of deletedNodeIds) {
       this.nodes.delete(nid);
@@ -1395,7 +1543,7 @@ export class RoutingDatabase {
     );
 
     const allEdges: Array<EdgeRow & { db_index?: number }> =
-      await this.sendMessage("loadEdges");
+      await this.store.loadEdges();
     for (const edge of allEdges) {
       // Skip if source or target was deleted
       if (deletedNodeSet.has(edge.source) || deletedNodeSet.has(edge.target))
@@ -1424,29 +1572,12 @@ export class RoutingDatabase {
 
     this.buildSpatialIndex();
 
-    const allPois: Array<{
-      id: number;
-      name: string;
-      type_id: number;
-      properties: string | null;
-      lat: number;
-      lon: number;
-      parent_id: number | null;
-    }> = await this.sendMessage("loadPois");
+    const allPois = await this.store.loadPois();
     this.pois.push(...allPois);
 
     const metadata = await this.getMetadata();
 
-    const rawRegions: Array<{
-      region_id: number;
-      boundary_geometry: string;
-      vertices: string;
-      triangles: string;
-      triangle_adjacency: string | null;
-      boundary_node_ids: string;
-      depth_ceiling_m: number;
-      db_index?: number;
-    }> = await this.sendMessage("loadNavmeshRegions");
+    const rawRegions = await this.store.loadNavmeshRegions();
     this.navmeshRegions = rawRegions.map((r) => ({
       ...Navmesh.buildNavmeshRegion(r, (id) => this.nodes.get(id)),
       dbIndex: r.db_index ?? -1,
@@ -1497,7 +1628,8 @@ export class RoutingDatabase {
   ): void {
     this.coverageIndex.clear();
     this.bulkFileList.forEach((file, index) => {
-      const meta = metadata.find((m) => m.filename === file.filename) ?? null;
+      const meta =
+        metadata.find((m) => m.filename === basename(file.path)) ?? null;
       let bbox: DatabaseCoverageEntry["bbox"] = null;
       let boundary: DatabaseCoverageEntry["boundary"] = null;
       try {
@@ -1796,7 +1928,7 @@ export class RoutingDatabase {
   async ensureRegionsLoaded(
     points: Array<{ latitude: number; longitude: number }>,
   ): Promise<void> {
-    if (!this.dynamicLoading) return;
+    if (this.policy !== "dynamic") return;
     const toLoad = new Set<string>();
     for (const p of points) {
       for (const entry of this.coverageIndex.values()) {
@@ -1842,7 +1974,7 @@ export class RoutingDatabase {
    * before astarSearch — PHASE_4_DESIGN.md §4a.1 task 4.
    */
   async ensureRegionsForBbox(bbox: BBox): Promise<void> {
-    if (!this.dynamicLoading) return;
+    if (this.policy !== "dynamic") return;
     const toLoad = new Set<string>();
     for (const entry of this.coverageIndex.values()) {
       if (entry.state === "disabled" || entry.state === "unsupported") continue;
@@ -1912,7 +2044,7 @@ export class RoutingDatabase {
     lon: number,
     radiusNm: number = 0,
   ): Promise<void> {
-    if (!this.dynamicLoading) return;
+    if (this.policy !== "dynamic") return;
     // ~1 nm of latitude ≈ 1/60°; scale longitude by cos(lat) so the band is
     // roughly circular. Cheap prefilter — the containment test below is what
     // actually decides membership.
@@ -1961,7 +2093,7 @@ export class RoutingDatabase {
    *  on, rather than presenting an empty graph until a route or position
    *  triggers the sole region. No-op in non-dynamic mode. */
   async eagerLoadIfSingle(): Promise<void> {
-    if (!this.dynamicLoading) return;
+    if (this.policy !== "dynamic") return;
     // Count only databases that can actually route: with one enabled region
     // and any number of disabled ones there is still nothing to choose
     // between, and a raw coverageIndex.size check would silently stop
@@ -2059,20 +2191,8 @@ export class RoutingDatabase {
       // tightens an already-loaded neighbour's copy of a shared edge, and a
       // route already found would otherwise be judged against limits from a
       // file that never finished loading.
-      const opened: {
-        dbIndex: number;
-        filename: string;
-        flags: {
-          hasCrossesLand: boolean;
-          hasCrossesObstacle: boolean;
-          hasNodeDepth: boolean;
-          hasRegionId: boolean;
-          hasEdgeKind: boolean;
-        };
-        descriptionError?: string | null;
-        refused?: string;
-      } = await this.sendMessage("openDb", { dbPath: entry.path });
-      if (opened.refused) throw new FormatRefusal(opened.refused);
+      const opened = await this.store.openDb(entry.path);
+      if ("refused" in opened) throw new FormatRefusal(opened.refused);
       const dbIndex = opened.dbIndex;
 
       // The overlay's own added nodes/edges rows must be merged into memory
@@ -2081,53 +2201,30 @@ export class RoutingDatabase {
       // load would duplicate them in edgesBySource.
       const includeOverlay = !this.overlayMergedOnce;
 
-      const nodes: Array<{
-        id: number;
-        lat: number;
-        lon: number;
-        node_depth: number;
-        node_depth_known?: boolean;
-        region_id?: number;
-        db_index: number;
-      }> = await this.sendMessage("loadNodes", {
+      const nodes = await this.store.loadNodes({
         dbIndexes: [dbIndex],
         includeOverlay,
       });
 
       // Overlay deletions apply regardless of includeOverlay (they're a
       // filter, not a merge, and cheap enough to just refetch every load).
-      const deletedNodeIds: number[] =
-        await this.sendMessage("getDeletedNodeIds");
-      const deletedEdges: Array<{ source: number; target: number }> =
-        await this.sendMessage("getDeletedEdgePairs");
+      const deletedNodeIds: number[] = this.overlay
+        ? await this.overlay.getDeletedNodeIds()
+        : [];
+      const deletedEdges: Array<{ source: number; target: number }> = this
+        .overlay
+        ? await this.overlay.getDeletedEdgePairs()
+        : [];
 
       const edges: Array<EdgeRow & { db_index: number }> =
-        await this.sendMessage("loadEdges", {
+        await this.store.loadEdges({
           dbIndexes: [dbIndex],
           includeOverlay,
         });
 
-      const pois: Array<{
-        id: number;
-        name: string;
-        type_id: number;
-        properties: string | null;
-        lat: number;
-        lon: number;
-        parent_id: number | null;
-        db_index: number;
-      }> = await this.sendMessage("loadPois", { dbIndexes: [dbIndex] });
+      const pois = await this.store.loadPois({ dbIndexes: [dbIndex] });
 
-      const rawRegions: Array<{
-        region_id: number;
-        boundary_geometry: string;
-        vertices: string;
-        triangles: string;
-        triangle_adjacency: string | null;
-        boundary_node_ids: string;
-        depth_ceiling_m: number;
-        db_index: number;
-      }> = await this.sendMessage("loadNavmeshRegions", {
+      const rawRegions = await this.store.loadNavmeshRegions({
         dbIndexes: [dbIndex],
       });
 
@@ -2412,7 +2509,7 @@ export class RoutingDatabase {
     );
     this.pois = this.pois.filter((p) => p.dbIndex !== dbIndex);
 
-    await this.sendMessage("closeDb", { dbIndex });
+    await this.store.closeDb(dbIndex);
     this.descriptionErrors.delete(filename);
 
     // spatialGrid is maintained incrementally above (gridRemoveNode for
@@ -2470,7 +2567,7 @@ export class RoutingDatabase {
 
   /** One enforcement pass. See enforceRegionCap, which serializes these. */
   private async enforceRegionCapPass(): Promise<void> {
-    if (!this.dynamicLoading) return;
+    if (this.policy !== "dynamic") return;
     if (this.maxLoadedRegions <= 0 && this.maxLoadedRegionEdges <= 0) return;
     if (this.activeRouteCount > 0) return;
 
@@ -2596,7 +2693,7 @@ export class RoutingDatabase {
         ...(edge?.dbIndex !== undefined ? { dbIndex: edge.dbIndex } : {}),
       };
     });
-    return this.sendMessage("describeRoute", { pairs, lang });
+    return this.store.describeRoute(pairs, lang);
   }
 
   async getEdge(source: number, target: number): Promise<EdgeRow | null> {
@@ -3058,7 +3155,7 @@ export class RoutingDatabase {
     ids: number[],
   ): Promise<Record<string, Record<string, unknown>>> {
     if (ids.length === 0) return {};
-    return this.sendMessage("poiInfo", { ids });
+    return this.store.poiInfo(ids);
   }
 
   /**
@@ -3097,7 +3194,7 @@ export class RoutingDatabase {
       );
       return { lo: Math.min(a, b), hi: Math.max(a, b), dbIndexes, verify };
     });
-    return this.sendMessage("routePois", { pairs: request });
+    return this.store.routePois(request);
   }
 
   async getOverlayStats(): Promise<{
@@ -3106,7 +3203,11 @@ export class RoutingDatabase {
     deletedNodes: number;
     deletedEdges: number;
   }> {
-    return this.sendMessage("getOverlayStats");
+    // No overlay (read-only, or none configured): nothing was ever edited.
+    if (!this.overlay) {
+      return { nodes: 0, edges: 0, deletedNodes: 0, deletedEdges: 0 };
+    }
+    return this.overlay.getOverlayStats();
   }
 
   async getStats(): Promise<{ nodes: number; edges: number; pois: number }> {
@@ -3540,7 +3641,6 @@ export class RoutingDatabase {
   }
 
   private waterwaysGeoJson: any = null;
-  private waterwaysGeojsonPath: string | null = null;
 
   async getWaterways(
     minLat: number,
@@ -3548,18 +3648,11 @@ export class RoutingDatabase {
     maxLat: number,
     maxLon: number,
   ): Promise<any[]> {
-    if (!this.waterwaysGeojsonPath) {
-      this.waterwaysGeojsonPath = join(
-        this.dbDir,
-        "inland_waterways_lines.geojson",
-      );
-    }
-
     if (!this.waterwaysGeoJson) {
-      if (!existsSync(this.waterwaysGeojsonPath)) {
+      if (!this.waterwaysPath || !existsSync(this.waterwaysPath)) {
         this.waterwaysGeoJson = { type: "FeatureCollection", features: [] };
       } else {
-        const raw = readFileSync(this.waterwaysGeojsonPath, "utf-8");
+        const raw = readFileSync(this.waterwaysPath, "utf-8");
         try {
           this.waterwaysGeoJson = JSON.parse(raw);
         } catch {
@@ -4046,10 +4139,11 @@ export class RoutingDatabase {
     nodeId: number,
     updates: { node_depth?: number },
   ): Promise<void> {
+    const overlay = this.requireOverlay();
     const cur = this.nodes.get(nodeId);
     if (!cur) throw new Error(`Node ${nodeId} not found`);
     const node_depth = updates.node_depth ?? cur.nodeDepth;
-    await this.sendMessage("updateNode", {
+    await overlay.updateNode({
       dbIndex,
       nodeId,
       lat: cur.lat,
@@ -4077,6 +4171,7 @@ export class RoutingDatabase {
       cost_factor?: number;
     },
   ): Promise<void> {
+    const overlay = this.requireOverlay();
     const edges = this.edgesBySource.get(source);
     if (!edges) throw new Error(`No edges from source ${source}`);
     const edge = edges.find((e) => e.target === target);
@@ -4094,7 +4189,7 @@ export class RoutingDatabase {
       }
     }
     // Send full edge context so the overlay can store a complete row
-    await this.sendMessage("updateEdge", {
+    await overlay.updateEdge({
       dbIndex,
       source,
       target,
@@ -4128,6 +4223,7 @@ export class RoutingDatabase {
   }
 
   async deleteNode(dbIndex: number, nodeId: number): Promise<void> {
+    const overlay = this.requireOverlay();
     for (const t of this.loadTombstones) t.nodes.add(nodeId);
     this.edgesBySource.delete(nodeId);
     for (const [src, edges] of this.edgesBySource) {
@@ -4142,7 +4238,7 @@ export class RoutingDatabase {
     this.nodes.delete(nodeId);
     if (existing) this.gridRemoveNode(nodeId, existing.lat, existing.lon);
     this.invalidateBBoxCaches();
-    await this.sendMessage("deleteNode", { dbIndex, nodeId });
+    await overlay.deleteNode({ dbIndex, nodeId });
   }
 
   async deleteEdge(
@@ -4150,6 +4246,7 @@ export class RoutingDatabase {
     source: number,
     target: number,
   ): Promise<void> {
+    const overlay = this.requireOverlay();
     for (const t of this.loadTombstones) t.edges.add(`${source}:${target}`);
     const edges = this.edgesBySource.get(source);
     if (edges) {
@@ -4157,7 +4254,7 @@ export class RoutingDatabase {
       if (idx >= 0) edges.splice(idx, 1);
     }
     this.invalidateBBoxCaches();
-    await this.sendMessage("deleteEdge", { dbIndex, source, target });
+    await overlay.deleteEdge({ dbIndex, source, target });
   }
 
   async addNode(
@@ -4165,8 +4262,9 @@ export class RoutingDatabase {
     node: { id: number; lat: number; lon: number; node_depth?: number },
   ): Promise<void> {
     // A re-add is the user's latest word on this id.
+    const overlay = this.requireOverlay();
     for (const t of this.loadTombstones) t.nodes.delete(node.id);
-    await this.sendMessage("insertNode", { dbIndex, ...node });
+    await overlay.insertNode({ dbIndex, ...node });
     // This is an upsert (see handleUpsertNode) — an existing node id can be
     // re-added at a different (lat, lon), which would move it to a
     // different grid cell. Remove the stale grid entry at its old cell
@@ -4204,6 +4302,7 @@ export class RoutingDatabase {
       traffic_mode?: number;
     },
   ): Promise<void> {
+    const overlay = this.requireOverlay();
     for (const ts of this.loadTombstones)
       ts.edges.delete(`${edge.source}:${edge.target}`);
     const s = this.nodes.get(edge.source);
@@ -4214,7 +4313,7 @@ export class RoutingDatabase {
         this.haversineMeters(s.lat, s.lon, t.lat, t.lon),
       );
     }
-    await this.sendMessage("insertEdge", { dbIndex, ...edge });
+    await overlay.insertEdge({ dbIndex, ...edge });
     const newEdge: EdgeRow = {
       source: edge.source,
       target: edge.target,
@@ -4242,22 +4341,12 @@ export class RoutingDatabase {
   }
 
   async clearOverlayDeletedEdges(): Promise<{ restored: number }> {
-    return this.sendMessage("clearOverlayDeletedEdges");
+    return this.requireOverlay().clearOverlayDeletedEdges();
   }
 
   async close(): Promise<void> {
-    if (this.worker) {
-      try {
-        await Promise.race([
-          this.sendMessage("close"),
-          new Promise((resolve) => setTimeout(resolve, 5000)),
-        ]);
-      } catch {
-        /* worker may already be dead */
-      }
-      this.worker.terminate();
-      this.worker = null;
-    }
+    await this.store.close();
+    this.overlayOpen = false;
     this.nodes.clear();
     this.edgesBySource.clear();
     this.descriptionErrors.clear();
@@ -4268,9 +4357,7 @@ export class RoutingDatabase {
     this.poiIndex = null;
     this.edgeGrid = null;
     this.waterwaysGeoJson = null;
-    this.waterwaysGeojsonPath = null;
     this.landGeoJson = null;
-    this.landGeojsonPath = null;
     this.landBBoxIndex = null;
     this.graphLoaded = false;
     this.coverageIndex.clear();
@@ -4295,7 +4382,6 @@ export class RoutingDatabase {
   }
 
   private landGeoJson: any = null;
-  private landGeojsonPath: string | null = null;
   private landBBoxIndex: Float64Array | null = null;
 
   isLineCrossingLand(
@@ -4305,16 +4391,13 @@ export class RoutingDatabase {
     lon2: number,
     numSamples: number,
   ): boolean {
-    if (!this.landGeojsonPath) {
-      this.landGeojsonPath = join(this.dbDir, "land_polygons.geojson");
-    }
     if (!this.landGeoJson) {
-      if (!existsSync(this.landGeojsonPath)) {
+      if (!this.landPolygonsPath || !existsSync(this.landPolygonsPath)) {
         this.landGeoJson = { type: "FeatureCollection", features: [] };
       } else {
         try {
           this.landGeoJson = JSON.parse(
-            readFileSync(this.landGeojsonPath, "utf-8"),
+            readFileSync(this.landPolygonsPath, "utf-8"),
           );
         } catch {
           this.landGeoJson = { type: "FeatureCollection", features: [] };

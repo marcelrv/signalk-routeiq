@@ -4,6 +4,7 @@ import assert from "node:assert";
 import { after, before, describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { POI_TYPE_LOCK_CHAMBER, RoutingDatabase } from "../dist-tsc/database.js";
+import { createDirectoryDatabase } from "../dist-tsc/data-dir.js";
 import { RoutingEngine } from "../dist-tsc/routing.js";
 import {
   KNOTS_TO_MS,
@@ -338,7 +339,7 @@ describe("tide-informed depth", () => {
         fs.unlinkSync(path.join(fixturesDir, f));
       }
       build(name, sentinel, depth);
-      const db = new RoutingDatabase(fixturesDir);
+      const db = createDirectoryDatabase(fixturesDir);
       await db.init();
       await db.loadGraph();
       const edges = await db.getOutgoingEdges(1);
@@ -491,7 +492,7 @@ describe("tide-informed depth", () => {
       upgradeToPoiModel(raw);
       raw.close();
 
-      db = new RoutingDatabase(fixturesDir);
+      db = createDirectoryDatabase(fixturesDir);
       await db.init();
       await db.loadGraph();
     });

@@ -4,6 +4,7 @@ import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase } from '../dist-tsc/database.js';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
@@ -139,7 +140,7 @@ describe('navmesh_regions consumption (integration)', () => {
     upgradeToPoiModel(plainDb);
     plainDb.close();
 
-    db = new RoutingDatabase(fixturesDir);
+    db = createDirectoryDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
     engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
@@ -334,7 +335,7 @@ describe('navmesh boundary-shortcut sparsification (regression)', () => {
     originalWarn = console.warn;
     console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
 
-    db = new RoutingDatabase(fixturesDir);
+    db = createDirectoryDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
   });
@@ -444,7 +445,7 @@ describe('empty boundary_node_ids (Round 9 warn-on-empty)', () => {
     originalWarn = console.warn;
     console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
 
-    db = new RoutingDatabase(fixturesDir);
+    db = createDirectoryDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
   });

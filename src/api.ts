@@ -11,11 +11,8 @@ import { pipeline } from "node:stream/promises";
 import { Readable, Transform } from "node:stream";
 import { ServerAPI } from "@signalk/server-api";
 import { NextFunction, Request, Response, Router } from "express";
-import {
-  DISABLED_SUFFIX,
-  MAX_POIS_IN_BBOX,
-  RoutingDatabase,
-} from "./database.js";
+import { MAX_POIS_IN_BBOX, RoutingDatabase } from "./database.js";
+import { DISABLED_SUFFIX } from "./data-dir.js";
 import {
   DEFAULT_REQUEST_LIMITS,
   GpxExporter,

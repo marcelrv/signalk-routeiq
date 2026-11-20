@@ -18,6 +18,7 @@ import {
   type RoutingRequest,
 } from 'routeiq-core';
 import { RoutingDatabase } from '../dist-tsc/database.js';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { testOptions } from './engine-helper.js';
@@ -29,6 +30,13 @@ const SHORT: RoutingRequest = { start: pt(51.613, 3.885), end: pt(51.6135, 3.887
 const THROUGH_BRIDGE: RoutingRequest = { start: pt(51.613, 3.885), end: pt(51.609, 3.896), minCoastDistance: 0 };
 const BOAT = { draft: 2.0, beam: 5.0, airDraft: 19.5, speedKnots: 5 };
 
+/** The inputs without the data version, which the data test below covers. */
+function withoutData(inputs: object | undefined): object {
+  const { data, ...rest } = (inputs ?? {}) as { data?: unknown };
+  assert.ok(Array.isArray(data), 'the inputs name the data the route was calculated from');
+  return rest;
+}
+
 describe('engine per-request inputs', () => {
   let dir: string;
   let db: RoutingDatabase;
@@ -36,7 +44,7 @@ describe('engine per-request inputs', () => {
   before(async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'routeiq-per-request-'));
     fs.copyFileSync(path.join(FIXTURE, 'netherlands.sqlite'), path.join(dir, 'netherlands.sqlite'));
-    db = new RoutingDatabase(dir);
+    db = createDirectoryDatabase(dir);
     await db.init();
     await db.loadGraph();
   });
@@ -208,7 +216,7 @@ describe('engine per-request inputs', () => {
         useTides: false,
         departureTime: '2026-08-03T06:00:00+02:00',
       });
-      assert.deepStrictEqual(route.inputs, {
+      assert.deepStrictEqual(withoutData(route.inputs), {
         draft: 1.7,
         beam: 3.9,
         airDraft: 12.5,
@@ -229,7 +237,7 @@ describe('engine per-request inputs', () => {
 
     it('is the full effective set when the request gives nothing', async () => {
       const route = await new RoutingEngine(db, options()).calculateRoute({ start: SHORT.start, end: SHORT.end });
-      assert.deepStrictEqual(route.inputs, {
+      assert.deepStrictEqual(withoutData(route.inputs), {
         draft: 0,
         beam: 4,
         airDraft: 0,

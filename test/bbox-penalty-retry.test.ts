@@ -4,6 +4,7 @@ import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase } from '../dist-tsc/database.js';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
@@ -97,7 +98,7 @@ describe('bbox expansion retries on a penalized (not just failed) result', () =>
     upgradeToPoiModel(raw);
     raw.close();
 
-    db = new RoutingDatabase(fixturesDir);
+    db = createDirectoryDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
   });
@@ -273,7 +274,7 @@ describe('violation-rate tradeoff is bounded, not all-or-nothing (Round 19)', ()
     upgradeToPoiModel(raw);
     raw.close();
 
-    const db = new RoutingDatabase(fixturesDir);
+    const db = createDirectoryDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
     return db;

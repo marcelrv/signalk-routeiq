@@ -4,6 +4,7 @@ import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase } from '../dist-tsc/database.js';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
@@ -84,7 +85,7 @@ describe('via route with a disconnected final leg (Round 24 regression)', () => 
     upgradeToPoiModel(raw);
     raw.close();
 
-    db = new RoutingDatabase(fixturesDir);
+    db = createDirectoryDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
     engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 1.0, beam: 3.0, airDraft: 5.0 }));

@@ -12,7 +12,8 @@ import * as fs from "fs";
 import * as path from "path";
 
 import { ApiHandler, coerceVesselDimension } from "./api.js";
-import { RoutingDatabase } from "./database.js";
+import type { RoutingDatabase } from "./database.js";
+import { createDirectoryDatabase } from "./data-dir.js";
 import {
   registerPlotterExtension,
   setPlotterExtensionRunning,
@@ -521,7 +522,7 @@ export function pluginConstructor(app: ServerAPI) {
       if (!config.routingDataDir) {
         throw new Error("routingDataDir is not configured");
       }
-      db = new RoutingDatabase(
+      db = createDirectoryDatabase(
         config.routingDataDir,
         config.dynamicLoading,
         config.maxLoadedRegions,
@@ -623,7 +624,7 @@ export function pluginConstructor(app: ServerAPI) {
 
     let db: RoutingDatabase | null = null;
     try {
-      db = new RoutingDatabase(
+      db = createDirectoryDatabase(
         dataDir,
         config.dynamicLoading,
         config.maxLoadedRegions,

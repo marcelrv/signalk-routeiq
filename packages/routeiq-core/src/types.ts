@@ -85,6 +85,22 @@ export interface RouteInputs {
   describe: boolean;
   /** Version of the routing core that produced the result. */
   coreVersion: string;
+  /** The routing data in memory when the route was calculated: one entry per
+   *  loaded region file, sorted by filename. Set on a calculated route only
+   *  (a request validator has no data to report). */
+  data?: DataVersionEntry[];
+}
+
+/** Identifies one routing data file's content for a result: the file's name
+ *  and the date its metadata carries. Two results with the same entries were
+ *  calculated from the same data. */
+export interface DataVersionEntry {
+  /** Plain `<name>.sqlite` identity of the file. */
+  filename: string;
+  /** `metadata.last_update_date`; null when the file has none. */
+  lastUpdateDate: string | null;
+  /** A build id or content hash, when the file's metadata carries one. */
+  buildId?: string;
 }
 
 // Edge attributes from routing database

@@ -1285,6 +1285,12 @@
       "beam": 5,
       "bridgeWaitMinutes": 30,
       "coreVersion": "0.0.0",
+      "data": [
+        {
+          "filename": "netherlands.sqlite",
+          "lastUpdateDate": "2026-07-12T13:35:41Z"
+        }
+      ],
       "departureTime": null,
       "describe": true,
       "draft": 2,

@@ -60,6 +60,12 @@
       "beam": 4,
       "bridgeWaitMinutes": 30,
       "coreVersion": "0.0.0",
+      "data": [
+        {
+          "filename": "tide.sqlite",
+          "lastUpdateDate": "2026-01-01T00:00:00Z"
+        }
+      ],
       "departureTime": "2026-08-11T00:00:00.000Z",
       "describe": true,
       "draft": 2,

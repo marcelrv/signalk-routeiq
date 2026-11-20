@@ -4,6 +4,7 @@ import assert from 'node:assert';
 import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase } from '../dist-tsc/database.js';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
@@ -231,7 +232,7 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
 
     before(async () => {
       buildFixtures();
-      db = new RoutingDatabase(fixturesDir, true);
+      db = createDirectoryDatabase(fixturesDir, true);
       await db.init();
       await db.loadGraph();
       await db.loadDatabaseGraph('region-west.sqlite');
@@ -333,7 +334,7 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
 
     before(async () => {
       buildFixtures();
-      db = new RoutingDatabase(fixturesDir, true);
+      db = createDirectoryDatabase(fixturesDir, true);
       await db.init();
       await db.loadGraph();
       await db.loadDatabaseGraph('region-west.sqlite');
@@ -453,7 +454,7 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
 
     before(async () => {
       buildFixtures();
-      db = new RoutingDatabase(fixturesDir, true);
+      db = createDirectoryDatabase(fixturesDir, true);
       await db.init();
       await db.loadGraph();
       await db.loadDatabaseGraph('region-west.sqlite');
@@ -541,7 +542,7 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
 
     before(async () => {
       buildFixtures();
-      first = new RoutingDatabase(fixturesDir, true);
+      first = createDirectoryDatabase(fixturesDir, true);
       await first.init();
       await first.loadGraph();
       await first.loadDatabaseGraph('region-west.sqlite');
@@ -551,7 +552,7 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
 
       // A second instance over the same directory: the two region files are
       // untouched on disk, the edit exists only as an overlay row.
-      reopened = new RoutingDatabase(fixturesDir, true);
+      reopened = createDirectoryDatabase(fixturesDir, true);
       await reopened.init();
       await reopened.loadGraph();
       await reopened.loadDatabaseGraph('region-west.sqlite');
@@ -656,7 +657,7 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
   });
 
   beforeEach(async () => {
-    db = new RoutingDatabase(dir, true);
+    db = createDirectoryDatabase(dir, true);
     await db.init();
     await db.loadGraph();
     await db.loadDatabaseGraph('west.sqlite');
@@ -765,14 +766,13 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
   });
 
   it('a load that fails part-way leaves the loaded seam edge as it was', async () => {
-    const anyDb = db as any;
-    const send = anyDb.sendMessage.bind(db);
-    anyDb.sendMessage = async (type: string, payload?: unknown) => {
-      if (type === 'loadNavmeshRegions') throw new Error('synthetic navmesh read failure');
-      return send(type, payload);
+    const store = (db as any).store;
+    const load = store.loadNavmeshRegions;
+    store.loadNavmeshRegions = async () => {
+      throw new Error('synthetic navmesh read failure');
     };
     await assert.rejects(db.loadDatabaseGraph('east.sqlite'), /synthetic navmesh read failure/);
-    anyDb.sendMessage = send;
+    store.loadNavmeshRegions = load;
 
     const edge = db.getEdgeSync(id(rS0), id(rS1))!;
     assert.strictEqual(edge.min_depth, 12, 'the failed file\'s 7.5 m is not merged in');
@@ -889,17 +889,17 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
   });
 
   it('a node deleted while a load is reading is not put back by it', async () => {
-    const anyDb = db as any;
-    const send = anyDb.sendMessage.bind(db);
-    anyDb.sendMessage = async (type: string, payload?: unknown) => {
+    const store = (db as any).store;
+    const load = store.loadNavmeshRegions.bind(store);
+    store.loadNavmeshRegions = async (selector?: unknown) => {
       // The user deletes S1 after the load took its deletion snapshot.
-      if (type === 'loadNavmeshRegions') await db.deleteNode(0, id(rS1));
-      return send(type, payload);
+      await db.deleteNode(0, id(rS1));
+      return load(selector);
     };
     try {
       await db.loadDatabaseGraph('east.sqlite');
     } finally {
-      anyDb.sendMessage = send;
+      store.loadNavmeshRegions = load;
     }
     assert.strictEqual(db.getNodeSync(id(rS1)), null, 'S1 stays deleted');
     assert.strictEqual(db.getEdgeSync(id(rS0), id(rS1)), null);

@@ -15,6 +15,7 @@ import assert from "node:assert";
 import { after, before, describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { RoutingDatabase } from "../dist-tsc/database.js";
+import { createDirectoryDatabase } from "../dist-tsc/data-dir.js";
 import { RoutingEngine } from "../dist-tsc/routing.js";
 import { DEFAULT_CONFIG } from "../dist-tsc/types.js";
 import { upgradeToPoiModel } from "./poi-model-fixture.js";
@@ -144,7 +145,7 @@ interface Fixture {
 async function openFixture(files: FileSpec[]): Promise<Fixture> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "routeiq-crossdetect-"));
   files.forEach((f, i) => buildFile(path.join(dir, `f${i}.sqlite`), f));
-  const db = new RoutingDatabase(dir, true);
+  const db = createDirectoryDatabase(dir, true);
   await db.init();
   await db.loadGraph();
   for (let i = 0; i < files.length; i++)

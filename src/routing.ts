@@ -44,7 +44,7 @@ import {
   prepareStationFlowField,
   prepareTideHeights,
 } from "routeiq-core";
-import {
+import type {
   BBox,
   DepartureScanStep,
   LegMode,
@@ -53,7 +53,7 @@ import {
   RouteResult,
   RouteWarning,
   RoutingRequest,
-} from "./types.js";
+} from "routeiq-core";
 import { type EngineOptions, resolveRouteInputs } from "routeiq-core";
 
 function isInsideBBox(lat: number, lon: number, bbox: BBox): boolean {
@@ -4179,7 +4179,7 @@ export class RoutingEngine {
       bridgeWaitMinutes: inputs.bridgeWaitMinutes,
     };
     // The effective inputs, as a copy: nothing downstream may change them.
-    route.inputs = { ...inputs };
+    route.inputs = { ...inputs, data: this.db.getDataVersion() };
     if (env) {
       const totalDistance =
         feature.properties.totalDistance ??
