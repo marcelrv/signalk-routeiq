@@ -9,7 +9,8 @@
  */
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { GpxExporter } from '../dist-tsc/gpx-export.js';
+import { GpxExporter } from 'routeiq-core';
+import { PROVIDER } from '../dist-tsc/provider.js';
 
 describe('toSignalKRoute coordinatesMeta', () => {
   const routeWithWaypoints = (n: number) => ({
@@ -28,7 +29,7 @@ describe('toSignalKRoute coordinatesMeta', () => {
     (typeof m.href === 'string' && m.href.length > 0);
 
   it('names every waypoint, so no entry is an empty object', () => {
-    const r = GpxExporter.toSignalKRoute(routeWithWaypoints(53) as never, 'probe');
+    const r = GpxExporter.toSignalKRoute(routeWithWaypoints(53) as never, 'probe', PROVIDER);
     const meta = r.feature.properties.coordinatesMeta;
     assert.ok(Array.isArray(meta), 'coordinatesMeta is present');
     assert.strictEqual(meta.length, 53);
@@ -40,7 +41,7 @@ describe('toSignalKRoute coordinatesMeta', () => {
 
   it('keeps one entry per coordinate', () => {
     for (const n of [2, 3, 71, 97]) {
-      const r = GpxExporter.toSignalKRoute(routeWithWaypoints(n) as never, 'probe');
+      const r = GpxExporter.toSignalKRoute(routeWithWaypoints(n) as never, 'probe', PROVIDER);
       assert.strictEqual(
         r.feature.properties.coordinatesMeta.length,
         r.feature.geometry.coordinates.length,
@@ -50,7 +51,7 @@ describe('toSignalKRoute coordinatesMeta', () => {
   });
 
   it('numbers them from 1, matching what the plotter panel writes', () => {
-    const r = GpxExporter.toSignalKRoute(routeWithWaypoints(4) as never, 'probe');
+    const r = GpxExporter.toSignalKRoute(routeWithWaypoints(4) as never, 'probe', PROVIDER);
     assert.deepStrictEqual(
       r.feature.properties.coordinatesMeta.map((m: { name: string }) => m.name),
       ['WP1', 'WP2', 'WP3', 'WP4'],
@@ -73,7 +74,7 @@ describe('toSignalKRoute coordinatesMeta', () => {
         properties: { segments: [seg, seg] },
       }],
     };
-    const r = GpxExporter.toSignalKRoute(legacy as never, 'probe');
+    const r = GpxExporter.toSignalKRoute(legacy as never, 'probe', PROVIDER);
     const meta = r.feature.properties.coordinatesMeta;
     assert.strictEqual(meta.length, r.feature.geometry.coordinates.length);
     assert.ok(meta.every(isValidMetaEntry), 'legacy path is named too');

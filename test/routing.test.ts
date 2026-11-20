@@ -355,7 +355,7 @@ describe('RoutingEngine', () => {
 });
 
 describe('Itinerary', async () => {
-  const { simplifyIndices, buildItinerary, clipLocation } = await import('../dist-tsc/itinerary.js');
+  const { simplifyIndices, buildItinerary, clipLocation } = await import('routeiq-core');
 
   // L-shaped route: 10 segments due east along lat 52.0 (lon 4.00→4.10),
   // then 5 segments due north along lon 4.10 (lat 52.00→52.05).

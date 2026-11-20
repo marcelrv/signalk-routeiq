@@ -4,7 +4,7 @@
 // Layout stays flat, dist/*.js, because several modules locate files relative
 // to their own URL:
 //   src/index.ts          dist/.. is the plugin root
-//   src/passage-profile.ts  ../package.json
+//   src/provider.ts       ../package.json
 //   src/plotterext.ts     createRequire(import.meta.url)
 //   src/database.ts       db-worker.js next to the module that starts it
 // db-worker is a second entry point so it exists as dist/db-worker.js, and

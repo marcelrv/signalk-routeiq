@@ -3,8 +3,8 @@ import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { BBox, PoiResult, OVERLAY_EDITABLE_COLUMNS } from "./types.js";
-import * as Navmesh from "./navmesh.js";
-import type { DescribeWorkerResult } from "./route-description.js";
+import * as Navmesh from "routeiq-core";
+import type { DescribeWorkerResult } from "routeiq-core";
 
 // Node type constants (encoded in the node ID via coordinate hashing)
 export const NODE_TYPE_COASTAL = 0;

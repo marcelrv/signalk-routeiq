@@ -13,30 +13,13 @@
  * route edited in another app, so a reader recomputes the hash over the
  * resource's current coordinates and treats a mismatch as a stale profile.
  */
-import crypto from "crypto";
-import fs from "fs";
-import { RouteResult, WarnLevel } from "./types.js";
+import crypto from "node:crypto";
+import { ProviderInfo, RouteResult, WarnLevel } from "./types.js";
 
 export const PASSAGE_PROFILE_VERSION = 1;
 export const GEOMETRY_HASH_METHOD = "lonlat-e5";
 
 const KNOTS_TO_MS = 1852 / 3600;
-
-let providerVersion: string | undefined;
-function packageVersion(): string {
-  if (providerVersion !== undefined) return providerVersion;
-  let version = "";
-  try {
-    const pkg = JSON.parse(
-      fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-    );
-    if (typeof pkg.version === "string") version = pkg.version;
-  } catch {
-    // unreadable package.json: report no version rather than fail the save
-  }
-  providerVersion = version;
-  return version;
-}
 
 /**
  * The canonical form of a route's geometry: each position as integer
@@ -95,7 +78,7 @@ export interface PassageProfileWarning {
 
 export interface PassageProfile {
   version: number;
-  provider: { name: "signalk-routeiq"; version: string };
+  provider: { name: string; version: string };
   calculatedAt: string | null;
   geometry: { hash: string; method: string; pointCount: number };
   distance: number | null; // m
@@ -135,6 +118,7 @@ const finiteOrNull = (v: unknown): number | null =>
 export function buildPassageProfile(
   route: RouteResult,
   coords: ReadonlyArray<ArrayLike<number>>,
+  provider: ProviderInfo,
 ): PassageProfile | undefined {
   const total = finiteOrNull(route.totalSeconds);
   if (total === null || total < 0) return undefined;
@@ -188,7 +172,7 @@ export function buildPassageProfile(
 
   return {
     version: PASSAGE_PROFILE_VERSION,
-    provider: { name: "signalk-routeiq", version: packageVersion() },
+    provider: { name: provider.name, version: provider.version },
     calculatedAt: isoOrNull(route.calculatedAt),
     geometry: {
       hash: geometryHash(coords),

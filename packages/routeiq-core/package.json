@@ -8,6 +8,8 @@
   "engines": {
     "node": ">=22.5.0"
   },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "files": ["dist"],
   "exports": {
     ".": {
@@ -17,6 +19,6 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.test.json && node --test --test-force-exit dist-test/version.test.js"
+    "test": "tsc -p tsconfig.test.json && node --test --test-force-exit dist-test/*.test.js"
   }
 }

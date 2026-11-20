@@ -20,20 +20,20 @@ import {
   TRAFFIC_ONE_WAY_REV,
   isSailableEdge,
 } from "./database.js";
-import type { FunnelResult, NavmeshRegion } from "./navmesh.js";
+import type { FunnelResult, NavmeshRegion } from "routeiq-core";
 import {
   attachWaters,
   buildRouteDescription,
   ENDPOINT_POI_RADIUS_M,
   nameEndpoints,
-} from "./route-description.js";
+} from "routeiq-core";
 import {
   bearingDeg,
   buildItinerary,
   closestCoordIndex,
   cumulativeDistances,
   limitPair,
-} from "./itinerary.js";
+} from "routeiq-core";
 import {
   CurrentsClient,
   FlowField,

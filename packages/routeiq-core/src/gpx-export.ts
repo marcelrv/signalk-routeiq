@@ -1,5 +1,5 @@
-import crypto from "crypto";
-import { RouteResult } from "./types.js";
+import crypto from "node:crypto";
+import { ProviderInfo, RouteResult } from "./types.js";
 import { buildPassageProfile, PassageProfile } from "./passage-profile.js";
 
 export class GpxExporter {
@@ -7,7 +7,11 @@ export class GpxExporter {
    * Convert a RouteResult GeoJSON to GPX XML string
    * Handles both single-feature (segments array) and multi-feature (per-segment) formats.
    */
-  static toGpx(route: RouteResult, name: string = "RouteIQ"): string {
+  static toGpx(
+    route: RouteResult,
+    name: string,
+    provider: ProviderInfo,
+  ): string {
     const { coords, segments } = this.extractCoordsAndSegments(route);
     const totalDistance = route.totalDistance ?? 0;
     const totalCost = route.totalCost ?? 0;
@@ -23,6 +27,7 @@ export class GpxExporter {
       waypoints
         ? waypoints.map((w) => [w.longitude, w.latitude] as [number, number])
         : coords,
+      provider,
     );
     const duration = profile
       ? `, Duration: ${this.formatDuration(profile.duration.total)}` +
@@ -32,10 +37,10 @@ export class GpxExporter {
       : "";
 
     let gpx = `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="signalk-routeiq" xmlns:ar="http://signalk.org/routeiq">
+<gpx version="1.1" creator="${this.escapeXml(provider.name)}" xmlns:ar="http://signalk.org/routeiq">
   <rte>
     <name>${this.escapeXml(name)}</name>
-    <desc>Route calculated by SignalK RouteIQ Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m, Cost: ${totalCost.toFixed(2)}${duration}</desc>`;
+    <desc>Route calculated by ${this.escapeXml(provider.displayName ?? provider.name)} - Distance: ${totalDistance.toFixed(0)}m, Cost: ${totalCost.toFixed(2)}${duration}</desc>`;
     // GPX 1.1 puts <extensions> after <desc> and before the first <rtept>.
     if (profile) gpx += this.passageProfileGpx(profile);
 
@@ -99,7 +104,8 @@ export class GpxExporter {
    */
   static toSignalKRoute(
     route: RouteResult,
-    name: string = "RouteIQ Route",
+    name: string,
+    provider: ProviderInfo,
     routeId?: string,
   ): any {
     const { coords, segments } = this.extractCoordsAndSegments(route);
@@ -126,11 +132,11 @@ export class GpxExporter {
     const coordinatesMeta = coordinates.map((_, i) => ({ name: `WP${i + 1}` }));
 
     // The calculated times, tied to exactly these coordinates (issue #50).
-    const passageProfile = buildPassageProfile(route, coordinates);
+    const passageProfile = buildPassageProfile(route, coordinates, provider);
 
     return {
       name,
-      description: `Route calculated by SignalK RouteIQ Nautical Route Planner - Distance: ${totalDistance.toFixed(0)}m`,
+      description: `Route calculated by ${provider.displayName ?? provider.name} - Distance: ${totalDistance.toFixed(0)}m`,
       distance: totalDistance,
       feature: {
         type: "Feature",

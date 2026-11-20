@@ -16,13 +16,14 @@ import {
   MAX_POIS_IN_BBOX,
   RoutingDatabase,
 } from "./database.js";
-import { GpxExporter } from "./gpx-export.js";
+import { GpxExporter } from "routeiq-core";
 import {
   buildPassageProfile,
   geometryHash,
   isPositionList,
   savedCoordinates,
-} from "./passage-profile.js";
+} from "routeiq-core";
+import { PROVIDER } from "./provider.js";
 import { RoutingEngine } from "./routing.js";
 import { runWithCaller } from "./server-access.js";
 import {
@@ -907,7 +908,7 @@ export class ApiHandler {
         return;
       }
 
-      const gpx = GpxExporter.toGpx(route, name);
+      const gpx = GpxExporter.toGpx(route, name, PROVIDER);
 
       res.setHeader("Content-Type", "application/gpx+xml");
       res.setHeader(
@@ -948,7 +949,7 @@ export class ApiHandler {
 
       // Generate a UUID and convert to v2 Route format
       const uuid = crypto.randomUUID();
-      const skRoute = GpxExporter.toSignalKRoute(route, name, uuid);
+      const skRoute = GpxExporter.toSignalKRoute(route, name, PROVIDER, uuid);
 
       // Persist via the Resource API (goes through resources-provider plugin)
       await (this.app as unknown as SkResourcesApp).resourcesApi.setResource(
@@ -1044,7 +1045,7 @@ export class ApiHandler {
         });
         return;
       }
-      const passageProfile = buildPassageProfile(route, coords);
+      const passageProfile = buildPassageProfile(route, coords, PROVIDER);
       if (!passageProfile) {
         res.status(400).json({ error: "Route carries no calculated times" });
         return;

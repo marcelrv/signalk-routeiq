@@ -14,8 +14,8 @@ import {
   ENDPOINT_WATER_REACH_M,
   nameEndpoints,
   noticeLevel,
-} from '../dist-tsc/route-description.js';
-import { legWarnings, limitPair } from '../dist-tsc/itinerary.js';
+} from 'routeiq-core';
+import { legWarnings, limitPair } from 'routeiq-core';
 import {
   describePairs,
   detectDescribeFlags,

@@ -4,17 +4,19 @@
  * calculated for, so a reader can trust them or see they are stale.
  */
 import assert from 'node:assert';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { Router } from 'express';
 import { ServerAPI } from '@signalk/server-api';
-import { GpxExporter } from '../dist-tsc/gpx-export.js';
+import { GpxExporter } from 'routeiq-core';
 import { ApiHandler } from '../dist-tsc/api.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import {
   buildPassageProfile,
   canonicalGeometry,
   geometryHash,
-} from '../dist-tsc/passage-profile.js';
+} from 'routeiq-core';
+import { PROVIDER } from '../dist-tsc/provider.js';
 
 const waypoints = [
   { latitude: 52.0, longitude: 5.0 },
@@ -59,12 +61,16 @@ function calculated(extra: Record<string, unknown> = {}): any {
 
 describe('passage profile', () => {
   it('saves the total with the waiting part inside it', () => {
-    const r = GpxExporter.toSignalKRoute(calculated(), 'probe');
+    const r = GpxExporter.toSignalKRoute(calculated(), 'probe', PROVIDER);
     const p = r.feature.properties.passageProfile;
     assert.ok(p, 'profile present');
     assert.strictEqual(p.version, 1);
     assert.strictEqual(p.provider.name, 'signalk-routeiq');
     assert.match(p.provider.version, /^\d+\.\d+\.\d+/);
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    assert.strictEqual(p.provider.version, pkg.version);
+    assert.strictEqual(PROVIDER.name, 'signalk-routeiq');
+    assert.strictEqual(PROVIDER.displayName, 'SignalK RouteIQ Nautical Route Planner');
     assert.deepStrictEqual(p.duration, {
       total: 20520, moving: 13320, waiting: 7200, waitingIncludedInTotal: true,
     });
@@ -73,7 +79,7 @@ describe('passage profile', () => {
   });
 
   it('hashes exactly the coordinates it saves', () => {
-    const r = GpxExporter.toSignalKRoute(calculated(), 'probe');
+    const r = GpxExporter.toSignalKRoute(calculated(), 'probe', PROVIDER);
     const p = r.feature.properties.passageProfile;
     assert.strictEqual(p.geometry.hash, geometryHash(r.feature.geometry.coordinates));
     assert.strictEqual(p.geometry.pointCount, r.feature.geometry.coordinates.length);
@@ -81,7 +87,7 @@ describe('passage profile', () => {
   });
 
   it('leaves an undated plan undated', () => {
-    const p = buildPassageProfile(calculated(), coordsOf(waypoints))!;
+    const p = buildPassageProfile(calculated(), coordsOf(waypoints), PROVIDER)!;
     assert.strictEqual(p.departure, null);
     assert.strictEqual(p.arrival, null);
     const dated = buildPassageProfile(
@@ -91,6 +97,7 @@ describe('passage profile', () => {
         tide: { enabled: true, estimated: true, source: 'stations', stations: [] },
       }),
       coordsOf(waypoints),
+      PROVIDER,
     )!;
     assert.strictEqual(dated.departure, '2026-11-15T08:00:00.000Z');
     assert.strictEqual(dated.arrival, '2026-11-15T13:42:00.000Z');
@@ -98,7 +105,7 @@ describe('passage profile', () => {
   });
 
   it('states its assumptions in SI units', () => {
-    const p = buildPassageProfile(calculated(), coordsOf(waypoints))!;
+    const p = buildPassageProfile(calculated(), coordsOf(waypoints), PROVIDER)!;
     assert.strictEqual(p.assumptions.speedThroughWater, 3.087); // 6 kn
     assert.strictEqual(p.assumptions.lockWait, 3600);
     assert.strictEqual(p.assumptions.bridgeWait, 1800);
@@ -106,7 +113,7 @@ describe('passage profile', () => {
   });
 
   it('lists only the structures that charged a wait, and the warnings', () => {
-    const p = buildPassageProfile(calculated(), coordsOf(waypoints))!;
+    const p = buildPassageProfile(calculated(), coordsOf(waypoints), PROVIDER)!;
     assert.deepStrictEqual(p.waits.map((w) => w.name), ['Sluis A', 'Brug B']);
     assert.strictEqual(p.waits.reduce((t, w) => t + w.seconds, 0), p.duration.waiting);
     assert.deepStrictEqual(
@@ -116,7 +123,7 @@ describe('passage profile', () => {
   });
 
   it('is left out when the route carries no time', () => {
-    const r = GpxExporter.toSignalKRoute(calculated({ totalSeconds: undefined }), 'probe');
+    const r = GpxExporter.toSignalKRoute(calculated({ totalSeconds: undefined }), 'probe', PROVIDER);
     assert.ok(!('passageProfile' in r.feature.properties));
   });
 
@@ -247,7 +254,7 @@ describe('POST /route/profile', () => {
 
 describe('passage profile in GPX', () => {
   it('writes the times as extensions before the first route point', () => {
-    const gpx = GpxExporter.toGpx(calculated(), 'probe');
+    const gpx = GpxExporter.toGpx(calculated(), 'probe', PROVIDER);
     const ext = gpx.indexOf('<extensions>');
     assert.ok(ext > gpx.indexOf('</desc>'), 'extensions follow <desc>');
     assert.ok(ext < gpx.indexOf('<rtept'), 'GPX 1.1 order: extensions before rtept');
@@ -258,7 +265,7 @@ describe('passage profile in GPX', () => {
   });
 
   it('lists each wait with where it is, and the warnings', () => {
-    const gpx = GpxExporter.toGpx(calculated(), 'probe');
+    const gpx = GpxExporter.toGpx(calculated(), 'probe', PROVIDER);
     const waits = gpx.match(/<ar:wait [^>]*\/>/g) ?? [];
     assert.strictEqual(waits.length, 2);
     assert.match(waits[0], /type="lock" name="Sluis A" structure="7" distanceFromStart="8123" seconds="3600" lat="52.010000" lon="5.020000"/);
@@ -266,15 +273,15 @@ describe('passage profile in GPX', () => {
   });
 
   it('says the duration in the description, for plotters that skip extensions', () => {
-    const gpx = GpxExporter.toGpx(calculated(), 'probe');
+    const gpx = GpxExporter.toGpx(calculated(), 'probe', PROVIDER);
     assert.match(gpx, /<desc>[^<]*, Duration: 5h42m \(2h00m waiting\)<\/desc>/);
   });
 
   it('escapes names, and leaves everything out when there is no time', () => {
     const r = calculated();
     r.crossings[0].name = 'Sluis "A" & <B>';
-    assert.match(GpxExporter.toGpx(r, 'probe'), /name="Sluis &quot;A&quot; &amp; &lt;B&gt;"/);
-    const none = GpxExporter.toGpx(calculated({ totalSeconds: undefined }), 'probe');
+    assert.match(GpxExporter.toGpx(r, 'probe', PROVIDER), /name="Sluis &quot;A&quot; &amp; &lt;B&gt;"/);
+    const none = GpxExporter.toGpx(calculated({ totalSeconds: undefined }), 'probe', PROVIDER);
     assert.ok(!none.includes('<extensions>') && !none.includes('Duration:'));
   });
 
@@ -282,6 +289,7 @@ describe('passage profile in GPX', () => {
     const gpx = GpxExporter.toGpx(
       calculated({ departureTime: '2026-11-15T08:00:00.000Z', arrivalTime: '2026-11-15T13:42:00.000Z' }),
       'probe',
+      PROVIDER,
     );
     assert.match(gpx, /<ar:departure>2026-11-15T08:00:00.000Z<\/ar:departure>\s*<ar:arrival>2026-11-15T13:42:00.000Z<\/ar:arrival>/);
   });
