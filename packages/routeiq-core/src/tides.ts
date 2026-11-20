@@ -1,29 +1,17 @@
 /**
- * Tide data for tide-aware routing, from two plugins:
+ * Tide data for tide-aware routing: the provider interfaces the engine reads
+ * through, and the field math built on what they return.
  *
- * - signalk-tidal-currents (/signalk/v2/api/currents): harmonic current
- *   stations with set/drift. The only source of tidal *current* — see
- *   prepareStationFlowField(). Away from its stations the flow is zero.
- * - signalk-tides (https://github.com/openwatersio/signalk-tides,
- *   /signalk/v2/api/tides): tide-HEIGHT predictions, used only for the depth
- *   under the keel at the time of passage — see prepareTideHeights(). Until
- *   2026-11-16 a current was also estimated from these heights' slope, scaled
- *   by a single user-set spring speed; that estimate is gone, because no one
- *   speed fits every area and a wrong current is worse than none.
+ * - TideHeightProvider: tide-HEIGHT predictions, used only for the depth
+ *   under the keel at the time of passage — see prepareTideHeights().
+ * - CurrentProvider: harmonic current stations with set/drift. The only
+ *   source of tidal *current* — see prepareStationFlowField(). Away from its
+ *   stations the flow is zero. A current is never estimated from heights.
  *
- * Architecture note: FlowField is the provider-agnostic abstraction the
- * routing engine consumes. Future providers (ENC TS_PAD panels, RWS
- * stroomatlas, GRIB currents, and eventually WIND) implement the same
- * interface; the engine only ever sees sample(lat, lon, t) → (u, v).
+ * The engine only ever sees FlowField.sample(lat, lon, t) -> (u, v) and
+ * TideHeightField.riseAt(); how the stations are reached (HTTP, in-process,
+ * files, an in-memory fake) is the provider's business.
  */
-
-import {
-  callerKey,
-  CurrentsApiHandle,
-  GetJson,
-  loopbackGetJson,
-  TideSource,
-} from "./server-access.js";
 
 export interface FlowVector {
   u: number; // m/s, east component
@@ -94,137 +82,29 @@ interface StationTimeline {
   minLevel: number;
 }
 
-interface TimelineResponse {
+/** A height timeline as a provider returns it (fixed step, metres). */
+export interface TideTimelineDto {
   timeline?: Array<{ time: string; level: number }>;
 }
 
-/** Hard cap on cache entries per Map — a backstop behind TTL pruning so a
- *  vessel wandering through many coordinate buckets can't grow these maps
- *  unbounded even within the TTL window. */
-const CACHE_MAX_ENTRIES = 500;
-
-/** Delete expired entries (age >= ttlMs) from `map`, then, if it's still
- *  over `CACHE_MAX_ENTRIES`, evict the oldest entries (smallest `at`) until
- *  it's under the cap. Call before every cache `.set(...)`. */
-function pruneCache<T>(
-  map: Map<string, { at: number; data: T }>,
-  ttlMs: number,
-): void {
-  const now = Date.now();
-  for (const [k, v] of map) {
-    if (now - v.at >= ttlMs) map.delete(k);
-  }
-  if (map.size >= CACHE_MAX_ENTRIES) {
-    const entries = [...map.entries()].sort((a, b) => a[1].at - b[1].at);
-    const toEvict = map.size - CACHE_MAX_ENTRIES + 1;
-    for (let i = 0; i < toEvict; i++) map.delete(entries[i][0]);
-  }
-}
-
 /**
- * Client for the signalk-tides REST API with response caching, so a 24 h
- * departure scan (dozens of route calculations) reuses one set of fetches.
- * Reached over HTTP on this server (signalk-tides offers nothing in-process),
- * with the caller's login — see server-access.ts. Cache entries are kept per
- * login, so one caller's answer is never served to another.
+ * Source of tide heights. `findStations` answers the nearest stations to a
+ * position; `fetchTimeline` the heights for [startMs, endMs] (providers may
+ * round the window outward and cache); `probe` says whether any station is
+ * known near a position. Implementations do their own caching and failure
+ * handling; any rejection reads as "no data" to the callers here.
  */
-export class TidesClient {
-  private baseUrl: string;
-  private source: TideSource;
-  private stationCache = new Map<
-    string,
-    { at: number; data: TideStationInfo[] }
-  >();
-  private timelineCache = new Map<
-    string,
-    { at: number; data: TimelineResponse }
-  >();
-  private static CACHE_TTL_MS = 6 * 3600_000;
-
-  constructor(
-    baseUrl: string,
-    getJson: GetJson = loopbackGetJson,
-    source?: TideSource,
-  ) {
-    this.baseUrl = baseUrl.replace(/\/$/, "");
-    this.source =
-      source ?? new TideSource("signalk-tides", this.baseUrl, getJson);
-  }
-
-  private api(path: string): string {
-    return `${this.baseUrl}/signalk/v2/api/tides${path}`;
-  }
-
-  private get(url: string, what: string): Promise<unknown> {
-    return this.source.get(url, what);
-  }
-
-  /** Nearest stations (the API returns up to 10, closest first). */
-  async findStations(lat: number, lon: number): Promise<TideStationInfo[]> {
-    const key = `${callerKey()}|${lat.toFixed(1)},${lon.toFixed(1)}`;
-    const hit = this.stationCache.get(key);
-    if (hit && Date.now() - hit.at < TidesClient.CACHE_TTL_MS) return hit.data;
-
-    const raw = (await this.get(
-      this.api(`/stations?latitude=${lat}&longitude=${lon}`),
-      "tides station search",
-    )) as Array<Record<string, unknown>>;
-    const data = (Array.isArray(raw) ? raw : [])
-      .filter(
-        (s) =>
-          typeof s.latitude === "number" && typeof s.longitude === "number",
-      )
-      .map((s) => ({
-        id: String(s.id),
-        name: String(s.name ?? s.id),
-        latitude: s.latitude as number,
-        longitude: s.longitude as number,
-      }));
-    pruneCache(this.stationCache, TidesClient.CACHE_TTL_MS);
-    this.stationCache.set(key, { at: Date.now(), data });
-    return data;
-  }
-
-  /** Height timeline (fixed 10-minute interval) for [startMs, endMs]. */
-  async fetchTimeline(
+export interface TideHeightProvider {
+  findStations(lat: number, lon: number): Promise<TideStationInfo[]>;
+  fetchTimeline(
     stationId: string,
     startMs: number,
     endMs: number,
-  ): Promise<TimelineResponse> {
-    // Round the window outward to whole hours so scan steps share cache entries.
-    const HOUR = 3600_000;
-    const s = Math.floor(startMs / HOUR) * HOUR;
-    const e = Math.ceil(endMs / HOUR) * HOUR;
-    const key = `${callerKey()}|${stationId}|${s}|${e}`;
-    const hit = this.timelineCache.get(key);
-    if (hit && Date.now() - hit.at < TidesClient.CACHE_TTL_MS) return hit.data;
-
-    const url = this.api(
-      `/stations/${stationId}/timeline` +
-        `?start=${encodeURIComponent(new Date(s).toISOString())}` +
-        `&end=${encodeURIComponent(new Date(e).toISOString())}`,
-    );
-    const data = (await this.get(
-      url,
-      `tides timeline for ${stationId}`,
-    )) as TimelineResponse;
-    pruneCache(this.timelineCache, TidesClient.CACHE_TTL_MS);
-    this.timelineCache.set(key, { at: Date.now(), data });
-    return data;
-  }
-
-  /** Availability probe: plugin reachable and knows stations near (lat, lon). */
-  async probe(
+  ): Promise<TideTimelineDto>;
+  probe(
     lat: number,
     lon: number,
-  ): Promise<{ available: boolean; stations: TideStationInfo[] }> {
-    try {
-      const stations = await this.findStations(lat, lon);
-      return { available: stations.length > 0, stations };
-    } catch {
-      return { available: false, stations: [] };
-    }
-  }
+  ): Promise<{ available: boolean; stations: TideStationInfo[] }>;
 }
 
 const EARTH_M_PER_DEG_LAT = 111_320;
@@ -365,9 +245,9 @@ class StationTideHeights implements TideHeightField {
   }
 }
 
-// ── Real current stations via signalk-tidal-currents ─────────────────
+// ── Current stations ────────────────────────────────────────────────
 
-interface CurrentStationDto {
+export interface CurrentStationDto {
   id: string;
   name: string;
   latitude: number;
@@ -376,131 +256,24 @@ interface CurrentStationDto {
   distanceKm?: number;
 }
 
-interface CurrentTimelineDto {
+export interface CurrentTimelineDto {
   timeline?: Array<{ time: string; u: number | null; v: number | null }>;
 }
 
 /**
- * Client for the signalk-tidal-currents plugin — real harmonic current
- * stations with flood/ebb axes. Calls the plugin in-process through its
- * `currentsApi` handle when it has emitted one, else its REST API
- * (/signalk/v2/api/currents) on this server with the caller's login — see
- * server-access.ts. Responses are cached so departure scans reuse fetches;
- * those fetched over HTTP per login, so one caller's answer is never served
- * to another (the in-process answers need no login and are shared).
+ * Source of tidal currents. `findStations` answers the nearest
+ * vector-capable stations to a position; `fetchTimeline` their set/drift
+ * (u east, v north, m/s) for [startMs, endMs]; `probe` says whether any
+ * such station is known near a position.
  */
-/** A stable number per in-process handle, for cache keys. */
-const handleIds = new WeakMap<CurrentsApiHandle, number>();
-let nextHandleId = 1;
-
-export class CurrentsClient {
-  private baseUrl: string;
-  private source: TideSource;
-  private handle: () => CurrentsApiHandle | null;
-  private stationCache = new Map<
-    string,
-    { at: number; data: CurrentStationDto[] }
-  >();
-  private timelineCache = new Map<
-    string,
-    { at: number; data: CurrentTimelineDto }
-  >();
-  private static CACHE_TTL_MS = 6 * 3600_000;
-
-  constructor(
-    baseUrl: string,
-    handle: () => CurrentsApiHandle | null = () => null,
-    getJson: GetJson = loopbackGetJson,
-    source?: TideSource,
-  ) {
-    this.baseUrl = baseUrl.replace(/\/$/, "");
-    this.handle = handle;
-    this.source =
-      source ?? new TideSource("signalk-tidal-currents", this.baseUrl, getJson);
-  }
-
-  private api(path: string): string {
-    return `${this.baseUrl}/signalk/v2/api/currents${path}`;
-  }
-
-  private get(url: string, what: string): Promise<unknown> {
-    return this.source.get(url, what);
-  }
-
-  /** Cache-key prefix: the login for HTTP answers; in-process, the handle
-   *  itself, so a handle the provider replaced (after its restart, say) never
-   *  serves its predecessor's answers. */
-  private keyPrefix(handle: CurrentsApiHandle | null): string {
-    if (!handle) return `http:${callerKey()}`;
-    let id = handleIds.get(handle);
-    if (id === undefined) handleIds.set(handle, (id = nextHandleId++));
-    return `ip${id}`;
-  }
-
-  /** Nearest vector-capable current stations to a position. */
-  async findStations(lat: number, lon: number): Promise<CurrentStationDto[]> {
-    const handle = this.handle();
-    const key = `${this.keyPrefix(handle)}|${lat.toFixed(1)},${lon.toFixed(1)}`;
-    const hit = this.stationCache.get(key);
-    if (hit && Date.now() - hit.at < CurrentsClient.CACHE_TTL_MS)
-      return hit.data;
-    const raw = (
-      handle
-        ? await this.source.call("currents station search", () =>
-            handle.findStations(lat, lon, 10),
-          )
-        : await this.get(
-            this.api(`/stations?latitude=${lat}&longitude=${lon}&limit=10`),
-            "currents station search",
-          )
-    ) as CurrentStationDto[];
-    const data = (Array.isArray(raw) ? raw : []).filter((s) => s.vectorCapable);
-    pruneCache(this.stationCache, CurrentsClient.CACHE_TTL_MS);
-    this.stationCache.set(key, { at: Date.now(), data });
-    return data;
-  }
-
-  async fetchTimeline(
+export interface CurrentProvider {
+  findStations(lat: number, lon: number): Promise<CurrentStationDto[]>;
+  fetchTimeline(
     stationId: string,
     startMs: number,
     endMs: number,
-  ): Promise<CurrentTimelineDto> {
-    const HOUR = 3600_000;
-    const s = Math.floor(startMs / HOUR) * HOUR;
-    const e = Math.ceil(endMs / HOUR) * HOUR;
-    const handle = this.handle();
-    const key = `${this.keyPrefix(handle)}|${stationId}|${s}|${e}`;
-    const hit = this.timelineCache.get(key);
-    if (hit && Date.now() - hit.at < CurrentsClient.CACHE_TTL_MS)
-      return hit.data;
-    const startIso = new Date(s).toISOString();
-    const endIso = new Date(e).toISOString();
-    const data = (
-      handle
-        ? await this.source.call(`currents timeline for ${stationId}`, () =>
-            handle.getTimeline(stationId, startIso, endIso, 10),
-          )
-        : await this.get(
-            this.api(
-              `/stations/${stationId}/timeline` +
-                `?start=${encodeURIComponent(startIso)}` +
-                `&end=${encodeURIComponent(endIso)}&step=10`,
-            ),
-            `currents timeline for ${stationId}`,
-          )
-    ) as CurrentTimelineDto;
-    pruneCache(this.timelineCache, CurrentsClient.CACHE_TTL_MS);
-    this.timelineCache.set(key, { at: Date.now(), data });
-    return data;
-  }
-
-  async probe(lat: number, lon: number): Promise<boolean> {
-    try {
-      return (await this.findStations(lat, lon)).length > 0;
-    } catch {
-      return false;
-    }
-  }
+  ): Promise<CurrentTimelineDto>;
+  probe(lat: number, lon: number): Promise<boolean>;
 }
 
 interface StationSeries {
@@ -569,7 +342,7 @@ class StationFlowField implements FlowField {
  * Returns null when no vector-capable station is anywhere near the route.
  */
 export async function prepareStationFlowField(
-  client: CurrentsClient,
+  client: CurrentProvider,
   anchors: Array<{ latitude: number; longitude: number }>,
   startMs: number,
   endMs: number,
@@ -641,7 +414,7 @@ export async function prepareStationFlowField(
  * (plugin missing, no stations, fetch failures).
  */
 export async function prepareTideHeights(
-  client: TidesClient,
+  client: TideHeightProvider,
   points: Array<{ latitude: number; longitude: number }>,
   startMs: number,
   endMs: number,

@@ -42,7 +42,7 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { validateRequestConstraints } from '../dist-tsc/api.js';
 import { RoutingDatabase } from '../dist-tsc/database.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
-import type { CurrentsClient, TidesClient } from '../dist-tsc/tides.js';
+import type { CurrentsClient, TidesClient } from '../dist-tsc/tide-providers.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import type { PluginConfig, RoutingRequest } from '../dist-tsc/types.js';
 import { POIS_DDL, upgradeToPoiModel } from './poi-model-fixture.js';

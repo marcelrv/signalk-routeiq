@@ -26,7 +26,7 @@ import {
   warnIfRemoteTidesApiBase,
   watchCurrentsApi,
 } from "./server-access.js";
-import { CurrentsClient, TidesClient } from "./tides.js";
+import { CurrentsClient, TidesClient } from "./tide-providers.js";
 import { DEFAULT_CONFIG, PluginConfig, RETIRED_CONFIG_KEYS } from "./types.js";
 
 /**

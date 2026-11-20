@@ -6,12 +6,11 @@ import { DatabaseSync } from "node:sqlite";
 import { POI_TYPE_LOCK_CHAMBER, RoutingDatabase } from "../dist-tsc/database.js";
 import { RoutingEngine } from "../dist-tsc/routing.js";
 import {
-  CurrentsClient,
   KNOTS_TO_MS,
   prepareStationFlowField,
   prepareTideHeights,
-  TidesClient,
-} from "../dist-tsc/tides.js";
+} from "routeiq-core";
+import { CurrentsClient, TidesClient } from "../dist-tsc/tide-providers.js";
 import { DEFAULT_CONFIG } from "../dist-tsc/types.js";
 import { upgradeToPoiModel } from './poi-model-fixture.js';
 

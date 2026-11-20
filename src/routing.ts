@@ -35,15 +35,15 @@ import {
   limitPair,
 } from "routeiq-core";
 import {
-  CurrentsClient,
+  CurrentProvider,
   FlowField,
   KNOTS_TO_MS,
   TideHeightField,
-  TidesClient,
+  TideHeightProvider,
   noCurrentField,
   prepareStationFlowField,
   prepareTideHeights,
-} from "./tides.js";
+} from "routeiq-core";
 import {
   BBox,
   DepartureScanStep,
@@ -374,8 +374,8 @@ export class RoutingEngine {
   private db: RoutingDatabase;
   private _config: PluginConfig;
   private vesselDimensions: VesselDimensions;
-  private tides: TidesClient | null = null;
-  private currents: CurrentsClient | null = null;
+  private tides: TideHeightProvider | null = null;
+  private currents: CurrentProvider | null = null;
 
   constructor(
     db: RoutingDatabase,
@@ -406,19 +406,19 @@ export class RoutingEngine {
     return this._config;
   }
 
-  setTidesClient(client: TidesClient | null): void {
+  setTidesClient(client: TideHeightProvider | null): void {
     this.tides = client;
   }
 
-  get tidesClient(): TidesClient | null {
+  get tidesClient(): TideHeightProvider | null {
     return this.tides;
   }
 
-  setCurrentsClient(client: CurrentsClient | null): void {
+  setCurrentsClient(client: CurrentProvider | null): void {
     this.currents = client;
   }
 
-  get currentsClient(): CurrentsClient | null {
+  get currentsClient(): CurrentProvider | null {
     return this.currents;
   }
 
@@ -856,7 +856,7 @@ export class RoutingEngine {
    * Scan a range of departure times, yielding each result as it is computed so
    * a caller can stream them. Each step is a full route calculation (the optimal
    * route may differ per tide); repeated tide API fetches are absorbed by the
-   * TidesClient cache.
+   * tide provider cache.
    *
    * Results arrive in `departureScanOrder`, not chronological order — each
    * carries its `index` into the window so a caller can place it. Pass a signal

@@ -13,3 +13,4 @@ export * from "./itinerary.js";
 export * from "./route-description.js";
 export * from "./passage-profile.js";
 export * from "./gpx-export.js";
+export * from "./tides.js";
