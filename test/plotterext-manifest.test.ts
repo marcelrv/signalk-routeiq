@@ -1,6 +1,6 @@
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { buildManifest, HIGHLIGHT_OVERLAY } from '../dist/plotterext.js';
+import { buildManifest, HIGHLIGHT_OVERLAY } from '../dist-tsc/plotterext.js';
 
 // The manifest is what a host chartplotter (Freeboard-SK) reads to decide
 // whether it can run the extension at all. An id it does not know in

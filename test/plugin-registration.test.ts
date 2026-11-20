@@ -2,7 +2,7 @@ import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import type { IRouter } from 'express';
 import type { ServerAPI } from '@signalk/server-api';
-import { pluginConstructor } from '../dist/index.js';
+import { pluginConstructor } from '../dist-tsc/index.js';
 
 // Signal K registers the router of *every* installed plugin, enabled or not:
 // doRegisterPlugin() calls registerWithRouter(router) and only afterwards does
@@ -99,7 +99,7 @@ describe('plugin registration while still disabled', () => {
 // then silently ignored.
 describe('settings schema', () => {
   it('offers none of the retired settings', async () => {
-    const { RETIRED_CONFIG_KEYS } = await import('../dist/types.js');
+    const { RETIRED_CONFIG_KEYS } = await import('../dist-tsc/types.js');
     const plugin = pluginConstructor({} as unknown as ServerAPI);
     const props = Object.keys(
       (plugin.schema({}) as { properties: Record<string, unknown> }).properties,

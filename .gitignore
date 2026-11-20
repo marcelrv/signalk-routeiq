@@ -4,6 +4,9 @@ node_modules/
 # Build output
 dist/
 dist-test/
+dist-tsc/
+packages/*/dist
+packages/*/dist-test
 
 # Environment
 .env

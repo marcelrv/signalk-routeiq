@@ -39,12 +39,12 @@ import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
-import { validateRequestConstraints } from '../dist/api.js';
-import { RoutingDatabase } from '../dist/database.js';
-import { RoutingEngine } from '../dist/routing.js';
-import type { CurrentsClient, TidesClient } from '../dist/tides.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
-import type { PluginConfig, RoutingRequest } from '../dist/types.js';
+import { validateRequestConstraints } from '../dist-tsc/api.js';
+import { RoutingDatabase } from '../dist-tsc/database.js';
+import { RoutingEngine } from '../dist-tsc/routing.js';
+import type { CurrentsClient, TidesClient } from '../dist-tsc/tides.js';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
+import type { PluginConfig, RoutingRequest } from '../dist-tsc/types.js';
 import { POIS_DDL, upgradeToPoiModel } from './poi-model-fixture.js';
 
 const UPDATE = process.env.UPDATE_GOLDEN === '1';

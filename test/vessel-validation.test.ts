@@ -1,6 +1,6 @@
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { coerceVesselDimension, pickVesselDimensions, validateRequestConstraints } from '../dist/api.js';
+import { coerceVesselDimension, pickVesselDimensions, validateRequestConstraints } from '../dist-tsc/api.js';
 
 // Vessel dimensions reach the engine from two directions — PUT /vessel (the
 // server-wide defaults) and per-request overrides on POST /route — and both

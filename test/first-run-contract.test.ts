@@ -5,7 +5,7 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import type { IRouter, Router } from 'express';
 import type { ServerAPI } from '@signalk/server-api';
-import { pluginConstructor } from '../dist/index.js';
+import { pluginConstructor } from '../dist-tsc/index.js';
 
 // First run: the plugin is installed and enabled but no routing database has
 // been downloaded yet, so init fails with "No .sqlite files found ...". The web

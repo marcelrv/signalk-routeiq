@@ -5,9 +5,9 @@ import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import {
   RoutingDatabase, POI_TYPE_HARBOUR, POI_TYPE_LOCK, POI_TYPE_BRIDGE, POI_TYPE_LOCK_CHAMBER, POI_TYPE_BRIDGE_SPAN,
-} from '../dist/database.js';
-import { RoutingEngine } from '../dist/routing.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+} from '../dist-tsc/database.js';
+import { RoutingEngine } from '../dist-tsc/routing.js';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // §4a — dynamic database loading (PHASE_4_DESIGN.md). Covers:

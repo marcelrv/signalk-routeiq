@@ -8,7 +8,7 @@ import {
   locateTriangle,
   pointInPolygon,
   type NavmeshRegion,
-} from '../dist/navmesh.js';
+} from '../dist-tsc/navmesh.js';
 
 describe('pointInPolygon', () => {
   it('detects a point inside a simple square', () => {

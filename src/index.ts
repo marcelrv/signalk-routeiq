@@ -6,6 +6,7 @@
  */
 
 import { ServerAPI } from "@signalk/server-api";
+import { CORE_VERSION } from "routeiq-core";
 import * as express from "express";
 import * as fs from "fs";
 import * as path from "path";
@@ -93,6 +94,7 @@ export function pluginConstructor(app: ServerAPI) {
       console.log(
         "[routeiq] Starting SignalK RouteIQ Nautical Route Planner Plugin...",
       );
+      console.log(`[routeiq] routeiq-core ${CORE_VERSION}`);
 
       // Merge received configuration with defaults, minus every key that is
       // no longer a user setting (see RETIRED_CONFIG_KEYS) so a stale saved

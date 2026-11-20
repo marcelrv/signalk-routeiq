@@ -139,6 +139,9 @@ export default tseslint.config(
     ignores: [
       'dist/**/*',
       'dist-test/**/*',
+      'dist-tsc/**/*',
+      'packages/*/dist/**/*',
+      'packages/*/dist-test/**/*',
       'node_modules/**/*',
       // Third-party, and the world-countries GeoJSON. public/app.js is ours
       // and is linted — see the block above.

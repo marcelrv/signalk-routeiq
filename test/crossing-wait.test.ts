@@ -9,8 +9,8 @@
  */
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { RoutingEngine, passesClosedSpan } from '../dist/routing.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+import { RoutingEngine, passesClosedSpan } from '../dist-tsc/routing.js';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 
 describe('crossing wait time', () => {
   /**

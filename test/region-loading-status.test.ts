@@ -3,7 +3,7 @@ import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { RoutingDatabase } from '../dist/database.js';
+import { RoutingDatabase } from '../dist-tsc/database.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // A route or a position update can trigger a region to be read into the graph

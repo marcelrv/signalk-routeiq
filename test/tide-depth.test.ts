@@ -3,16 +3,16 @@ import * as path from "path";
 import assert from "node:assert";
 import { after, before, describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { POI_TYPE_LOCK_CHAMBER, RoutingDatabase } from "../dist/database.js";
-import { RoutingEngine } from "../dist/routing.js";
+import { POI_TYPE_LOCK_CHAMBER, RoutingDatabase } from "../dist-tsc/database.js";
+import { RoutingEngine } from "../dist-tsc/routing.js";
 import {
   CurrentsClient,
   KNOTS_TO_MS,
   prepareStationFlowField,
   prepareTideHeights,
   TidesClient,
-} from "../dist/tides.js";
-import { DEFAULT_CONFIG } from "../dist/types.js";
+} from "../dist-tsc/tides.js";
+import { DEFAULT_CONFIG } from "../dist-tsc/types.js";
 import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // Charted depths are referenced to LAT, so they are the low-water case and the

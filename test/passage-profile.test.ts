@@ -7,14 +7,14 @@ import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import { Router } from 'express';
 import { ServerAPI } from '@signalk/server-api';
-import { GpxExporter } from '../dist/gpx-export.js';
-import { ApiHandler } from '../dist/api.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+import { GpxExporter } from '../dist-tsc/gpx-export.js';
+import { ApiHandler } from '../dist-tsc/api.js';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import {
   buildPassageProfile,
   canonicalGeometry,
   geometryHash,
-} from '../dist/passage-profile.js';
+} from '../dist-tsc/passage-profile.js';
 
 const waypoints = [
   { latitude: 52.0, longitude: 5.0 },

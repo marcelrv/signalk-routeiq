@@ -4,9 +4,9 @@ import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { RoutingDatabase } from '../dist/database.js';
-import { RoutingEngine } from '../dist/routing.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+import { RoutingDatabase } from '../dist-tsc/database.js';
+import { RoutingEngine } from '../dist-tsc/routing.js';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import {
   attachWaters,
   buildRouteDescription,
@@ -14,14 +14,14 @@ import {
   ENDPOINT_WATER_REACH_M,
   nameEndpoints,
   noticeLevel,
-} from '../dist/route-description.js';
-import { legWarnings, limitPair } from '../dist/itinerary.js';
+} from '../dist-tsc/route-description.js';
+import { legWarnings, limitPair } from '../dist-tsc/itinerary.js';
 import {
   describePairs,
   detectDescribeFlags,
   findDescribeCollision,
   languageChain,
-} from '../dist/route-metadata.js';
+} from '../dist-tsc/route-metadata.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // Route description: water names and warnings along a found route, read from

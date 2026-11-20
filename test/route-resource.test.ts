@@ -9,7 +9,7 @@
  */
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { GpxExporter } from '../dist/gpx-export.js';
+import { GpxExporter } from '../dist-tsc/gpx-export.js';
 
 describe('toSignalKRoute coordinatesMeta', () => {
   const routeWithWaypoints = (n: number) => ({

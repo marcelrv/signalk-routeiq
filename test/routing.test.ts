@@ -3,9 +3,9 @@ import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { RoutingDatabase } from '../dist/database.js';
-import { RoutingEngine } from '../dist/routing.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+import { RoutingDatabase } from '../dist-tsc/database.js';
+import { RoutingEngine } from '../dist-tsc/routing.js';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 describe('RoutingEngine', () => {
@@ -355,7 +355,7 @@ describe('RoutingEngine', () => {
 });
 
 describe('Itinerary', async () => {
-  const { simplifyIndices, buildItinerary, clipLocation } = await import('../dist/itinerary.js');
+  const { simplifyIndices, buildItinerary, clipLocation } = await import('../dist-tsc/itinerary.js');
 
   // L-shaped route: 10 segments due east along lat 52.0 (lon 4.00→4.10),
   // then 5 segments due north along lon 4.10 (lat 52.00→52.05).
