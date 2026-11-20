@@ -15,7 +15,7 @@
 // package needs nothing from a registry beyond its own dependencies.
 import { readFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { build } from 'esbuild';
+import { build, context } from 'esbuild';
 
 const root = new URL('../', import.meta.url);
 const pkg = JSON.parse(readFileSync(new URL('package.json', root), 'utf8'));
@@ -26,7 +26,7 @@ const external = Object.keys(pkg.dependencies ?? {}).flatMap((name) => [
 
 rmSync(new URL('dist', root), { recursive: true, force: true });
 
-await build({
+const options = {
   absWorkingDir: fileURLToPath(root),
   entryPoints: { index: 'src/index.ts', 'db-worker': 'src/db-worker.ts' },
   outdir: 'dist',
@@ -37,4 +37,14 @@ await build({
   sourcemap: true,
   external: ['node:*', ...external],
   logLevel: 'info',
-});
+};
+
+// --watch: rebuild dist/ on every change to src/ or routeiq-core's dist/ (used
+// by `npm run build:watch`; type-checking is left to `tsc --watch`).
+if (process.argv.includes('--watch')) {
+  const ctx = await context(options);
+  await ctx.watch();
+  console.log('watching for changes');
+} else {
+  await build(options);
+}
