@@ -17,8 +17,9 @@
  *   depends on another having run first.
  *
  * Determinism
- *   - Vessel dimensions are passed twice, to the engine (setVesselDimensions)
- *     and in each request, and the config is written out in full (GOLDEN_CONFIG)
+ *   - Vessel dimensions are passed twice, to the engine as its default vessel
+ *     (EngineOptions.defaultVessel) and in each request, and the config is
+ *     written out in full (GOLDEN_CONFIG)
  *     so that a changed default does not silently change an input.
  *   - Every case that has a time uses a fixed departureTime.
  *   - Fixture databases are copied to a temp directory (the engine creates a
@@ -46,6 +47,7 @@ import type { CurrentsClient, TidesClient } from '../dist-tsc/tide-providers.js'
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import type { PluginConfig, RoutingRequest } from '../dist-tsc/types.js';
 import { POIS_DDL, upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 const UPDATE = process.env.UPDATE_GOLDEN === '1';
 const REVERSE = process.env.GOLDEN_REVERSE === '1';
@@ -172,8 +174,7 @@ function newEngine(
   config: PluginConfig = GOLDEN_CONFIG,
   dims: Dims = VESSEL,
 ): RoutingEngine {
-  const engine = new RoutingEngine(db, { ...config });
-  engine.setVesselDimensions({ ...dims });
+  const engine = new RoutingEngine(db, testOptions({ ...config }, { ...dims }));
   return engine;
 }
 

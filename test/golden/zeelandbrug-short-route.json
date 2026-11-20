@@ -53,6 +53,23 @@
         "type": "Feature"
       }
     ],
+    "inputs": {
+      "airDraft": 19.5,
+      "beam": 5,
+      "bridgeWaitMinutes": 30,
+      "coreVersion": "0.0.0",
+      "departureTime": null,
+      "describe": true,
+      "draft": 2,
+      "lang": null,
+      "lockWaitMinutes": 60,
+      "minCoastDistance": 0,
+      "safetyMarginAirDraft": 1.5,
+      "safetyMarginBeam": 2,
+      "safetyMarginDraft": 0.3,
+      "speedKnots": 5,
+      "useTides": false
+    },
     "itinerary": [
       {
         "coordIndex": 0,

@@ -9,6 +9,7 @@ import {
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 // §4a — dynamic database loading (PHASE_4_DESIGN.md). Covers:
 //  (a) non-dynamic mode is unaffected — already covered by every other
@@ -377,8 +378,7 @@ describe('§4a dynamic database loading', () => {
     });
 
     it('a route request inside region A triggers an inline on-demand load, and matches the non-dynamic route', async () => {
-      const dynEngine = new RoutingEngine(dynDb, DEFAULT_CONFIG);
-      dynEngine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const dynEngine = new RoutingEngine(dynDb, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
 
       const request = {
         start: { latitude: V0[0] - 0.0001, longitude: V0[1] },
@@ -401,8 +401,7 @@ describe('§4a dynamic database loading', () => {
       staticDb = new RoutingDatabase(fixturesDir, false);
       await staticDb.init();
       await staticDb.loadGraph();
-      const staticEngine = new RoutingEngine(staticDb, DEFAULT_CONFIG);
-      staticEngine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const staticEngine = new RoutingEngine(staticDb, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
       const staticRoute = await staticEngine.calculateRoute(request);
 
       assert.strictEqual(dynRoute.totalDistance, staticRoute.totalDistance);
@@ -582,8 +581,7 @@ describe('§4a dynamic database loading', () => {
     });
 
     it('routes across the fixture while both databases are loaded', async () => {
-      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
       const route = await engine.calculateRoute({
         start: { latitude: V0[0] - 0.0001, longitude: V0[1] },
         end: { latitude: V2[0] + 0.0001, longitude: V2[1] },
@@ -683,8 +681,7 @@ describe('§4a dynamic database loading', () => {
     });
 
     it('routes correctly again after the reload', async () => {
-      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
       const route = await engine.calculateRoute({
         start: { latitude: V0[0] - 0.0001, longitude: V0[1] },
         end: { latitude: V2[0] + 0.0001, longitude: V2[1] },
@@ -1039,8 +1036,7 @@ describe('§4a dynamic database loading', () => {
         await db.init();
         await db.loadGraph();
         try {
-          const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-          engine.setVesselDimensions({ draft: 2.0, beam: 4.0, airDraft: 10.0 });
+          const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 2.0, beam: 4.0, airDraft: 10.0 }));
 
           const result = await engine.calculateRoute({
             start: { latitude: NEAR_A[0], longitude: NEAR_A[1] },
@@ -1271,8 +1267,7 @@ describe('§4a dynamic database loading', () => {
       assert.strictEqual(before.get('transit-mid.sqlite'), 'not_loaded');
       assert.strictEqual(before.get('transit-end.sqlite'), 'not_loaded');
 
-      const engine = new RoutingEngine(transitDb, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(transitDb, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
 
       const start = { latitude: 10.5, longitude: 10.5 }; // inside transit-start, nowhere near mid/end
       const end = { latitude: 10.5, longitude: 20.5 };    // inside transit-end, nowhere near mid/start
@@ -1342,8 +1337,7 @@ describe('§4a dynamic database loading', () => {
       assert.strictEqual(before.get('near.sqlite'), 'not_loaded');
       assert.strictEqual(before.get('far.sqlite'), 'not_loaded');
 
-      const engine = new RoutingEngine(preloadDb, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(preloadDb, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
 
       // Both endpoints are NEAR's own two nodes, joined by an edge that
       // violates nothing — so the first attempt returns an unpenalized
@@ -1403,8 +1397,7 @@ describe('§4a dynamic database loading', () => {
     });
 
     it('no region is evicted between scan steps, and the hold is released when the scan ends', async () => {
-      const engine = new RoutingEngine(scanDb, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(scanDb, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
 
       const scan = engine.streamDepartures(
         {

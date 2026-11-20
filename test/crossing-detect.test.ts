@@ -19,6 +19,7 @@ import { RoutingEngine } from "../dist-tsc/routing.js";
 import { DEFAULT_CONFIG } from "../dist-tsc/types.js";
 import { upgradeToPoiModel } from "./poi-model-fixture.js";
 import { POIS_DDL } from "./poi-model-fixture.js";
+import { testOptions } from './engine-helper.js';
 
 const LAT0 = 52.0;
 const LON0 = 5.0;
@@ -148,8 +149,7 @@ async function openFixture(files: FileSpec[]): Promise<Fixture> {
   await db.loadGraph();
   for (let i = 0; i < files.length; i++)
     await db.loadDatabaseGraph(`f${i}.sqlite`);
-  const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-  engine.setVesselDimensions({ draft: 1.0, beam: 3.0, airDraft: 5.0 });
+  const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 1.0, beam: 3.0, airDraft: 5.0 }));
   const nodes = new Map(files.flatMap((f) => f.nodes).map((n) => [n.id, n]));
   return {
     db,
@@ -1060,7 +1060,7 @@ describe("route structures: the fallback box far north", () => {
   it("reaches at least 50 m east and west of the line at 65 N", async () => {
     const boxes: number[][] = [];
     const engine = Object.create(RoutingEngine.prototype) as any;
-    engine._config = { ...DEFAULT_CONFIG };
+    engine._options = testOptions({ ...DEFAULT_CONFIG });
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
     engine.db = {
       getRoutePois: async (pairs: unknown[]) =>

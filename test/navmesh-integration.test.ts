@@ -7,6 +7,7 @@ import { RoutingDatabase } from '../dist-tsc/database.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 // Deterministic node ID formula per routing-database-format-specification.md §2.7
 function nodeIdFor(lat: number, lon: number): number {
@@ -141,8 +142,7 @@ describe('navmesh_regions consumption (integration)', () => {
     db = new RoutingDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
-    engine = new RoutingEngine(db, DEFAULT_CONFIG);
-    engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+    engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
   });
 
   after(async () => {

@@ -7,6 +7,7 @@ import { RoutingDatabase } from '../dist-tsc/database.js';
 import { RouteSearchError, RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 // The start node's "better depth" swap. When every edge from the nearest
 // node toward the destination is too shallow, astarSearch looks within 2 km
@@ -144,12 +145,11 @@ function buildFixture(dir: string, opts: FixtureOptions = {}): void {
 }
 
 function makeEngine(db: RoutingDatabase): RoutingEngine {
-  const engine = new RoutingEngine(db, {
+  const engine = new RoutingEngine(db, testOptions({
     ...DEFAULT_CONFIG,
     safetyMarginDraft: 0.2,
     lineOfSightSearchRadius: 0,
-  });
-  engine.setVesselDimensions({ draft: 1.9, beam: 3.6, airDraft: 16 });
+  }, { draft: 1.9, beam: 3.6, airDraft: 16 }));
   return engine;
 }
 

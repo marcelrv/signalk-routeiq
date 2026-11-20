@@ -4,6 +4,7 @@ import { after, before, describe, it } from 'node:test';
 import { RoutingDatabase } from '../dist-tsc/database.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
+import { testOptions } from './engine-helper.js';
 
 // Real Phase-1-pipeline-generated database for the Zeelandbrug scenario
 // (test/fixtures/zeelandbrug/netherlands.sqlite, regenerated from
@@ -41,8 +42,7 @@ describe('Zeelandbrug opening-bridge routing (Phase 2 Hardening Round 3 regressi
     db = new RoutingDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
-    engine = new RoutingEngine(db, DEFAULT_CONFIG);
-    engine.setVesselDimensions({ draft: 2.0, beam: 5.0, airDraft: 19.5 });
+    engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 2.0, beam: 5.0, airDraft: 19.5 }));
   });
 
   after(async () => {

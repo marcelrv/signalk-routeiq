@@ -7,6 +7,7 @@ import { RoutingDatabase } from '../dist-tsc/database.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
+import { inputsFor, testOptions } from './engine-helper.js';
 
 // Cross-database seam merge — the runtime half of the build-time stitching
 // mechanism (signalk-router-pipeline/STITCHING_DESIGN.md §8-§10.8).
@@ -353,8 +354,7 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
     });
 
     it('a route from the west half to the east half crosses the seam on real edges', async () => {
-      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
 
       const route = await engine.calculateRoute({
         start: { latitude: W0.lat, longitude: W0.lon },
@@ -388,8 +388,7 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
     it('a route that starts on the graph raises no coverage-gap warning', async () => {
       // The no-false-alarm half of the check below: endpoints sitting on the
       // charted graph produce short connectors or none at all.
-      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
       const route = await engine.calculateRoute({
         start: { latitude: W0.lat, longitude: W0.lon },
         end: { latitude: E1.lat, longitude: E1.lon },
@@ -410,8 +409,7 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
     // route came back *shorter* than its single-file baseline (x0.89) by
     // cutting the corner.
     it('a start far from any charted waterway is reported as a coverage gap, not a connection', async () => {
-      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
 
       // ~4.4 km south of W0 — inside the measured gap band (3,485-4,597 m) and
       // well clear of the largest healthy connector seen on real data (893 m).
@@ -437,8 +435,7 @@ describe('cross-database seam merge (STITCHING_DESIGN §8-§10.8)', () => {
     });
 
     it('coverageGapMeters = 0 turns the check off', async () => {
-      const engine = new RoutingEngine(db, { ...DEFAULT_CONFIG, coverageGapMeters: 0 });
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(db, testOptions({ ...DEFAULT_CONFIG, coverageGapMeters: 0 }, { draft: 0, beam: 4, airDraft: 0 }));
       const route = await engine.calculateRoute({
         start: { latitude: W0.lat - 0.04, longitude: W0.lon },
         end: { latitude: E1.lat, longitude: E1.lon },
@@ -677,13 +674,12 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
 
   it('the returned route carries the tightened seam depth and warns about it', async () => {
     assert.strictEqual(db.getEdgeSync(id(rS0), id(rS1))!.min_depth, 12);
-    const engine = new RoutingEngine(db, {
+    const engine = new RoutingEngine(db, testOptions({
       ...DEFAULT_CONFIG,
       routingBBoxMargin: 0.005,
       routingBBoxMaxExtent: 0.01,
-    });
+    }, { draft: 8, beam: 4, airDraft: 10 }));
     // Needs 8.3 m: clear of the west file's 12 m, not of the east's 7.5 m.
-    engine.setVesselDimensions({ draft: 8, beam: 4, airDraft: 10 });
 
     const route = await engine.calculateRoute({
       start: { latitude: rW0.lat, longitude: rW0.lon },
@@ -704,12 +700,11 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
 
   it('a region another request loads while a candidate is scored is caught', async () => {
     // One box, no widening: only the final refresh can see the load.
-    const engine = new RoutingEngine(db, {
+    const engine = new RoutingEngine(db, testOptions({
       ...DEFAULT_CONFIG,
       routingBBoxMargin: 0.005,
       routingBBoxMaxExtent: 0.005,
-    }) as any;
-    engine.setVesselDimensions({ draft: 8, beam: 4, airDraft: 10 });
+    }, { draft: 8, beam: 4, airDraft: 10 })) as any;
     const score = engine.pathViolationMeters.bind(engine);
     let loaded = false;
     engine.pathViolationMeters = async (...args: unknown[]) => {
@@ -735,12 +730,11 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
   });
 
   it('a region loaded during the final refresh is caught before selection', async () => {
-    const engine = new RoutingEngine(db, {
+    const engine = new RoutingEngine(db, testOptions({
       ...DEFAULT_CONFIG,
       routingBBoxMargin: 0.005,
       routingBBoxMaxExtent: 0.005,
-    }) as any;
-    engine.setVesselDimensions({ draft: 8, beam: 4, airDraft: 10 });
+    }, { draft: 8, beam: 4, airDraft: 10 })) as any;
     const score = engine.pathViolationMeters.bind(engine);
     let calls = 0;
     engine.pathViolationMeters = async (...args: unknown[]) => {
@@ -792,12 +786,12 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
 
   it('an earlier via leg is warned about a seam a later leg\'s load tightened', async () => {
     // One box, no widening: the leg is found and warned about on west alone.
-    const engine = new RoutingEngine(db, {
+    const engine = new RoutingEngine(db, testOptions({
       ...DEFAULT_CONFIG,
       routingBBoxMargin: 0.005,
       routingBBoxMaxExtent: 0.005,
-    }) as any;
-    const dims = { draft: 8, beam: 4, airDraft: 10 };
+    })) as any;
+    const dims = inputsFor(engine.options, { draft: 8, beam: 4, airDraft: 10 });
     const warnings: any[] = [];
     const leg = await engine.tryRouteSegment(
       rW0.lat, rW0.lon, rS1.lat, rS1.lon, 0, 0, warnings, dims);
@@ -815,12 +809,12 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
   });
 
   it('with tides on, a via leg is re-warned on a graph change that leaves its limits alone', async () => {
-    const engine = new RoutingEngine(db, {
+    const engine = new RoutingEngine(db, testOptions({
       ...DEFAULT_CONFIG,
       routingBBoxMargin: 0.005,
       routingBBoxMaxExtent: 0.005,
-    }) as any;
-    const dims = { draft: 8, beam: 4, airDraft: 10 };
+    })) as any;
+    const dims = inputsFor(engine.options, { draft: 8, beam: 4, airDraft: 10 });
     const env = {
       departureMs: Date.parse('2026-08-12T00:00:00Z'),
       offsetSec: 0,
@@ -851,14 +845,14 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
   });
 
   it('an earlier via leg is warned about a limit an edge edit tightened', async () => {
-    const engine = new RoutingEngine(db, {
+    const engine = new RoutingEngine(db, testOptions({
       ...DEFAULT_CONFIG,
       routingBBoxMargin: 0.005,
       routingBBoxMaxExtent: 0.005,
-    }) as any;
+    })) as any;
     const warnings: any[] = [];
     const leg = await engine.tryRouteSegment(
-      rW0.lat, rW0.lon, rS1.lat, rS1.lon, 0, 0, warnings, { draft: 8, beam: 4, airDraft: 10 });
+      rW0.lat, rW0.lon, rS1.lat, rS1.lon, 0, 0, warnings, inputsFor(engine.options, { draft: 8, beam: 4, airDraft: 10 }));
     assert.ok(leg, 'the leg is found');
     assert.doesNotMatch(warnings[0].message, /depth/);
 
@@ -871,12 +865,12 @@ describe('a route kept from an earlier box reports seam limits a later load tigh
   });
 
   it('a candidate whose recount throws stays behind, so a later refresh retries it', async () => {
-    const engine = new RoutingEngine(db, {
+    const engine = new RoutingEngine(db, testOptions({
       ...DEFAULT_CONFIG,
       routingBBoxMargin: 0.005,
       routingBBoxMaxExtent: 0.005,
-    }) as any;
-    const dims = { draft: 8, beam: 4, airDraft: 10 };
+    })) as any;
+    const dims = inputsFor(engine.options, { draft: 8, beam: 4, airDraft: 10 });
     const leg = await engine.tryRouteSegment(
       rW0.lat, rW0.lon, rS1.lat, rS1.lon, 0, 0, [], dims);
     const before = db.graphGeneration;

@@ -23,6 +23,7 @@ import {
   languageChain,
 } from '../dist-tsc/route-metadata.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 // Route description: water names and warnings along a found route, read from
 // the edge sequence / water body tables of the routing database
@@ -172,8 +173,7 @@ async function routeAcross(
   await db.init();
   await db.loadGraph();
   for (const f of opts.loadAll ?? []) await db.loadDatabaseGraph(f);
-  const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-  engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+  const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
   try {
     const route = await engine.calculateRoute({
       start: opts.start ?? { latitude: LAT, longitude: LONS[0] },
@@ -314,8 +314,7 @@ describe('route description from a routing database', () => {
     await db.init();
     await db.loadGraph();
     await db.loadDatabaseGraph('a_navlines.sqlite');
-    const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-    engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+    const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
     let called = 0;
     const orig = db.describeRoute.bind(db);
     db.describeRoute = async (...a: Parameters<typeof orig>) => { called++; return orig(...a); };
@@ -640,8 +639,7 @@ describe('id collisions between regional files', () => {
       assert.strictEqual(byName.get('a_navlines.sqlite')!.descriptionError, null);
       assert.match(byName.get('b_navlines.sqlite')!.descriptionError!, /edge sequence id 12/);
       assert.strictEqual(byName.get('b_navlines.sqlite')!.state, 'loaded');
-      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
       const route = await engine.calculateRoute({
         start: { latitude: LAT, longitude: LONS[0] },
         end: { latitude: LAT, longitude: LONS[5] },
@@ -683,8 +681,7 @@ describe('real navline database', { skip: !isCurrentFormat(REAL) }, () => {
     const db = new RoutingDatabase(dir, true);
     await db.init();
     await db.loadGraph();
-    const engine = new RoutingEngine(db, { ...DEFAULT_CONFIG });
-    engine.setVesselDimensions({ draft: 1.0, beam: 3, airDraft: 0 });
+    const engine = new RoutingEngine(db, testOptions({ ...DEFAULT_CONFIG }, { draft: 1.0, beam: 3, airDraft: 0 }));
     try {
       return await engine.calculateRoute({
         start: { latitude: 51.8497, longitude: 5.8680 },

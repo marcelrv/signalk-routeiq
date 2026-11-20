@@ -7,6 +7,7 @@ import { RoutingDatabase } from '../dist-tsc/database.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 // Regression fixture for the "penalized-but-successful" bbox bug: a tight
 // routingBBoxMargin can leave only a constraint-violating edge reachable
@@ -112,12 +113,11 @@ describe('bbox expansion retries on a penalized (not just failed) result', () =>
     // Tight initial margin (~1.1km) excludes C; a max extent of 0.5° gives
     // plenty of room for the single doubling (0.01 -> 0.02) that's actually
     // needed to reach it.
-    const engine = new RoutingEngine(db, {
+    const engine = new RoutingEngine(db, testOptions({
       ...DEFAULT_CONFIG,
       routingBBoxMargin: 0.01,
       routingBBoxMaxExtent: 0.5,
-    });
-    engine.setVesselDimensions({ draft: 2.0, beam: 4.0, airDraft: 10.0 });
+    }, { draft: 2.0, beam: 4.0, airDraft: 10.0 }));
 
     const route = await engine.calculateRoute({
       start: { latitude: A.lat, longitude: A.lon },
@@ -152,12 +152,11 @@ describe('bbox expansion retries on a penalized (not just failed) result', () =>
     // reach C) but short of the second, so the retry can widen the box once
     // and still never reach the clean detour. The engine must still return
     // *a* route (the penalized one) rather than failing outright.
-    const engine = new RoutingEngine(db, {
+    const engine = new RoutingEngine(db, testOptions({
       ...DEFAULT_CONFIG,
       routingBBoxMargin: 0.01,
       routingBBoxMaxExtent: 0.015,
-    });
-    engine.setVesselDimensions({ draft: 2.0, beam: 4.0, airDraft: 10.0 });
+    }, { draft: 2.0, beam: 4.0, airDraft: 10.0 }));
 
     const route = await engine.calculateRoute({
       start: { latitude: A.lat, longitude: A.lon },
@@ -295,8 +294,7 @@ describe('violation-rate tradeoff is bounded, not all-or-nothing (Round 19)', ()
     // is far cheaper than the 721,196 direct-edge total — the detour wins.
     const db = await buildFixture(2089, 3919);
     try {
-      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 2.0, beam: 4.0, airDraft: 10.0 });
+      const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 2.0, beam: 4.0, airDraft: 10.0 }));
 
       const route = await engine.calculateRoute({
         start: { latitude: A.lat, longitude: A.lon },
@@ -327,8 +325,7 @@ describe('violation-rate tradeoff is bounded, not all-or-nothing (Round 19)', ()
     // geometry note above.)
     const db = await buildFixture(500_000, 500_000);
     try {
-      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 2.0, beam: 4.0, airDraft: 10.0 });
+      const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 2.0, beam: 4.0, airDraft: 10.0 }));
 
       const route = await engine.calculateRoute({
         start: { latitude: A.lat, longitude: A.lon },
@@ -361,10 +358,10 @@ describe('maxPenaltyDetourRatio selects independently of attempt order', () => {
   const RATIO = 3;
 
   function engineWithRatio(): any {
-    return new RoutingEngine({} as never, {
+    return new RoutingEngine({} as never, testOptions({
       ...DEFAULT_CONFIG,
       maxPenaltyDetourRatio: RATIO,
-    });
+    }));
   }
 
   // (violating meters, cost, distance)
@@ -413,10 +410,10 @@ describe('maxPenaltyDetourRatio selects independently of attempt order', () => {
   });
 
   it('is unbounded again at ratio 0, the documented escape hatch', () => {
-    const engine: any = new RoutingEngine({} as never, {
+    const engine: any = new RoutingEngine({} as never, testOptions({
       ...DEFAULT_CONFIG,
       maxPenaltyDetourRatio: 0,
-    });
+    }));
     for (const order of permutations([SHORT_DIRTY, MID, LONG_CLEAN])) {
       assert.equal(engine.selectBestCandidate(order).result, 'long-clean');
     }

@@ -23,6 +23,7 @@ import { RoutingDatabase } from '../dist-tsc/database.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { EDGE_POIS_DDL, POIS_DDL, upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 const LAT = 52.0;
 const lonOf = (node: number) => 5.0 + 0.01 * (node - 1);
@@ -376,8 +377,7 @@ describe('a route reports the whole and uses the part', () => {
     db = new RoutingDatabase(dir, false);
     await db.init();
     await db.loadGraph();
-    engine = new RoutingEngine(db, DEFAULT_CONFIG);
-    engine.setVesselDimensions({ draft: 1.0, beam: 3.0, airDraft: 5.0 });
+    engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 1.0, beam: 3.0, airDraft: 5.0 }));
   });
   after(async () => {
     await db.close();
@@ -610,8 +610,7 @@ describe('structure kind: a power line is told apart from a bridge', () => {
     db = new RoutingDatabase(dir, false);
     await db.init();
     await db.loadGraph();
-    engine = new RoutingEngine(db, DEFAULT_CONFIG);
-    engine.setVesselDimensions({ draft: 1.0, beam: 3.0, airDraft: 5.0 });
+    engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 1.0, beam: 3.0, airDraft: 5.0 }));
   });
   after(async () => {
     await db.close();

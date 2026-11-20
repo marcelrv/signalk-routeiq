@@ -7,6 +7,7 @@ import { RoutingDatabase } from '../dist-tsc/database.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 describe('RoutingEngine', () => {
   let db: RoutingDatabase;
@@ -114,7 +115,7 @@ describe('RoutingEngine', () => {
     await db.init();
     await db.loadGraph();
 
-    engine = new RoutingEngine(db, DEFAULT_CONFIG);
+    engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG));
   });
 
   after(async () => {
@@ -177,11 +178,12 @@ describe('RoutingEngine', () => {
     });
 
     it('should return warnings when vessel draft constraints block the route', async () => {
-      engine.setVesselDimensions({ draft: 100.0, beam: 4.0, airDraft: 10.0 });
-
       const route = await engine.calculateRoute({
         start: { latitude: 52.0, longitude: 5.0 },
         end: { latitude: 52.04, longitude: 5.04 },
+        draft: 100.0,
+        beam: 4.0,
+        airDraft: 10.0,
         minCoastDistance: 0,
       });
 
@@ -284,24 +286,19 @@ describe('RoutingEngine', () => {
 
     it('rejects nothing: a manual leg never fails, even where auto routing would', async () => {
       // Draft that blocks every edge of the graph — manual ignores constraints
-      engine.setVesselDimensions({ draft: 100.0, beam: 4.0, airDraft: 10.0 });
       const route = await engine.calculateRoute({
         start: { latitude: 52.0, longitude: 5.0 },
         end: { latitude: 52.04, longitude: 5.04 },
         endMode: 'manual',
+        draft: 100.0,
+        beam: 4.0,
+        airDraft: 10.0,
         minCoastDistance: 0,
       });
-      engine.setVesselDimensions({ draft: 2.0, beam: 4.0, airDraft: 10.0 });
       assert.strictEqual(route.features[0].properties.mode, 'manual');
       // No depth violations reported for manual segments (minDepth is unknown)
       const depthWarnings = (route.warnings || []).filter(w => w.type === 'via_constrained');
       assert.strictEqual(depthWarnings.length, 0, 'manual legs carry no constraint violations');
-    });
-  });
-
-  describe('setVesselDimensions', () => {
-    it('should update vessel dimensions', () => {
-      engine.setVesselDimensions({ draft: 3.0, beam: 5.0, airDraft: 15.0 });
     });
   });
 
