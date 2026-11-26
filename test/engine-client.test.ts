@@ -355,6 +355,36 @@ describe('engine client', () => {
     });
   });
 
+  describe('hardening', () => {
+    it('rejects a request that cannot be posted and still runs the next job', async () => {
+      const client = makeClient();
+      await client.ready;
+      const bad = { ...request(), onProgress: () => undefined } as unknown as RoutingRequest;
+      const first = client.route(bad);
+      const second = client.route(request());
+      const e = await rejection(first);
+      assert.ok(e instanceof EngineWorkerError && e.code === 'INVALID_MESSAGE');
+      const ok = await second;
+      assert.ok(ok.resultId);
+    });
+
+    for (const bad of [0, -1, NaN, Infinity, 1.5]) {
+      it(`refuses retainedResults ${bad} with INIT_FAILED`, async () => {
+        const client = makeClient({ retainedResults: bad });
+        const e = await rejection(client.ready);
+        assert.ok(e instanceof EngineWorkerError && e.code === 'INIT_FAILED');
+      });
+    }
+
+    it('refuses a provider module whose instance lacks the methods', async () => {
+      const module = path.resolve('test', 'fixtures', 'empty-provider.mjs');
+      const client = makeClient({ providers: { tideHeights: { module } } });
+      const e = await rejection(client.ready);
+      assert.ok(e instanceof EngineWorkerError && e.code === 'INIT_FAILED');
+      assert.ok(!e.message.includes('findStations'), 'neutral message');
+    });
+  });
+
   describe('protocol', () => {
     it('refuses a host init with another protocol version', async () => {
       const client = makeClient({ protocolVersion: PROTOCOL_VERSION + 1 });

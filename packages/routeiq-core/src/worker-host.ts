@@ -162,6 +162,57 @@ function ready(): { db: RoutingDatabase; engine: RoutingEngine } {
   return { db, engine };
 }
 
+const PROVIDER_METHODS = ["findStations", "fetchTimeline", "probe"] as const;
+
+const posInt = (v: unknown): boolean =>
+  typeof v === "number" && Number.isInteger(v) && v > 0;
+const posOrInf = (v: unknown): boolean =>
+  typeof v === "number" && !Number.isNaN(v) && v > 0;
+const countOrZero = (v: unknown): boolean =>
+  typeof v === "number" && Number.isInteger(v) && v >= 0;
+
+/** Names the first init option that would switch a bound off (NaN, zero,
+ *  negative, infinite), or null. */
+function invalidInitOption(
+  msg: Extract<HostRequest, { type: "init" }>,
+): string | null {
+  if (msg.retainedResults !== undefined && !posInt(msg.retainedResults)) {
+    return "retainedResults";
+  }
+  const engineOptions = msg.engine as {
+    maxSearchIterations?: unknown;
+    budget?: { maxIterations?: unknown; maxWallMs?: unknown };
+  };
+  if (
+    engineOptions.maxSearchIterations !== undefined &&
+    !posInt(engineOptions.maxSearchIterations)
+  ) {
+    return "engine.maxSearchIterations";
+  }
+  for (const k of ["maxIterations", "maxWallMs"] as const) {
+    const v = engineOptions.budget?.[k];
+    if (v !== undefined && !posOrInf(v)) return `engine.budget.${k}`;
+  }
+  for (const k of ["maxLoadedRegions", "maxLoadedRegionEdges"] as const) {
+    const v = (msg.database as Record<string, unknown>)[k];
+    if (v !== undefined && !countOrZero(v)) return `database.${k}`;
+  }
+  return null;
+}
+
+function requireMethods(
+  instance: unknown,
+  methods: readonly string[],
+  what: string,
+): void {
+  const o = instance as Record<string, unknown> | null | undefined;
+  for (const m of methods) {
+    if (!o || typeof o[m] !== "function") {
+      throw new Error(`the ${what} provider has no ${m}() function`);
+    }
+  }
+}
+
 async function init(
   msg: Extract<HostRequest, { type: "init" }>,
 ): Promise<void> {
@@ -178,7 +229,12 @@ async function init(
     );
   testHooks = msg.testHooks ?? {};
   if (msg.generation) generation = msg.generation;
-  maxRetained = Math.max(1, msg.retainedResults ?? MAX_RETAINED_RESULTS);
+  const badOption = invalidInitOption(msg);
+  if (badOption) {
+    hostLogger.error(`[worker-host] Invalid init option: ${badOption}`);
+    throw new HostProtocolError("INIT_FAILED", "An init option is invalid");
+  }
+  maxRetained = msg.retainedResults ?? MAX_RETAINED_RESULTS;
   const database = new RoutingDatabase({
     ...msg.database,
     files: msg.database.files,
@@ -203,14 +259,14 @@ async function init(
   });
   try {
     if (msg.providers?.tideHeights) {
-      hosted.setTidesClient(
-        (await loadProvider(msg.providers.tideHeights)) as TideHeightProvider,
-      );
+      const tides = await loadProvider(msg.providers.tideHeights);
+      requireMethods(tides, PROVIDER_METHODS, "tide height");
+      hosted.setTidesClient(tides as TideHeightProvider);
     }
     if (msg.providers?.currents) {
-      hosted.setCurrentsClient(
-        (await loadProvider(msg.providers.currents)) as CurrentProvider,
-      );
+      const currents = await loadProvider(msg.providers.currents);
+      requireMethods(currents, PROVIDER_METHODS, "current");
+      hosted.setCurrentsClient(currents as CurrentProvider);
     }
   } catch (e) {
     await database.close().catch(() => undefined);

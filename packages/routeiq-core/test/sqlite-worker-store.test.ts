@@ -74,3 +74,25 @@ describe('SqliteWorkerStore when its worker dies', () => {
     await store.close();
   });
 });
+
+describe('SqliteWorkerStore overlapping close', () => {
+  it('shares one close and can be used again afterwards', async () => {
+    const store = new SqliteWorkerStore();
+    try {
+      await store.getMetadata();
+      const first = store.close();
+      const second = store.close();
+      assert.strictEqual(first, second);
+      await Promise.all([first, second]);
+      assert.deepStrictEqual(await store.getMetadata(), []);
+      const worker = workerOf(store);
+      // A late close must not leave a worker behind from a new start.
+      const again = store.close();
+      await again;
+      assert.deepStrictEqual(await store.getMetadata(), []);
+      assert.ok(workerOf(store) !== worker);
+    } finally {
+      await store.close();
+    }
+  });
+});

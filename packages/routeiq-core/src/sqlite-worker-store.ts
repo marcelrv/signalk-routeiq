@@ -94,6 +94,9 @@ export interface SqliteWorkerStoreOptions {
 
 export class SqliteWorkerStore implements RoutingStore, OverlayStore {
   private worker: Worker | null = null;
+  /** The close in flight; overlapping `close()` calls share it, and calls
+   *  made while it runs wait for it, then use a fresh worker. */
+  private closing: Promise<void> | null = null;
   /** Set when the worker stopped without being closed: why. */
   private deadReason: Error | null = null;
   private messageIdCounter = 0;
@@ -227,6 +230,9 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
   }
 
   private send(type: string, payload?: any): Promise<any> {
+    if (this.closing) {
+      return this.closing.then(() => this.send(type, payload));
+    }
     // `init` (openAll) is the re-initialisation: it forgets the dead worker
     // and starts a new one. Anything else would talk to state that is gone.
     if (this.deadReason) {
@@ -239,6 +245,10 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
         );
       }
     }
+    return this.sendToWorker(type, payload);
+  }
+
+  private sendToWorker(type: string, payload?: any): Promise<any> {
     const worker = this.start();
     return new Promise((resolve, reject) => {
       const id = ++this.messageIdCounter;
@@ -302,14 +312,23 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
     return this.send("routePois", { pairs });
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closing) return this.closing;
+    const closing = this.closeWorker().finally(() => {
+      if (this.closing === closing) this.closing = null;
+    });
+    this.closing = closing;
+    return closing;
+  }
+
+  private async closeWorker(): Promise<void> {
     // A dead store is closed: the next call starts afresh, as after any close.
     this.deadReason = null;
     const worker = this.worker;
     if (!worker) return;
     try {
       await Promise.race([
-        this.send("close"),
+        this.sendToWorker("close"),
         new Promise((resolve) => setTimeout(resolve, 5000)),
       ]);
     } catch {

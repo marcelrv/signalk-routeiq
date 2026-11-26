@@ -77,6 +77,8 @@ export type EngineWorkerErrorCode =
   /** The client was closed. */
   | "CLOSED"
   | "UNKNOWN_REQUEST"
+  /** The request could not be sent to the worker (it is not cloneable). */
+  | "INVALID_MESSAGE"
   | "HOST_BUSY"
   | "NOT_INITIALISED";
 
@@ -456,7 +458,24 @@ export class EngineClient {
     const job = this.queue.shift();
     if (!job) return;
     this.running = job;
-    worker.postMessage({ ...job.body, id: job.id } as HostRequest);
+    try {
+      worker.postMessage({ ...job.body, id: job.id } as HostRequest);
+    } catch {
+      // Not cloneable (a function, say): nothing reached the worker. Fail this
+      // job alone and go on with the queue.
+      this.running = null;
+      this.clearTimer(job);
+      this.settle(
+        job,
+        undefined,
+        new EngineWorkerError(
+          "INVALID_MESSAGE",
+          "The request could not be sent to the engine worker",
+        ),
+      );
+      this.pump();
+      return;
+    }
     if (Number.isFinite(job.maxWallMs)) {
       this.armHardStop(job, job.maxWallMs + this.hardStopGraceMs);
     }
