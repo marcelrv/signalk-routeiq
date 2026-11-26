@@ -33,9 +33,9 @@ async function quickStart(dataFile: string): Promise<RouteResult> {
     policy: 'pinned',
     readOnly: true,
   });
-  await database.init();
-  await database.loadGraph(); // `pinned`: loads every listed region
   try {
+    await database.init();
+    await database.loadGraph(); // `pinned`: loads every listed region
     const engine = new RoutingEngine(database, DEFAULT_ENGINE_OPTIONS);
     const controller = new AbortController();
     return await engine.calculateRoute(
@@ -199,9 +199,9 @@ describe('README examples', () => {
       readOnly: true,
       logger: onlyProblems(lines),
     });
-    await database.init();
-    await database.loadGraph();
     try {
+      await database.init();
+      await database.loadGraph();
       const engine = new RoutingEngine(database, { ...DEFAULT_ENGINE_OPTIONS, requireVesselInRequest: true });
       const refused = await describeOutcome(engine, { start: START, end: END });
       assert.match(refused, /^VESSEL_INCOMPLETE: /);

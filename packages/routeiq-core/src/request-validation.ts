@@ -265,6 +265,21 @@ function haversineM(
   return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+const ISO_DATE_TIME =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})?$/;
+
+/** ISO-8601 date-time (`YYYY-MM-DDTHH:MM[:SS[.sss]]`, optional `Z` or
+ *  `±HH:MM`) that names a real instant. RFC 2822 / toUTCString forms are out. */
+function isIsoDateTime(value: string): boolean {
+  const m = ISO_DATE_TIME.exec(value);
+  if (!m) return false;
+  const hour = Number(m[4]);
+  const minute = Number(m[5]);
+  const second = m[6] === undefined ? 0 : Number(m[6]);
+  if (hour > 23 || minute > 59 || second > 59) return false;
+  return Number.isFinite(Date.parse(value));
+}
+
 type Point = { latitude: number; longitude: number };
 
 /** Reads a coordinate pair, or says why it is not one. */
@@ -276,8 +291,9 @@ function readPoint(
   let latitude = raw.latitude;
   let longitude = raw.longitude;
   if (aliases) {
-    if (typeof latitude !== "number") latitude = raw.lat;
-    if (typeof longitude !== "number") longitude = raw.lng ?? raw.lon;
+    // An alias is only a stand-in for an absent canonical key.
+    if (latitude === undefined) latitude = raw.lat;
+    if (longitude === undefined) longitude = raw.lng ?? raw.lon;
   }
   if (typeof latitude !== "number" || typeof longitude !== "number") {
     return { problem: "format" };
@@ -536,6 +552,13 @@ export function validateRouteRequest(
     if (!Array.isArray(body.via)) {
       return refuse(fail(lang, "INVALID_VIA", "INVALID_VIA", "via"));
     }
+    if (body.via.length > limits.maxVias) {
+      return refuse(
+        fail(lang, "TOO_MANY_VIAS", "TOO_MANY_VIAS", "via", {
+          max: limits.maxVias,
+        }),
+      );
+    }
     via = [];
     for (let i = 0; i < body.via.length; i++) {
       const raw = body.via[i];
@@ -565,13 +588,6 @@ export function validateRouteRequest(
       }
       via.push(mode === undefined ? r.point : { ...r.point, mode });
     }
-    if (via.length > limits.maxVias) {
-      return refuse(
-        fail(lang, "TOO_MANY_VIAS", "TOO_MANY_VIAS", "via", {
-          max: limits.maxVias,
-        }),
-      );
-    }
   }
 
   const endMode = body.endMode;
@@ -584,8 +600,7 @@ export function validateRouteRequest(
   const departureTime = body.departureTime;
   if (
     departureTime !== undefined &&
-    (typeof departureTime !== "string" ||
-      !Number.isFinite(Date.parse(departureTime)))
+    (typeof departureTime !== "string" || !isIsoDateTime(departureTime))
   ) {
     return refuse(
       fail(

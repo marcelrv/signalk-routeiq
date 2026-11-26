@@ -67,6 +67,10 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
   private nextIndex = 0;
   private indexBase = 0;
   private readonly log: Logger;
+  /** Tail of the queue that serialises `openAll` and `openDb`: both hand out
+   *  handle numbers, and `openAll` must number its generation after every
+   *  handle already issued. */
+  private handleOps: Promise<unknown> = Promise.resolve();
   private pending = new Map<
     number,
     {
@@ -240,34 +244,45 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
 
   // --- RoutingStore -------------------------------------------------------
 
-  async openAll(paths: string[]): Promise<OpenAllResult> {
-    // Every earlier handle ends here: the new set is numbered from where the
-    // old ones stopped.
-    const indexBase = this.nextIndex;
-    const result: OpenAllResult = await this.send("init", {
-      dbPaths: paths,
-      indexBase,
+  /** Runs `op` after every earlier `openAll`/`openDb` has settled. */
+  private serialHandleOp<T>(op: () => Promise<T>): Promise<T> {
+    const run = this.handleOps.then(op, op);
+    this.handleOps = run.catch(() => undefined);
+    return run;
+  }
+
+  openAll(paths: string[]): Promise<OpenAllResult> {
+    return this.serialHandleOp(async () => {
+      // Every earlier handle ends here: the new set is numbered from where the
+      // old ones stopped (all of them have been issued by now).
+      const indexBase = this.nextIndex;
+      const result: OpenAllResult = await this.send("init", {
+        dbPaths: paths,
+        indexBase,
+      });
+      this.indexBase = Math.max(this.indexBase, indexBase);
+      this.nextIndex = Math.max(
+        this.nextIndex,
+        indexBase + result.filenames.length,
+      );
+      return result;
     });
-    this.indexBase = Math.max(this.indexBase, indexBase);
-    this.nextIndex = Math.max(
-      this.nextIndex,
-      indexBase + result.filenames.length,
-    );
-    return result;
   }
 
   peekMetadata(paths: string[]): Promise<PeekedFile[]> {
     return this.send("peekMetadata", { dbPaths: paths });
   }
 
-  async openDb(path: string): Promise<OpenedFile | RefusedFile> {
-    const result: OpenedFile | RefusedFile = await this.send("openDb", {
-      dbPath: path,
+  openDb(path: string): Promise<OpenedFile | RefusedFile> {
+    return this.serialHandleOp(async () => {
+      const result: OpenedFile | RefusedFile = await this.send("openDb", {
+        dbPath: path,
+      });
+      if ("dbIndex" in result) {
+        this.nextIndex = Math.max(this.nextIndex, result.dbIndex + 1);
+      }
+      return result;
     });
-    if ("dbIndex" in result) {
-      this.nextIndex = Math.max(this.nextIndex, result.dbIndex + 1);
-    }
-    return result;
   }
 
   async closeDb(dbIndex: number): Promise<void> {
@@ -335,20 +350,31 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
     this.indexBase = this.nextIndex;
     const worker = this.worker;
     if (!worker) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
         this.sendToWorker("close"),
-        new Promise((resolve) => setTimeout(resolve, 5000)),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, 5000);
+        }),
       ]);
     } catch {
       /* worker may already be dead */
+    } finally {
+      if (timer) clearTimeout(timer);
     }
     // Anything still waiting is answered with a failure rather than left
     // hanging on a worker that no longer exists.
     for (const [, p] of this.pending) p.reject(new Error("Store closed"));
     this.pending.clear();
     this.worker = null;
-    worker.terminate();
+    // Awaited, so a start that follows cannot overlap the old thread's
+    // SQLite handles.
+    try {
+      await worker.terminate();
+    } catch {
+      /* already gone */
+    }
     // Last, so a worker that exited while closing leaves no dead state.
     this.deadReason = null;
   }

@@ -263,14 +263,18 @@ function formatRefusal(db: DatabaseSync, filename: string): string | null {
 
 /** Collision check for a freshly opened handle against the others (see
  *  findDescribeCollision). On a clash the new file keeps routing but loses its
- *  description; the error names both files and the id. */
+ *  description; the detail (files and id) goes to the debug log. */
 function checkDescribeCollision(fresh: DbHandle): void {
   try {
     const err = findDescribeCollision(fresh, handles);
     if (err) {
       fresh.describeError = err;
       log.error(
-        `[db-worker] Route description disabled for ${filenameOf(fresh.path)}: ${err}`,
+        `[db-worker] Route description switched off for ${filenameOf(fresh.path)} (ids clash with another file)`,
+      );
+      // The detail names node ids, which encode positions: debug only.
+      log.debug(
+        `[db-worker] Route description clash in ${filenameOf(fresh.path)}: ${err}`,
       );
     }
   } catch (e: any) {

@@ -40,6 +40,9 @@ export const UNLIMITED_BUDGET: SearchBudget = Object.freeze({
   maxWallMs: Infinity,
 });
 
+/** Longest delay Node's `setTimeout` takes; above it the delay becomes 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 function limitOf(v: number | undefined): number {
   return typeof v === "number" && !Number.isNaN(v) && v >= 0 ? v : Infinity;
 }
@@ -135,16 +138,45 @@ export class RequestControl {
     work.catch(() => undefined);
     return new Promise<T>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
       const signal = this.signal;
       const finish = (): void => {
+        settled = true;
         if (timer) clearTimeout(timer);
         signal?.removeEventListener("abort", onStop);
       };
+      /** Why the request may not go on now, if it may not. */
+      const stopNow = (): StopReason | null => {
+        if (signal?.aborted) return { code: "ABORTED", params: {} };
+        const elapsed = this.elapsedMs;
+        if (elapsed > this.budget.maxWallMs) {
+          return this.over("maxWallMs", Math.round(elapsed));
+        }
+        return null;
+      };
       const onStop = (): void => {
         finish();
-        const stop =
-          this.check() ?? this.over("maxWallMs", Math.round(this.elapsedMs));
-        reject(new StopRequested(stop));
+        reject(
+          new StopRequested(
+            stopNow() ?? this.over("maxWallMs", Math.round(this.elapsedMs)),
+          ),
+        );
+      };
+      // One timer interval never exceeds Node's maximum; a longer wall limit
+      // re-arms until the deadline has really passed.
+      const arm = (): void => {
+        const remaining = Math.max(0, this.budget.maxWallMs - this.elapsedMs);
+        if (remaining <= 0 || stopNow()) {
+          onStop();
+          return;
+        }
+        timer = setTimeout(
+          () => {
+            if (!settled) arm();
+          },
+          Math.min(remaining + 1, MAX_TIMER_MS),
+        );
+        timer.unref?.();
       };
       const early = this.check();
       if (early) {
@@ -152,19 +184,21 @@ export class RequestControl {
         return;
       }
       signal?.addEventListener("abort", onStop, { once: true });
-      if (wallLimited) {
-        const remaining = Math.max(0, this.budget.maxWallMs - this.elapsedMs);
-        timer = setTimeout(onStop, remaining + 1);
-        timer.unref?.();
-      }
+      if (wallLimited) arm();
       work.then(
         (v) => {
+          if (settled) return;
+          const late = stopNow();
           finish();
-          resolve(v);
+          if (late) reject(new StopRequested(late));
+          else resolve(v);
         },
         (e) => {
+          if (settled) return;
+          const late = stopNow();
           finish();
-          reject(e);
+          if (late) reject(new StopRequested(late));
+          else reject(e);
         },
       );
     });

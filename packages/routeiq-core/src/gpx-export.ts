@@ -48,7 +48,7 @@ export class GpxExporter {
     );
 
     let gpx = `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="${this.escapeXml(provider.name)}" xmlns:ar="http://signalk.org/routeiq">
+<gpx version="1.1" creator="${escapeXmlAttribute(provider.name)}" xmlns:ar="http://signalk.org/routeiq">
   <rte>
     <name>${this.escapeXml(name)}</name>
     <desc>${this.escapeXml(description)}</desc>`;

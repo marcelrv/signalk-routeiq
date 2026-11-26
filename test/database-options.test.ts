@@ -18,6 +18,15 @@ import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { testOptions } from './engine-helper.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
 
+// node:sqlite ignores `readOnly` before Node 22.12 and has no
+// `DatabaseSync#isTransaction` before 22.16 (feature-checked, not by version).
+const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
+const READ_ONLY_SKIP =
+  nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 12)
+    ? 'node:sqlite ignores the readOnly option before Node 22.12'
+    : false;
+const HAS_IS_TRANSACTION = 'isTransaction' in DatabaseSync.prototype;
+
 const ZEELANDBRUG = path.join('test', 'fixtures', 'zeelandbrug', 'netherlands.sqlite');
 
 const tmpDirs: string[] = [];
@@ -252,7 +261,7 @@ describe('read-only support probe', () => {
     assert.strictEqual(readOnlyHonoured({ threw: true, readOnlyError: false }), false);
   });
 
-  it('on this Node a read-only connection refuses the probe and a normal one does not', () => {
+  it('on this Node a read-only connection refuses the probe and a normal one does not', { skip: READ_ONLY_SKIP }, () => {
     const dir = tmpDir();
     const file = path.join(dir, 'x.sqlite');
     const w = new DatabaseSync(file);
@@ -262,12 +271,12 @@ describe('read-only support probe', () => {
 
     const ro = new DatabaseSync(file, { readOnly: true });
     assert.strictEqual(probeReadOnlyConnection(ro), true);
-    assert.strictEqual(ro.isTransaction, false, 'no transaction is left open');
+    if (HAS_IS_TRANSACTION) assert.strictEqual(ro.isTransaction, false, 'no transaction is left open');
     ro.close();
 
     const rw = new DatabaseSync(file);
     assert.strictEqual(probeReadOnlyConnection(rw), false);
-    assert.strictEqual(rw.isTransaction, false, 'no transaction is left open');
+    if (HAS_IS_TRANSACTION) assert.strictEqual(rw.isTransaction, false, 'no transaction is left open');
     assert.strictEqual((rw.prepare('SELECT COUNT(*) AS c FROM sqlite_master').get() as { c: number }).c, 1);
     rw.close();
     assert.deepStrictEqual(snapshot(dir), before, 'the file is as it was');
@@ -276,7 +285,7 @@ describe('read-only support probe', () => {
 
 describe('read-only mode', () => {
   for (const policy of ['bulk', 'dynamic', 'pinned'] as const) {
-    it(`routes from read-only files and writes nothing (${policy})`, async () => {
+    it(`routes from read-only files and writes nothing (${policy})`, { skip: READ_ONLY_SKIP }, async () => {
       const dir = tmpDir();
       fs.copyFileSync(ZEELANDBRUG, path.join(dir, 'netherlands.sqlite'));
       fs.chmodSync(path.join(dir, 'netherlands.sqlite'), 0o444);

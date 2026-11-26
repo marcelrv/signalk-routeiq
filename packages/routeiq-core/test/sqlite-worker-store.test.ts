@@ -96,3 +96,38 @@ describe('SqliteWorkerStore overlapping close', () => {
     }
   });
 });
+
+describe('SqliteWorkerStore handle numbering and shutdown', () => {
+  it('serialises openAll behind in-flight openDb calls, so no two live handles are equal', async () => {
+    const store = new SqliteWorkerStore();
+    const order: string[] = [];
+    const hook = store as unknown as { send: (t: string, p?: any) => Promise<unknown> };
+    let issued = 0;
+    hook.send = async (type: string, payload?: any) => {
+      order.push(`${type}:start`);
+      await new Promise((r) => setTimeout(r, type === 'openDb' ? 30 : 0));
+      order.push(`${type}:end`);
+      if (type === 'openDb') return { dbIndex: issued++ };
+      assert.ok(payload.indexBase >= issued, 'the base covers every handle already issued');
+      return { filenames: ['x'] };
+    };
+    const a = store.openDb('/a');
+    const b = store.openDb('/b');
+    const all = store.openAll(['/x']);
+    await Promise.all([a, b, all]);
+    assert.deepStrictEqual(order, [
+      'openDb:start', 'openDb:end', 'openDb:start', 'openDb:end', 'init:start', 'init:end',
+    ]);
+  });
+
+  it('close() leaves no timer behind and the worker is gone when it returns', async () => {
+    const store = new SqliteWorkerStore();
+    await store.getMetadata();
+    const worker = workerOf(store);
+    const timers = () => process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+    const before = timers();
+    await store.close();
+    assert.ok(timers() <= before, 'close() left no timer running');
+    assert.strictEqual(worker.threadId, -1, 'the worker thread has ended');
+  });
+});

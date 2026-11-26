@@ -60,3 +60,10 @@ describe('provider info is a parameter', () => {
     assert.match(gpx, /<desc>Route calculated by plain - /);
   });
 });
+
+describe('provider name in the GPX creator attribute', () => {
+  it('is escaped as an attribute value', () => {
+    const gpx = GpxExporter.toGpx(route, 'probe', { name: 'a"b<c&d', version: '1.0.0' });
+    assert.ok(gpx.includes('creator="a&quot;b&lt;c&amp;d"'));
+  });
+});

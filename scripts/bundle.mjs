@@ -36,6 +36,9 @@ const options = {
     'worker-host': 'packages/routeiq-core/src/worker-host.ts',
   },
   outdir: 'dist',
+  // Core is compiled from source here, so a core edit reaches the bundle (and
+  // `--watch`) without rebuilding core's own dist/.
+  alias: { 'routeiq-core': './packages/routeiq-core/src/index.ts' },
   bundle: true,
   format: 'esm',
   platform: 'node',
@@ -45,7 +48,7 @@ const options = {
   logLevel: 'info',
 };
 
-// --watch: rebuild dist/ on every change to src/ or routeiq-core's dist/ (used
+// --watch: rebuild dist/ on every change to src/ or routeiq-core's src/ (used
 // by `npm run build:watch`; type-checking is left to `tsc --watch`).
 if (process.argv.includes('--watch')) {
   const ctx = await context(options);

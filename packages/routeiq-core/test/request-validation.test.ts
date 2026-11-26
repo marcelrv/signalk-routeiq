@@ -303,3 +303,55 @@ describe('checkRequestConstraints', () => {
     assert.ok('draft' in out && out.draft === undefined);
   });
 });
+
+describe('validateRouteRequest: review fixes', () => {
+  it('rejects an oversized via array before reading its entries', () => {
+    let reads = 0;
+    const via = new Proxy(new Array(1_000_000), {
+      get(target, prop, receiver) {
+        if (typeof prop === 'string' && /^\d+$/.test(prop)) reads++;
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const e = bad({ start, end, via }, { maxVias: 3 });
+    assert.strictEqual(e.code, 'TOO_MANY_VIAS');
+    assert.strictEqual(reads, 0, 'no entry was read');
+  });
+
+  it('accepts ISO-8601 departure times and refuses other date formats', () => {
+    for (const t of [
+      '2026-08-11T06:00:00.000Z',
+      '2026-08-11T06:00Z',
+      '2026-08-11T06:00:00+02:00',
+      '2026-08-11T06:00:00',
+      new Date(0).toISOString(),
+    ]) {
+      ok({ start, end, departureTime: t });
+    }
+    for (const t of [
+      new Date(0).toUTCString(),
+      'Aug 11 2026',
+      '2026-08-11',
+      '2026-13-11T06:00:00Z',
+      '2026-08-11T25:00:00Z',
+      '',
+      5,
+    ]) {
+      const e = bad({ start, end, departureTime: t });
+      assert.strictEqual(e.code, 'INVALID_DEPARTURE_TIME');
+    }
+  });
+
+  it('uses a coordinate alias only when the canonical key is absent', () => {
+    ok({ start: { lat: 52, lng: 5 }, end }, { acceptCoordinateAliases: true });
+    ok({ start: { lat: 52, longitude: 5 }, end }, { acceptCoordinateAliases: true });
+    for (const p of [
+      { latitude: '52', lat: 52, longitude: 5 },
+      { latitude: 52, longitude: '5', lng: 5 },
+      { latitude: null, lat: 52, longitude: 5 },
+    ]) {
+      const e = bad({ start: p, end }, { acceptCoordinateAliases: true });
+      assert.strictEqual(e.code, 'INVALID_COORDINATE');
+    }
+  });
+});

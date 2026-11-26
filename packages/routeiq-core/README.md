@@ -103,9 +103,9 @@ async function quickStart(dataFile: string): Promise<RouteResult> {
     policy: 'pinned',
     readOnly: true,
   });
-  await database.init();
-  await database.loadGraph(); // `pinned`: loads every listed region
   try {
+    await database.init();
+    await database.loadGraph(); // `pinned`: loads every listed region
     const engine = new RoutingEngine(database, DEFAULT_ENGINE_OPTIONS);
     const controller = new AbortController();
     return await engine.calculateRoute(
