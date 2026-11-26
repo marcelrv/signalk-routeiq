@@ -1,0 +1,156 @@
+# Releases the routing engine package (packages/routeiq-core) as a tarball.
+#
+# To release: bump "version" in packages/routeiq-core/package.json (and
+# CORE_VERSION in src/version.ts), turn "Unreleased" in
+# packages/routeiq-core/CHANGELOG.md into a "## X.Y.Z - date" section, merge,
+# THEN push the tag core-vX.Y.Z on the merge commit. This workflow refuses to
+# release when the tag and package.json disagree, or when the CHANGELOG has no
+# section for the version, so a stale tag cannot ship the wrong code.
+#
+# The package is private and is not published to npm: the artifact is
+# routeiq-core-X.Y.Z.tgz plus a .sha256 file, attached to a GitHub release.
+# Consumers install the tarball URL; npm pins its integrity hash in their
+# lockfile. The plugin itself bundles the engine and does not use this tarball.
+#
+# Two jobs, so that the token that can write releases never runs repository
+# code: "build" (read-only) installs, builds, tests and packs, and hands the
+# files over as a workflow artifact; "release" (contents: write) only downloads
+# them and calls `gh release create`.
+
+name: Release core
+
+on:
+  push:
+    tags:
+      - 'core-v*.*.*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # persist-credentials defaults to true, which leaves GITHUB_TOKEN in the
+      # checkout's git config for every later step, and this job installs npm
+      # packages and runs them. Nothing here talks back to git.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run build
+
+      # Same as publish-npm.yml: the plugin's test script needs the flag on the
+      # older Node 22 releases that still have node:sqlite behind it.
+      - name: Run tests
+        run: npm test
+        env:
+          NODE_OPTIONS: --experimental-sqlite
+
+      # The tag name goes through the environment, not into the script text:
+      # `${{ }}` in a `run:` is expanded as raw shell before the shell sees it.
+      - name: Verify the tag matches the package version
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./packages/routeiq-core/package.json').version")"
+          if [ "$TAG" != "core-v$VERSION" ]; then
+            echo "Tag $TAG does not match packages/routeiq-core/package.json version $VERSION (expected core-v$VERSION)."
+            echo "Bump the version first, merge, then tag the merge commit."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # The release notes are the CHANGELOG section of this version: the lines
+      # after its "## X.Y.Z" heading up to the next "## " heading. Fails when
+      # the section is missing or empty, rather than releasing without notes.
+      - name: Extract the release notes from the CHANGELOG
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release"
+          awk -v v="$VERSION" '
+            /^## / { if (found) exit; if ($2 == v) { found = 1; next } }
+            found { print }
+          ' packages/routeiq-core/CHANGELOG.md > "$RUNNER_TEMP/release/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/release/notes.md"; then
+            echo "packages/routeiq-core/CHANGELOG.md has no section (or an empty one) for $VERSION."
+            exit 1
+          fi
+
+      # Packed into a temp directory outside the checkout, so no stray
+      # tarball lands in the working tree.
+      - name: Pack
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          (cd packages/routeiq-core && npm pack --pack-destination "$RUNNER_TEMP/release")
+          cd "$RUNNER_TEMP/release"
+          ls -l
+          sha256sum "routeiq-core-$VERSION.tgz" > "routeiq-core-$VERSION.tgz.sha256"
+          cat "routeiq-core-$VERSION.tgz.sha256"
+
+      # What a consumer does: install the tarball into an empty directory (no
+      # workspace, no repository node_modules on the resolution path) and
+      # import it. Catches a tarball that only works inside this repository.
+      - name: Smoke-install the tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          SMOKE="$(mktemp -d)"
+          cd "$SMOKE"
+          npm init -y > /dev/null
+          npm install "$RUNNER_TEMP/release/routeiq-core-$VERSION.tgz"
+          node --input-type=module -e "import('routeiq-core').then(m => { if (!m.CORE_VERSION) process.exit(1) })"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: routeiq-core-release
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and attach the files
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: routeiq-core-release
+          path: release
+
+      # No checkout: this job has write access and runs nothing from the
+      # repository, so --repo says where to create the release. A version with
+      # a pre-release identifier (1.1.0-rc.1) is marked as a pre-release.
+      # --verify-tag makes gh fail instead of creating a tag that is missing.
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#core-v}"
+          FLAGS=()
+          case "$VERSION" in
+            *-*) FLAGS+=(--prerelease) ;;
+          esac
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "routeiq-core $VERSION" \
+            --notes-file release/notes.md \
+            "${FLAGS[@]}" \
+            "release/routeiq-core-$VERSION.tgz" \
+            "release/routeiq-core-$VERSION.tgz.sha256"

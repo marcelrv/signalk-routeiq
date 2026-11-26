@@ -4,4 +4,4 @@
  * which keeps it bundleable. Lives in its own module so the engine can echo it
  * in every result without importing the package entry point.
  */
-export const CORE_VERSION: string = "0.0.0";
+export const CORE_VERSION: string = "1.0.0";

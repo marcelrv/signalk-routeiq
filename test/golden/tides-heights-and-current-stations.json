@@ -39,7 +39,7 @@
       "airDraft": 5,
       "beam": 4,
       "bridgeWaitMinutes": 30,
-      "coreVersion": "0.0.0",
+      "coreVersion": "1.0.0",
       "data": [
         {
           "filename": "tide.sqlite",

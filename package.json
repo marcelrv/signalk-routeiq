@@ -52,7 +52,8 @@
     "test:integration": "node --test --test-force-exit dist-test/integration/*.test.js",
     "deploy": "bash deploy.sh",
     "prepublishOnly": "npm run build",
-    "test:packed": "node --experimental-sqlite scripts/test-packed.mjs"
+    "test:packed": "node --experimental-sqlite scripts/test-packed.mjs",
+    "test:pack-core": "node scripts/test-pack-core.mjs"
   },
   "dependencies": {
     "@signalk/server-api": "^2.0.0",

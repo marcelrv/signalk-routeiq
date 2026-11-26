@@ -1,6 +1,6 @@
 {
   "name": "routeiq-core",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Routing engine of signalk-routeiq, usable outside Signal K (internal, bundled into the plugin)",
   "license": "Apache-2.0",
@@ -10,7 +10,7 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist"],
+  "files": ["dist", "README.md", "CHANGELOG.md", "LICENSE"],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

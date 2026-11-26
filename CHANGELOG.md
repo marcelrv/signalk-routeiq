@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+Bundles routeiq-core 1.0.0.
+
 ### Added
 
 - Every route warning (route-level, leg and water warnings) and crossing note
@@ -11,6 +13,24 @@
 - A route that fails answers 422 with the same `error` and `code` as before and
   an added `failure: { code, params, blocking? }`. A failed departure scan step
   carries `code` and `params` too.
+
+### Changed
+
+- The routing engine now lives in its own internal package, `routeiq-core`,
+  which is bundled into the plugin. There is nothing to install or configure
+  differently, and routes come out the same as before.
+- Route results carry `inputs`: the values the route was calculated with
+  (vessel dimensions, speed, margins, waits, tide choice, language, and the
+  routing data files used).
+- Requests that used to slip through are now rejected with 400: coordinates out
+  of range, a speed or margin that is out of range or not a number, flags that
+  are not true or false, and, on `/route/departures`, the same via checks as on
+  `/route`.
+
+### Fixed
+
+- A vessel dimension set with `PUT /vessel` is no longer overwritten when a later
+  stream update arrives for a different dimension.
 
 ## 0.1.1 — 2026-11-26
 
