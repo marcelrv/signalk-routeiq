@@ -37,6 +37,12 @@
 - BBox expansion adds warnings to the route result.
 - Via points each get their own per-segment bounding box.
 
+## Request Budget, Abort and the Worker Host (`routeiq-core`)
+- **Budget**: `EngineOptions.budget = { maxIterations, maxWallMs }` (default unlimited) is spent over a whole request (every bbox retry, via leg, departure-scan step, smoothing). `calculateRoute`/`streamDepartures`/`scanDepartures` take `{ budget, signal }` as call options (`RouteCallOptions`); a call's budget can only lower the option. Overrun throws `RouteFailure` `BUDGET_EXCEEDED` (params `limit`, `used`, `max`; counted in `budgetHits`). The per-search cap `EngineOptions.maxSearchIterations` (5_000_000) is separate and still ends a search as "no path" with `iterationLimit`. Checks sit in `astarSearch`'s loop and between retries/legs/steps (`checkStop` in `routing.ts`, state in `request-control.ts`); any `catch` that retries or falls back must rethrow `isStopFailure(e)`.
+- **Abort**: the same call options take an `AbortSignal`; an aborted request throws `ABORTED`. The NDJSON departure stream in `src/api.ts` aborts an `AbortController` when the client disconnects.
+- **Worker host** (`worker-host.ts`, run by `EngineClient` from `engine-client.ts`): the engine in a `worker_thread`, so a long search stays off the caller's event loop and a crash or hang is contained. Protocol in `protocol.ts` (`PROTOCOL_VERSION`, closed request set `HOST_REQUEST_TYPES`: no message lists the graph, edges or all POIs). One job at a time, queued by the client; `abort(jobId)` or a signal cancels a queued job at once and signals a running one; `hardStopGraceMs` terminates and replaces a worker that outlives its `maxWallMs`, rejecting that job (`WORKER_RESTARTED`) while queued jobs run on the new worker. GPX is built only from the last 32 results the host holds (by result id). Bundled as `dist/worker-host.js` (`scripts/bundle.mjs`).
+- **The plugin stays in-process**: `src/` calls `RoutingEngine` directly and does not use `EngineClient`; it only passes a real `AbortSignal` to the departure scan. Tide providers are not available in the host.
+
 ## Deterministic Node IDs (coordinate hashing + type packing)
 - Node IDs are globally unique integers derived from snapped (lat, lon) at 5 decimal places + node type.
 - Formula: `lat_int = int((round(lat,5) + 90.0) * 100000)` (0..18M), `lon_int = int((round(lon,5) + 180.0) * 100000)` (0..36M), `type_int = 1 if 'inland' else 0`.
