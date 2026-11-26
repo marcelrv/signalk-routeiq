@@ -8242,6 +8242,11 @@
     clearPaneSelection();
     document.getElementById("route-warnings").innerHTML = "";
     document.getElementById("route-nodes").innerHTML = "";
+    const summaryEl = document.getElementById("route-summary");
+    if (summaryEl) {
+      summaryEl.innerHTML = "";
+      summaryEl.style.display = "none";
+    }
     const emptyEl = document.getElementById("route-pane-empty");
     if (emptyEl) emptyEl.style.display = "";
     state.routeSegments = [];

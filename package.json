@@ -12,7 +12,7 @@
     "url": "https://github.com/marcelrv/signalk-routeiq/issues"
   },
   "homepage": "https://github.com/marcelrv/signalk-routeiq#readme",
-  "keywords": ["signalk-node-server-plugin", "signalk-webapp"],
+  "keywords": ["signalk-node-server-plugin", "signalk-webapp", "signalk-category-plotter-extensions"],
   "files": [
     "dist",
     "public",
