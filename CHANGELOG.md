@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Every route warning (route-level, leg and water warnings) and crossing note
+  carries a stable `code` and `params` (`noteCode`/`noteParams` on a crossing),
+  so a client or a log can match on it. The `type` fields and the English texts
+  are unchanged.
+- A route that fails answers 422 with the same `error` and `code` as before and
+  an added `failure: { code, params, blocking? }`. A failed departure scan step
+  carries `code` and `params` too.
+
 ## 0.1.1 — 2026-11-26
 
 ### Added
