@@ -446,7 +446,7 @@ export class ApiHandler {
   private noteUnknownFields(fields: string[]): void {
     if (fields.length > 0) {
       this.app.debug?.(
-        `[routeiq] Ignored unknown request fields: ${fields.join(", ")}`,
+        `[routeiq] Ignored unknown request fields: ${JSON.stringify(fields)}`,
       );
     }
   }

@@ -12,6 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase, GraphEditError } from '../dist-tsc/database.js';
 import type { RegionFileEntry, RoutingStore } from '../dist-tsc/database.js';
 import { directoryDatabaseOptions, scanRoutingDataDir } from '../dist-tsc/data-dir.js';
+import { nodeSqliteSupportsReadOnly, readOnlyHonoured } from '../dist-tsc/sqlite-worker-store.js';
 import { RoutingEngine } from '../dist-tsc/routing.js';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { testOptions } from './engine-helper.js';
@@ -182,19 +183,77 @@ describe('explicit file list', () => {
     await assert.rejects(new RoutingDatabase({ files: [], fileSource: 'test list' }).init(), /No \.sqlite files found in test list/);
   });
 
-  it('the plugin-side scan lists both states under the plain filename and skips the overlay', () => {
+  it('the plugin-side scan lists both states, skips the overlay, and returns absolute paths', () => {
     const dir = tmpDir();
     for (const f of ['x.sqlite', 'y.sqlite.disabled', 'user-edits.sqlite', 'notes.txt', 'user-edits.sqlite.disabled']) {
       fs.writeFileSync(path.join(dir, f), '');
     }
     const found = scanRoutingDataDir(dir)
-      .map((e) => [e.name, e.enabled, path.basename(e.path)])
+      .map((e) => [e.enabled, path.basename(e.path)])
       .sort();
     assert.deepStrictEqual(found, [
-      ['x.sqlite', true, 'x.sqlite'],
-      ['y.sqlite', false, 'y.sqlite.disabled'],
+      [false, 'y.sqlite.disabled'],
+      [true, 'x.sqlite'],
     ]);
     assert.throws(() => scanRoutingDataDir(path.join(dir, 'missing')), /Cannot read routing data directory/);
+    const prev = process.cwd();
+    process.chdir(path.dirname(dir));
+    try {
+      for (const e of scanRoutingDataDir(path.basename(dir))) assert.ok(path.isAbsolute(e.path), e.path);
+    } finally {
+      process.chdir(prev);
+    }
+  });
+
+  it('the scan lists only the active file when both states exist, skips directories, keeps symlinks to files', () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, 'x.sqlite'), '');
+    fs.writeFileSync(path.join(dir, 'x.sqlite.disabled'), '');
+    fs.mkdirSync(path.join(dir, 'folder.sqlite'));
+    fs.writeFileSync(path.join(dir, 'real.dat'), '');
+    fs.symlinkSync(path.join(dir, 'real.dat'), path.join(dir, 'link.sqlite'));
+    const found = scanRoutingDataDir(dir)
+      .map((e) => [e.enabled, path.basename(e.path)])
+      .sort();
+    assert.deepStrictEqual(found, [
+      [true, 'link.sqlite'],
+      [true, 'x.sqlite'],
+    ]);
+  });
+
+  it('a file list naming the same file twice is rejected', async () => {
+    const dir = tmpDir();
+    buildRegion(path.join(dir, 'a.sqlite'), A);
+    fs.copyFileSync(path.join(dir, 'a.sqlite'), path.join(dir, 'a.sqlite.disabled'));
+    const db = new RoutingDatabase({ files: [entry(dir, 'a.sqlite'), entry(dir, 'a.sqlite.disabled', false)] });
+    await assert.rejects(db.init(), /names "a\.sqlite" twice/);
+    await db.close();
+  });
+});
+
+describe('overlay contract', () => {
+  it('an overlay that is not the store, or has no path, makes the constructor throw', async () => {
+    const files = [{ path: '/memory/mem.sqlite', enabled: true }];
+    const mem = new MemoryStore();
+    const other = { openOverlay: async () => {} } as any;
+    assert.throws(() => new RoutingDatabase({ files, store: mem, overlay: other, overlayPath: '/x' }), /same object as the store/);
+    assert.throws(() => new RoutingDatabase({ files, store: mem, overlayPath: '/x' }), /store has no overlay/);
+    const sqlite = new (class extends MemoryStore { openOverlay = async () => {}; })();
+    assert.throws(() => new RoutingDatabase({ files, store: sqlite, overlay: sqlite as any }), /needs an overlayPath/);
+    // Read-only ignores overlay settings, as before.
+    assert.doesNotThrow(() => new RoutingDatabase({ files, store: mem, overlay: other, overlayPath: '/x', readOnly: true }));
+  });
+});
+
+describe('read-only support probe', () => {
+  it('honours read-only only when the open refused and nothing was created', () => {
+    assert.strictEqual(readOnlyHonoured({ threw: true, created: false }), true);
+    assert.strictEqual(readOnlyHonoured({ threw: false, created: true }), false);
+    assert.strictEqual(readOnlyHonoured({ threw: false, created: false }), false);
+    assert.strictEqual(readOnlyHonoured({ threw: true, created: true }), false);
+  });
+  it('reports this Node as supported', () => {
+    assert.strictEqual(nodeSqliteSupportsReadOnly(), true);
   });
 });
 
@@ -308,6 +367,49 @@ describe('pinned loading policy', () => {
     assert.ok(result.features.length > 0);
     await db.enforceRegionCapForTest();
     assert.deepStrictEqual(states(), { 'a.sqlite': 'loaded', 'b.sqlite': 'loaded', 'c.sqlite': 'disabled' });
+    await db.close();
+  });
+
+  it('a second loadGraph during the first waits for the load, and both fail together', async () => {
+    const dir = tmpDir();
+    buildRegion(path.join(dir, 'a.sqlite'), A);
+    const db = new RoutingDatabase({ files: [entry(dir, 'a.sqlite')], policy: 'pinned' });
+    await db.init();
+    const first = db.loadGraph();
+    const second = db.loadGraph();
+    await second;
+    assert.strictEqual(db.getStatus().counts.loaded, 1, 'loaded when the second call resolves');
+    await first;
+    await db.close();
+
+    const bad = new RoutingDatabase({ files: [entry(dir, 'a.sqlite')], policy: 'pinned' });
+    await bad.init();
+    (bad as any).store.loadNavmeshRegions = async () => {
+      throw new Error('synthetic read failure');
+    };
+    const r = await Promise.allSettled([bad.loadGraph(), bad.loadGraph()]);
+    assert.deepStrictEqual(r.map((x) => x.status), ['rejected', 'rejected']);
+    await bad.close();
+  });
+
+  it('a failed load closes the handle it opened', async () => {
+    const dir = tmpDir();
+    buildRegion(path.join(dir, 'a.sqlite'), A);
+    const db = new RoutingDatabase({ files: [entry(dir, 'a.sqlite')], policy: 'dynamic' });
+    await db.init();
+    const store = (db as any).store;
+    const closed: number[] = [];
+    const close = store.closeDb.bind(store);
+    store.closeDb = (i: number) => (closed.push(i), close(i));
+    const load = store.loadNavmeshRegions;
+    store.loadNavmeshRegions = async () => {
+      throw new Error('synthetic read failure');
+    };
+    await assert.rejects(db.loadDatabaseGraph('a.sqlite'), /synthetic read failure/);
+    assert.deepStrictEqual(closed, [0]);
+    store.loadNavmeshRegions = load;
+    await db.loadDatabaseGraph('a.sqlite');
+    assert.deepStrictEqual(closed, [0], 'a merged region is not closed');
     await db.close();
   });
 
@@ -528,6 +630,21 @@ class MemoryStore implements RoutingStore {
   async routePois(pairs: unknown[]) { return pairs.map(() => ({ poiIds: [], known: false })); }
   async close() {}
 }
+
+describe('a route with no length', () => {
+  it('still carries the inputs and the data version', async () => {
+    const dir = tmpDir();
+    buildRegion(path.join(dir, 'a.sqlite'), A);
+    const db = new RoutingDatabase({ files: [entry(dir, 'a.sqlite')], policy: 'bulk' });
+    await db.init();
+    await db.loadGraph();
+    const here = { latitude: A.lat, longitude: A.lon };
+    const result = await engineOn(db).calculateRoute({ start: here, end: here, minCoastDistance: 0, describe: false });
+    assert.ok(result.inputs, 'inputs present');
+    assert.deepStrictEqual(result.inputs?.data, [{ filename: 'a.sqlite', lastUpdateDate: A.updated }]);
+    await db.close();
+  });
+});
 
 describe('an in-memory RoutingStore', () => {
   for (const policy of ['bulk', 'dynamic', 'pinned'] as const) {

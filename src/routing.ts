@@ -4026,6 +4026,10 @@ export class RoutingEngine {
     viaAt?: ReadonlyMap<number, number>,
   ): Promise<void> {
     const feature = route.features[0];
+    // The effective inputs, as a copy: nothing downstream may change them.
+    // Set first, so a route with no length (start and end on one node) still
+    // says what it was calculated from.
+    route.inputs = { ...inputs, data: this.db.getDataVersion() };
     if (!feature || feature.geometry.coordinates.length < 2) return;
     const coords = feature.geometry.coordinates;
     const segments = feature.properties.segments || [];
@@ -4178,8 +4182,6 @@ export class RoutingEngine {
       lockWaitMinutes: inputs.lockWaitMinutes,
       bridgeWaitMinutes: inputs.bridgeWaitMinutes,
     };
-    // The effective inputs, as a copy: nothing downstream may change them.
-    route.inputs = { ...inputs, data: this.db.getDataVersion() };
     if (env) {
       const totalDistance =
         feature.properties.totalDistance ??

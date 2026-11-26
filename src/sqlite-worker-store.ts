@@ -8,6 +8,9 @@
  * and ends with `close()`; a closed store starts afresh on its next call.
  */
 
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
@@ -34,6 +37,45 @@ import {
   type StorePoiRow,
 } from "./routing-store.js";
 
+/** What the read-only probe saw when it opened a file that does not exist
+ *  with `{ readOnly: true }`. */
+export interface ReadOnlyProbeOutcome {
+  /** The open threw (a read-only open of a missing file must). */
+  threw: boolean;
+  /** A file appeared at the path (a read-write open creates it). */
+  created: boolean;
+}
+
+/** Whether the probe outcome shows `readOnly` is honoured: the open refused
+ *  and nothing was created. A node:sqlite that ignores the option (22.5.0)
+ *  opens read-write and creates the file. */
+export function readOnlyHonoured(outcome: ReadOnlyProbeOutcome): boolean {
+  return outcome.threw && !outcome.created;
+}
+
+let readOnlySupport: boolean | null = null;
+
+/** One-time probe, in a temporary directory, of whether this Node's
+ *  node:sqlite honours `readOnly`. */
+export function nodeSqliteSupportsReadOnly(): boolean {
+  if (readOnlySupport !== null) return readOnlySupport;
+  const dir = mkdtempSync(join(tmpdir(), "routeiq-ro-probe-"));
+  const file = join(dir, "probe.sqlite");
+  const outcome: ReadOnlyProbeOutcome = { threw: false, created: false };
+  try {
+    try {
+      new DatabaseSync(file, { readOnly: true }).close();
+    } catch {
+      outcome.threw = true;
+    }
+    outcome.created = existsSync(file);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  readOnlySupport = readOnlyHonoured(outcome);
+  return readOnlySupport;
+}
+
 export interface SqliteWorkerStoreOptions {
   /** Open region files read-only (node:sqlite `readOnly`), never open an
    *  overlay, and refuse every graph edit with a `GraphEditError`
@@ -58,6 +100,11 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
 
   constructor(options: SqliteWorkerStoreOptions = {}) {
     this.readOnly = options.readOnly === true;
+    if (this.readOnly && !nodeSqliteSupportsReadOnly()) {
+      throw new Error(
+        `Read-only mode is not available: this Node.js (${process.version}) opens SQLite files read-write even when asked for read-only. Use a newer Node.js.`,
+      );
+    }
   }
 
   private start(): Worker {

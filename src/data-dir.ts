@@ -11,8 +11,8 @@
  *   inland_waterways_lines.geojson, land_polygons.geojson   optional map data
  */
 
-import { readdirSync } from "node:fs";
-import { join } from "node:path";
+import { readdirSync, statSync, type Dirent } from "node:fs";
+import { join, resolve } from "node:path";
 import {
   RoutingDatabase,
   type RegionFileEntry,
@@ -54,22 +54,39 @@ export function isRoutingDatabaseFile(filename: string): boolean {
   );
 }
 
-/** List the routing databases in `dir`, each marked enabled or not. Throws
- *  when the directory cannot be read. */
+/** List the routing databases in `dir` (made absolute), each marked enabled
+ *  or not. When both `x.sqlite` and `x.sqlite.disabled` exist only the active
+ *  `x.sqlite` is listed, which is what routes. Directories named `*.sqlite`
+ *  are skipped; symlinks to files are kept. Throws when the directory cannot
+ *  be read. */
 export function scanRoutingDataDir(dir: string): RegionFileEntry[] {
-  let names: string[];
+  const root = resolve(dir);
+  let dirents: Dirent[];
   try {
-    names = readdirSync(dir).filter(isRoutingDatabaseFile);
+    dirents = readdirSync(root, { withFileTypes: true });
   } catch (err: any) {
     throw new Error(
       `Cannot read routing data directory "${dir}": ${err.message}`,
     );
   }
-  return names.map((f) => ({
-    path: join(dir, f),
-    enabled: !isDisabledFile(f),
-    name: baseFilename(f),
-  }));
+  const names = dirents
+    .filter((d) => isRoutingDatabaseFile(d.name) && !isDirectory(root, d))
+    .map((d) => d.name);
+  const active = new Set(names.filter((f) => !isDisabledFile(f)));
+  return names
+    .filter((f) => !isDisabledFile(f) || !active.has(baseFilename(f)))
+    .map((f) => ({ path: join(root, f), enabled: !isDisabledFile(f) }));
+}
+
+/** A real directory, looking through symlinks. */
+function isDirectory(root: string, d: Dirent): boolean {
+  if (d.isDirectory()) return true;
+  if (!d.isSymbolicLink()) return false;
+  try {
+    return statSync(join(root, d.name)).isDirectory();
+  } catch {
+    return false; // a dangling link is left for the open to report
+  }
 }
 
 export interface DirectoryDatabaseSettings {

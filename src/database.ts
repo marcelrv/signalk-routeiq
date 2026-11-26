@@ -331,13 +331,15 @@ export interface RoutingDatabaseOptions {
   /** Persistence. Default: a `SqliteWorkerStore` (SQLite files read in a
    *  worker thread). */
   store?: RoutingStore;
-  /** Graph-edit persistence. Default: the store itself when it also
-   *  implements `OverlayStore` (the SQLite store does); null = none. Always
+  /** Graph-edit persistence. Supported only as the store itself (its graph
+   *  reads return the overlay's rows), so this is either that same object,
+   *  null (none) or absent (the store when it implements `OverlayStore`, as
+   *  the SQLite store does). Anything else makes the constructor throw. Always
    *  none when `readOnly`. */
   overlay?: OverlayStore | null;
-  /** Where the SQLite overlay lives; the overlay is opened (and created) at
-   *  `init`. Without a path (and without an explicit `overlay`) graph edits
-   *  reject with `GraphEditError` (`NO_OVERLAY`). */
+  /** Where the overlay lives; it is opened (and created) at `init`. Required
+   *  for an overlay; without it graph edits reject with `GraphEditError`
+   *  (`NO_OVERLAY`). */
   overlayPath?: string | null;
   /** GeoJSON of inland waterway lines for the map; null = none. */
   waterwaysPath?: string | null;
@@ -585,15 +587,32 @@ export class RoutingDatabase {
     this.fileSource = options.fileSource ?? "the region file list";
     this.store =
       options.store ?? new SqliteWorkerStore({ readOnly: this.readOnly });
-    if (this.readOnly) {
-      this.overlay = null;
-    } else if (options.overlay !== undefined) {
-      this.overlay = options.overlay;
-    } else {
-      this.overlay = isOverlayStore(this.store) ? this.store : null;
+    this.overlay = null;
+    this.overlayPath = null;
+    if (!this.readOnly) {
+      // The store merges the overlay's rows into the graph reads it answers,
+      // so an overlay is supported only as the store itself, with a path.
+      if (
+        options.overlay != null &&
+        (options.overlay as unknown) !== this.store
+      ) {
+        throw new Error(
+          "RoutingDatabase: the overlay must be the same object as the store",
+        );
+      }
+      const overlay = isOverlayStore(this.store) ? this.store : null;
+      if (options.overlayPath) {
+        if (!overlay || options.overlay === null) {
+          throw new Error(
+            "RoutingDatabase: overlayPath was given but the store has no overlay",
+          );
+        }
+        this.overlay = overlay;
+        this.overlayPath = options.overlayPath;
+      } else if (options.overlay != null) {
+        throw new Error("RoutingDatabase: an overlay needs an overlayPath");
+      }
     }
-    this.overlayPath =
-      this.readOnly || !this.overlay ? null : (options.overlayPath ?? null);
     this.waterwaysPath = options.waterwaysPath ?? null;
     this.landPolygonsPath = options.landPolygonsPath ?? null;
   }
@@ -615,14 +634,32 @@ export class RoutingDatabase {
       typeof this.fileList === "function"
         ? await this.fileList()
         : this.fileList;
+    const byKey = new Map<string, string>();
+    for (const e of list) {
+      const key = RoutingDatabase.keyOf(e.path);
+      const other = byKey.get(key);
+      if (other !== undefined) {
+        throw new Error(
+          `The region file list names "${key}" twice (${other} and ${e.path})`,
+        );
+      }
+      byKey.set(key, e.path);
+    }
     this.entryByPath = new Map(list.map((e) => [e.path, e]));
     return list;
   }
 
-  /** The plain filename a listed file is known by (coverage index key). */
+  /** The plain filename a file is known by (coverage index key): its
+   *  basename, with a trailing `.disabled` removed from `<name>.sqlite`. */
+  private static keyOf(path: string): string {
+    const base = basename(path.replace(/\\/g, "/"));
+    return base.endsWith(".sqlite.disabled")
+      ? base.slice(0, -".disabled".length)
+      : base;
+  }
+
   private keyOfPath(path: string): string {
-    const entry = this.entryByPath.get(path);
-    return entry?.name ?? basename(path.replace(/\\/g, "/"));
+    return RoutingDatabase.keyOf(path);
   }
 
   private isEnabledPath(path: string): boolean {
@@ -734,19 +771,10 @@ export class RoutingDatabase {
       this.hasCrossesObstacle = schema.hasCrossesObstacle;
       this.hasNodeDepth = schema.hasNodeDepth;
       this.hasRegionId = schema.hasRegionId;
-      // The store reports by basename; the coverage index is keyed by the
-      // plain filename.
-      const keyOfBasename = new Map(
-        dbPaths.map((p) => [
-          basename(p.replace(/\\/g, "/")),
-          this.keyOfPath(p),
-        ]),
-      );
+      // Enabled files are opened under their plain filename, which is the
+      // store's basename and the coverage key alike.
       this.descriptionErrors = new Map(
-        Object.entries(schema.descriptionErrors ?? {}).map(([f, m]) => [
-          keyOfBasename.get(f) ?? f,
-          m,
-        ]),
+        Object.entries(schema.descriptionErrors ?? {}),
       );
       // Files the worker refused (format generation, or built before the POI
       // model) were never opened; list them with their message instead.
@@ -1490,7 +1518,7 @@ export class RoutingDatabase {
       // that cannot be loaded fails the call rather than leaving a gap the
       // caller was promised there would not be.
       const toLoad = Array.from(this.coverageIndex.values()).filter(
-        (e) => e.state === "not_loaded",
+        (e) => e.state === "not_loaded" || e.state === "loading",
       );
       for (const entry of toLoad) {
         await this.loadDatabaseGraph(entry.filename);
@@ -2184,6 +2212,8 @@ export class RoutingDatabase {
     entry.state = "loading";
     const tombstones = { nodes: new Set<number>(), edges: new Set<string>() };
     this.loadTombstones.add(tombstones);
+    // The handle this attempt opened, until its region is merged.
+    let openedHandle: number | null = null;
     try {
       // Everything is read from the worker, and the navmesh parsed, before
       // the in-memory graph is touched: a load that fails (a worker error, a
@@ -2194,6 +2224,7 @@ export class RoutingDatabase {
       const opened = await this.store.openDb(entry.path);
       if ("refused" in opened) throw new FormatRefusal(opened.refused);
       const dbIndex = opened.dbIndex;
+      openedHandle = dbIndex;
 
       // The overlay's own added nodes/edges rows must be merged into memory
       // exactly once across the whole process lifetime, no matter how many
@@ -2354,6 +2385,7 @@ export class RoutingDatabase {
 
       entry.dbIndex = dbIndex;
       entry.state = "loaded";
+      openedHandle = null; // merged: owned by the loaded region now
       // §4a M5: a freshly-loaded region is by definition the most recently
       // used one.
       this.touchRegion(filename);
@@ -2368,6 +2400,11 @@ export class RoutingDatabase {
           `${nodeIdSet.size} nodes, ${edgeCount} edges, ${pois.length} POIs, ${newRegions.length} navmesh regions`,
       );
     } catch (err) {
+      // A failed attempt must not leave its file open: nothing refers to the
+      // handle, and a later attempt opens a fresh one.
+      if (openedHandle !== null) {
+        await this.store.closeDb(openedHandle).catch(() => {});
+      }
       if (err instanceof FormatRefusal) {
         // The file is not in a format this build reads (possibly replaced on
         // disk after the peek): keep it out of every selection path.

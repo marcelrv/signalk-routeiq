@@ -46,9 +46,6 @@ export interface RegionFileEntry {
   /** False for a file that is listed but must never be loaded (it is peeked
    *  for its metadata only, so it can still be shown and switched on). */
   enabled: boolean;
-  /** The plain filename the file is known by (coverage index key, API
-   *  filename, data version). Defaults to the basename of `path`. */
-  name?: string;
 }
 
 /** Why a graph-editing call was refused. */
