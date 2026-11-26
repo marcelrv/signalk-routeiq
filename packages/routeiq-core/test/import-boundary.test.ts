@@ -59,3 +59,11 @@ test("core's package.json declares no runtime dependencies", () => {
   const pkg = JSON.parse(readFileSync(join(pkgRoot, "package.json"), "utf8"));
   assert.equal(pkg.dependencies, undefined);
 });
+
+test("core's compiled output never touches the console", () => {
+  // It logs through the injected Logger; the db worker forwards its lines to it.
+  const offenders = jsFiles(distDir)
+    .filter((f) => /\bconsole\s*\./.test(readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "")))
+    .map((f) => relative(pkgRoot, f));
+  assert.deepEqual(offenders, []);
+});
