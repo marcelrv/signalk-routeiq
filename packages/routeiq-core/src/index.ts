@@ -24,4 +24,6 @@ export * from "./codes.js";
 export * from "./messages.js";
 export * from "./failure.js";
 export * from "./request-control.js";
+export * from "./protocol.js";
+export * from "./engine-client.js";
 export * from "./counters.js";

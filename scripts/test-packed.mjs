@@ -16,6 +16,8 @@ import { cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { clearTimeout } from 'node:timers';
+import { Worker } from 'node:worker_threads';
 
 const repo = fileURLToPath(new URL('../', import.meta.url));
 const work = mkdtempSync(join(tmpdir(), 'routeiq-packed-'));
@@ -97,6 +99,7 @@ try {
   const files = packed[0].files.map((f) => f.path);
   assert.ok(files.includes('dist/index.js'), 'tarball lacks dist/index.js');
   assert.ok(files.includes('dist/db-worker.js'), 'tarball lacks dist/db-worker.js');
+  assert.ok(files.includes('dist/worker-host.js'), 'tarball lacks dist/worker-host.js');
   assert.ok(
     !files.some((f) => f.startsWith('packages/') || f.includes('node_modules/routeiq-core')),
     'tarball contains packages/ or node_modules/routeiq-core',
@@ -138,7 +141,11 @@ try {
   assert.ok(body.totalDistance > 0, 'route has no distance');
   console.log(`   route: ${body.features.length} segments, ${Math.round(body.totalDistance)} m`);
 
-  console.log('5. stop');
+  console.log('5. the installed worker host routes on its own');
+  await hostRoutes(join(pluginRoot, 'dist', 'worker-host.js'));
+  console.log('   worker host answered a route');
+
+  console.log('6. stop');
   await plugin.stop();
   plugin = null;
   console.log('OK');
@@ -154,6 +161,60 @@ try {
   rmSync(work, { recursive: true, force: true });
 }
 process.exit(failed ? 1 : 0);
+
+/** Starts the installed worker host, initialises it over the protocol and routes once. */
+function hostRoutes(hostFile) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(hostFile);
+    const timer = setTimeout(() => done(new Error('worker host did not answer in time')), 60000);
+    const done = (err) => {
+      clearTimeout(timer);
+      void worker.terminate().then(() => (err ? reject(err) : resolve()));
+    };
+    worker.on('error', done);
+    worker.on('message', (m) => {
+      if (m.type !== 'result') return;
+      if (!m.ok) return done(new Error(`host job ${m.id} failed: ${JSON.stringify(m.error)}`));
+      if (m.id === 1) {
+        worker.postMessage({
+          type: 'route',
+          id: 2,
+          request: {
+            start: { latitude: 51.613, longitude: 3.885 },
+            end: { latitude: 51.609, longitude: 3.896 },
+            minCoastDistance: 0,
+          },
+        });
+      } else if (m.id === 2) {
+        done(m.value?.result?.features?.length > 0 && m.value.resultId ? undefined : new Error('host route has no features'));
+      }
+    });
+    worker.postMessage({
+      type: 'init',
+      id: 1,
+      protocolVersion: 1,
+      engine: {
+        bboxMarginDeg: 1,
+        bboxMaxExtentDeg: 10,
+        losSearchRadiusM: 0,
+        waypointToleranceM: 30,
+        coverageGapM: 1500,
+        maxPenaltyDetourRatio: 3,
+        defaultSpeedKnots: 5,
+        defaultLockWaitMinutes: 60,
+        defaultBridgeWaitMinutes: 30,
+        defaultSafetyMarginDraftM: 0.3,
+        defaultSafetyMarginBeamM: 2,
+        defaultSafetyMarginAirDraftM: 1.5,
+        defaultUseTides: false,
+        defaultVessel: { draft: 1, beam: 3, airDraft: 10 },
+        requireVesselInRequest: false,
+        messageLanguage: 'en',
+      },
+      database: { files: [{ path: join(dataDir, 'netherlands.sqlite'), enabled: true }], policy: 'dynamic' },
+    });
+  });
+}
 
 function existsAt(p) {
   try {

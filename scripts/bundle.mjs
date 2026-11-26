@@ -7,8 +7,9 @@
 //   src/provider.ts       ../package.json
 //   src/plotterext.ts     createRequire(import.meta.url)
 //   core sqlite-worker-store.ts  db-worker.js next to the module that starts it
+//   core engine-client.ts        worker-host.js next to the module that starts it
 // db-worker is a second entry point (taken from routeiq-core's sources) so it
-// exists as dist/db-worker.js, and sqlite-worker-store.ts (inlined into
+// exists as dist/db-worker.js (worker-host is a third, for EngineClient), and sqlite-worker-store.ts (inlined into
 // dist/index.js) finds it in the same directory.
 //
 // External: node built-ins and the root package's runtime dependencies.
@@ -29,7 +30,11 @@ rmSync(new URL('dist', root), { recursive: true, force: true });
 
 const options = {
   absWorkingDir: fileURLToPath(root),
-  entryPoints: { index: 'src/index.ts', 'db-worker': 'packages/routeiq-core/src/db-worker.ts' },
+  entryPoints: {
+    index: 'src/index.ts',
+    'db-worker': 'packages/routeiq-core/src/db-worker.ts',
+    'worker-host': 'packages/routeiq-core/src/worker-host.ts',
+  },
   outdir: 'dist',
   bundle: true,
   format: 'esm',
