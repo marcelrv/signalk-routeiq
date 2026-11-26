@@ -47,6 +47,13 @@ import {
   type BlockingCause,
 } from "./failure.js";
 import { CounterSet, type EngineCounters } from "./counters.js";
+import {
+  RequestControl,
+  effectiveBudget,
+  isStopFailure,
+  type RouteCallOptions,
+  type StopReason,
+} from "./request-control.js";
 import { format, type MessageParams } from "./messages.js";
 import {
   CurrentProvider,
@@ -69,6 +76,7 @@ import type {
   RoutingRequest,
 } from "./types.js";
 import {
+  DEFAULT_MAX_SEARCH_ITERATIONS,
   type EngineOptions,
   RouteRequestError,
   messageLanguageFor,
@@ -398,6 +406,10 @@ export class RoutingEngine {
   private currents: CurrentProvider | null = null;
   private readonly log: Logger;
   private readonly counters = new CounterSet();
+  /** The budget and abort signal of each request in flight, by the request's
+   *  own inputs object (which no other request shares). Nothing about a
+   *  request outlives it: the entry goes with the inputs. */
+  private readonly controls = new WeakMap<RouteInputs, RequestControl>();
 
   /**
    * The engine keeps no vessel or user state: draft, beam, air draft, speed,
@@ -592,13 +604,45 @@ export class RoutingEngine {
    * refuses to evict a database while any route is executing) without
    * touching the body of the actual search logic.
    */
-  async calculateRoute(request: RoutingRequest): Promise<RouteResult> {
+  async calculateRoute(
+    request: RoutingRequest,
+    options: RouteCallOptions = {},
+  ): Promise<RouteResult> {
+    return this.runRoute(request, this.newControl(options));
+  }
+
+  /** The control of one request: the engine's budget, lowered by the call's. */
+  private newControl(options: RouteCallOptions): RequestControl {
+    return new RequestControl(
+      effectiveBudget(this._options.budget, options.budget),
+      options.signal,
+    );
+  }
+
+  /** Throws `BUDGET_EXCEEDED` / `ABORTED` when the request owning `inputs` has
+   *  to stop. A no-op for inputs that carry no control. */
+  private checkStop(inputs: RouteInputs): void {
+    const stop = this.controls.get(inputs)?.check();
+    if (stop) throw this.stopFailure(inputs, stop);
+  }
+
+  private stopFailure(inputs: RouteInputs, stop: StopReason): RouteFailure {
+    return this.failure(inputs, stop.code, stop.params as MessageParams);
+  }
+
+  /** One route calculation under `control` (a scan shares one across steps). */
+  private async runRoute(
+    request: RoutingRequest,
+    control: RequestControl,
+  ): Promise<RouteResult> {
     // Resolved once, before anything is counted or loaded: strict mode refuses
     // an incomplete request here.
     let inputs: RouteInputs | undefined;
     try {
       inputs = resolveRouteInputs(request, this._options);
+      this.controls.set(inputs, control);
       this.checkRequest(request, inputs);
+      this.checkStop(inputs);
       this.db.beginRoute();
       try {
         const route = await this.calculateRouteImpl(request, inputs);
@@ -775,6 +819,7 @@ export class RoutingEngine {
     let lastSearchError: RouteSearchError | undefined;
 
     while (currentMargin <= maxMargin) {
+      this.checkStop(inputs);
       const bbox = bboxFromPoints(start, end, currentMargin);
 
       // §4a.1 task 4: preload transit regions — databases this attempt's box
@@ -860,6 +905,8 @@ export class RoutingEngine {
         previousAttempt = candidates[candidates.length - 1];
         currentMargin = newMargin;
       } catch (e) {
+        // A budget or abort ends the request, whatever was found so far.
+        if (isStopFailure(e)) throw e;
         // Only an A* failure is worth a wider box. Anything else is a bug:
         // it propagates, unless an earlier box already found a route, which
         // is kept rather than thrown away.
@@ -995,7 +1042,7 @@ export class RoutingEngine {
     request: RoutingRequest,
     scanHours: number = 24,
     stepMinutes: number = 60,
-    signal?: { aborted: boolean },
+    options: RouteCallOptions = {},
     baseMs: number = RoutingEngine.departureScanBase(request),
   ): AsyncGenerator<DepartureScanStep> {
     // Count the whole scan as one route in flight, on top of the per-step
@@ -1007,12 +1054,15 @@ export class RoutingEngine {
     // regions are evicted once, when the scan is done.
     //
     // Safe for a scan that stops early: an async generator runs `finally` on
-    // .return(), which is what both the `signal.aborted` returns below and a
-    // consumer that stops iterating trigger.
+    // .return(), which is what a consumer that stops iterating triggers; an
+    // abort or an overrun budget throws out of the generator and runs it too.
     // The effective inputs are fixed once for the whole scan (strict mode
     // refuses an incomplete request here, before the first step) and handed to
     // every step in the request, so all steps plan against the same boat.
     const inputs = resolveRouteInputs(request, this._options);
+    // One control for the whole scan: the budget is spent over all its steps.
+    const control = this.newControl(options);
+    this.controls.set(inputs, control);
     const fixed: RoutingRequest = {
       ...request,
       draft: inputs.draft,
@@ -1031,7 +1081,8 @@ export class RoutingEngine {
         fixed,
         scanHours,
         stepMinutes,
-        signal,
+        control,
+        inputs,
         baseMs,
       );
     } finally {
@@ -1044,30 +1095,41 @@ export class RoutingEngine {
     request: RoutingRequest,
     scanHours: number,
     stepMinutes: number,
-    signal: { aborted: boolean } | undefined,
+    control: RequestControl,
+    scanInputs: RouteInputs,
     baseMs: number,
   ): AsyncGenerator<DepartureScanStep> {
+    // A stop between steps (no calculation is running to count it) is counted
+    // here; one inside a step was counted by that step.
+    const checkBetween = (): void => {
+      const stop = control.check();
+      if (!stop) return;
+      const failure = this.stopFailure(scanInputs, stop);
+      this.counters.routeFailed(failure.code);
+      throw failure;
+    };
     for (const i of RoutingEngine.departureScanOrder(
       RoutingEngine.departureScanSteps(scanHours, stepMinutes),
     )) {
-      if (signal?.aborted) return;
+      checkBetween();
       const departureTime = RoutingEngine.departureScanTime(
         baseMs,
         i,
         stepMinutes,
       );
       try {
-        const r = await this.calculateRoute({
-          ...request,
-          departureTime,
-          useTides: true,
-          describe: false,
-        });
-        // Checked again on the way out, not just on the way in. A search that
-        // was already running when the client hung up finishes — cancellation
-        // is not threaded into calculateRoute itself — but its result belongs
-        // to a scan nobody is receiving, so it is dropped rather than yielded.
-        if (signal?.aborted) return;
+        const r = await this.runRoute(
+          {
+            ...request,
+            departureTime,
+            useTides: true,
+            describe: false,
+          },
+          control,
+        );
+        // Checked again on the way out: a result that finished just as the
+        // scan was aborted belongs to a scan nobody is receiving.
+        checkBetween();
         yield {
           index: i,
           departureTime,
@@ -1077,7 +1139,8 @@ export class RoutingEngine {
           totalDistance: r.totalDistance,
         };
       } catch (e) {
-        if (signal?.aborted) return;
+        // A budget or abort ends the scan; only a step's own failure is a row.
+        if (isStopFailure(e)) throw e;
         yield {
           index: i,
           departureTime,
@@ -1128,12 +1191,14 @@ export class RoutingEngine {
     request: RoutingRequest,
     scanHours: number = 24,
     stepMinutes: number = 60,
+    options: RouteCallOptions = {},
   ): Promise<DepartureScanStep[]> {
     const out: DepartureScanStep[] = [];
     for await (const d of this.streamDepartures(
       request,
       scanHours,
       stepMinutes,
+      options,
     )) {
       out.push(d);
     }
@@ -1209,6 +1274,7 @@ export class RoutingEngine {
             env,
           );
         } catch (e) {
+          if (isStopFailure(e)) throw e;
           throw this.failure(inputs, "NO_PATH", {
             reason: "primary_network",
             cause: this.causeOf(e),
@@ -1485,6 +1551,7 @@ export class RoutingEngine {
     let lastSearchError: RouteSearchError | undefined;
 
     while (currentMargin <= segmentMaxMargin) {
+      this.checkStop(inputs);
       const segmentBbox = bbox ?? bboxFromPoints(startPt, endPt, currentMargin);
 
       // §4a.1 task 4: preload this segment's transit regions — see the
@@ -1558,6 +1625,7 @@ export class RoutingEngine {
         previousAttempt = candidates[candidates.length - 1];
         currentMargin = newMargin;
       } catch (e) {
+        if (isStopFailure(e)) throw e;
         // As in calculateRouteImpl: widen only on an A* failure; a bug
         // propagates unless a route was already found.
         if (!(e instanceof RouteSearchError)) {
@@ -1652,6 +1720,7 @@ export class RoutingEngine {
         }
         return fallback;
       } catch (e) {
+        if (isStopFailure(e)) throw e;
         failure.reason = e instanceof Error ? e.message : String(e);
         failure.cause = this.causeOf(e);
         this.log.info(`[routeiq] ${label}: ${failure.reason}`);
@@ -2813,7 +2882,11 @@ export class RoutingEngine {
     let reachedNode: number | null = null;
     const searchStartedAt = performance.now();
     let iterations = 0;
-    const maxIterations = 5000000; // Safety limit (5000K suffices for trans-continental routes like NL→Italy ~2000nm)
+    // Per-search safety limit (EngineOptions.maxSearchIterations); the
+    // request-wide budget is counted separately, in `control`.
+    const maxIterations =
+      this._options.maxSearchIterations ?? DEFAULT_MAX_SEARCH_ITERATIONS;
+    const control = this.controls.get(inputs);
     const skipReasons: SearchSkipReasons = {
       land: 0,
       obstacle: 0,
@@ -2851,6 +2924,13 @@ export class RoutingEngine {
 
     while (!openSet.isEmpty() && iterations < maxIterations) {
       iterations++;
+      if (control) {
+        const stop = control.expand();
+        if (stop) throw this.stopFailure(inputs, stop);
+        // Abort and wall time every 1024 expansions, and again after each
+        // yield below (an abort usually arrives while the loop is yielded).
+        if ((iterations & 1023) === 0) this.checkStop(inputs);
+      }
 
       // Yield to the macrotask queue periodically so a long CPU-bound search
       // doesn't starve the SignalK server's event loop (I/O, NMEA, WebSocket
@@ -2859,6 +2939,7 @@ export class RoutingEngine {
       // does. ~10k iterations keeps each blocking burst to a few ms.
       if (iterations % 10000 === 0) {
         await new Promise<void>((resolve) => setImmediate(resolve));
+        this.checkStop(inputs);
       }
 
       // Once any goal candidate is known, no future pop can beat it once the
@@ -3126,7 +3207,8 @@ export class RoutingEngine {
     const compressedPath = this.compressCollinear(path);
 
     // Apply string-pulling to remove unnecessary grid staircasing
-    const smoothedPath = await this.smoothPath(compressedPath);
+    this.checkStop(inputs);
+    const smoothedPath = await this.smoothPath(compressedPath, inputs);
 
     // Build GeoJSON response
     const result = await this.buildRouteResult(
@@ -5824,7 +5906,10 @@ export class RoutingEngine {
    * that has a clear line-of-sight (no land or constraint gaps), and skip
    * the intermediate grid nodes.
    */
-  private async smoothPath(path: number[]): Promise<number[]> {
+  private async smoothPath(
+    path: number[],
+    inputs: RouteInputs,
+  ): Promise<number[]> {
     if (path.length <= 2 || !this._options.losSearchRadiusM) return path;
 
     const smoothed: number[] = [path[0]];
@@ -5841,6 +5926,7 @@ export class RoutingEngine {
     const MAX_LOOKAHEAD = 300;
 
     while (i < path.length - 1) {
+      this.checkStop(inputs);
       const maxJ = Math.min(path.length - 1, i + MAX_LOOKAHEAD);
       let j = maxJ;
       while (j > i + 1) {

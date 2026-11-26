@@ -608,10 +608,9 @@ export class ApiHandler {
 
     // Closing the planner, or navigating away, should stop the work — not leave
     // the server computing routes for a window nobody is looking at any more.
-    const signal = { aborted: false };
-    const stop = (): void => {
-      signal.aborted = true;
-    };
+    const abort = new AbortController();
+    const signal = abort.signal;
+    const stop = (): void => abort.abort();
     res.on("close", stop);
 
     const write = (obj: unknown): void => {
@@ -637,13 +636,15 @@ export class ApiHandler {
         request,
         hours,
         step,
-        signal,
+        { signal },
         baseMs,
       )) {
         write({ type: "departure", ...d });
       }
       write({ type: signal.aborted ? "aborted" : "done" });
     } catch (error) {
+      // The client went away: the scan stopped on the signal, nobody is told.
+      if (signal.aborted) return;
       const message = error instanceof Error ? error.message : "Unknown error";
       write({
         type: "error",

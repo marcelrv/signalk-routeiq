@@ -108,9 +108,9 @@ export const FAILURE_CODES = [
   "OUTSIDE_COVERAGE",
   /** No routing node near a point. params: point (start|end|either). */
   "NO_NODE_NEAR_POINT",
-  /** The calculation hit a configured budget (reserved; none is configured). */
+  /** The calculation hit a configured budget (`EngineOptions.budget`, or a request's own lower one). */
   "BUDGET_EXCEEDED",
-  /** The calculation was aborted (reserved). */
+  /** The calculation was aborted (its `AbortSignal`). */
   "ABORTED",
   /** Strict mode: the request lacks vessel or speed. params: missing. */
   "VESSEL_INCOMPLETE",

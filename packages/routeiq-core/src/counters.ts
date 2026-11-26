@@ -37,7 +37,7 @@ export interface EngineCounters {
   failuresByCode: Record<FailureCode, number>;
   /** Failures that were not a `RouteFailure` (a bug or an I/O error). */
   failuresOther: number;
-  /** Calculations stopped by a budget. No budget exists yet, so always 0. */
+  /** Calculations stopped by a budget (`BUDGET_EXCEEDED`). */
   budgetHits: number;
   search: {
     /** A* iterations, summed over searches. */

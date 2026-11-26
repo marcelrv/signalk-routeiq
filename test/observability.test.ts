@@ -459,7 +459,7 @@ describe('structured failures', () => {
     assert.deepStrictEqual(new RouteFailure('NO_PATH', {}, 'm', blocking).failure, { code: 'NO_PATH', params: {}, blocking });
   });
 
-  it('BUDGET_EXCEEDED and ABORTED are reserved: nothing throws them yet, the catalogue words them', () => {
+  it('BUDGET_EXCEEDED and ABORTED are worded by the catalogue', () => {
     for (const code of ['BUDGET_EXCEEDED', 'ABORTED'] as const) {
       const f = RouteFailure.create(code, {}, 'nl');
       assert.strictEqual(f.code, code);

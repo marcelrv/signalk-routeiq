@@ -23,4 +23,5 @@ export * from "./sqlite-worker-store.js";
 export * from "./codes.js";
 export * from "./messages.js";
 export * from "./failure.js";
+export * from "./request-control.js";
 export * from "./counters.js";

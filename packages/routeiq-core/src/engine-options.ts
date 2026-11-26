@@ -12,6 +12,7 @@
 import { RouteFailure } from "./failure.js";
 import type { Logger } from "./logger.js";
 import { formatFailure } from "./messages.js";
+import type { SearchBudget } from "./request-control.js";
 import type { RouteInputs, RoutingRequest } from "./types.js";
 import { CORE_VERSION } from "./version.js";
 
@@ -70,9 +71,26 @@ export interface EngineOptions {
    * still selects the language of water names either way.
    */
   messageLanguage: "request" | string;
+  /**
+   * Node expansions one A* search may make before it ends as "no path" with
+   * `iterationLimit: true` in the failure params. Per search, not per request
+   * (see `budget` for that). Default 5_000_000.
+   */
+  maxSearchIterations?: number;
+  /**
+   * What one whole request (a route, or a departure scan) may spend over all
+   * its searches, retries, legs and steps. Default: unlimited. A request can
+   * lower these through its call options, never raise them. Over the limit the
+   * request throws `BUDGET_EXCEEDED`.
+   */
+  budget?: Partial<SearchBudget>;
   /** Where the engine logs to. Default: silent. */
   logger?: Logger;
 }
+
+/** Default of `EngineOptions.maxSearchIterations`: 5M suffices for
+ *  trans-continental routes (about 2000 nm). */
+export const DEFAULT_MAX_SEARCH_ITERATIONS = 5_000_000;
 
 export const DEFAULT_ENGINE_OPTIONS: EngineOptions = {
   bboxMarginDeg: 1.0,
@@ -91,6 +109,8 @@ export const DEFAULT_ENGINE_OPTIONS: EngineOptions = {
   defaultVessel: { draft: 0, beam: 4, airDraft: 0 },
   requireVesselInRequest: false,
   messageLanguage: "request",
+  maxSearchIterations: DEFAULT_MAX_SEARCH_ITERATIONS,
+  budget: { maxIterations: Infinity, maxWallMs: Infinity },
 };
 
 /** Codes a RouteRequestError can carry. */

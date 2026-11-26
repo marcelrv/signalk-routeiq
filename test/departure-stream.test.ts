@@ -33,12 +33,12 @@ describe('POST /route/departures streaming', () => {
         _req: unknown,
         hours: number,
         step: number,
-        signal?: { aborted: boolean },
+        options?: { signal?: AbortSignal },
       ) {
         const { RoutingEngine } = await import('routeiq-core');
         const steps = RoutingEngine.departureScanSteps(hours, step);
         for (const i of RoutingEngine.departureScanOrder(steps)) {
-          if (signal?.aborted) return;
+          if (options?.signal?.aborted) return;
           visited.push(i);
           if (opts.failAt === i) throw new Error('engine blew up');
           yield {
