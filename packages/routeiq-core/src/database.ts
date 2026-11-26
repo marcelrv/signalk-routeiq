@@ -74,6 +74,38 @@ export const POI_WHOLE_TYPES: ReadonlySet<number> = new Set([
  *  files per result. Callers (the API) apply it; route building does not. */
 export const MAX_POIS_IN_BBOX = 500;
 
+/** Caps on what a POI query may ask for. They are parameters of the database
+ *  (`RoutingDatabaseOptions.limits`); a call's own limit can only lower them. */
+export interface PoiLimits {
+  /** Most POIs a client-facing bounding-box query returns (see
+   *  `clampBBoxLimit`). `getPoisInBBox` itself takes the limit it is given:
+   *  route building asks for parts uncapped. */
+  maxBBoxResults: number;
+  /** Most results one name search returns. */
+  maxSearchResults: number;
+  /** Metres. Largest radius a nearest-POI query looks within. */
+  maxNearestRadiusM: number;
+  /** Characters of a search text that are used; the rest is dropped. */
+  maxSearchQueryLength: number;
+}
+
+export const DEFAULT_POI_LIMITS: PoiLimits = Object.freeze({
+  maxBBoxResults: MAX_POIS_IN_BBOX,
+  maxSearchResults: Infinity,
+  maxNearestRadiusM: Infinity,
+  maxSearchQueryLength: 256,
+});
+
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+
+/** The search text as the database uses it: control characters (C0, DEL, C1,
+ *  and the Unicode line/paragraph separators) removed, cut to `maxLength`. */
+export function sanitizeSearchQuery(query: string, maxLength: number): string {
+  const clean = String(query).replace(CONTROL_CHARS, "");
+  return clean.length > maxLength ? clean.slice(0, maxLength) : clean;
+}
+
 /** A POI as the bounding-box query returns it. */
 export interface PoiBBoxResult {
   id: number;
@@ -348,6 +380,9 @@ export interface RoutingDatabaseOptions {
   waterwaysPath?: string | null;
   /** GeoJSON of land polygons for the land-crossing check; null = none. */
   landPolygonsPath?: string | null;
+  /** Caps on POI queries (see `PoiLimits`). Defaults keep the API's long-time
+   *  behaviour: 500 per box, no cap on search results or nearest radius. */
+  limits?: Partial<PoiLimits>;
   /** Where the database logs to. Also given to the default store, so the
    *  worker thread's lines reach it. Default: silent. */
   logger?: Logger;
@@ -587,7 +622,10 @@ export class RoutingDatabase {
    *  getRegionCounters). */
   private regionLoadCount = 0;
 
+  private readonly poiLimits: PoiLimits;
+
   constructor(options: RoutingDatabaseOptions) {
+    this.poiLimits = { ...DEFAULT_POI_LIMITS, ...options.limits };
     this.log = resolveLogger(options.logger);
     this.readOnly = options.readOnly === true;
     this.policy = options.policy ?? "dynamic";
@@ -3251,7 +3289,13 @@ export class RoutingDatabase {
     query: string,
     maxResults: number = 20,
   ): Promise<PoiResult[]> {
-    const pattern = query.toLowerCase();
+    const pattern = sanitizeSearchQuery(
+      query,
+      this.poiLimits.maxSearchQueryLength,
+    ).toLowerCase();
+    // Nothing but control characters is not "match everything".
+    if (pattern === "" && query !== "") return [];
+    maxResults = Math.min(maxResults, this.poiLimits.maxSearchResults);
     // Wholes and harbours only: a part is found through its whole, so the
     // same lock never appears once per chamber. Sort before slicing so
     // results are alphabetically consistent regardless of the order rows were
@@ -3559,6 +3603,15 @@ export class RoutingDatabase {
     return results;
   }
 
+  /** The limit to pass `getPoisInBBox` for a client's request: what it asked
+   *  for, at least 1, never more than `limits.maxBBoxResults`. */
+  clampBBoxLimit(requested?: number): number {
+    const max = Math.max(1, this.poiLimits.maxBBoxResults);
+    return requested === undefined || Number.isNaN(requested)
+      ? max
+      : Math.max(1, Math.min(max, requested));
+  }
+
   /**
    * POIs inside a box, for the map and for crossing detection: parts (chambers
    * and spans) and harbours, never a whole, so a lock is not drawn once as a
@@ -3735,7 +3788,11 @@ export class RoutingDatabase {
     longitude: number;
     distance: number;
   } | null> {
-    const found = this.nearestPoiRow(lat, lon, maxDistanceMeters);
+    const found = this.nearestPoiRow(
+      lat,
+      lon,
+      Math.min(maxDistanceMeters, this.poiLimits.maxNearestRadiusM),
+    );
     if (!found) return null;
     const { row: best, distance: bestDist } = found;
     const info = await this.getPoiInfo([best.id]);

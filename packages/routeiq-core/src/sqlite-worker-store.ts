@@ -6,6 +6,12 @@
  * client side of it: one request per call, replies matched by id, chunked
  * replies (the edge load) reassembled. The worker starts with the first call
  * and ends with `close()`; a closed store starts afresh on its next call.
+ *
+ * If the worker dies on its own (an uncaught error, an exit), every call still
+ * waiting is rejected and the store refuses further calls until it is
+ * re-initialised (`openAll`) or closed. It never restarts a worker silently:
+ * the new one would know none of the open files or loaded indexes the callers
+ * still hold.
  */
 
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -88,6 +94,8 @@ export interface SqliteWorkerStoreOptions {
 
 export class SqliteWorkerStore implements RoutingStore, OverlayStore {
   private worker: Worker | null = null;
+  /** Set when the worker stopped without being closed: why. */
+  private deadReason: Error | null = null;
   private messageIdCounter = 0;
   private readonly readOnly: boolean;
   private readonly log: Logger;
@@ -181,12 +189,15 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
       },
     );
 
-    worker.on("error", (err) => {
-      for (const [, p] of this.pending) {
-        p.reject(err);
-      }
-      this.pending.clear();
-    });
+    // An uncaught error in the worker is followed by its exit; either one
+    // ends it. A worker `close()` already let go of is not a failure.
+    worker.on("error", (err) => this.workerStopped(worker, err));
+    worker.on("exit", (code) =>
+      this.workerStopped(
+        worker,
+        new Error(`The database worker exited unexpectedly (code ${code})`),
+      ),
+    );
 
     // The worker's own switch: every file it opens is opened read-only.
     worker.postMessage({
@@ -197,7 +208,37 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
     return worker;
   }
 
+  /** The worker stopped by itself: fail what waits on it and refuse more
+   *  until the store is initialised again. */
+  private workerStopped(worker: Worker, cause: Error): void {
+    if (this.worker !== worker) return;
+    this.worker = null;
+    this.deadReason = cause;
+    this.log.error(`[routeiq] ${cause.message}`);
+    for (const [, p] of this.pending) p.reject(cause);
+    this.pending.clear();
+    worker.terminate().catch(() => undefined);
+  }
+
+  /** Whether the worker stopped on its own and the store has not been
+   *  initialised or closed since. */
+  get dead(): boolean {
+    return this.deadReason !== null;
+  }
+
   private send(type: string, payload?: any): Promise<any> {
+    // `init` (openAll) is the re-initialisation: it forgets the dead worker
+    // and starts a new one. Anything else would talk to state that is gone.
+    if (this.deadReason) {
+      if (type === "init") this.deadReason = null;
+      else {
+        return Promise.reject(
+          new Error(
+            `The database worker is not running (${this.deadReason.message}); the store must be initialised again`,
+          ),
+        );
+      }
+    }
     const worker = this.start();
     return new Promise((resolve, reject) => {
       const id = ++this.messageIdCounter;
@@ -262,6 +303,8 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
   }
 
   async close(): Promise<void> {
+    // A dead store is closed: the next call starts afresh, as after any close.
+    this.deadReason = null;
     const worker = this.worker;
     if (!worker) return;
     try {
@@ -276,8 +319,8 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
     // hanging on a worker that no longer exists.
     for (const [, p] of this.pending) p.reject(new Error("Store closed"));
     this.pending.clear();
-    worker.terminate();
     this.worker = null;
+    worker.terminate();
   }
 
   // --- OverlayStore -------------------------------------------------------

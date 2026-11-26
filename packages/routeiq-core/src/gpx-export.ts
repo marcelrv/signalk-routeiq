@@ -194,11 +194,11 @@ export class GpxExporter {
    * someone else can edit under it.
    */
   private static passageProfileGpx(p: PassageProfile): string {
-    const x = (v: string) => this.escapeXml(v);
+    const x = (v: string) => escapeXmlText(v);
     const attrs = (o: Record<string, string | number | boolean | undefined>) =>
       Object.entries(o)
         .filter(([, v]) => v !== undefined)
-        .map(([k, v]) => ` ${k}="${x(String(v))}"`)
+        .map(([k, v]) => ` ${k}="${escapeXmlAttribute(String(v))}"`)
         .join("");
     const a = p.assumptions;
     let out = `
@@ -316,11 +316,33 @@ export class GpxExporter {
   }
 
   private static escapeXml(text: string): string {
-    return text
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&apos;");
+    return escapeXmlText(text);
   }
+}
+
+/** Characters XML 1.0 does not allow: control characters other than tab, LF
+ *  and CR, U+FFFE/U+FFFF, and unpaired surrogates. */
+const INVALID_XML_CHARS =
+  // eslint-disable-next-line no-control-regex
+  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/** Text for an element body: characters XML 1.0 forbids are removed, the
+ *  five markup characters escaped. */
+export function escapeXmlText(text: string): string {
+  return String(text)
+    .replace(INVALID_XML_CHARS, "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/** Text for a double-quoted attribute value: as `escapeXmlText`, and tab, LF
+ *  and CR written as character references so a parser keeps them. */
+export function escapeXmlAttribute(text: string): string {
+  return escapeXmlText(text)
+    .replace(/\t/g, "&#9;")
+    .replace(/\n/g, "&#10;")
+    .replace(/\r/g, "&#13;");
 }
