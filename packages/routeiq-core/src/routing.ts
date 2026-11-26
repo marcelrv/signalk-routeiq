@@ -646,6 +646,8 @@ export class RoutingEngine {
       this.db.beginRoute();
       try {
         const route = await this.calculateRouteImpl(request, inputs);
+        // Also covers a path with no A* (same-region navmesh route).
+        this.checkStop(inputs);
         this.counters.routeCalculated();
         return route;
       } finally {
@@ -2922,195 +2924,201 @@ export class RoutingEngine {
     // in place, never replaced, so this stays valid across the awaits below).
     const nodeMap = this.db.getNodeMap();
 
-    while (!openSet.isEmpty() && iterations < maxIterations) {
-      iterations++;
-      if (control) {
-        const stop = control.expand();
-        if (stop) throw this.stopFailure(inputs, stop);
-        // Abort and wall time every 1024 expansions, and again after each
-        // yield below (an abort usually arrives while the loop is yielded).
-        if ((iterations & 1023) === 0) this.checkStop(inputs);
-      }
+    try {
+      while (!openSet.isEmpty() && iterations < maxIterations) {
+        iterations++;
+        if (control) {
+          const stop = control.expand();
+          if (stop) throw this.stopFailure(inputs, stop);
+          // Abort and wall time every 1024 expansions, and again after each
+          // yield below (an abort usually arrives while the loop is yielded).
+          if ((iterations & 1023) === 0) this.checkStop(inputs);
+        }
 
-      // Yield to the macrotask queue periodically so a long CPU-bound search
-      // doesn't starve the SignalK server's event loop (I/O, NMEA, WebSocket
-      // broadcasts). await on the synchronously-resolved getOutgoingEdges below
-      // only drains microtasks, which never lets macrotasks run — setImmediate
-      // does. ~10k iterations keeps each blocking burst to a few ms.
-      if (iterations % 10000 === 0) {
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        this.checkStop(inputs);
-      }
+        // Yield to the macrotask queue periodically so a long CPU-bound search
+        // doesn't starve the SignalK server's event loop (I/O, NMEA, WebSocket
+        // broadcasts). await on the synchronously-resolved getOutgoingEdges below
+        // only drains microtasks, which never lets macrotasks run — setImmediate
+        // does. ~10k iterations keeps each blocking burst to a few ms.
+        if (iterations % 10000 === 0) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          this.checkStop(inputs);
+        }
 
-      // Once any goal candidate is known, no future pop can beat it once the
-      // open set's best remaining f (an admissible lower bound on true
-      // remaining cost, including any navmesh suffix) is no better than that
-      // candidate's already-known true total — stop.
-      if (reachedNode !== null) {
-        const top = openSet.peek();
-        if (!top || top.f >= bestGoalCost) break;
-      }
+        // Once any goal candidate is known, no future pop can beat it once the
+        // open set's best remaining f (an admissible lower bound on true
+        // remaining cost, including any navmesh suffix) is no better than that
+        // candidate's already-known true total — stop.
+        if (reachedNode !== null) {
+          const top = openSet.peek();
+          if (!top || top.f >= bestGoalCost) break;
+        }
 
-      const current = openSet.pop()!;
+        const current = openSet.pop()!;
 
-      if (closedSet.has(current.nodeId)) {
-        continue;
-      }
-
-      closedSet.add(current.nodeId);
-
-      // A node finishes the route one of two ways: it IS the literal
-      // nearest-graph-node target (suffix cost 0), or it's one of the
-      // destination navmesh region's boundary-node candidates, whose own
-      // precomputed funnel "suffix" (that boundary node -> the literal end
-      // point, from seedNavmeshCandidates) still has to be paid before the
-      // journey is actually over. Reaching *some* boundary node cheaply via
-      // the graph does not mean the cheapest finish has been found — a
-      // pricier-to-reach boundary node can still be cheaper overall if its
-      // own suffix is much shorter (e.g. one that's actually close to the
-      // literal end point vs. one that's merely close by graph distance).
-      // Comparing true totals here (instead of stopping on first touch) is
-      // the fix for a real regression: the old immediate-stop let A* settle
-      // for whichever boundary node was cheapest to reach by graph alone,
-      // even when that meant crossing a heavily constraint-penalized edge
-      // while a clean, only-slightly-more-expensive-to-reach boundary node
-      // (e.g. next to an opening bridge) sat unexplored in the open set.
-      const suffix = endCandidates?.get(current.nodeId);
-      let candidateTotal: number | null = null;
-      if (current.nodeId === endNode) candidateTotal = current.g;
-      if (suffix !== undefined) {
-        const withSuffix = current.g + suffix.distance;
-        if (candidateTotal === null || withSuffix < candidateTotal)
-          candidateTotal = withSuffix;
-      }
-      if (candidateTotal !== null && candidateTotal < bestGoalCost) {
-        bestGoalCost = candidateTotal;
-        reachedNode = current.nodeId;
-        goalReached = true;
-      }
-
-      // Get outgoing edges from current node
-      const edges = await this.db.getOutgoingEdges(current.nodeId);
-
-      for (const edge of edges) {
-        if (closedSet.has(edge.target)) {
+        if (closedSet.has(current.nodeId)) {
           continue;
         }
 
-        // The target's position is resolved once per relaxation and reused
-        // by the bbox test, the tidal sample below and the heuristic. An
-        // edge whose target has no node can't be scored (nor arrived at),
-        // so it's skipped.
-        const toPos = nodeMap.get(edge.target);
-        if (!toPos) continue;
+        closedSet.add(current.nodeId);
 
-        // Bounding box check — skip nodes outside the box
-        if (bbox && !isInsideBBox(toPos.lat, toPos.lon, bbox)) {
-          skipReasons.bbox++;
-          continue;
+        // A node finishes the route one of two ways: it IS the literal
+        // nearest-graph-node target (suffix cost 0), or it's one of the
+        // destination navmesh region's boundary-node candidates, whose own
+        // precomputed funnel "suffix" (that boundary node -> the literal end
+        // point, from seedNavmeshCandidates) still has to be paid before the
+        // journey is actually over. Reaching *some* boundary node cheaply via
+        // the graph does not mean the cheapest finish has been found — a
+        // pricier-to-reach boundary node can still be cheaper overall if its
+        // own suffix is much shorter (e.g. one that's actually close to the
+        // literal end point vs. one that's merely close by graph distance).
+        // Comparing true totals here (instead of stopping on first touch) is
+        // the fix for a real regression: the old immediate-stop let A* settle
+        // for whichever boundary node was cheapest to reach by graph alone,
+        // even when that meant crossing a heavily constraint-penalized edge
+        // while a clean, only-slightly-more-expensive-to-reach boundary node
+        // (e.g. next to an opening bridge) sat unexplored in the open set.
+        const suffix = endCandidates?.get(current.nodeId);
+        let candidateTotal: number | null = null;
+        if (current.nodeId === endNode) candidateTotal = current.g;
+        if (suffix !== undefined) {
+          const withSuffix = current.g + suffix.distance;
+          if (candidateTotal === null || withSuffix < candidateTotal)
+            candidateTotal = withSuffix;
+        }
+        if (candidateTotal !== null && candidateTotal < bestGoalCost) {
+          bestGoalCost = candidateTotal;
+          reachedNode = current.nodeId;
+          goalReached = true;
         }
 
-        // Where and when this edge is crossed. Hoisted above the penalty
-        // because the depth check needs it too, and computed only when tides
-        // are on — with env undefined none of this runs and the search stays
-        // bit-identical to the untimed one.
-        const fromNode = env ? this.db.getNodeSync(current.nodeId) : null;
-        const elapsed = env ? (tSec.get(current.nodeId) ?? 0) : 0;
-        const atMs = this.passageMsAt(env, elapsed);
-        const midLat = fromNode ? (fromNode.lat + toPos.lat) / 2 : toPos.lat;
-        const midLon = fromNode ? (fromNode.lon + toPos.lon) / 2 : toPos.lon;
+        // Get outgoing edges from current node
+        const edges = await this.db.getOutgoingEdges(current.nodeId);
 
-        // Apply soft safety constraints
-        const penalty = this.getEdgePenalty(
-          edge,
-          minCoastDistanceMeters,
-          inputs,
-          skipReasons,
-          env?.heights
-            ? {
-                env,
-                heights: env.heights,
-                atMs,
-                lat: midLat,
-                lon: midLon,
-              }
-            : undefined,
-        );
-        if (penalty === -1) {
-          continue;
-        }
-
-        // Tidal current: scale the edge to an "effective distance" so all
-        // existing cost factors and penalties keep their meaning. A fair
-        // current shortens the edge, a foul one lengthens it; with tides off
-        // (env undefined) this is a no-op and results match the old engine.
-        //
-        // transitTime resamples the current along the way rather than once
-        // for the whole edge — most edges are short enough that this is
-        // still exactly one sample, at the same cost as before, but a real
-        // edge can run to tens of kilometres (the ocean-tiled US East Coast
-        // data has some at ~34 km, hours at cruising speed) and a current
-        // sampled once at entry cannot be trusted for that long.
-        let effDistance = edge.distance;
-        let edgeSeconds = 0;
-        if (env) {
-          if (fromNode) {
-            edgeSeconds = this.transitTime(
-              fromNode.lat,
-              fromNode.lon,
-              toPos.lat,
-              toPos.lon,
-              edge.distance,
-              atMs!,
-              env,
-            ).sec;
-          } else {
-            edgeSeconds = edge.distance / env.speedMs;
+        for (const edge of edges) {
+          if (closedSet.has(edge.target)) {
+            continue;
           }
-          // Derived from the true (possibly multi-chunk) elapsed time rather
-          // than from a single sog, so a subdivided edge's cost reflects the
-          // same current variation its time tracking does — a fair current
-          // at entry followed by a foul one further along must not be scored
-          // as though the fair one held for the whole edge.
-          effDistance = env.speedMs * edgeSeconds;
-        }
 
-        const baseCost = this.calculateEdgeCost(edge, effDistance);
-        // penalty is a sum of per-meter violation RATES (see
-        // VIOLATION_RATE_CONSTRAINT/VIOLATION_RATE_COAST) — multiplying by
-        // the edge's own length keeps the surcharge proportional to how
-        // much violating distance is actually being crossed, rather than a
-        // flat per-edge charge that would bias the search toward many
-        // short violating edges over one long one. Math.max(1, ...) only
-        // guards against a zero-length edge silently escaping the penalty.
-        const edgeCost = baseCost + penalty * Math.max(1, edge.distance);
+          // The target's position is resolved once per relaxation and reused
+          // by the bbox test, the tidal sample below and the heuristic. An
+          // edge whose target has no node can't be scored (nor arrived at),
+          // so it's skipped.
+          const toPos = nodeMap.get(edge.target);
+          if (!toPos) continue;
 
-        const tentativeG = gScore.get(current.nodeId)! + edgeCost;
+          // Bounding box check — skip nodes outside the box
+          if (bbox && !isInsideBBox(toPos.lat, toPos.lon, bbox)) {
+            skipReasons.bbox++;
+            continue;
+          }
 
-        if (!gScore.has(edge.target) || tentativeG < gScore.get(edge.target)!) {
-          gScore.set(edge.target, tentativeG);
-          parent.set(edge.target, current.nodeId);
-          if (env)
-            tSec.set(
-              edge.target,
-              (tSec.get(current.nodeId) ?? 0) + edgeSeconds,
-            );
+          // Where and when this edge is crossed. Hoisted above the penalty
+          // because the depth check needs it too, and computed only when tides
+          // are on — with env undefined none of this runs and the search stays
+          // bit-identical to the untimed one.
+          const fromNode = env ? this.db.getNodeSync(current.nodeId) : null;
+          const elapsed = env ? (tSec.get(current.nodeId) ?? 0) : 0;
+          const atMs = this.passageMsAt(env, elapsed);
+          const midLat = fromNode ? (fromNode.lat + toPos.lat) / 2 : toPos.lat;
+          const midLon = fromNode ? (fromNode.lon + toPos.lon) / 2 : toPos.lon;
 
-          const h =
-            this.haversineDistance(toPos.lat, toPos.lon, endLat, endLon) *
-            minMultiplier;
+          // Apply soft safety constraints
+          const penalty = this.getEdgePenalty(
+            edge,
+            minCoastDistanceMeters,
+            inputs,
+            skipReasons,
+            env?.heights
+              ? {
+                  env,
+                  heights: env.heights,
+                  atMs,
+                  lat: midLat,
+                  lon: midLon,
+                }
+              : undefined,
+          );
+          if (penalty === -1) {
+            continue;
+          }
 
-          openSet.push({
-            nodeId: edge.target,
-            g: tentativeG,
-            f: tentativeG + h,
-            parent: current.nodeId,
-          });
+          // Tidal current: scale the edge to an "effective distance" so all
+          // existing cost factors and penalties keep their meaning. A fair
+          // current shortens the edge, a foul one lengthens it; with tides off
+          // (env undefined) this is a no-op and results match the old engine.
+          //
+          // transitTime resamples the current along the way rather than once
+          // for the whole edge — most edges are short enough that this is
+          // still exactly one sample, at the same cost as before, but a real
+          // edge can run to tens of kilometres (the ocean-tiled US East Coast
+          // data has some at ~34 km, hours at cruising speed) and a current
+          // sampled once at entry cannot be trusted for that long.
+          let effDistance = edge.distance;
+          let edgeSeconds = 0;
+          if (env) {
+            if (fromNode) {
+              edgeSeconds = this.transitTime(
+                fromNode.lat,
+                fromNode.lon,
+                toPos.lat,
+                toPos.lon,
+                edge.distance,
+                atMs!,
+                env,
+              ).sec;
+            } else {
+              edgeSeconds = edge.distance / env.speedMs;
+            }
+            // Derived from the true (possibly multi-chunk) elapsed time rather
+            // than from a single sog, so a subdivided edge's cost reflects the
+            // same current variation its time tracking does — a fair current
+            // at entry followed by a foul one further along must not be scored
+            // as though the fair one held for the whole edge.
+            effDistance = env.speedMs * edgeSeconds;
+          }
+
+          const baseCost = this.calculateEdgeCost(edge, effDistance);
+          // penalty is a sum of per-meter violation RATES (see
+          // VIOLATION_RATE_CONSTRAINT/VIOLATION_RATE_COAST) — multiplying by
+          // the edge's own length keeps the surcharge proportional to how
+          // much violating distance is actually being crossed, rather than a
+          // flat per-edge charge that would bias the search toward many
+          // short violating edges over one long one. Math.max(1, ...) only
+          // guards against a zero-length edge silently escaping the penalty.
+          const edgeCost = baseCost + penalty * Math.max(1, edge.distance);
+
+          const tentativeG = gScore.get(current.nodeId)! + edgeCost;
+
+          if (
+            !gScore.has(edge.target) ||
+            tentativeG < gScore.get(edge.target)!
+          ) {
+            gScore.set(edge.target, tentativeG);
+            parent.set(edge.target, current.nodeId);
+            if (env)
+              tSec.set(
+                edge.target,
+                (tSec.get(current.nodeId) ?? 0) + edgeSeconds,
+              );
+
+            const h =
+              this.haversineDistance(toPos.lat, toPos.lon, endLat, endLon) *
+              minMultiplier;
+
+            openSet.push({
+              nodeId: edge.target,
+              g: tentativeG,
+              f: tentativeG + h,
+              parent: current.nodeId,
+            });
+          }
         }
       }
+    } finally {
+      // Also when the loop is left by a stop failure: counted once.
+      this.noteSearch(iterations, searchStartedAt);
     }
-
-    this.noteSearch(iterations, searchStartedAt);
 
     if (
       (!goalReached || reachedNode === null) &&

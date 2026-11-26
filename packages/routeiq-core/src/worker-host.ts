@@ -15,6 +15,9 @@
  * from nothing else. The nested db worker (SQLite reads) stays as it is.
  */
 
+import { randomBytes } from "node:crypto";
+import { isAbsolute } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parentPort } from "node:worker_threads";
 import { RoutingDatabase } from "./database.js";
 import { RoutingEngine } from "./routing.js";
@@ -28,11 +31,13 @@ import {
   type HostErrorCode,
   type HostJobRequest,
   type HostLogMessage,
+  type HostProviderSpec,
   type HostReply,
   type HostRequest,
   type HostTestHooks,
   type WireError,
 } from "./protocol.js";
+import type { CurrentProvider, TideHeightProvider } from "./tides.js";
 import type { RouteResult } from "./types.js";
 
 if (!parentPort) {
@@ -65,22 +70,53 @@ let db: RoutingDatabase | null = null;
 let engine: RoutingEngine | null = null;
 let testHooks: HostTestHooks = {};
 let maxRetained = MAX_RETAINED_RESULTS;
+/** Route and departures jobs seen, for the test hooks. */
+let searchJobs = 0;
+
+/** Test hook: blocks this thread for good (no CPU used); only a terminate
+ *  ends it. */
+function maybeMisbehave(): void {
+  searchJobs++;
+  if (testHooks.hangOnRoute || testHooks.hangOnJobNumber === searchJobs) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+  }
+}
 
 /** The last route results, oldest first, by result id. */
-const results = new Map<number, RouteResult>();
+const results = new Map<string, RouteResult>();
 let nextResultId = 1;
+/** Prefix of every result id this host hands out (see InitRequest). */
+let generation = randomBytes(6).toString("hex");
 
 /** The job being processed, if any, and the aborts of jobs by id. */
 let busy = false;
 const controllers = new Map<number, AbortController>();
 
-function retain(result: RouteResult): number {
-  const id = nextResultId++;
+function retain(result: RouteResult): string {
+  const id = `${generation}:${nextResultId++}`;
   results.set(id, result);
   while (results.size > maxRetained) {
-    results.delete(results.keys().next().value as number);
+    results.delete(results.keys().next().value as string);
   }
   return id;
+}
+
+/** Loads a provider module named by the embedding application (trusted). */
+async function loadProvider(spec: HostProviderSpec): Promise<unknown> {
+  const location = spec.module;
+  const url = location.startsWith("file:")
+    ? location
+    : isAbsolute(location)
+      ? pathToFileURL(location).href
+      : null;
+  if (url === null) {
+    throw new Error("a provider module must be an absolute path or file: URL");
+  }
+  const mod = (await import(url)) as { default?: unknown };
+  if (typeof mod.default !== "function") {
+    throw new Error("a provider module must export a function by default");
+  }
+  return (mod.default as (options: unknown) => unknown)(spec.options);
 }
 
 function hostError(code: HostErrorCode, message: string): WireError {
@@ -141,6 +177,7 @@ async function init(
       "The host is already initialised",
     );
   testHooks = msg.testHooks ?? {};
+  if (msg.generation) generation = msg.generation;
   maxRetained = Math.max(1, msg.retainedResults ?? MAX_RETAINED_RESULTS);
   const database = new RoutingDatabase({
     ...msg.database,
@@ -160,8 +197,33 @@ async function init(
       "The routing data could not be opened",
     );
   }
+  const hosted = new RoutingEngine(database, {
+    ...msg.engine,
+    logger: hostLogger,
+  });
+  try {
+    if (msg.providers?.tideHeights) {
+      hosted.setTidesClient(
+        (await loadProvider(msg.providers.tideHeights)) as TideHeightProvider,
+      );
+    }
+    if (msg.providers?.currents) {
+      hosted.setCurrentsClient(
+        (await loadProvider(msg.providers.currents)) as CurrentProvider,
+      );
+    }
+  } catch (e) {
+    await database.close().catch(() => undefined);
+    hostLogger.error(
+      `[worker-host] Loading a provider module failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    throw new HostProtocolError(
+      "INIT_FAILED",
+      "A provider could not be loaded",
+    );
+  }
   db = database;
-  engine = new RoutingEngine(database, { ...msg.engine, logger: hostLogger });
+  engine = hosted;
 }
 
 async function runJob(
@@ -179,10 +241,7 @@ async function runJob(
     }
     case "route": {
       const { engine } = ready();
-      if (testHooks.hangOnRoute) {
-        // Blocks this thread for good (no CPU used): only a terminate ends it.
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
-      }
+      maybeMisbehave();
       if (testHooks.crashOnRoute) {
         setImmediate(() => {
           throw new Error("test hook: crash on route");
@@ -194,6 +253,14 @@ async function runJob(
         signal,
       });
       return { resultId: retain(result), result };
+    }
+    case "departures": {
+      const { engine } = ready();
+      maybeMisbehave();
+      return engine.scanDepartures(msg.request, msg.hours, msg.stepMinutes, {
+        budget: msg.budget,
+        signal,
+      });
     }
     case "pois": {
       const { db } = ready();

@@ -27,6 +27,7 @@
  * files.
  */
 
+import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
@@ -44,6 +45,7 @@ import {
   PROTOCOL_VERSION,
   type HostDatabaseOptions,
   type HostEngineOptions,
+  type HostProviders,
   type HostReply,
   type HostRequest,
   type HostTestHooks,
@@ -53,6 +55,7 @@ import {
 import { effectiveBudget, type SearchBudget } from "./request-control.js";
 import type {
   DataVersionEntry,
+  DepartureScanStep,
   ProviderInfo,
   RouteResult,
   RoutingRequest,
@@ -102,6 +105,10 @@ export interface EngineClientOptions {
   hardStopGraceMs?: number;
   /** How many route results the host keeps for `gpx`. */
   retainedResults?: number;
+  /** Tide and current provider modules the host loads in the worker. Trusted
+   *  configuration of the embedding application (they run code in the host),
+   *  never request data. See `HostProviderSpec`. */
+  providers?: HostProviders;
   /** The protocol version sent in `init`. Default `PROTOCOL_VERSION`; another
    *  value makes the host refuse (for tests). */
   protocolVersion?: number;
@@ -125,8 +132,9 @@ export interface RouteJobOptions extends JobOptions {
 }
 
 export interface RouteResponse {
-  /** Names this result in `gpx`, for as long as the host keeps it. */
-  resultId: number;
+  /** Names this result in `gpx`, for as long as the host keeps it. Carries
+   *  the worker's generation: after a worker is replaced it is unknown. */
+  resultId: string;
   result: RouteResult;
 }
 
@@ -191,6 +199,8 @@ export class EngineClient {
   private readyListeners: Array<() => void> = [];
   private restarts = 0;
   private started = false;
+  /** Rejects the readiness promise of a worker still starting. */
+  private startReject: ((e: EngineWorkerError) => void) | null = null;
 
   constructor(options: EngineClientOptions) {
     this.options = options;
@@ -232,15 +242,42 @@ export class EngineClient {
     request: RoutingRequest,
     options: RouteJobOptions = {},
   ): EngineJob<RouteResponse> {
+    // One copy, for the watchdog and the posted payload alike.
+    const budget = options.budget ? { ...options.budget } : undefined;
     const maxWallMs = effectiveBudget(
       this.options.engine.budget,
-      options.budget,
+      budget,
     ).maxWallMs;
     return this.submit(
-      { type: "route", request, budget: options.budget },
+      { type: "route", request, budget },
       options,
       maxWallMs,
     ) as EngineJob<RouteResponse>;
+  }
+
+  /** A whole departure scan, as the full step list (not streamed). One budget
+   *  covers all its steps; the hard stop works as for `route`. */
+  departures(
+    request: RoutingRequest,
+    scan: { hours?: number; stepMinutes?: number } = {},
+    options: RouteJobOptions = {},
+  ): EngineJob<DepartureScanStep[]> {
+    const budget = options.budget ? { ...options.budget } : undefined;
+    const maxWallMs = effectiveBudget(
+      this.options.engine.budget,
+      budget,
+    ).maxWallMs;
+    return this.submit(
+      {
+        type: "departures",
+        request,
+        hours: scan.hours,
+        stepMinutes: scan.stepMinutes,
+        budget,
+      },
+      options,
+      maxWallMs,
+    ) as EngineJob<DepartureScanStep[]>;
   }
 
   pois(
@@ -290,7 +327,7 @@ export class EngineClient {
   /** GPX of a route the host still holds (by the `resultId` of `route`).
    *  Rejects with `UNKNOWN_RESULT` for any other id. */
   gpx(
-    resultId: number,
+    resultId: string,
     name: string,
     provider: ProviderInfo,
     lang?: string | null,
@@ -336,6 +373,13 @@ export class EngineClient {
     }
     const worker = this.worker;
     this.worker = null;
+    // A worker still starting: whoever waits on `ready` hears it is closed.
+    if (this.startReject) {
+      const reject = this.startReject;
+      this.startReject = null;
+      this.readyPromise = null;
+      reject(new EngineWorkerError("CLOSED", "The engine client is closed"));
+    }
     if (this.running) {
       this.settle(
         this.running,
@@ -476,6 +520,8 @@ export class EngineClient {
       protocolVersion: this.options.protocolVersion ?? PROTOCOL_VERSION,
       engine: this.options.engine,
       database: this.options.database,
+      generation: randomBytes(8).toString("hex"),
+      ...(this.options.providers ? { providers: this.options.providers } : {}),
       ...(this.options.retainedResults !== undefined
         ? { retainedResults: this.options.retainedResults }
         : {}),
@@ -483,10 +529,12 @@ export class EngineClient {
     };
 
     return new Promise<void>((resolve, reject) => {
+      this.startReject = reject;
       const failStart = (error: EngineWorkerError): void => {
         if (this.worker !== worker) return;
         this.worker = null;
         this.readyPromise = null;
+        this.startReject = null;
         worker.removeAllListeners();
         worker.terminate().catch(() => undefined);
         // Nobody can be served: queued jobs get the reason, the next call
@@ -508,6 +556,7 @@ export class EngineClient {
         if (msg.id === initId) {
           if (msg.ok) {
             this.initialised = true;
+            this.startReject = null;
             resolve();
             for (const listener of [...this.readyListeners]) listener();
             this.pump();

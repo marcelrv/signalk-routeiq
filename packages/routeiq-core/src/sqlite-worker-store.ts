@@ -321,6 +321,8 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
     this.pending.clear();
     this.worker = null;
     worker.terminate();
+    // Last, so a worker that exited while closing leaves no dead state.
+    this.deadReason = null;
   }
 
   // --- OverlayStore -------------------------------------------------------

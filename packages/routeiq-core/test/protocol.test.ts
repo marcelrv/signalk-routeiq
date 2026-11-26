@@ -37,6 +37,7 @@ describe('protocol', () => {
       'init',
       'status',
       'route',
+      'departures',
       'pois',
       'search',
       'nearestPoi',

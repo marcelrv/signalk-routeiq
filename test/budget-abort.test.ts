@@ -136,6 +136,8 @@ describe('request budget and abort', () => {
       assert.ok((e.params.used as number) > total - 1);
       assert.strictEqual(engine.getCounters().budgetHits, 1);
       assert.strictEqual(engine.getCounters().failuresByCode.BUDGET_EXCEEDED, 1);
+      assert.strictEqual(engine.getCounters().search.iterations.count, 1, 'the stopped search is recorded once');
+      assert.strictEqual(engine.getCounters().search.iterations.sum, total, 'with the expansions it made');
       // Exactly the needed amount is enough: the budget is on what was spent.
       const ok = new RoutingEngine(db, options({ budget: { maxIterations: total } }));
       await ok.calculateRoute(request());
@@ -277,6 +279,21 @@ describe('request budget and abort', () => {
       assert.strictEqual(e.code, 'ABORTED');
       assert.ok(reads >= 6 && reads < 20, `${reads} reads`);
       assert.ok(engine.getCounters().search.iterations.count < 10, 'stopped before every box was searched');
+    });
+
+    it('a route with no A* search (same-region navmesh) is still stopped before it counts as calculated', async () => {
+      const engine = new RoutingEngine(db, options());
+      let reads = 0;
+      // The start check reads once; the next read is after the route was built.
+      const signal = {
+        get aborted() {
+          return ++reads > 1;
+        },
+      } as unknown as AbortSignal;
+      const e = await rejection(engine.calculateRoute(request({ end: BRIDGE_VIA }), { signal }));
+      assert.strictEqual(e.code, 'ABORTED');
+      assert.strictEqual(engine.getCounters().routes.calculated, 0);
+      assert.strictEqual(engine.getCounters().search.iterations.count, 0, 'no search ran');
     });
 
     it('in the middle of a scan: between steps, ending the stream with ABORTED', async () => {

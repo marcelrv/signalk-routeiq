@@ -33,6 +33,7 @@ export const HOST_REQUEST_TYPES = [
   "init",
   "status",
   "route",
+  "departures",
   "pois",
   "search",
   "nearestPoi",
@@ -61,10 +62,32 @@ export type HostDatabaseOptions = Omit<
 /** Switches that make the host misbehave on purpose, for tests. Ignored
  *  unless `init` carries them. */
 export interface HostTestHooks {
-  /** A route job blocks the host thread and never answers. */
+  /** Every route or departures job blocks the host thread and never
+   *  answers. */
   hangOnRoute?: boolean;
+  /** Only the Nth route or departures job (counting from 1) does. */
+  hangOnJobNumber?: number;
   /** A route job throws out of the host thread (an unexpected exit). */
   crashOnRoute?: boolean;
+}
+
+/**
+ * A provider module the host loads inside the worker. `module` is an absolute
+ * file path or a `file:` URL; the host `import()`s it and calls its default
+ * export with `options` (async allowed). That export returns a
+ * `TideHeightProvider` or `CurrentProvider`, which is handed to the engine.
+ *
+ * Trusted configuration: loading a module runs its code in the host. Only the
+ * embedding application may supply these paths, never request data.
+ */
+export interface HostProviderSpec {
+  module: string;
+  options?: unknown;
+}
+
+export interface HostProviders {
+  tideHeights?: HostProviderSpec;
+  currents?: HostProviderSpec;
 }
 
 export interface InitRequest {
@@ -73,6 +96,11 @@ export interface InitRequest {
   protocolVersion: number;
   engine: HostEngineOptions;
   database: HostDatabaseOptions;
+  /** Tide and current providers to load in the worker (trusted paths). */
+  providers?: HostProviders;
+  /** Names this worker; result ids carry it, so an id from another worker
+   *  (an earlier one, replaced) is never known here. Default: random. */
+  generation?: string;
   /** How many route results the host keeps for `gpx`. Default
    *  `MAX_RETAINED_RESULTS`. */
   retainedResults?: number;
@@ -89,6 +117,17 @@ export interface RouteJobRequest {
   id: number;
   request: RoutingRequest;
   /** Lowers the engine's budget for this request; never raises it. */
+  budget?: Partial<SearchBudget>;
+}
+
+/** A whole departure scan, answered as the full step list (not streamed). */
+export interface DeparturesRequest {
+  type: "departures";
+  id: number;
+  request: RoutingRequest;
+  hours?: number;
+  stepMinutes?: number;
+  /** Lowers the engine's budget; one budget for the whole scan. */
   budget?: Partial<SearchBudget>;
 }
 
@@ -127,7 +166,7 @@ export interface GpxRequest {
   type: "gpx";
   id: number;
   /** A `resultId` of a route the host still holds. */
-  resultId: number;
+  resultId: string;
   name: string;
   provider: ProviderInfo;
   lang?: string | null;
@@ -148,6 +187,7 @@ export type HostRequest =
   | InitRequest
   | StatusRequest
   | RouteJobRequest
+  | DeparturesRequest
   | PoisRequest
   | SearchRequest
   | NearestPoiRequest

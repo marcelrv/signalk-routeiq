@@ -3295,7 +3295,11 @@ export class RoutingDatabase {
     ).toLowerCase();
     // Nothing but control characters is not "match everything".
     if (pattern === "" && query !== "") return [];
-    maxResults = Math.min(maxResults, this.poiLimits.maxSearchResults);
+    // A count: whole, never negative (a negative would slice from the end).
+    let count = Math.floor(Number(maxResults));
+    if (Number.isNaN(count) || count < 0) count = 0;
+    maxResults = Math.min(count, this.poiLimits.maxSearchResults);
+    if (maxResults === 0) return [];
     // Wholes and harbours only: a part is found through its whole, so the
     // same lock never appears once per chamber. Sort before slicing so
     // results are alphabetically consistent regardless of the order rows were
@@ -3606,10 +3610,10 @@ export class RoutingDatabase {
   /** The limit to pass `getPoisInBBox` for a client's request: what it asked
    *  for, at least 1, never more than `limits.maxBBoxResults`. */
   clampBBoxLimit(requested?: number): number {
-    const max = Math.max(1, this.poiLimits.maxBBoxResults);
+    const max = Math.max(1, Math.floor(this.poiLimits.maxBBoxResults));
     return requested === undefined || Number.isNaN(requested)
       ? max
-      : Math.max(1, Math.min(max, requested));
+      : Math.max(1, Math.min(max, Math.floor(requested)));
   }
 
   /**
