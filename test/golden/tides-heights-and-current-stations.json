@@ -89,10 +89,15 @@
                   "toCoordIndex": 1
                 }
               ],
+              "code": "LEG_SHALLOW_AT_PASSAGE",
               "level": "caution",
               "message": "Shallow (1.5m charted, 2.7m at passage)",
               "minDepth": 1.5,
               "minDepthAtPassage": 2.71,
+              "params": {
+                "minDepth": 1.5,
+                "minDepthAtPassage": 2.71
+              },
               "requiredDepth": 2.3,
               "type": "shallow"
             }

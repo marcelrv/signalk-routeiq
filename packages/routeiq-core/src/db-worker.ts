@@ -1,5 +1,6 @@
 import { parentPort } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
+import type { Logger, LogLevel } from "./logger.js";
 import { OVERLAY_DB_INDEX, OVERLAY_EDITABLE_COLUMNS } from "./routing-store.js";
 import {
   DescribeFlags,
@@ -7,6 +8,29 @@ import {
   detectDescribeFlags,
   findDescribeCollision,
 } from "./route-metadata.js";
+
+/**
+ * The worker's logger. A worker thread has no console of its own to write to
+ * (its output would bypass the host's logger), so every call becomes a
+ * `{ type: "log" }` message that SqliteWorkerStore hands to the injected
+ * Logger on the main thread.
+ */
+function forwardLog(level: LogLevel) {
+  return (message: string, meta?: Record<string, unknown>): void => {
+    parentPort?.postMessage({
+      type: "log",
+      level,
+      message,
+      ...(meta ? { meta } : {}),
+    });
+  };
+}
+const log: Logger = {
+  debug: forwardLog("debug"),
+  info: forwardLog("info"),
+  warn: forwardLog("warn"),
+  error: forwardLog("error"),
+};
 
 interface NodeRow {
   id: number;
@@ -220,15 +244,13 @@ function checkDescribeCollision(fresh: DbHandle): void {
     const err = findDescribeCollision(fresh, handles);
     if (err) {
       fresh.describeError = err;
-      console.error(
+      log.error(
         `[db-worker] Route description disabled for ${filenameOf(fresh.path)}: ${err}`,
       );
     }
   } catch (e: any) {
     fresh.describeError = `description check failed: ${e.message ?? String(e)}`;
-    console.error(
-      `[db-worker] ${filenameOf(fresh.path)}: ${fresh.describeError}`,
-    );
+    log.error(`[db-worker] ${filenameOf(fresh.path)}: ${fresh.describeError}`);
   }
 }
 
@@ -385,23 +407,19 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
               .prepare("SELECT COUNT(*) as count FROM nodes")
               .get() as unknown as { count: number } | undefined;
             if (!row) {
-              console.warn(
-                `[db-worker] Skipping ${dbPath}: nodes table not found`,
-              );
+              log.warn(`[db-worker] Skipping ${dbPath}: nodes table not found`);
               db.close();
               continue;
             }
             const flags = detectSchemaFlags(db);
             if (flags.edgeCols.length === 0) {
-              console.warn(
-                `[db-worker] Skipping ${dbPath}: edges table not found`,
-              );
+              log.warn(`[db-worker] Skipping ${dbPath}: edges table not found`);
               db.close();
               continue;
             }
             const refusal = formatRefusal(db, filenameOf(dbPath));
             if (refusal) {
-              console.warn(`[db-worker] Refusing ${dbPath}: ${refusal}`);
+              log.warn(`[db-worker] Refusing ${dbPath}: ${refusal}`);
               formatErrors[filenameOf(dbPath)] = refusal;
               db.close();
               continue;
@@ -424,9 +442,9 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             checkDescribeCollision(handle);
             handles.push(handle);
             filenames.push(filename);
-            console.log(`[db-worker] Loaded database: ${dbPath}`);
+            log.info(`[db-worker] Loaded database: ${dbPath}`);
           } catch (err: any) {
-            console.warn(
+            log.warn(
               `[db-worker] Skipping invalid database ${dbPath}: ${err.message ?? String(err)}`,
             );
           }
@@ -481,14 +499,14 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
               .prepare("SELECT COUNT(*) as count FROM nodes")
               .get() as unknown as { count: number } | undefined;
             if (!row) {
-              console.warn(
+              log.warn(
                 `[db-worker] peekMetadata: skipping ${dbPath}: nodes table not found`,
               );
               continue;
             }
             const { edgeCols, nodeCols, ...flags } = detectSchemaFlags(db);
             if (edgeCols.length === 0) {
-              console.warn(
+              log.warn(
                 `[db-worker] peekMetadata: skipping ${dbPath}: edges table not found`,
               );
               continue;
@@ -519,7 +537,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
               formatError,
             });
           } catch (err: any) {
-            console.warn(
+            log.warn(
               `[db-worker] peekMetadata: skipping invalid database ${dbPath}: ${err.message ?? String(err)}`,
             );
           } finally {
@@ -593,7 +611,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
         checkDescribeCollision(handle);
         handles.push(handle);
         filenames.push(filename);
-        console.log(
+        log.info(
           `[db-worker] Opened database on demand: ${dbPath} (dbIndex=${dbIndex})`,
         );
         parentPort!.postMessage({
@@ -618,7 +636,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             /* already closed */
           }
           handles[dbIndex] = null;
-          console.log(
+          log.info(
             `[db-worker] Closed database dbIndex=${dbIndex} (${h.path})`,
           );
         }
@@ -675,7 +693,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             db.prepare(
               "UPDATE edges SET cost_factor = CASE WHEN is_fairway = 1 THEN 0.8 ELSE 1.2 END",
             ).run();
-            console.log(
+            log.info(
               "[db-worker] Migrated overlay edges: is_fairway → cost_factor",
             );
           }
@@ -688,7 +706,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
           // recover after the fact which of their columns were meant.
           if (!colNames.includes("edited_fields")) {
             db.prepare("ALTER TABLE edges ADD COLUMN edited_fields TEXT").run();
-            console.log("[db-worker] Migrated overlay edges: + edited_fields");
+            log.info("[db-worker] Migrated overlay edges: + edited_fields");
           }
           // Backfill reverse edges for bidirectional (traffic_mode=0) overlay edges that are missing their reverse.
           // Skip any reverse that the user explicitly deleted.
@@ -747,7 +765,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             backfilled++;
           }
           if (backfilled > 0)
-            console.log(
+            log.info(
               `[db-worker] Backfilled ${backfilled} missing reverse edges in overlay`,
             );
           // The overlay is created by this plugin, so its schema is known —
@@ -761,7 +779,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             // semantics (isDepthKnown's null branch: negative = unknown).
             depthUnknownSentinel: null,
           };
-          console.log(`[db-worker] Overlay opened: ${overlayPath}`);
+          log.info(`[db-worker] Overlay opened: ${overlayPath}`);
           parentPort!.postMessage({ id, type, result: { success: true } });
         } catch (err: any) {
           parentPort!.postMessage({
@@ -1033,7 +1051,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
               if (prior !== undefined) {
                 if (prior !== r.info && !warned) {
                   warned = true;
-                  console.warn(
+                  log.warn(
                     `[db-worker] poiInfo: files disagree on info for POI ${r.id} (${filenameOf(h.path)}); keeping the first file's`,
                   );
                 }

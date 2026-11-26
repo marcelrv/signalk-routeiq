@@ -13,7 +13,13 @@
     "error": null,
     "warnings": [
       {
+        "code": "VESSEL_DIMENSION_IGNORED_CONFIGURED",
         "message": "Ignored the supplied air draft (100000) — expected a number between 0 and 150 meters. Routed with the air draft configured on the server instead; check the vessel dimensions in Signal K.",
+        "params": {
+          "dimension": "airDraft",
+          "max": 150,
+          "value": "100000"
+        },
         "type": "vessel_dimension_ignored"
       }
     ]

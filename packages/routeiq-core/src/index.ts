@@ -5,6 +5,7 @@
  */
 export { CORE_VERSION } from "./version.js";
 
+export * from "./logger.js";
 export * from "./types.js";
 export * from "./engine-options.js";
 export * from "./request-validation.js";
@@ -19,3 +20,7 @@ export * from "./route-metadata.js";
 export * from "./database.js";
 export * from "./routing.js";
 export * from "./sqlite-worker-store.js";
+export * from "./codes.js";
+export * from "./messages.js";
+export * from "./failure.js";
+export * from "./counters.js";

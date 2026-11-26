@@ -11,7 +11,7 @@ import { pipeline } from "node:stream/promises";
 import { Readable, Transform } from "node:stream";
 import { ServerAPI } from "@signalk/server-api";
 import { NextFunction, Request, Response, Router } from "express";
-import { MAX_POIS_IN_BBOX, RoutingDatabase } from "routeiq-core";
+import { MAX_POIS_IN_BBOX, RouteFailure, RoutingDatabase } from "routeiq-core";
 import { DISABLED_SUFFIX } from "./data-dir.js";
 import {
   DEFAULT_REQUEST_LIMITS,
@@ -68,12 +68,21 @@ const PLUGIN_REQUEST_LIMITS: RequestLimits = {
   allowManualLegs: true,
   acceptCoordinateAliases: true,
   strict: false,
-  ignoredDimensionHint: (label) =>
-    `Routed with the ${label} configured on the server instead; ` +
-    `check the vessel dimensions in Signal K.`,
+  // The warning says the dimension configured on the server was used instead.
+  ignoredDimensionFallback: "configured",
+  // The plugin's UIs are English: texts stay English whatever the client's
+  // `lang` (which still picks the language of water names).
+  messageLanguage: "en",
 };
 
 export { coerceVesselDimension };
+
+/** The structured cause of a route failure, for a response body: `failure:
+ *  { code, params, blocking? }` when the engine threw one of its own, else
+ *  nothing. The `error` text and the endpoint's own `code` stay as they were. */
+function failureBody(error: unknown): { failure?: RouteFailure["failure"] } {
+  return error instanceof RouteFailure ? { failure: error.failure } : {};
+}
 
 /** Shared validation for the draft/beam/airDraft trio, which arrives both as
  *  the global default (PUT /vessel) and as per-request overrides (POST /route,
@@ -437,7 +446,11 @@ export class ApiHandler {
       // Use 422 (Unprocessable Entity) so clients can distinguish a routing
       // failure (constraint/graph issue) from a server error (500).
       // Do not call next(error) — the response is already sent.
-      res.status(422).json({ error: message, code: "ROUTE_NOT_FOUND" });
+      res.status(422).json({
+        error: message,
+        code: "ROUTE_NOT_FOUND",
+        ...failureBody(error),
+      });
     }
   }
 
@@ -554,7 +567,11 @@ export class ApiHandler {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
-      res.status(422).json({ error: message, code: "SCAN_FAILED" });
+      res.status(422).json({
+        error: message,
+        code: "SCAN_FAILED",
+        ...failureBody(error),
+      });
     }
   }
 
@@ -628,7 +645,12 @@ export class ApiHandler {
       write({ type: signal.aborted ? "aborted" : "done" });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
-      write({ type: "error", error: message, code: "SCAN_FAILED" });
+      write({
+        type: "error",
+        error: message,
+        code: "SCAN_FAILED",
+        ...failureBody(error),
+      });
     } finally {
       res.off("close", stop);
       // Ended unconditionally: after a client hang-up the socket is already

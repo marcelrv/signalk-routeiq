@@ -13,6 +13,7 @@
 
 import { readdirSync, statSync, type Dirent } from "node:fs";
 import { join, resolve } from "node:path";
+import { pluginLogger } from "./logger.js";
 import {
   RoutingDatabase,
   type RegionFileEntry,
@@ -116,6 +117,7 @@ export function directoryDatabaseOptions(
     overlayPath: join(dir, USER_EDITS_FILENAME),
     waterwaysPath: join(dir, WATERWAYS_FILENAME),
     landPolygonsPath: join(dir, LAND_POLYGONS_FILENAME),
+    logger: pluginLogger,
   };
 }
 

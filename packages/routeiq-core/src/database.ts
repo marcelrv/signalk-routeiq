@@ -15,6 +15,7 @@ import {
   type RoutingStore,
 } from "./routing-store.js";
 import { SqliteWorkerStore } from "./sqlite-worker-store.js";
+import { resolveLogger, type Logger } from "./logger.js";
 
 export {
   GraphEditError,
@@ -304,6 +305,12 @@ export type RegionFileList =
   | RegionFileEntry[]
   | (() => RegionFileEntry[] | Promise<RegionFileEntry[]>);
 
+/** Rough in-memory cost of one node, edge and POI of a loaded region, bytes.
+ *  Planning figures for the counters; not measured. */
+export const ESTIMATED_BYTES_PER_NODE = 120;
+export const ESTIMATED_BYTES_PER_EDGE = 260;
+export const ESTIMATED_BYTES_PER_POI = 400;
+
 export interface RoutingDatabaseOptions {
   /** The region files that exist, or a function returning that list (called
    *  by `init` and by `reloadMetadata`, so a caller can re-scan after files
@@ -341,6 +348,9 @@ export interface RoutingDatabaseOptions {
   waterwaysPath?: string | null;
   /** GeoJSON of land polygons for the land-crossing check; null = none. */
   landPolygonsPath?: string | null;
+  /** Where the database logs to. Also given to the default store, so the
+   *  worker thread's lines reach it. Default: silent. */
+  logger?: Logger;
 }
 
 /** Whether a store also keeps graph edits. */
@@ -570,7 +580,15 @@ export class RoutingDatabase {
    *  first pass. See enforceRegionCap. */
   private capEnforcement: Promise<void> | null = null;
 
+  /** Injected logger (silent by default). */
+  private readonly log: Logger;
+
+  /** Regions loaded into memory since this database opened (see
+   *  getRegionCounters). */
+  private regionLoadCount = 0;
+
   constructor(options: RoutingDatabaseOptions) {
+    this.log = resolveLogger(options.logger);
     this.readOnly = options.readOnly === true;
     this.policy = options.policy ?? "dynamic";
     this.dynamicLoading = this.policy !== "bulk";
@@ -582,7 +600,8 @@ export class RoutingDatabase {
     this.fileList = options.files;
     this.fileSource = options.fileSource ?? "the region file list";
     this.store =
-      options.store ?? new SqliteWorkerStore({ readOnly: this.readOnly });
+      options.store ??
+      new SqliteWorkerStore({ readOnly: this.readOnly, logger: this.log });
     this.overlay = null;
     this.overlayPath = null;
     if (!this.readOnly) {
@@ -833,7 +852,7 @@ export class RoutingDatabase {
           stats: p.stats ?? null,
         });
       }
-      console.log(
+      this.log.info(
         `[routeiq] Dynamic loading enabled: peeked ${peeked.length} database(s) in ${this.fileSource}, none loaded yet`,
       );
     }
@@ -843,7 +862,7 @@ export class RoutingDatabase {
     if (this.overlay && this.overlayPath) {
       await this.overlay.openOverlay(this.overlayPath);
       this.overlayOpen = true;
-      console.log(`[routeiq] User-edits overlay ready: ${this.overlayPath}`);
+      this.log.info(`[routeiq] User-edits overlay ready: ${this.overlayPath}`);
     }
   }
 
@@ -1145,6 +1164,82 @@ export class RoutingDatabase {
     return "";
   }
 
+  /**
+   * What the loaded regions hold, for the engine's counters: how many loads
+   * happened since the database opened, and the regions in memory now with a
+   * rough size each (planning figures from the row counts: about
+   * ESTIMATED_BYTES_PER_* each, not a measurement). Regions are tracked per
+   * file only under the dynamic policy; with bulk loading the list is empty.
+   */
+  getRegionCounters(): {
+    loadsTotal: number;
+    loaded: Array<{
+      filename: string;
+      nodes: number;
+      edges: number;
+      pois: number;
+      estimatedBytes: number;
+    }>;
+  } {
+    const loaded = [...this.coverageIndex.values()]
+      .filter((e) => e.state === "loaded")
+      .map((e) => {
+        const nodes = e.stats?.nodes ?? 0;
+        const edges = e.stats?.edges ?? 0;
+        const pois = e.stats?.pois ?? 0;
+        return {
+          filename: e.filename,
+          nodes,
+          edges,
+          pois,
+          estimatedBytes:
+            nodes * ESTIMATED_BYTES_PER_NODE +
+            edges * ESTIMATED_BYTES_PER_EDGE +
+            pois * ESTIMATED_BYTES_PER_POI,
+        };
+      });
+    return { loadsTotal: this.regionLoadCount, loaded };
+  }
+
+  /**
+   * Why a point has no routing region, for a "no routing nodes" failure: a
+   * refused file covers it (`unsupported`, with the file's name and reason), or
+   * the coverage index knows the regions and none covers it (`outside`), or
+   * null when the index cannot say (non-dynamic mode keeps none).
+   */
+  coverageProblemAt(
+    lat: number,
+    lon: number,
+  ):
+    | { kind: "unsupported"; file: string; reason: string }
+    | { kind: "outside" }
+    | null {
+    const inside = (e: DatabaseCoverageEntry): boolean =>
+      !!e.bbox &&
+      lat >= e.bbox.min_lat &&
+      lat <= e.bbox.max_lat &&
+      lon >= e.bbox.min_lon &&
+      lon <= e.bbox.max_lon;
+    const entries = [...this.coverageIndex.values()];
+    for (const e of entries) {
+      if (e.state === "unsupported" && inside(e)) {
+        return {
+          kind: "unsupported",
+          file: e.filename,
+          reason: e.formatError ?? "unsupported format",
+        };
+      }
+    }
+    if (
+      entries.length > 0 &&
+      entries.every((e) => e.bbox) &&
+      !entries.some(inside)
+    ) {
+      return { kind: "outside" };
+    }
+    return null;
+  }
+
   /** Peek *.sqlite.disabled files into ready-made coverage entries. Shared by
    *  init()'s non-dynamic branch and reloadMetadata(); returns [] for an empty
    *  list without troubling the worker. */
@@ -1171,7 +1266,7 @@ export class RoutingDatabase {
     } catch (e) {
       // A corrupt or unreadable disabled file must not break startup — it is
       // by definition not participating in routing.
-      console.warn(`[routeiq] Could not peek disabled database(s): ${e}`);
+      this.log.warn(`[routeiq] Could not peek disabled database(s): ${e}`);
       return [];
     }
   }
@@ -1187,7 +1282,7 @@ export class RoutingDatabase {
     try {
       peeked = await this.store.peekMetadata(paths);
     } catch (e) {
-      console.warn(`[routeiq] Could not peek refused database(s): ${e}`);
+      this.log.warn(`[routeiq] Could not peek refused database(s): ${e}`);
     }
     return paths.map((path) => {
       const filename = this.keyOfPath(path) || path;
@@ -1245,7 +1340,7 @@ export class RoutingDatabase {
 
       this.mergeMetadataIntoCoverageIndex(peeked);
     } catch (err) {
-      console.warn(
+      this.log.warn(
         `[routeiq] reloadMetadata: peekMetadata failed, coverage index left unchanged: ${err instanceof Error ? err.message : err}`,
       );
     }
@@ -1707,7 +1802,7 @@ export class RoutingDatabase {
         // region_id is not a unique key in real generated databases (all rows
         // observed with region_id=1 in zeeland.sqlite) — log the load-order
         // index too so individual occurrences are distinguishable.
-        console.warn(
+        this.log.warn(
           `[routeiq] Navmesh region_id=${region.regionId} (load index ${index}) has no ` +
             "boundary_node_ids — funnel-edge upgrade and anchor shortcuts are silently skipped for it, " +
             "leaving only straight-line edge_kind_id=1 fallback edges (see NEXT_PHASES.md, Round 9 master finding).",
@@ -1718,7 +1813,7 @@ export class RoutingDatabase {
       this.addAnchorShortcutEdges(region);
     });
     if (emptyCount > 0) {
-      console.warn(
+      this.log.warn(
         `[routeiq] ${emptyCount}/${regions.length} navmesh regions have empty ` +
           "boundary_node_ids — funnel-upgrade coverage is degraded for this database.",
       );
@@ -1975,11 +2070,11 @@ export class RoutingDatabase {
     }
     for (const filename of toLoad) {
       const t0 = Date.now();
-      console.log(
+      this.log.info(
         `[routeiq] Route request falls inside not-yet-loaded database ${filename} — loading inline before search`,
       );
       await this.loadDatabaseGraph(filename);
-      console.log(
+      this.log.info(
         `[routeiq] Inline on-demand load of ${filename} completed in ${Date.now() - t0}ms`,
       );
     }
@@ -2036,7 +2131,7 @@ export class RoutingDatabase {
         const need = entry?.stats?.edges ?? 0;
         const current = this.totalLoadedEdges();
         if (current + need > this.maxLoadedRegionEdges) {
-          console.log(
+          this.log.info(
             `[routeiq] Skipping load of ${filename} (${need} edges) — would push loaded ` +
               `edges from ${current} to ${current + need}, over maxLoadedRegionEdges=` +
               `${this.maxLoadedRegionEdges}. Search continues without it; a shorter or ` +
@@ -2046,11 +2141,11 @@ export class RoutingDatabase {
         }
       }
       const t0 = Date.now();
-      console.log(
+      this.log.info(
         `[routeiq] Route search bounding box overlaps not-yet-loaded database ${filename} — loading inline before search`,
       );
       await this.loadDatabaseGraph(filename);
-      console.log(
+      this.log.info(
         `[routeiq] Inline on-demand load of ${filename} completed in ${Date.now() - t0}ms`,
       );
     }
@@ -2092,16 +2187,16 @@ export class RoutingDatabase {
     }
     for (const filename of toLoad) {
       const t0 = Date.now();
-      console.log(
+      this.log.debug(
         `[routeiq] Vessel position (${lat.toFixed(4)},${lon.toFixed(4)}) is inside not-yet-loaded database ${filename} — eager-loading`,
       );
       try {
         await this.loadDatabaseGraph(filename);
-        console.log(
+        this.log.info(
           `[routeiq] Eager position load of ${filename} completed in ${Date.now() - t0}ms`,
         );
       } catch (e) {
-        console.warn(
+        this.log.warn(
           `[routeiq] Eager position load of ${filename} failed: ${e instanceof Error ? e.message : e}`,
         );
       }
@@ -2128,13 +2223,13 @@ export class RoutingDatabase {
     if (enabled.length !== 1) return;
     const [only] = enabled;
     if (!only || only.state === "loaded") return;
-    console.log(
+    this.log.info(
       `[routeiq] Single installed database ${only.filename} — eager-loading at startup`,
     );
     try {
       await this.loadDatabaseGraph(only.filename);
     } catch (e) {
-      console.warn(
+      this.log.warn(
         `[routeiq] Single-database eager load failed: ${e instanceof Error ? e.message : e}`,
       );
     }
@@ -2385,13 +2480,14 @@ export class RoutingDatabase {
       // §4a M5: a freshly-loaded region is by definition the most recently
       // used one.
       this.touchRegion(filename);
+      this.regionLoadCount++;
 
       // This load just added to `this.pois` and `edgesBySource` (incl. its
       // own newly-precomputed synthetic funnel/anchor edges) — any
       // bbox-query cache built before this load is stale.
       this.invalidateBBoxCaches();
 
-      console.log(
+      this.log.info(
         `[routeiq] Loaded database ${filename} (dbIndex=${dbIndex}): ` +
           `${nodeIdSet.size} nodes, ${edgeCount} edges, ${pois.length} POIs, ${newRegions.length} navmesh regions`,
       );
@@ -2556,7 +2652,7 @@ export class RoutingDatabase {
     // the just-removed database's rows).
     this.invalidateBBoxCaches();
 
-    console.log(
+    this.log.info(
       `[routeiq] Unloaded database ${filename} (dbIndex=${dbIndex}): removed ${nodesRemoved} nodes, ${edgesRemoved} edges`,
     );
     return { nodesRemoved, edgesRemoved };
@@ -2636,7 +2732,7 @@ export class RoutingDatabase {
         // this line that reload looks unexplained, when it is in fact a
         // working set larger than the cap(s) cycling against them — which is
         // the thing worth seeing in the log.
-        console.log(
+        this.log.info(
           `[routeiq] Evicted database ${victim.filename} (least recently used; ` +
             `${loaded.length} loaded [maxLoadedRegions=${this.maxLoadedRegions}], ` +
             `${totalEdges} edges loaded [maxLoadedRegionEdges=${this.maxLoadedRegionEdges}], ` +
@@ -2646,7 +2742,7 @@ export class RoutingDatabase {
         // Last-loaded-database guard or a route that started concurrently —
         // either way, stop enforcing rather than loop or throw out of a
         // fire-and-forget background pass.
-        console.warn(
+        this.log.warn(
           `[routeiq] enforceRegionCap: stopping (${e instanceof Error ? e.message : e})`,
         );
         return;

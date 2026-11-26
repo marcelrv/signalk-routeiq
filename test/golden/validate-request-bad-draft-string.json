@@ -14,7 +14,13 @@
     "error": null,
     "warnings": [
       {
+        "code": "VESSEL_DIMENSION_IGNORED_CONFIGURED",
         "message": "Ignored the supplied draft (deep) — expected a number between 0 and 30 meters. Routed with the draft configured on the server instead; check the vessel dimensions in Signal K.",
+        "params": {
+          "dimension": "draft",
+          "max": 30,
+          "value": "deep"
+        },
         "type": "vessel_dimension_ignored"
       }
     ]

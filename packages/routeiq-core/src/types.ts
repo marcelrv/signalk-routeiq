@@ -2,6 +2,8 @@
  * Engine, request and result types shared by the routing engine and its clients.
  */
 
+import type { CrossingNoteCode, FailureCode, WarningCode } from "./codes.js";
+
 // Vessel dimensions from SignalK delta tree
 export interface VesselDimensions {
   draft?: number;
@@ -145,6 +147,9 @@ export interface RouteCrossing {
   // it charges no wait; `note` says why, so the skipped wait stays visible.
   passesClosed?: boolean;
   note?: string;
+  // `note` as code + params (codes.ts), for a client that words it itself.
+  noteCode?: CrossingNoteCode;
+  noteParams?: Record<string, unknown>;
   // The wait actually charged here, in seconds — set on the crossing that owns
   // an obstacle group, and left off the ones it absorbs, so the numbers add up
   // exactly once. Distinct from waitMinutes below, which is an input.
@@ -258,7 +263,9 @@ export interface RouteLocation {
 // warning, and link it to the map through `at`, without knowing the type.
 export interface WarningBase {
   level: WarnLevel;
-  message: string; // English
+  message: string; // rendered from `code` + `params` (English unless messageLanguage says otherwise)
+  code: WarningCode; // stable, see codes.ts
+  params: Record<string, unknown>; // SI units (m, s) plus ids and names
   at?: RouteLocation[]; // in route order; absent when the server cannot tell
 }
 
@@ -338,6 +345,8 @@ export interface RouteWarning {
     // The route was found but the water names and warnings could not be read.
     | "description_unavailable";
   message: string;
+  code: WarningCode; // stable, see codes.ts
+  params: Record<string, unknown>; // SI units (m, s) plus ids and names
   from?: { latitude: number; longitude: number };
   to?: { latitude: number; longitude: number };
   distanceMeters?: number;
@@ -462,6 +471,10 @@ export interface DepartureScanStep {
   arrivalTime?: string;
   totalDistance?: number;
   error?: string;
+  // The failure behind `error`, when it is one of the engine's own: stable
+  // code (codes.ts, FAILURE_CODES) and the params that word it.
+  code?: FailureCode;
+  params?: Record<string, unknown>;
 }
 
 // POI search result

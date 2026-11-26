@@ -476,9 +476,14 @@
                   "toCoordIndex": 4
                 }
               ],
+              "code": "LEG_LOW_CLEARANCE",
               "level": "danger",
               "maxAirDraft": 11,
               "message": "Low clearance (11.0m, need 21.0m)",
+              "params": {
+                "maxAirDraft": 11,
+                "requiredAirDraft": 21
+              },
               "requiredAirDraft": 21,
               "type": "low_clearance"
             }
@@ -519,12 +524,19 @@
     "type": "FeatureCollection",
     "warnings": [
       {
+        "code": "ROUTE_CONSTRAINED",
         "distanceMeters": 21.17,
         "from": {
           "latitude": 51.61087,
           "longitude": 3.88924
         },
         "message": "Route to destination: constrained for 1 leg(s) 0.0Nm — air draft 11.0m < required 21.0m",
+        "params": {
+          "airDraft": 11,
+          "airDraftRequired": 21,
+          "distance": 21.17,
+          "legs": 1
+        },
         "to": {
           "latitude": 51.61081,
           "longitude": 3.88953

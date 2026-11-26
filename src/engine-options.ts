@@ -6,6 +6,7 @@
 
 import type { EngineOptions } from "routeiq-core";
 import type { PluginConfig } from "./types.js";
+import { pluginLogger } from "./logger.js";
 import { INITIAL_VESSEL } from "./vessel-state.js";
 
 export function toEngineOptions(config: PluginConfig): EngineOptions {
@@ -27,5 +28,9 @@ export function toEngineOptions(config: PluginConfig): EngineOptions {
     // The plugin fills every request itself (see vessel-state.ts), so it runs
     // the engine non-strict.
     requireVesselInRequest: false,
+    // The plugin's UIs are English: warnings and failures stay English
+    // whatever `lang` the client sends (it still picks the water names).
+    messageLanguage: "en",
+    logger: pluginLogger,
   };
 }

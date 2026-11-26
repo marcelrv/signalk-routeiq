@@ -10,6 +10,7 @@
  * Display only: nothing here feeds a routing cost.
  */
 
+import { format } from "./messages.js";
 import { clipLocation, RunCollector } from "./itinerary.js";
 import {
   ItineraryPoint,
@@ -143,17 +144,20 @@ function warningsFor(
   seq: DescribedSequence | undefined,
   noticeIds: number[] | undefined,
   notices: Record<string, DescribedNotice>,
+  lang?: string | null,
 ): RouteDescriptionWarning[] {
   const out: RouteDescriptionWarning[] = [];
   if (seq?.depthQualityWarn) {
+    const unknown = seq.depthQuality === "unknown";
+    const code = unknown ? "DEPTH_UNKNOWN" : "DEPTH_NOT_CHARTED";
+    const params = unknown ? {} : { quality: seq.depthQuality };
     out.push({
       type: "depth_quality",
       level: depthQualityLevel(seq.depthQuality),
       quality: seq.depthQuality,
-      message:
-        seq.depthQuality === "unknown"
-          ? "Depth unknown along this stretch"
-          : `Depth not charted here (${seq.depthQuality.replace(/_/g, " ")})`,
+      code,
+      params,
+      message: format(code, params, lang),
     });
   }
   if (seq?.originWarn) {
@@ -162,7 +166,9 @@ function warningsFor(
       // Not surveyed or reviewed: check it, it is not known to be wrong.
       level: "caution",
       origin: seq.origin,
-      message: `This line is ${seq.origin}, not surveyed or reviewed as the charted ones`,
+      code: "ORIGIN_UNREVIEWED",
+      params: { origin: seq.origin },
+      message: format("ORIGIN_UNREVIEWED", { origin: seq.origin }, lang),
     });
   }
   for (const id of noticeIds ?? []) {
@@ -174,7 +180,13 @@ function warningsFor(
       severity: n.severity,
       text: n.text,
       ...(n.name ? { name: n.name } : {}),
-      message: n.text,
+      code: "NOTICE",
+      params: {
+        severity: n.severity,
+        text: n.text,
+        ...(n.name ? { name: n.name } : {}),
+      },
+      message: format("NOTICE", { text: n.text }, lang),
     });
   }
   return out;
@@ -196,6 +208,7 @@ export function buildRouteDescription(
   segments: DescribableSegment[],
   described: DescribeWorkerResult,
   geometry?: RouteGeometry,
+  lang?: string | null,
 ): RouteDescriptionLeg[] | undefined {
   const legs: RouteDescriptionLeg[] = [];
   // Per leg, where each of its warnings (by key) applies, by route segment.
@@ -216,7 +229,7 @@ export function buildRouteDescription(
       waterBodyId !== null
         ? described.waterBodies[String(waterBodyId)]
         : undefined;
-    const warnings = warningsFor(seq, info?.notices, described.notices);
+    const warnings = warningsFor(seq, info?.notices, described.notices, lang);
     if (body?.name || warnings.length > 0) any = true;
 
     const opensLeg = !(legs.length > 0 && last === waterBodyId);

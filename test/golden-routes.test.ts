@@ -143,10 +143,15 @@ async function outcome(fn: () => Promise<unknown>): Promise<unknown> {
   try {
     return { ok: normaliseRoute((await fn()) as object) };
   } catch (e) {
+    // `name`, not the class name: a RouteFailure keeps the name "Error" its
+    // predecessor (a plain Error) had. A route failure also records its stable
+    // code and params.
+    const failure = e as { code?: unknown; params?: unknown };
     return {
       error: {
-        name: (e as Error).constructor.name,
+        name: (e as Error).name,
         message: (e as Error).message,
+        ...(typeof failure.code === 'string' ? { code: failure.code, params: failure.params } : {}),
       },
     };
   }

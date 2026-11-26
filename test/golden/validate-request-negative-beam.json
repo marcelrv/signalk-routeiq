@@ -14,7 +14,13 @@
     "error": null,
     "warnings": [
       {
+        "code": "VESSEL_DIMENSION_IGNORED_CONFIGURED",
         "message": "Ignored the supplied beam (-2) — expected a number between 0 and 100 meters. Routed with the beam configured on the server instead; check the vessel dimensions in Signal K.",
+        "params": {
+          "dimension": "beam",
+          "max": 100,
+          "value": "-2"
+        },
         "type": "vessel_dimension_ignored"
       }
     ]

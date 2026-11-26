@@ -23,8 +23,10 @@
                 "toCoordIndex": 2
               }
             ],
+            "code": "DEPTH_UNKNOWN",
             "level": "caution",
             "message": "Depth unknown along this stretch",
+            "params": {},
             "quality": "unknown",
             "type": "depth_quality"
           },
@@ -43,9 +45,13 @@
                 "toCoordIndex": 2
               }
             ],
+            "code": "ORIGIN_UNREVIEWED",
             "level": "caution",
             "message": "This line is imported, not surveyed or reviewed as the charted ones",
             "origin": "imported",
+            "params": {
+              "origin": "imported"
+            },
             "type": "origin"
           },
           {
@@ -63,9 +69,15 @@
                 "toCoordIndex": 1
               }
             ],
+            "code": "NOTICE",
             "level": "caution",
             "message": "Shallow, depth unknown",
             "name": "Line",
+            "params": {
+              "name": "Line",
+              "severity": 1,
+              "text": "Shallow, depth unknown"
+            },
             "severity": 1,
             "text": "Shallow, depth unknown",
             "type": "notice"
@@ -266,9 +278,13 @@
                   "toCoordIndex": 5
                 }
               ],
+              "code": "LEG_SHALLOW",
               "level": "danger",
               "message": "Shallow (1.5m)",
               "minDepth": 1.5,
+              "params": {
+                "minDepth": 1.5
+              },
               "requiredDepth": 2.3,
               "type": "shallow"
             },
@@ -288,9 +304,13 @@
                 }
               ],
               "beam": 3,
+              "code": "LEG_NARROW",
               "level": "caution",
               "message": "Narrow (3.0m)",
               "minWidth": 3,
+              "params": {
+                "minWidth": 3
+              },
               "requiredWidth": 5,
               "type": "narrow"
             }
@@ -316,8 +336,10 @@
                       "toCoordIndex": 2
                     }
                   ],
+                  "code": "DEPTH_UNKNOWN",
                   "level": "caution",
                   "message": "Depth unknown along this stretch",
+                  "params": {},
                   "quality": "unknown",
                   "type": "depth_quality"
                 },
@@ -336,9 +358,13 @@
                       "toCoordIndex": 2
                     }
                   ],
+                  "code": "ORIGIN_UNREVIEWED",
                   "level": "caution",
                   "message": "This line is imported, not surveyed or reviewed as the charted ones",
                   "origin": "imported",
+                  "params": {
+                    "origin": "imported"
+                  },
                   "type": "origin"
                 },
                 {
@@ -356,9 +382,15 @@
                       "toCoordIndex": 1
                     }
                   ],
+                  "code": "NOTICE",
                   "level": "caution",
                   "message": "Shallow, depth unknown",
                   "name": "Line",
+                  "params": {
+                    "name": "Line",
+                    "severity": 1,
+                    "text": "Shallow, depth unknown"
+                  },
                   "severity": 1,
                   "text": "Shallow, depth unknown",
                   "type": "notice"
@@ -398,12 +430,21 @@
     "type": "FeatureCollection",
     "warnings": [
       {
+        "code": "ROUTE_CONSTRAINED",
         "distanceMeters": 3425,
         "from": {
           "latitude": 52,
           "longitude": 5.05
         },
         "message": "Route to destination: constrained for 5 leg(s) 1.8Nm — depth 1.5m < required 2.3m; width 3.0m < required beam 5.0m",
+        "params": {
+          "beamRequired": 5,
+          "depth": 1.5,
+          "depthRequired": 2.3,
+          "distance": 3425,
+          "legs": 5,
+          "width": 3
+        },
         "to": {
           "latitude": 52,
           "longitude": 5

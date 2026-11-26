@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { format } from "./messages.js";
 import { ProviderInfo, RouteResult } from "./types.js";
 import { buildPassageProfile, PassageProfile } from "./passage-profile.js";
 
@@ -11,6 +12,7 @@ export class GpxExporter {
     route: RouteResult,
     name: string,
     provider: ProviderInfo,
+    lang?: string | null,
   ): string {
     const { coords, segments } = this.extractCoordsAndSegments(route);
     const totalDistance = route.totalDistance ?? 0;
@@ -29,18 +31,27 @@ export class GpxExporter {
         : coords,
       provider,
     );
-    const duration = profile
-      ? `, Duration: ${this.formatDuration(profile.duration.total)}` +
-        (profile.duration.waiting > 0
-          ? ` (${this.formatDuration(profile.duration.waiting)} waiting)`
-          : "")
-      : "";
+    const description = format(
+      "ROUTE_DESCRIPTION_GPX",
+      {
+        provider: provider.displayName ?? provider.name,
+        distance: totalDistance,
+        cost: totalCost,
+        ...(profile
+          ? {
+              duration: profile.duration.total,
+              waiting: profile.duration.waiting,
+            }
+          : {}),
+      },
+      lang,
+    );
 
     let gpx = `<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="${this.escapeXml(provider.name)}" xmlns:ar="http://signalk.org/routeiq">
   <rte>
     <name>${this.escapeXml(name)}</name>
-    <desc>Route calculated by ${this.escapeXml(provider.displayName ?? provider.name)} - Distance: ${totalDistance.toFixed(0)}m, Cost: ${totalCost.toFixed(2)}${duration}</desc>`;
+    <desc>${this.escapeXml(description)}</desc>`;
     // GPX 1.1 puts <extensions> after <desc> and before the first <rtept>.
     if (profile) gpx += this.passageProfileGpx(profile);
 
@@ -107,6 +118,7 @@ export class GpxExporter {
     name: string,
     provider: ProviderInfo,
     routeId?: string,
+    lang?: string | null,
   ): any {
     const { coords, segments } = this.extractCoordsAndSegments(route);
     const totalDistance = route.totalDistance ?? 0;
@@ -136,7 +148,14 @@ export class GpxExporter {
 
     return {
       name,
-      description: `Route calculated by ${provider.displayName ?? provider.name} - Distance: ${totalDistance.toFixed(0)}m`,
+      description: format(
+        "ROUTE_DESCRIPTION_SIGNALK",
+        {
+          provider: provider.displayName ?? provider.name,
+          distance: totalDistance,
+        },
+        lang,
+      ),
       distance: totalDistance,
       feature: {
         type: "Feature",
@@ -166,14 +185,6 @@ export class GpxExporter {
       },
       timestamp: new Date().toISOString(),
     };
-  }
-
-  /** Seconds as "11h18m" (or "45m" under an hour). */
-  private static formatDuration(seconds: number): string {
-    const m = Math.round(seconds / 60);
-    const h = Math.floor(m / 60);
-    const mm = String(m % 60).padStart(2, "0");
-    return h > 0 ? `${h}h${mm}m` : `${m % 60}m`;
   }
 
   /**
@@ -238,6 +249,7 @@ export class GpxExporter {
           type: w.type,
           level: w.level,
           distanceFromStart: w.distanceFromStart,
+          code: w.code,
         })}>${x(w.message)}</ar:warning>`;
     }
     out += `

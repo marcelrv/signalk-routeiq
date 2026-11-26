@@ -13,6 +13,8 @@
  * files, an in-memory fake) is the provider's business.
  */
 
+import { SILENT_LOGGER, type Logger } from "./logger.js";
+
 export interface FlowVector {
   u: number; // m/s, east component
   v: number; // m/s, north component
@@ -346,6 +348,7 @@ export async function prepareStationFlowField(
   anchors: Array<{ latitude: number; longitude: number }>,
   startMs: number,
   endMs: number,
+  logger: Logger = SILENT_LOGGER,
 ): Promise<FlowField | null> {
   try {
     // Densify: anchor points plus midpoints of consecutive anchors.
@@ -402,7 +405,7 @@ export async function prepareStationFlowField(
     if (series.length === 0) return null;
     return new StationFlowField(series);
   } catch (e) {
-    console.warn(`[routeiq] station flow field unavailable: ${e}`);
+    logger.warn(`[routeiq] station flow field unavailable: ${e}`);
     return null;
   }
 }
@@ -418,6 +421,7 @@ export async function prepareTideHeights(
   points: Array<{ latitude: number; longitude: number }>,
   startMs: number,
   endMs: number,
+  logger: Logger = SILENT_LOGGER,
 ): Promise<TideHeightField | null> {
   try {
     // Union of nearest stations at each anchor point (start / via / end).
@@ -460,7 +464,7 @@ export async function prepareTideHeights(
 
     return new StationTideHeights(timelines);
   } catch (e) {
-    console.warn(`[routeiq] tide heights unavailable: ${e}`);
+    logger.warn(`[routeiq] tide heights unavailable: ${e}`);
     return null;
   }
 }

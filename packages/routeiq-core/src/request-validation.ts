@@ -11,6 +11,8 @@
  * Nothing here touches the engine or any database.
  */
 
+import type { MessageKey } from "./codes.js";
+import { format } from "./messages.js";
 import type { LegMode, RouteWarning, RoutingRequest } from "./types.js";
 
 /** The vessel dimensions a request can carry. */
@@ -125,11 +127,24 @@ export interface RequestLimits {
   /** Longest `lang` string. */
   maxLangLength: number;
   /**
-   * Non-strict only. The trailing sentence of the "Ignored the supplied …"
-   * warning, which says what was used instead, so the caller can name its own
-   * fallback. Receives the dimension's label ("draft", "air draft").
+   * Non-strict only. What the "Ignored the supplied …" warning says was used
+   * instead: `"default"` (the engine's default dimension; the default) or
+   * `"configured"` (the dimension configured on the server).
    */
-  ignoredDimensionHint?: (label: string) => string;
+  ignoredDimensionFallback?: "default" | "configured";
+  /**
+   * Language of the messages: `"request"` follows the body's `lang` (a
+   * language the catalogue lacks reads as English), any other value is a
+   * language tag used for every request. Default `"request"`.
+   */
+  messageLanguage?: "request" | string;
+}
+
+/** The language the messages for this body are written in. */
+function messageLang(limits: RequestLimits, body: unknown): string {
+  const lang = limits.messageLanguage ?? "request";
+  if (lang !== "request") return lang;
+  return isRecord(body) && typeof body.lang === "string" ? body.lang : "en";
 }
 
 export const DEFAULT_REQUEST_LIMITS: RequestLimits = {
@@ -214,13 +229,23 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** A validation error. `key` words it (catalogue); the text may use the field
+ *  name, which is not part of `params`. */
 function fail(
+  lang: string,
   code: RequestErrorCode,
+  key: MessageKey,
   field: string,
-  message: string,
   params: Record<string, unknown> = {},
 ): { error: RequestValidationError } {
-  return { error: { code, field, message, params } };
+  return {
+    error: {
+      code,
+      field,
+      message: format(key, { field, ...params }, lang),
+      params,
+    },
+  };
 }
 
 function haversineM(
@@ -300,6 +325,7 @@ export function checkRequestConstraints(
   out: ConstraintFields,
 ): { error?: RequestValidationError; warnings: RouteWarning[] } {
   const warnings: RouteWarning[] = [];
+  const lang = messageLang(limits, body);
 
   for (const key of VESSEL_DIM_KEYS) {
     const raw = body[key];
@@ -311,26 +337,30 @@ export function checkRequestConstraints(
     const value = coerceVesselDimension(raw);
     if (value === undefined || value < 0 || value > max) {
       if (limits.strict) {
-        const message =
-          value === undefined
-            ? `Invalid ${key} — expected a number in meters`
-            : `Invalid ${key} — expected 0..${max} meters`;
         return {
-          ...fail("INVALID_DIMENSION", key, message, { max }),
+          ...fail(
+            lang,
+            "INVALID_DIMENSION",
+            value === undefined
+              ? "INVALID_NUMBER_METERS"
+              : "INVALID_RANGE_METERS",
+            key,
+            { max },
+          ),
           warnings,
         };
       }
       out[key] = undefined;
-      const label = VESSEL_DIM_LABEL[key];
-      const hint = limits.ignoredDimensionHint
-        ? limits.ignoredDimensionHint(label)
-        : `The default ${label} was used instead.`;
+      const code =
+        limits.ignoredDimensionFallback === "configured"
+          ? "VESSEL_DIMENSION_IGNORED_CONFIGURED"
+          : "VESSEL_DIMENSION_IGNORED";
+      const params = { dimension: key, value: describeValue(raw), max };
       warnings.push({
         type: "vessel_dimension_ignored",
-        message:
-          `Ignored the supplied ${label} (${describeValue(raw)}) — ` +
-          `expected a number between 0 and ${max} meters. ` +
-          hint,
+        code,
+        params,
+        message: format(code, params, lang),
       });
       continue;
     }
@@ -347,8 +377,8 @@ export function checkRequestConstraints(
       | "safetyMarginBeam"
       | "safetyMarginAirDraft",
     valid: (v: number) => boolean,
-    typeMessage: string,
-    rangeMessage: string,
+    typeKey: MessageKey,
+    rangeKey: MessageKey,
     params: Record<string, unknown>,
   ): RequestValidationError | undefined => {
     let v = body[key];
@@ -356,18 +386,18 @@ export function checkRequestConstraints(
     out[key] = v;
     if (v === undefined) return undefined;
     if (typeof v !== "number" || !Number.isFinite(v)) {
-      return fail("INVALID_VALUE", key, typeMessage, params).error;
+      return fail(lang, "INVALID_VALUE", typeKey, key, params).error;
     }
     if (!valid(v))
-      return fail("INVALID_VALUE", key, rangeMessage, params).error;
+      return fail(lang, "INVALID_VALUE", rangeKey, key, params).error;
     return undefined;
   };
 
   let error = numeric(
     "minCoastDistance",
     (v) => v >= 0 && v <= limits.maxCoastDistanceNm,
-    "Invalid minCoastDistance — expected a number in nautical miles",
-    `Invalid minCoastDistance — expected 0..${limits.maxCoastDistanceNm} nautical miles`,
+    "INVALID_NUMBER_NM",
+    "INVALID_RANGE_NM",
     { min: 0, max: limits.maxCoastDistanceNm },
   );
   if (error) return { error, warnings };
@@ -378,8 +408,8 @@ export function checkRequestConstraints(
     error = numeric(
       key,
       (v) => v >= 0 && v <= limits.maxWaitMinutes,
-      `Invalid ${key} — expected 0..${limits.maxWaitMinutes} minutes`,
-      `Invalid ${key} — expected 0..${limits.maxWaitMinutes} minutes`,
+      "INVALID_RANGE_MINUTES",
+      "INVALID_RANGE_MINUTES",
       { min: 0, max: limits.maxWaitMinutes },
     );
     if (error) return { error, warnings };
@@ -388,8 +418,8 @@ export function checkRequestConstraints(
   error = numeric(
     "speedKnots",
     (v) => v > 0 && v <= limits.maxSpeedKnots,
-    `Invalid speedKnots — expected a number of knots`,
-    `Invalid speedKnots — expected more than 0 and at most ${limits.maxSpeedKnots} knots`,
+    "INVALID_NUMBER_KNOTS",
+    "INVALID_RANGE_KNOTS",
     { max: limits.maxSpeedKnots },
   );
   if (error) return { error, warnings };
@@ -402,8 +432,8 @@ export function checkRequestConstraints(
     error = numeric(
       key,
       (v) => v >= 0 && v <= limits.maxSafetyMarginM,
-      `Invalid ${key} — expected a number in meters`,
-      `Invalid ${key} — expected 0..${limits.maxSafetyMarginM} meters`,
+      "INVALID_NUMBER_METERS",
+      "INVALID_RANGE_METERS",
       { min: 0, max: limits.maxSafetyMarginM },
     );
     if (error) return { error, warnings };
@@ -415,30 +445,23 @@ export function checkRequestConstraints(
     out[key] = v;
     if (v !== undefined && typeof v !== "boolean") {
       return {
-        ...fail(
-          "INVALID_VALUE",
-          key,
-          `Invalid ${key} — expected true or false`,
-        ),
+        ...fail(lang, "INVALID_VALUE", "INVALID_BOOLEAN", key),
         warnings,
       };
     }
   }
 
-  let lang = body.lang;
-  if (lang === null) lang = undefined;
-  out.lang = lang;
+  let langValue = body.lang;
+  if (langValue === null) langValue = undefined;
+  out.lang = langValue;
   if (
-    lang !== undefined &&
-    (typeof lang !== "string" || lang.length > limits.maxLangLength)
+    langValue !== undefined &&
+    (typeof langValue !== "string" || langValue.length > limits.maxLangLength)
   ) {
     return {
-      ...fail(
-        "INVALID_VALUE",
-        "lang",
-        `Invalid lang — expected a language tag of at most ${limits.maxLangLength} characters`,
-        { max: limits.maxLangLength },
-      ),
+      ...fail(lang, "INVALID_VALUE", "INVALID_LANG", "lang", {
+        max: limits.maxLangLength,
+      }),
       warnings,
     };
   }
@@ -459,14 +482,11 @@ export function validateRouteRequest(
   body: unknown,
   limits: RequestLimits,
 ): RequestValidation {
+  const lang = messageLang(limits, body);
   if (!isRecord(body)) {
     return {
       ok: false,
-      ...fail(
-        "INVALID_BODY",
-        "body",
-        "Invalid request — expected a JSON object",
-      ),
+      ...fail(lang, "INVALID_BODY", "INVALID_BODY", "body"),
       warnings: [],
       unknownFields: [],
     };
@@ -480,15 +500,14 @@ export function validateRouteRequest(
   if (!body.start || !body.end) {
     return refuse(
       fail(
+        lang,
+        "MISSING_ENDPOINTS",
         "MISSING_ENDPOINTS",
         !body.start ? "start" : "end",
-        "Missing required fields: start and end coordinates",
       ),
     );
   }
 
-  const rangeMessage = (what: string): string =>
-    `${what} out of range — expected latitude -90..90 and longitude -180..180`;
   const ends: Record<"start" | "end", Point> = {} as Record<
     "start" | "end",
     Point
@@ -498,12 +517,13 @@ export function validateRouteRequest(
     if ("problem" in r) {
       return refuse(
         r.problem === "format"
-          ? fail(
-              "INVALID_COORDINATE",
+          ? fail(lang, "INVALID_COORDINATE", "INVALID_COORDINATE", key)
+          : fail(
+              lang,
+              "COORDINATE_OUT_OF_RANGE",
+              "COORDINATE_OUT_OF_RANGE",
               key,
-              "Invalid coordinate format. Expected {latitude, longitude}",
-            )
-          : fail("COORDINATE_OUT_OF_RANGE", key, rangeMessage("Coordinate")),
+            ),
       );
     }
     ends[key] = r.point;
@@ -514,13 +534,7 @@ export function validateRouteRequest(
   let via: Array<Point & { mode?: LegMode }> | undefined;
   if (body.via !== undefined) {
     if (!Array.isArray(body.via)) {
-      return refuse(
-        fail(
-          "INVALID_VIA",
-          "via",
-          "Invalid via — expected an array of {latitude, longitude, mode?}",
-        ),
-      );
+      return refuse(fail(lang, "INVALID_VIA", "INVALID_VIA", "via"));
     }
     via = [];
     for (let i = 0; i < body.via.length; i++) {
@@ -530,37 +544,32 @@ export function validateRouteRequest(
         return refuse(
           r.problem === "format"
             ? fail(
+                lang,
                 "INVALID_COORDINATE",
+                "INVALID_VIA_COORDINATE",
                 `via[${i}]`,
-                "Invalid via coordinate format. Expected {latitude, longitude}",
               )
             : fail(
+                lang,
                 "COORDINATE_OUT_OF_RANGE",
+                "VIA_COORDINATE_OUT_OF_RANGE",
                 `via[${i}]`,
-                rangeMessage("Via coordinate"),
               ),
         );
       }
       const mode = (raw as Record<string, unknown>).mode;
       if (mode !== undefined && mode !== "auto" && mode !== "manual") {
         return refuse(
-          fail(
-            "INVALID_LEG_MODE",
-            `via[${i}].mode`,
-            "Invalid via mode — expected 'auto' or 'manual'",
-          ),
+          fail(lang, "INVALID_LEG_MODE", "INVALID_VIA_MODE", `via[${i}].mode`),
         );
       }
       via.push(mode === undefined ? r.point : { ...r.point, mode });
     }
     if (via.length > limits.maxVias) {
       return refuse(
-        fail(
-          "TOO_MANY_VIAS",
-          "via",
-          `Too many via points (max ${limits.maxVias})`,
-          { max: limits.maxVias },
-        ),
+        fail(lang, "TOO_MANY_VIAS", "TOO_MANY_VIAS", "via", {
+          max: limits.maxVias,
+        }),
       );
     }
   }
@@ -568,11 +577,7 @@ export function validateRouteRequest(
   const endMode = body.endMode;
   if (endMode !== undefined && endMode !== "auto" && endMode !== "manual") {
     return refuse(
-      fail(
-        "INVALID_LEG_MODE",
-        "endMode",
-        "Invalid endMode — expected 'auto' or 'manual'",
-      ),
+      fail(lang, "INVALID_LEG_MODE", "INVALID_END_MODE", "endMode"),
     );
   }
 
@@ -584,9 +589,10 @@ export function validateRouteRequest(
   ) {
     return refuse(
       fail(
+        lang,
+        "INVALID_DEPARTURE_TIME",
         "INVALID_DEPARTURE_TIME",
         "departureTime",
-        "Invalid departureTime — expected an ISO 8601 date string",
       ),
     );
   }
@@ -601,9 +607,10 @@ export function validateRouteRequest(
     if (at >= 0 || endMode === "manual") {
       return refuse(
         fail(
+          lang,
+          "MANUAL_LEGS_NOT_ALLOWED",
           "MANUAL_LEGS_NOT_ALLOWED",
           at >= 0 ? `via[${at}].mode` : "endMode",
-          "Manual legs are not accepted — every leg is routed automatically",
         ),
         warnings,
       );
@@ -624,12 +631,10 @@ export function validateRouteRequest(
     const nm = metres / 1852;
     if (nm > limits.maxStraightLineNm) {
       return refuse(
-        fail(
-          "ROUTE_TOO_LONG",
-          "end",
-          `The route is too long — ${Math.round(nm)} nautical miles in a straight line, at most ${limits.maxStraightLineNm} are accepted`,
-          { nm: Math.round(nm), max: limits.maxStraightLineNm },
-        ),
+        fail(lang, "ROUTE_TOO_LONG", "ROUTE_TOO_LONG", "end", {
+          nm: Math.round(nm),
+          max: limits.maxStraightLineNm,
+        }),
         warnings,
       );
     }

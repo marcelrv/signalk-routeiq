@@ -142,6 +142,8 @@ export default tseslint.config(
     // packages/routeiq-core/test/import-boundary.test.ts.
     files: ['packages/routeiq-core/src/**/*.ts'],
     rules: {
+      // Core logs through the injected Logger (logger.ts), never the console.
+      'no-console': 'error',
       '@typescript-eslint/no-restricted-imports': [
         'error',
         {

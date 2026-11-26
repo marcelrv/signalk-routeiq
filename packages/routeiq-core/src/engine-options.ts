@@ -9,6 +9,9 @@
  * search. Two requests on one engine therefore never see each other's values.
  */
 
+import { RouteFailure } from "./failure.js";
+import type { Logger } from "./logger.js";
+import { formatFailure } from "./messages.js";
 import type { RouteInputs, RoutingRequest } from "./types.js";
 import { CORE_VERSION } from "./version.js";
 
@@ -59,6 +62,16 @@ export interface EngineOptions {
    * instead of being routed with `defaultVessel` and `defaultSpeedKnots`.
    */
   requireVesselInRequest: boolean;
+  /**
+   * Language of the texts the engine writes (warnings, itinerary phrases,
+   * failure messages). `"request"` follows the request's `lang` (a language
+   * the catalogue lacks reads as English); any other value is a language tag
+   * every request is answered in, whatever its `lang`. The request's `lang`
+   * still selects the language of water names either way.
+   */
+  messageLanguage: "request" | string;
+  /** Where the engine logs to. Default: silent. */
+  logger?: Logger;
 }
 
 export const DEFAULT_ENGINE_OPTIONS: EngineOptions = {
@@ -77,30 +90,43 @@ export const DEFAULT_ENGINE_OPTIONS: EngineOptions = {
   defaultUseTides: false,
   defaultVessel: { draft: 0, beam: 4, airDraft: 0 },
   requireVesselInRequest: false,
+  messageLanguage: "request",
 };
 
 /** Codes a RouteRequestError can carry. */
-export type RouteRequestErrorCode = "VESSEL_INCOMPLETE";
+export type RouteRequestErrorCode = "VESSEL_INCOMPLETE" | "INVALID_REQUEST";
 
 /**
  * A request the engine refuses before searching, as opposed to a route it
  * could not find. `code` is stable and machine-readable, `params` carries the
- * values a client needs to translate the message, `message` is English.
+ * values a client needs to translate the message, `message` is rendered in the
+ * engine's message language.
  */
-export class RouteRequestError extends Error {
-  readonly code: RouteRequestErrorCode;
-  readonly params: Record<string, unknown>;
+export class RouteRequestError extends RouteFailure {
+  declare readonly code: RouteRequestErrorCode;
 
   constructor(
     code: RouteRequestErrorCode,
     params: Record<string, unknown>,
     message: string,
   ) {
-    super(message);
+    super(code, params, message);
     this.name = "RouteRequestError";
-    this.code = code;
-    this.params = params;
   }
+}
+
+/**
+ * The language to write a request's texts in: the option's fixed language, or
+ * the request's own `lang` when the option is `"request"`. Not yet reduced to
+ * a catalogue language; the catalogue does that (unknown reads as English).
+ */
+export function messageLanguageFor(
+  options: Pick<EngineOptions, "messageLanguage">,
+  requestLang: string | null | undefined,
+): string {
+  return options.messageLanguage === "request"
+    ? (requestLang ?? "en")
+    : options.messageLanguage;
 }
 
 /** Slowest speed the engine plans with, knots. */
@@ -128,7 +154,11 @@ export function resolveRouteInputs(
       throw new RouteRequestError(
         "VESSEL_INCOMPLETE",
         { missing },
-        `The request must carry the vessel and speed; missing: ${missing.join(", ")}`,
+        formatFailure(
+          "VESSEL_INCOMPLETE",
+          { missing },
+          messageLanguageFor(options, request.lang),
+        ),
       );
     }
   }

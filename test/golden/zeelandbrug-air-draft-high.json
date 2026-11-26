@@ -1441,9 +1441,13 @@
                   "toCoordIndex": 45
                 }
               ],
+              "code": "LEG_SHALLOW",
               "level": "danger",
               "message": "Shallow (0.0m)",
               "minDepth": 0,
+              "params": {
+                "minDepth": 0
+              },
               "requiredDepth": 2.3,
               "type": "shallow"
             }
@@ -1480,9 +1484,13 @@
                   "toCoordIndex": 46
                 }
               ],
+              "code": "LEG_SHALLOW",
               "level": "danger",
               "message": "Shallow (0.0m)",
               "minDepth": 0,
+              "params": {
+                "minDepth": 0
+              },
               "requiredDepth": 2.3,
               "type": "shallow"
             }
@@ -1525,12 +1533,16 @@
     "type": "FeatureCollection",
     "warnings": [
       {
+        "code": "CONNECTOR_START",
         "distanceMeters": 82,
         "from": {
           "latitude": 51.62,
           "longitude": 3.9
         },
         "message": "82m from the start position to the nearest charted waterway.",
+        "params": {
+          "distance": 82
+        },
         "to": {
           "latitude": 51.619530400690074,
           "longitude": 3.900913855260088
@@ -1538,12 +1550,16 @@
         "type": "start_connecting"
       },
       {
+        "code": "CONNECTOR_END",
         "distanceMeters": 48,
         "from": {
           "latitude": 51.62959300255267,
           "longitude": 3.9202092566212103
         },
         "message": "48m from the nearest charted waterway to the destination.",
+        "params": {
+          "distance": 48
+        },
         "to": {
           "latitude": 51.63,
           "longitude": 3.92

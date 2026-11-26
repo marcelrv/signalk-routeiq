@@ -3,6 +3,7 @@
  * Implements vessel-aware directed A* with multi-layered cost function
  */
 
+import { resolveLogger, type Logger } from "./logger.js";
 import {
   EdgeRow,
   PoiRow,
@@ -32,8 +33,20 @@ import {
   buildItinerary,
   closestCoordIndex,
   cumulativeDistances,
-  limitPair,
 } from "./itinerary.js";
+import type {
+  CrossingNoteCode,
+  FailureCode,
+  RouteWarningCode,
+} from "./codes.js";
+import {
+  RouteFailure,
+  RouteSearchError,
+  causeOf,
+  type BlockingCause,
+} from "./failure.js";
+import { CounterSet, type EngineCounters } from "./counters.js";
+import { format, type MessageParams } from "./messages.js";
 import {
   CurrentProvider,
   FlowField,
@@ -54,7 +67,12 @@ import type {
   RouteWarning,
   RoutingRequest,
 } from "./types.js";
-import { type EngineOptions, resolveRouteInputs } from "./engine-options.js";
+import {
+  type EngineOptions,
+  RouteRequestError,
+  messageLanguageFor,
+  resolveRouteInputs,
+} from "./engine-options.js";
 
 function isInsideBBox(lat: number, lon: number, bbox: BBox): boolean {
   return (
@@ -186,16 +204,30 @@ interface SearchSkipReasons {
 }
 
 /**
- * A failure of the A* search itself (no routing node near a point, start
- * outside the box, no path found). calculateRouteImpl's bounding-box loop
- * retries with a wider box on this and keeps the last one for its final
- * message; any other error is a bug and propagates.
+ * Which leg of a request a warning or log line is about: a via point (1-based),
+ * the destination of a via route (`end`), or the destination of a route
+ * without vias (`route`).
  */
-export class RouteSearchError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "RouteSearchError";
-  }
+type LegTarget = { via: number } | "end" | "route";
+
+/** The English words for a leg, as the log lines have always had them. */
+function legLabel(target: LegTarget): string {
+  return typeof target === "object"
+    ? `Via point ${target.via}`
+    : target === "end"
+      ? "Destination"
+      : "destination";
+}
+
+/** A route warning: the text is rendered from `code` and `params` in `lang`. */
+function makeWarning(
+  lang: string,
+  type: RouteWarning["type"],
+  code: RouteWarningCode,
+  params: MessageParams,
+  extra: Partial<RouteWarning> = {},
+): RouteWarning {
+  return { type, code, params, message: format(code, params, lang), ...extra };
 }
 
 /**
@@ -300,7 +332,7 @@ const segmentHops = new WeakMap<object, number[]>();
  *  (recheckViaLegs): the addViolationWarnings arguments, the warnings that
  *  call added, and the graph generation it ran at. */
 interface LegCheck {
-  label: string;
+  target: LegTarget;
   startPt: { latitude: number; longitude: number };
   endPt: { latitude: number; longitude: number };
   inputs: RouteInputs;
@@ -363,6 +395,8 @@ export class RoutingEngine {
   private _options: EngineOptions;
   private tides: TideHeightProvider | null = null;
   private currents: CurrentProvider | null = null;
+  private readonly log: Logger;
+  private readonly counters = new CounterSet();
 
   /**
    * The engine keeps no vessel or user state: draft, beam, air draft, speed,
@@ -373,10 +407,56 @@ export class RoutingEngine {
   constructor(db: RoutingDatabase, options: EngineOptions) {
     this.db = db;
     this._options = options;
+    this.log = resolveLogger(options.logger);
   }
 
   get options(): EngineOptions {
     return this._options;
+  }
+
+  /**
+   * Cumulative counters of this engine's work (routes, failures by code,
+   * search iterations and time, regions loaded and their estimated memory).
+   * A snapshot: later calculations do not change it. Numbers only, nothing
+   * about any request.
+   */
+  getCounters(): EngineCounters {
+    const regions = this.db.getRegionCounters();
+    return this.counters.snapshot({
+      loadsTotal: regions.loadsTotal,
+      loaded: regions.loaded,
+      estimatedBytes: regions.loaded.reduce((n, r) => n + r.estimatedBytes, 0),
+    });
+  }
+
+  /** The language this request's texts are written in. */
+  private msgLang(inputs: RouteInputs): string {
+    return messageLanguageFor(this._options, inputs.lang);
+  }
+
+  /** A failure with its message rendered in the request's language. */
+  private failure(
+    inputs: RouteInputs,
+    code: FailureCode,
+    params: MessageParams = {},
+    blocking?: BlockingCause[],
+  ): RouteFailure {
+    return RouteFailure.create(code, params, this.msgLang(inputs), blocking);
+  }
+
+  /** As `failure`, but a search failure the bounding-box loop retries on. */
+  private searchFailure(
+    inputs: RouteInputs,
+    code: FailureCode,
+    params: MessageParams = {},
+    blocking?: BlockingCause[],
+  ): RouteSearchError {
+    return RouteSearchError.create(
+      code,
+      params,
+      this.msgLang(inputs),
+      blocking,
+    );
   }
 
   setTidesClient(client: TideHeightProvider | null): void {
@@ -437,10 +517,16 @@ export class RoutingEngine {
     // current. Asked at the same time, so a slow plugin costs one wait.
     const [heights, stationField] = await Promise.all([
       this.tides
-        ? prepareTideHeights(this.tides, anchors, departureMs, endMs)
+        ? prepareTideHeights(this.tides, anchors, departureMs, endMs, this.log)
         : null,
       this.currents
-        ? prepareStationFlowField(this.currents, anchors, departureMs, endMs)
+        ? prepareStationFlowField(
+            this.currents,
+            anchors,
+            departureMs,
+            endMs,
+            this.log,
+          )
         : null,
     ]);
 
@@ -452,6 +538,32 @@ export class RoutingEngine {
       offsetSec: 0,
       speedMs,
     };
+  }
+
+  /**
+   * No routing node near a request's start or end: `REGION_UNAVAILABLE` when a
+   * refused routing file covers the point, `OUTSIDE_COVERAGE` when the known
+   * regions do not, else `NO_NODE_NEAR_POINT`. The file's name and reason are
+   * in the params.
+   */
+  private noNodeFailure(
+    inputs: RouteInputs,
+    point: "start" | "end",
+    at: { latitude: number; longitude: number },
+  ): RouteFailure {
+    const problem = this.db.coverageProblemAt(at.latitude, at.longitude);
+    if (problem?.kind === "unsupported") {
+      return this.failure(inputs, "REGION_UNAVAILABLE", {
+        point,
+        file: problem.file,
+        reason: problem.reason,
+      });
+    }
+    return this.failure(
+      inputs,
+      problem?.kind === "outside" ? "OUTSIDE_COVERAGE" : "NO_NODE_NEAR_POINT",
+      { point },
+    );
   }
 
   /**
@@ -471,13 +583,71 @@ export class RoutingEngine {
   async calculateRoute(request: RoutingRequest): Promise<RouteResult> {
     // Resolved once, before anything is counted or loaded: strict mode refuses
     // an incomplete request here.
-    const inputs = resolveRouteInputs(request, this._options);
-    this.db.beginRoute();
+    let inputs: RouteInputs | undefined;
     try {
-      return await this.calculateRouteImpl(request, inputs);
-    } finally {
-      this.db.endRoute();
+      inputs = resolveRouteInputs(request, this._options);
+      this.checkRequest(request, inputs);
+      this.db.beginRoute();
+      try {
+        const route = await this.calculateRouteImpl(request, inputs);
+        this.counters.routeCalculated();
+        return route;
+      } finally {
+        this.db.endRoute();
+      }
+    } catch (e) {
+      this.counters.routeFailed(e instanceof RouteFailure ? e.code : undefined);
+      throw e;
     }
+  }
+
+  /**
+   * The cheap shape check a host that skipped the request validator needs:
+   * start, end and every via are latitude/longitude pairs. Anything else is an
+   * `INVALID_REQUEST`, not a crash deep in the search.
+   */
+  private checkRequest(request: RoutingRequest, inputs: RouteInputs): void {
+    const isPoint = (p: unknown): boolean =>
+      typeof p === "object" &&
+      p !== null &&
+      Number.isFinite((p as { latitude?: unknown }).latitude) &&
+      Number.isFinite((p as { longitude?: unknown }).longitude);
+    const fields: Array<[string, unknown]> = [
+      ["start", request.start],
+      ["end", request.end],
+      ...(request.via ?? []).map((v, i): [string, unknown] => [`via[${i}]`, v]),
+    ];
+    for (const [field, value] of fields) {
+      if (!isPoint(value)) {
+        throw new RouteRequestError(
+          "INVALID_REQUEST",
+          { field },
+          format("INVALID_REQUEST", { field }, this.msgLang(inputs)),
+        );
+      }
+    }
+  }
+
+  /** Loads the regions a route needs; a region that cannot be loaded ends the
+   *  request as `REGION_UNAVAILABLE`, with the detail in the log rather than
+   *  in the message. */
+  private async ensureRegions(
+    inputs: RouteInputs,
+    load: () => Promise<void>,
+  ): Promise<void> {
+    try {
+      await load();
+    } catch (e) {
+      this.log.error(
+        `[routeiq] A routing region could not be loaded: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      throw this.failure(inputs, "REGION_UNAVAILABLE");
+    }
+  }
+
+  /** Records one finished A* loop in the counters. */
+  private noteSearch(iterations: number, startedAt: number): void {
+    this.counters.searchDone(iterations, performance.now() - startedAt);
   }
 
   private async calculateRouteImpl(
@@ -495,7 +665,9 @@ export class RoutingEngine {
     // coverage bbox contains start/end/any via point — waypoint containment
     // only for this phase, not the full transit-bbox a route might also
     // pass through (PHASE_4_DESIGN.md §4a.1 task 4 is that follow-up).
-    await this.db.ensureRegionsLoaded([start, end, ...via]);
+    await this.ensureRegions(inputs, () =>
+      this.db.ensureRegionsLoaded([start, end, ...via]),
+    );
 
     const coastDistanceMeters = effectiveCoastDistance * 1852;
 
@@ -518,7 +690,7 @@ export class RoutingEngine {
         await this.addViolationWarnings(
           navmeshRoute,
           violationWarnings,
-          "destination",
+          "route",
           start,
           end,
           inputs,
@@ -542,13 +714,9 @@ export class RoutingEngine {
     const lastLegMode = request.endMode;
 
     if (!startNode && firstLegMode !== "manual")
-      throw new Error(
-        `No routing nodes found near start point${this.db.unsupportedCoverageNote(start.latitude, start.longitude)}`,
-      );
+      throw this.noNodeFailure(inputs, "start", start);
     if (!endNode && lastLegMode !== "manual")
-      throw new Error(
-        `No routing nodes found near end point${this.db.unsupportedCoverageNote(end.latitude, end.longitude)}`,
-      );
+      throw this.noNodeFailure(inputs, "end", end);
 
     // Tidal flow field for time-dependent costs (undefined = tides off/unavailable)
     const env = await this.prepareEnv(inputs, [start, ...via, end]);
@@ -609,7 +777,9 @@ export class RoutingEngine {
       try {
         // Inside the try: a region that fails to load on a wider box must
         // not throw away a route an earlier box already found.
-        await this.db.ensureRegionsForBbox(bbox);
+        await this.ensureRegions(inputs, () =>
+          this.db.ensureRegionsForBbox(bbox),
+        );
         // Taken before the search: a region another request loads while
         // this one searches or scores is then caught by
         // refreshCandidateLimits, not stamped as already seen.
@@ -657,14 +827,14 @@ export class RoutingEngine {
           break;
         }
         if (currentMargin >= maxMargin || stalled) {
-          console.log(
+          this.log.info(
             `Route search kept a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — bounding box expansion ${stalled ? "stopped improving" : "reached max extent"}`,
           );
           break;
         }
 
         const newMargin = Math.min(currentMargin * 2, maxMargin);
-        console.log(
+        this.log.info(
           `Route search found a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`,
         );
         retriedForPenalty = true;
@@ -676,7 +846,7 @@ export class RoutingEngine {
         // is kept rather than thrown away.
         if (!(e instanceof RouteSearchError)) {
           if (candidates.length === 0) throw e;
-          console.error(
+          this.log.error(
             `[routeiq] Route search failed after a route was found; keeping that route: ${e instanceof Error ? e.message : String(e)}`,
           );
           break;
@@ -686,7 +856,7 @@ export class RoutingEngine {
         if (currentMargin < maxMargin) {
           const newMargin = Math.min(currentMargin * 2, maxMargin);
           if (newMargin > currentMargin) {
-            console.log(
+            this.log.info(
               `Route search expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box`,
             );
           }
@@ -704,21 +874,21 @@ export class RoutingEngine {
     if (best) {
       const result = best.result;
       if (retriedForPenalty) {
-        console.log(
+        this.log.info(
           `Route search penalized-result retry ${best.violatingMeters > 0 ? "did not clear the penalty" : "won"} (final cost ${best.cost.toFixed(0)}, ${best.violatingMeters.toFixed(0)}m constraint-violating)`,
         );
       }
 
       // Connect user's start/end to the route coordinates
-      await this.connectUserPoint(start, result, "start");
-      await this.connectUserPoint(end, result, "end");
+      await this.connectUserPoint(start, result, "start", inputs);
+      await this.connectUserPoint(end, result, "end", inputs);
 
       // Check for constraint violations (draft, beam, air draft) on the found path
       const violationWarnings: RouteWarning[] = [];
       await this.addViolationWarnings(
         result,
         violationWarnings,
-        "destination",
+        "route",
         start,
         end,
         inputs,
@@ -893,6 +1063,9 @@ export class RoutingEngine {
           index: i,
           departureTime,
           error: e instanceof Error ? e.message : String(e),
+          ...(e instanceof RouteFailure
+            ? { code: e.code, params: e.params }
+            : {}),
         };
       }
     }
@@ -997,11 +1170,7 @@ export class RoutingEngine {
       );
 
       if (!entry || !exit) {
-        throw new Error(
-          "No route found — the start and end are in disconnected parts of the waterway " +
-            "network (e.g. separated by a lock or unconnected water body) and no bridging " +
-            "point could be found at either end.",
-        );
+        throw this.failure(inputs, "NO_PATH", { reason: "disconnected" });
       }
 
       // Route through the primary component from entry to exit
@@ -1021,26 +1190,25 @@ export class RoutingEngine {
             env,
           );
         } catch (e) {
-          const cause = e instanceof Error ? e.message : String(e);
-          throw new Error(
-            `No route found through the primary waterway network between the connection points: ${cause}`,
-          );
+          throw this.failure(inputs, "NO_PATH", {
+            reason: "primary_network",
+            cause: causeOf(e),
+          });
         }
       }
 
       // Connect user points to the primary network entry/exit
-      await this.connectUserPoint(start, route, "start");
-      await this.connectUserPoint(end, route, "end");
+      await this.connectUserPoint(start, route, "start", inputs);
+      await this.connectUserPoint(end, route, "end", inputs);
 
       if (finalize) await this.finalizeRoute(route, inputs, [], env);
       return route;
     }
 
-    throw new Error(
-      `No route found — graph is connected but A* could not find a path. ` +
-        `This should not happen with soft constraints enabled.` +
-        (searchError ? ` Last search error: ${searchError.message}` : ""),
-    );
+    throw this.failure(inputs, "NO_PATH", {
+      reason: "graph_connected",
+      ...(searchError ? { cause: causeOf(searchError) } : {}),
+    });
   }
 
   /**
@@ -1107,8 +1275,9 @@ export class RoutingEngine {
         const manual = await this.buildManualLeg(
           currentStart,
           nextPoint,
-          `Via point ${i + 1}`,
+          { via: i + 1 },
           warnings,
+          inputs,
           nextLegMode !== "manual",
         );
         segmentResult = manual.route;
@@ -1135,8 +1304,9 @@ export class RoutingEngine {
       if (!segmentResult) {
         // via point completely unreachable — skip it
         warnings.push({
-          type: "via_skipped",
-          message: `Via point ${i + 1} is unreachable via any route — skipped.`,
+          ...makeWarning(this.msgLang(inputs), "via_skipped", "VIA_SKIPPED", {
+            via: i + 1,
+          }),
           from: {
             latitude: currentStart.latitude,
             longitude: currentStart.longitude,
@@ -1148,7 +1318,7 @@ export class RoutingEngine {
 
       // Snap the start of this segment to the user's currentStart coordinate
       // (important for the first segment and for each via point)
-      await this.connectUserPoint(currentStart, segmentResult, "start");
+      await this.connectUserPoint(currentStart, segmentResult, "start", inputs);
 
       if (allCoordinates.length === 0) {
         allCoordinates.push(...segmentResult.features[0].geometry.coordinates);
@@ -1175,7 +1345,7 @@ export class RoutingEngine {
     }
 
     let finalResult: RouteResult | null;
-    const finalFailure: { reason?: string } = {};
+    const finalFailure: { reason?: string; cause?: unknown } = {};
     if (endMode === "manual") {
       // Final leg drawn by hand — end exactly at the user's destination
       // (no node snapping; there is no following leg to pick up from it).
@@ -1183,8 +1353,9 @@ export class RoutingEngine {
         await this.buildManualLeg(
           currentStart,
           end,
-          "Destination",
+          "end",
           warnings,
+          inputs,
           false,
         )
       ).route;
@@ -1206,14 +1377,16 @@ export class RoutingEngine {
     }
 
     if (!finalResult) {
-      throw new Error(
-        "No route found to destination" +
-          (finalFailure.reason ? `: ${finalFailure.reason}` : ""),
-      );
+      throw this.failure(inputs, "NO_PATH", {
+        reason: "destination",
+        ...(finalFailure.cause !== undefined
+          ? { cause: finalFailure.cause }
+          : {}),
+      });
     }
 
     // Snap the final segment's start to currentStart (last via point or start if no vias)
-    await this.connectUserPoint(currentStart, finalResult, "start");
+    await this.connectUserPoint(currentStart, finalResult, "start", inputs);
 
     if (allCoordinates.length === 0) {
       allCoordinates.push(...finalResult.features[0].geometry.coordinates);
@@ -1251,7 +1424,7 @@ export class RoutingEngine {
     };
 
     // Connect only the overall end coordinate (start is handled per-segment above)
-    await this.connectUserPoint(end, result, "end");
+    await this.connectUserPoint(end, result, "end", inputs);
 
     await this.finalizeRoute(result, inputs, via, env, viaAt);
     return result;
@@ -1274,9 +1447,10 @@ export class RoutingEngine {
     bbox?: BBox,
     env?: RouteEnv,
     // Filled with why the segment failed when this returns null.
-    failure: { reason?: string } = {},
+    failure: { reason?: string; cause?: unknown } = {},
   ): Promise<RouteResult | null> {
-    const label = viaIndex >= 0 ? `Via point ${viaIndex + 1}` : "Destination";
+    const target: LegTarget = viaIndex >= 0 ? { via: viaIndex + 1 } : "end";
+    const label = legLabel(target);
     const startPt = { latitude: startLat, longitude: startLon };
     const endPt = { latitude: endLat, longitude: endLon };
 
@@ -1302,7 +1476,9 @@ export class RoutingEngine {
       // attempts fall through to the expanding bboxFromPoints box.
       try {
         // Inside the try, as in calculateRouteImpl.
-        await this.db.ensureRegionsForBbox(segmentBbox);
+        await this.ensureRegions(inputs, () =>
+          this.db.ensureRegionsForBbox(segmentBbox),
+        );
         // Taken before the search: a region another request loads while
         // this one searches or scores is then caught by
         // refreshCandidateLimits, not stamped as already seen.
@@ -1349,14 +1525,14 @@ export class RoutingEngine {
         if (!penalized) break;
         bbox = undefined;
         if (currentMargin >= segmentMaxMargin || stalled) {
-          console.log(
+          this.log.info(
             `Route search for ${label} kept a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — bounding box expansion ${stalled ? "stopped improving" : "reached max extent"}`,
           );
           break;
         }
 
         const newMargin = Math.min(currentMargin * 2, segmentMaxMargin);
-        console.log(
+        this.log.info(
           `Route search for ${label} found a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`,
         );
         retriedForPenalty = true;
@@ -1367,7 +1543,7 @@ export class RoutingEngine {
         // propagates unless a route was already found.
         if (!(e instanceof RouteSearchError)) {
           if (candidates.length === 0) throw e;
-          console.error(
+          this.log.error(
             `[routeiq] Route search for ${label} failed after a route was found; keeping that route: ${e instanceof Error ? e.message : String(e)}`,
           );
           break;
@@ -1377,7 +1553,7 @@ export class RoutingEngine {
         if (currentMargin >= segmentMaxMargin) break;
         const newMargin = Math.min(currentMargin * 2, segmentMaxMargin);
         if (newMargin > currentMargin) {
-          console.log(
+          this.log.info(
             `Route search for ${label} expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box`,
           );
         }
@@ -1391,7 +1567,7 @@ export class RoutingEngine {
     const best = this.selectBestCandidate(candidates);
     if (best) {
       if (retriedForPenalty) {
-        console.log(
+        this.log.info(
           `Route search for ${label} penalized-result retry ${best.violatingMeters > 0 ? "did not clear the penalty" : "won"} (final cost ${best.cost.toFixed(0)}, ${best.violatingMeters.toFixed(0)}m constraint-violating)`,
         );
       }
@@ -1403,14 +1579,14 @@ export class RoutingEngine {
       await this.addViolationWarnings(
         best.result,
         warnings,
-        label,
+        target,
         startPt,
         endPt,
         inputs,
         env,
       );
       legChecks.set(best.result, {
-        label,
+        target,
         startPt,
         endPt,
         inputs,
@@ -1425,9 +1601,14 @@ export class RoutingEngine {
     const startNode = await this.db.findNearestNode(startLat, startLon);
     const endNode = await this.db.findNearestNode(endLat, endLon);
     if (startNode && endNode) {
+      const viaLeg = typeof target === "object";
       warnings.push({
-        type: "via_constrained",
-        message: `${label} is disconnected in the waterway network — bridged via nearest reachable node.`,
+        ...makeWarning(
+          this.msgLang(inputs),
+          "via_constrained",
+          viaLeg ? "VIA_LEG_DISCONNECTED" : "END_LEG_DISCONNECTED",
+          viaLeg ? { via: target.via } : {},
+        ),
         from: startPt,
         to: endPt,
       });
@@ -1453,11 +1634,13 @@ export class RoutingEngine {
         return fallback;
       } catch (e) {
         failure.reason = e instanceof Error ? e.message : String(e);
-        console.log(`[routeiq] ${label}: ${failure.reason}`);
+        failure.cause = causeOf(e);
+        this.log.info(`[routeiq] ${label}: ${failure.reason}`);
         return null;
       }
     }
     failure.reason = lastSearchError?.message;
+    if (lastSearchError) failure.cause = causeOf(lastSearchError);
     return null;
   }
 
@@ -1475,8 +1658,9 @@ export class RoutingEngine {
   private async buildManualLeg(
     from: { latitude: number; longitude: number },
     to: { latitude: number; longitude: number },
-    label: string,
+    target: LegTarget,
     warnings: RouteWarning[],
+    inputs: RouteInputs,
     snapEnd: boolean = true,
   ): Promise<{
     route: RouteResult;
@@ -1521,9 +1705,16 @@ export class RoutingEngine {
         samples,
       )
     ) {
+      const viaLeg = typeof target === "object";
       warnings.push({
-        type: "manual_segment",
-        message: `Manual leg to ${label.toLowerCase()} may cross land or uncharted water — verify against the chart.`,
+        ...makeWarning(
+          this.msgLang(inputs),
+          "manual_segment",
+          viaLeg
+            ? "MANUAL_LEG_MAY_CROSS_LAND_VIA"
+            : "MANUAL_LEG_MAY_CROSS_LAND_END",
+          viaLeg ? { via: target.via } : {},
+        ),
         from: { latitude: from.latitude, longitude: from.longitude },
         to: { latitude: endLat, longitude: endLon },
         distanceMeters: distance,
@@ -1593,27 +1784,29 @@ export class RoutingEngine {
     meters: number,
     from: { latitude: number; longitude: number },
     to: { latitude: number; longitude: number },
+    inputs: RouteInputs,
   ): RouteWarning {
     const m = Math.round(meters);
     const gap =
       this._options.coverageGapM > 0 && m > this._options.coverageGapM;
-    const where =
-      position === "start"
-        ? "from the start position to the nearest charted waterway"
-        : "from the nearest charted waterway to the destination";
-    return {
-      type: gap
+    const code: RouteWarningCode = gap
+      ? position === "start"
+        ? "COVERAGE_GAP_START"
+        : "COVERAGE_GAP_END"
+      : position === "start"
+        ? "CONNECTOR_START"
+        : "CONNECTOR_END";
+    return makeWarning(
+      this.msgLang(inputs),
+      gap
         ? "coverage_gap"
         : position === "start"
           ? "start_connecting"
           : "end_connecting",
-      message: gap
-        ? `${m}m ${where} — a straight line, not a routed path, and not depth-checked. Likely a gap in the routing data covering this area.`
-        : `${m}m ${where}.`,
-      from,
-      to,
-      distanceMeters: m,
-    };
+      code,
+      { distance: m },
+      { from, to, distanceMeters: m },
+    );
   }
 
   /**
@@ -1627,8 +1820,9 @@ export class RoutingEngine {
     userPoint: { latitude: number; longitude: number },
     route: RouteResult,
     position: "start" | "end",
+    inputs: RouteInputs,
   ): Promise<void> {
-    if (await this.attachUserPoint(userPoint, route, position))
+    if (await this.attachUserPoint(userPoint, route, position, inputs))
       delete route.crossings;
   }
 
@@ -1642,6 +1836,7 @@ export class RoutingEngine {
     userPoint: { latitude: number; longitude: number },
     route: RouteResult,
     position: "start" | "end",
+    inputs: RouteInputs,
   ): Promise<boolean> {
     const coords = route.features[0].geometry.coordinates;
     const segments = route.features[0].properties.segments!;
@@ -1759,6 +1954,7 @@ export class RoutingEngine {
                 longitude: userPoint.longitude,
               },
               { latitude: proj.point.lat, longitude: proj.point.lon },
+              inputs,
             ),
           );
 
@@ -1794,6 +1990,7 @@ export class RoutingEngine {
             directDist,
             { latitude: userPoint.latitude, longitude: userPoint.longitude },
             { latitude: firstCoord[1], longitude: firstCoord[0] },
+            inputs,
           ),
         );
       }
@@ -1885,6 +2082,7 @@ export class RoutingEngine {
                     latitude: userPoint.latitude,
                     longitude: userPoint.longitude,
                   },
+                  inputs,
                 ),
               );
               didTruncate = true;
@@ -1974,6 +2172,7 @@ export class RoutingEngine {
               latitude: userPoint.latitude,
               longitude: userPoint.longitude,
             },
+            inputs,
           ),
         );
       } else if (!didTruncate) {
@@ -2004,6 +2203,7 @@ export class RoutingEngine {
             directDist,
             { latitude: lastCoord[1], longitude: lastCoord[0] },
             { latitude: userPoint.latitude, longitude: userPoint.longitude },
+            inputs,
           ),
         );
       }
@@ -2291,9 +2491,10 @@ export class RoutingEngine {
     const endRegion = this.db.findNavmeshRegionAt(endLat, endLon);
 
     if ((!startNode && !startRegion) || (!endNode && !endRegion)) {
-      throw new RouteSearchError(
-        "Could not find routing nodes near start or end point",
-      );
+      throw this.searchFailure(inputs, "NO_NODE_NEAR_POINT", {
+        point: "either",
+        reason: "search",
+      });
     }
 
     // Multi-candidate boundary-node seeding/goal-testing (spec §6 items 1-4):
@@ -2319,12 +2520,16 @@ export class RoutingEngine {
       ? this.seedNavmeshCandidates(endRegion, endLat, endLon)
       : null;
     if (!startCandidates && startNode === null) {
-      throw new RouteSearchError(
-        "Could not find routing nodes near start point",
-      );
+      throw this.searchFailure(inputs, "NO_NODE_NEAR_POINT", {
+        point: "start",
+        reason: "search",
+      });
     }
     if (!endCandidates && endNode === null) {
-      throw new RouteSearchError("Could not find routing nodes near end point");
+      throw this.searchFailure(inputs, "NO_NODE_NEAR_POINT", {
+        point: "end",
+        reason: "search",
+      });
     }
 
     const minDepth = this.requiredDepth(inputs);
@@ -2464,7 +2669,7 @@ export class RoutingEngine {
         break;
       }
       if (best !== node) {
-        console.log(
+        this.log.debug(
           `[routeiq] ${label} node ${node} → ${best} (better depth, ${Math.round(bestDist)}m away)`,
         );
       }
@@ -2587,6 +2792,7 @@ export class RoutingEngine {
 
     let goalReached = false;
     let reachedNode: number | null = null;
+    const searchStartedAt = performance.now();
     let iterations = 0;
     const maxIterations = 5000000; // Safety limit (5000K suffices for trans-continental routes like NL→Italy ~2000nm)
     const skipReasons: SearchSkipReasons = {
@@ -2607,9 +2813,9 @@ export class RoutingEngine {
         startCoords &&
         !isInsideBBox(startCoords.lat, startCoords.lon, bbox)
       ) {
-        throw new RouteSearchError(
-          "Start node is outside the routing bounding box",
-        );
+        throw this.searchFailure(inputs, "NO_PATH", {
+          reason: "start_outside_box",
+        });
       }
     }
 
@@ -2804,6 +3010,8 @@ export class RoutingEngine {
       }
     }
 
+    this.noteSearch(iterations, searchStartedAt);
+
     if (
       (!goalReached || reachedNode === null) &&
       improveEndpoints &&
@@ -2813,7 +3021,7 @@ export class RoutingEngine {
       // missed (a basin bigger than IMPROVE_NODE_MIN_REACH that misses the
       // other endpoint). The literal nearest nodes route with a depth
       // penalty instead of not at all, so search again from those.
-      console.log(
+      this.log.info(
         `[routeiq] No path from the better-depth endpoint(s) — retrying from the nearest nodes`,
       );
       try {
@@ -2831,7 +3039,11 @@ export class RoutingEngine {
       } catch (e) {
         if (!(e instanceof RouteSearchError)) throw e;
         throw new RouteSearchError(
-          `${e.message} [retried from the nearest nodes after the better-depth endpoint(s) found no path]`,
+          e.message + format("ROUTE_RETRIED_SUFFIX", {}, this.msgLang(inputs)),
+          e.code,
+          { ...e.params, retried: true },
+          e.blocking,
+          e.catalogued,
         );
       }
     }
@@ -2841,49 +3053,42 @@ export class RoutingEngine {
       // vessel constraints — a disconnected graph, an undersized bounding
       // box, or a genuine land/obstacle block all hit this same failure
       // path, and previously got the identical generic message regardless.
-      const causes: string[] = [];
-      if (skipReasons.land > 0)
-        causes.push(`${skipReasons.land} edge(s) blocked by land`);
-      if (skipReasons.obstacle > 0)
-        causes.push(`${skipReasons.obstacle} edge(s) blocked by an obstacle`);
+      // What the search tallied, as numbers; the catalogue words it. The
+      // vessel dimensions that blocked edges are the only cause named in
+      // `blocking` (nothing is analysed here, only what was counted).
+      const skipped = { ...skipReasons };
+      const blocking: BlockingCause[] = [];
       if (skipReasons.draft > 0)
-        causes.push(
-          `${skipReasons.draft} edge(s) too shallow for draft ${inputs.draft}m`,
-        );
+        blocking.push({
+          dimension: "draft",
+          value: inputs.draft,
+          need: this.requiredDepth(inputs),
+        });
       if (skipReasons.airDraft > 0)
-        causes.push(
-          `${skipReasons.airDraft} edge(s) with insufficient air draft for airDraft ${inputs.airDraft}m`,
-        );
+        blocking.push({
+          dimension: "airDraft",
+          value: inputs.airDraft,
+          need: this.requiredAirDraft(inputs),
+        });
       if (skipReasons.beam > 0)
-        causes.push(
-          `${skipReasons.beam} edge(s) too narrow for beam ${inputs.beam}m`,
-        );
-      if (skipReasons.coastDistance > 0)
-        causes.push(
-          `${skipReasons.coastDistance} edge(s) closer to shore than the requested minCoastDistance`,
-        );
-      if (skipReasons.bbox > 0)
-        causes.push(
-          `${skipReasons.bbox} edge(s) outside the current search bounding box`,
-        );
-
-      let detail: string;
-      if (causes.length === 0) {
-        detail =
-          iterations >= maxIterations
-            ? "the search exceeded its iteration limit before finding a path — the area may be too large for the current bounding box."
-            : "the destination appears unreachable from the start — the graph may be disconnected here (no edges connect the two areas), independent of vessel size or coast-distance settings.";
-      } else {
-        detail =
-          `during the search, ran into: ${causes.join(", ")}.` +
-          (iterations >= maxIterations
-            ? " The search also exceeded its iteration limit before finishing."
-            : "");
-      }
-
-      throw new RouteSearchError(
-        `No route found between the given points — ${detail} ` +
-          `(vessel dims: draft=${inputs.draft}m, beam=${inputs.beam}m, airDraft=${inputs.airDraft}m, minCoastDistance=${(minCoastDistanceMeters / 1852).toFixed(2)}nm)`,
+        blocking.push({
+          dimension: "beam",
+          value: inputs.beam,
+          need: this.requiredWidth(inputs),
+        });
+      throw this.searchFailure(
+        inputs,
+        "NO_PATH",
+        {
+          reason: "search",
+          skipped,
+          iterationLimit: iterations >= maxIterations,
+          draft: inputs.draft,
+          beam: inputs.beam,
+          airDraft: inputs.airDraft,
+          minCoastDistance: minCoastDistanceMeters,
+        },
+        blocking,
       );
     }
 
@@ -3121,7 +3326,7 @@ export class RoutingEngine {
       await this.addViolationWarnings(
         leg,
         fresh,
-        check.label,
+        check.target,
         check.startPt,
         check.endPt,
         check.inputs,
@@ -3898,10 +4103,17 @@ export class RoutingEngine {
         );
       for (const c of group) {
         if (!c.passesClosed) continue;
-        c.note =
-          `passes closed (air draft ${inputs.airDraft.toFixed(1)} m + ` +
-          `${inputs.safetyMarginAirDraft.toFixed(1)} m margin < closed ${c.closedHeight!.toFixed(1)} m)` +
-          (owner ? "" : ", no wait");
+        const noteCode: CrossingNoteCode = owner
+          ? "CROSSING_PASSES_CLOSED"
+          : "CROSSING_PASSES_CLOSED_NO_WAIT";
+        const noteParams = {
+          airDraft: inputs.airDraft,
+          margin: inputs.safetyMarginAirDraft,
+          closedHeight: c.closedHeight!,
+        };
+        c.note = format(noteCode, noteParams, this.msgLang(inputs));
+        c.noteCode = noteCode;
+        c.noteParams = noteParams;
       }
       if (!owner) continue; // fixed or passable spans only — nothing to wait for
       const minutes =
@@ -4080,6 +4292,7 @@ export class RoutingEngine {
         requiredAirDraft: this.requiredAirDraft(inputs),
       },
       viaAt,
+      this.msgLang(inputs),
     );
     route.waypoints = waypoints;
     route.itinerary = itinerary;
@@ -4130,7 +4343,12 @@ export class RoutingEngine {
           coords: coords as Array<[number, number]>,
           cum: cumulativeDistances(coords, segments),
         };
-        const description = buildRouteDescription(units, described, geometry);
+        const description = buildRouteDescription(
+          units,
+          described,
+          geometry,
+          this.msgLang(inputs),
+        );
         if (description) {
           route.description = description;
           attachWaters(itinerary, description, geometry);
@@ -4138,10 +4356,12 @@ export class RoutingEngine {
       } catch (e) {
         route.warnings = [
           ...(route.warnings ?? []),
-          {
-            type: "description_unavailable",
-            message: `Route description unavailable: ${e instanceof Error ? e.message : String(e)}`,
-          },
+          makeWarning(
+            this.msgLang(inputs),
+            "description_unavailable",
+            "DESCRIPTION_UNAVAILABLE",
+            { reason: e instanceof Error ? e.message : String(e) },
+          ),
         ];
       }
     }
@@ -5375,7 +5595,7 @@ export class RoutingEngine {
   private async addViolationWarnings(
     result: RouteResult,
     warnings: RouteWarning[],
-    label: string,
+    target: LegTarget,
     startPt: { latitude: number; longitude: number },
     endPt: { latitude: number; longitude: number },
     inputs: RouteInputs,
@@ -5464,30 +5684,43 @@ export class RoutingEngine {
     }
 
     if (totalViolationSegments > 0 && firstFromCoord && lastToCoord) {
-      const reasons: string[] = [];
+      // Numbers only: the wording (and the "also at passage" variant, present
+      // when the tide moved the depth figure) is the catalogue's.
+      const params: MessageParams = {
+        legs: totalViolationSegments,
+        distance: totalViolationDist,
+      };
+      if (typeof target === "object") params.via = target.via;
       if (worstDepth < Infinity) {
+        params.depth = worstDepth;
+        params.depthRequired = minDepth;
         // Only mention the tide where it actually moved the figure — with
         // tides off, or where the rise made no difference, the message reads
         // exactly as it always has rather than acquiring unexplained wording.
-        const [depth, need] = limitPair(worstDepth, minDepth);
-        reasons.push(
-          worstDepth - worstCharted >= RoutingEngine.TIDE_REPORT_MIN_RISE_M
-            ? `depth ${depth}m at passage (${worstCharted.toFixed(1)}m charted) < required ${need}m`
-            : `depth ${depth}m < required ${need}m`,
-        );
+        if (worstDepth - worstCharted >= RoutingEngine.TIDE_REPORT_MIN_RISE_M)
+          params.depthCharted = worstCharted;
       }
       if (worstAirDraft < Infinity) {
-        const [have, need] = limitPair(worstAirDraft, airDraft);
-        reasons.push(`air draft ${have}m < required ${need}m`);
+        params.airDraft = worstAirDraft;
+        params.airDraftRequired = airDraft;
       }
       if (worstBeam < Infinity) {
-        const [have, need] = limitPair(worstBeam, minBeam);
-        reasons.push(`width ${have}m < required beam ${need}m`);
+        params.width = worstBeam;
+        params.beamRequired = minBeam;
       }
-      const distNm = totalViolationDist / 1852;
+      const constrainedCode: RouteWarningCode =
+        target === "route"
+          ? "ROUTE_CONSTRAINED"
+          : target === "end"
+            ? "END_LEG_CONSTRAINED"
+            : "VIA_LEG_CONSTRAINED";
       warnings.push({
-        type: "via_constrained",
-        message: `Route to ${label}: constrained for ${totalViolationSegments} leg(s) ${distNm.toFixed(1)}Nm — ${reasons.join("; ")}`,
+        ...makeWarning(
+          this.msgLang(inputs),
+          "via_constrained",
+          constrainedCode,
+          params,
+        ),
         from: { latitude: firstFromCoord[1], longitude: firstFromCoord[0] },
         to: { latitude: lastToCoord[1], longitude: lastToCoord[0] },
         distanceMeters: totalViolationDist,

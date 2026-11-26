@@ -15,6 +15,7 @@
  *   bridge/lock crossings) computed from the exact graph edges.
  */
 
+import { format } from "./messages.js";
 import {
   ItineraryPoint,
   LegWarning,
@@ -350,14 +351,19 @@ export function legWarnings(
     narrow?: RouteLocation[];
     lowClearance?: RouteLocation[];
   } = {},
+  lang?: string | null,
 ): LegWarning[] {
   const out: LegWarning[] = [];
   const { minDepth, minDepthAtPassage, minWidth, maxAirDraft } = agg;
   if (minDepth !== undefined && belowLimit(minDepth, vessel.requiredDepth)) {
     const tideAdds =
       minDepthAtPassage !== undefined && minDepthAtPassage > minDepth;
+    const code = tideAdds ? "LEG_SHALLOW_AT_PASSAGE" : "LEG_SHALLOW";
+    const params = tideAdds ? { minDepth, minDepthAtPassage } : { minDepth };
     out.push({
       type: "shallow",
+      code,
+      params,
       level:
         tideAdds && !belowLimit(minDepthAtPassage, vessel.requiredDepth)
           ? "caution"
@@ -367,20 +373,20 @@ export function legWarnings(
         ? { minDepthAtPassage: Math.round(minDepthAtPassage * 100) / 100 }
         : {}),
       requiredDepth: round2(vessel.requiredDepth),
-      message: tideAdds
-        ? `Shallow (${minDepth.toFixed(1)}m charted, ${minDepthAtPassage.toFixed(1)}m at passage)`
-        : `Shallow (${minDepth.toFixed(1)}m)`,
+      message: format(code, params, lang),
       ...(at.shallow && at.shallow.length > 0 ? { at: at.shallow } : {}),
     });
   }
   if (minWidth !== undefined && belowLimit(minWidth, vessel.requiredWidth)) {
     out.push({
       type: "narrow",
+      code: "LEG_NARROW",
+      params: { minWidth },
       level: minWidth < vessel.beam ? "danger" : "caution",
       minWidth,
       beam: vessel.beam,
       requiredWidth: round2(vessel.requiredWidth),
-      message: `Narrow (${minWidth.toFixed(1)}m)`,
+      message: format("LEG_NARROW", { minWidth }, lang),
       ...(at.narrow && at.narrow.length > 0 ? { at: at.narrow } : {}),
     });
   }
@@ -390,13 +396,15 @@ export function legWarnings(
     maxAirDraft !== undefined &&
     belowLimit(maxAirDraft, requiredAirDraft)
   ) {
-    const [have, need] = limitPair(maxAirDraft, requiredAirDraft);
+    const params = { maxAirDraft, requiredAirDraft };
     out.push({
       type: "low_clearance",
+      code: "LEG_LOW_CLEARANCE",
+      params,
       level: "danger",
       maxAirDraft,
       requiredAirDraft: round2(requiredAirDraft),
-      message: `Low clearance (${have}m, need ${need}m)`,
+      message: format("LEG_LOW_CLEARANCE", params, lang),
       ...(at.lowClearance && at.lowClearance.length > 0
         ? { at: at.lowClearance }
         : {}),
@@ -412,15 +420,6 @@ export function legWarnings(
  *  value exactly at the limit short. A real shortfall of 1 cm still is. */
 function belowLimit(value: number, required: number): boolean {
   return value < round2(required);
-}
-
-/** A measured value and the limit it misses, as text: one decimal, or two
- *  when one decimal would print them the same (17.05 vs 17.06 would both
- *  read 17.1, a shortfall that looks like none). */
-export function limitPair(value: number, limit: number): [string, string] {
-  const a = value.toFixed(1);
-  const b = limit.toFixed(1);
-  return a === b ? [value.toFixed(2), limit.toFixed(2)] : [a, b];
 }
 
 /** Margins are added in floating point (15.56 + 1.5 = 17.060000000000002). */
@@ -461,6 +460,7 @@ export function buildItinerary(
   toleranceM: number,
   vessel?: VesselNeeds,
   viaAt?: ReadonlyMap<number, number>,
+  lang?: string | null,
 ): ItineraryResult {
   if (coords.length < 2) {
     return {
@@ -679,6 +679,7 @@ export function buildItinerary(
             narrow: narrowRuns.close(),
             lowClearance: lowClearanceRuns.close(),
           },
+          lang,
         );
         if (warnings.length > 0) point.leg.warnings = warnings;
       }

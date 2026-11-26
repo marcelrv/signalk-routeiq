@@ -20,7 +20,7 @@ import { RoutingEngine } from "routeiq-core";
 import { DEFAULT_CONFIG } from "../dist-tsc/types.js";
 import { upgradeToPoiModel } from "./poi-model-fixture.js";
 import { POIS_DDL } from "./poi-model-fixture.js";
-import { testOptions } from './engine-helper.js';
+import { inputsFor, testOptions } from './engine-helper.js';
 
 const LAT0 = 52.0;
 const LON0 = 5.0;
@@ -1251,6 +1251,7 @@ describe("route structures: a connector that cuts the first edge keeps its links
       { latitude: lat, longitude: lon },
       route,
       "start",
+      inputsFor(engine.options),
     );
     const coords = route.features[0].geometry.coordinates;
     const segments = route.features[0].properties.segments as Seg[];

@@ -73,6 +73,9 @@ export interface PassageProfileWarning {
   type: string;
   level?: WarnLevel;
   message: string;
+  /** Stable code and params of the warning (codes.ts), when it has them. */
+  code?: string;
+  params?: Record<string, unknown>;
   distanceFromStart?: number; // m, where it starts along the route
 }
 
@@ -210,18 +213,27 @@ function collectWarnings(route: RouteResult): PassageProfileWarning[] {
   const out: PassageProfileWarning[] = [];
   for (const w of route.warnings ?? []) {
     if (w && typeof w.message === "string") {
-      out.push({ type: String(w.type), message: w.message });
+      out.push({
+        type: String(w.type),
+        message: w.message,
+        ...(typeof w.code === "string" ? { code: w.code } : {}),
+        ...(w.params ? { params: w.params } : {}),
+      });
     }
   }
   const located = (w: {
     type: string;
     level: WarnLevel;
     message: string;
+    code?: string;
+    params?: Record<string, unknown>;
     at?: Array<{ distanceFromStart: number }>;
   }): PassageProfileWarning => ({
     type: w.type,
     level: w.level,
     message: w.message,
+    ...(typeof w.code === "string" ? { code: w.code } : {}),
+    ...(w.params ? { params: w.params } : {}),
     ...(w.at && w.at.length && Number.isFinite(w.at[0].distanceFromStart)
       ? { distanceFromStart: w.at[0].distanceFromStart }
       : {}),

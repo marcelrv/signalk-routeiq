@@ -1,6 +1,10 @@
 {
   "error": {
+    "code": "OUTSIDE_COVERAGE",
     "message": "No routing nodes found near start point",
-    "name": "Error"
+    "name": "Error",
+    "params": {
+      "point": "start"
+    }
   }
 }

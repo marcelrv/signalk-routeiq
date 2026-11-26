@@ -482,7 +482,7 @@ describe('buildRouteDescription / attachWaters (pure)', () => {
   it('drops slivers under 100 m without a warning and merges the water around them', () => {
     const w = (id: number | undefined, name: string | undefined, from: number, distance: number, warn = false) => ({
       distanceFromStart: from, distance, ...(id ? { waterBodyId: id } : {}), ...(name ? { name } : {}),
-      warnings: warn ? [{ type: 'origin' as const, level: 'caution' as const, origin: 'imported', message: 'm' }] : [],
+      warnings: warn ? [{ type: 'origin' as const, level: 'caution' as const, origin: 'imported', message: 'm', code: 'ORIGIN_UNREVIEWED' as const, params: { origin: 'imported' } }] : [],
     });
     const itinerary = () => [
       { kind: 'start', distanceFromStart: 0, leg: { distance: 1000 } },
@@ -790,7 +790,7 @@ describe('leg warnings', () => {
 
   it('shallow without tide is a danger', () => {
     assert.deepStrictEqual(legWarnings({ minDepth: 1.5 }, vessel), [
-      { type: 'shallow', level: 'danger', minDepth: 1.5, requiredDepth: 2.3, message: 'Shallow (1.5m)' },
+      { type: 'shallow', code: 'LEG_SHALLOW', params: { minDepth: 1.5 }, level: 'danger', minDepth: 1.5, requiredDepth: 2.3, message: 'Shallow (1.5m)' },
     ]);
     // A passage depth equal to the charted one means no tide was added.
     assert.strictEqual(legWarnings({ minDepth: 1.5, minDepthAtPassage: 1.5 }, vessel)[0].message, 'Shallow (1.5m)');
@@ -806,7 +806,7 @@ describe('leg warnings', () => {
 
   it('narrower than the beam is a danger, within the margin a caution', () => {
     assert.deepStrictEqual(legWarnings({ minWidth: 3.9 }, vessel), [
-      { type: 'narrow', level: 'danger', minWidth: 3.9, beam: 4.0, requiredWidth: 6.0, message: 'Narrow (3.9m)' },
+      { type: 'narrow', code: 'LEG_NARROW', params: { minWidth: 3.9 }, level: 'danger', minWidth: 3.9, beam: 4.0, requiredWidth: 6.0, message: 'Narrow (3.9m)' },
     ]);
     assert.strictEqual(legWarnings({ minWidth: 4.0 }, vessel)[0].level, 'caution');
     assert.strictEqual(legWarnings({ minWidth: 5.9 }, vessel)[0].level, 'caution');
@@ -821,6 +821,9 @@ describe('leg warnings', () => {
     assert.deepStrictEqual(legWarnings({ maxAirDraft: 6.7 }, tall), [
       {
         type: 'low_clearance',
+        code: 'LEG_LOW_CLEARANCE',
+        // The raw figures the message was worded from, noise and all.
+        params: { maxAirDraft: 6.7, requiredAirDraft: 15.56 + 1.5 },
         level: 'danger',
         maxAirDraft: 6.7,
         requiredAirDraft: 17.06,

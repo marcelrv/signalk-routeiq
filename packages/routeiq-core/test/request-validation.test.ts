@@ -160,25 +160,41 @@ describe('validateRouteRequest: vessel dimensions', () => {
     assert.deepStrictEqual([r.request.draft, r.request.beam, r.request.airDraft], [1.8, 3.5, 14]);
   });
 
-  it('drops an unusable dimension with a warning when not strict, using the caller hint', () => {
+  it('drops an unusable dimension with a warning when not strict, saying what was used instead', () => {
     const r = ok(
       { start, end, draft: 'deep', beam: -2, airDraft: 100000 },
-      { ignoredDimensionHint: (label) => `Used the default ${label}.` },
+      { ignoredDimensionFallback: 'configured' },
     );
     assert.deepStrictEqual([r.request.draft, r.request.beam, r.request.airDraft], [undefined, undefined, undefined]);
     assert.ok(!('draft' in r.request));
     assert.strictEqual(r.warnings.length, 3);
     assert.strictEqual(r.warnings[0].type, 'vessel_dimension_ignored');
+    assert.strictEqual(r.warnings[0].code, 'VESSEL_DIMENSION_IGNORED_CONFIGURED');
+    assert.deepStrictEqual(r.warnings[0].params, { dimension: 'draft', value: 'deep', max: 30 });
     assert.strictEqual(
       r.warnings[0].message,
-      'Ignored the supplied draft (deep) — expected a number between 0 and 30 meters. Used the default draft.',
+      'Ignored the supplied draft (deep) — expected a number between 0 and 30 meters. Routed with the draft configured on the server instead; check the vessel dimensions in Signal K.',
     );
-    assert.match(r.warnings[2].message, /air draft \(100000\).*0 and 150 meters\. Used the default air draft\.$/);
+    assert.match(r.warnings[2].message, /air draft \(100000\).*0 and 150 meters\. Routed with the air draft configured on the server instead/);
   });
 
   it('has a default hint when the caller gives none', () => {
     const r = ok({ start, end, beam: 'wide' });
     assert.match(r.warnings[0].message, /The default beam was used instead\.$/);
+    assert.strictEqual(r.warnings[0].code, 'VESSEL_DIMENSION_IGNORED');
+  });
+
+  it('words its messages in the limits language, or in the body lang when it follows the request', () => {
+    const dutch = ok({ start, end, beam: 'wide' }, { messageLanguage: 'nl' });
+    assert.match(dutch.warnings[0].message, /^De opgegeven breedte \(wide\) is genegeerd/);
+    const follow = ok({ start, end, beam: 'wide', lang: 'nl-BE' });
+    assert.match(follow.warnings[0].message, /^De opgegeven breedte/);
+    const fixed = ok({ start, end, beam: 'wide', lang: 'nl' }, { messageLanguage: 'en' });
+    assert.match(fixed.warnings[0].message, /^Ignored the supplied beam/);
+    const err = bad({ start, end, draft: 'deep' }, { strict: true, messageLanguage: 'nl' });
+    assert.strictEqual(err.code, 'INVALID_DIMENSION');
+    assert.strictEqual(err.message, 'Ongeldige draft — een getal in meters werd verwacht');
+    assert.strictEqual(bad(undefined, { messageLanguage: 'nl' }).message, 'Ongeldige aanvraag — een JSON-object werd verwacht');
   });
 
   it('is an error in strict mode, there being no fallback', () => {

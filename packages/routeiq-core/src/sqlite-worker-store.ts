@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import type { DescribeWorkerResult } from "./route-description.js";
+import { LOG_LEVELS, resolveLogger, type Logger } from "./logger.js";
 import {
   GraphEditError,
   type DescribePair,
@@ -81,12 +82,15 @@ export interface SqliteWorkerStoreOptions {
    *  overlay, and refuse every graph edit with a `GraphEditError`
    *  (`READ_ONLY`). Nothing is written anywhere. */
   readOnly?: boolean;
+  /** Receives what the worker thread logs. Default: silent. */
+  logger?: Logger;
 }
 
 export class SqliteWorkerStore implements RoutingStore, OverlayStore {
   private worker: Worker | null = null;
   private messageIdCounter = 0;
   private readonly readOnly: boolean;
+  private readonly log: Logger;
   private pending = new Map<
     number,
     {
@@ -100,6 +104,7 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
 
   constructor(options: SqliteWorkerStoreOptions = {}) {
     this.readOnly = options.readOnly === true;
+    this.log = resolveLogger(options.logger);
     if (this.readOnly && !nodeSqliteSupportsReadOnly()) {
       throw new Error(
         `Read-only mode is not available: this Node.js (${process.version}) opens SQLite files read-write even when asked for read-only. Use a newer Node.js.`,
@@ -126,7 +131,16 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
         chunk?: boolean;
         chunkIndex?: number;
         totalChunks?: number;
+        level?: string;
+        message?: string;
+        meta?: Record<string, unknown>;
       }) => {
+        // A log line from the worker, not a reply: hand it to the logger.
+        if (msg.type === "log") {
+          const level = LOG_LEVELS.find((l) => l === msg.level) ?? "info";
+          this.log[level](String(msg.message ?? ""), msg.meta);
+          return;
+        }
         const pending = this.pending.get(msg.id);
         if (!pending) return;
 
