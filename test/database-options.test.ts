@@ -9,11 +9,11 @@ import * as path from 'path';
 import assert from 'node:assert';
 import { afterEach, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { RoutingDatabase, GraphEditError } from '../dist-tsc/database.js';
-import type { RegionFileEntry, RoutingStore } from '../dist-tsc/database.js';
+import { RoutingDatabase, GraphEditError } from 'routeiq-core';
+import type { RegionFileEntry, RoutingStore } from 'routeiq-core';
 import { directoryDatabaseOptions, scanRoutingDataDir } from '../dist-tsc/data-dir.js';
-import { nodeSqliteSupportsReadOnly, readOnlyHonoured } from '../dist-tsc/sqlite-worker-store.js';
-import { RoutingEngine } from '../dist-tsc/routing.js';
+import { nodeSqliteSupportsReadOnly, readOnlyHonoured } from 'routeiq-core';
+import { RoutingEngine } from 'routeiq-core';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { testOptions } from './engine-helper.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
@@ -147,7 +147,7 @@ describe('explicit file list', () => {
     const dir = tmpDir();
     buildRegion(path.join(dir, 'a.sqlite'), A);
     buildRegion(path.join(dir, 'b.sqlite'), B);
-    const { SqliteWorkerStore } = await import('../dist-tsc/sqlite-worker-store.js');
+    const { SqliteWorkerStore } = await import('routeiq-core');
     for (const policy of ['dynamic', 'pinned', 'bulk'] as const) {
       const seen: string[] = [];
       const db = new RoutingDatabase({
@@ -440,7 +440,7 @@ describe('coverage without loading', () => {
     buildRegion(path.join(dir, 'b.sqlite'), B);
     buildRegion(path.join(dir, 'off.sqlite'), { country: 'OFF', lat: 20.5, lon: 3.5 });
     buildRegion(path.join(dir, 'old.sqlite'), { country: 'OLD', lat: 10.5, lon: 3.5, poiModel: false });
-    const { SqliteWorkerStore } = await import('../dist-tsc/sqlite-worker-store.js');
+    const { SqliteWorkerStore } = await import('routeiq-core');
     const opened: string[] = [];
     const db = new RoutingDatabase({
       files: [entry(dir, 'a.sqlite'), entry(dir, 'b.sqlite'), entry(dir, 'off.sqlite', false), entry(dir, 'old.sqlite')],

@@ -14,3 +14,8 @@ export * from "./route-description.js";
 export * from "./passage-profile.js";
 export * from "./gpx-export.js";
 export * from "./tides.js";
+export * from "./routing-store.js";
+export * from "./route-metadata.js";
+export * from "./database.js";
+export * from "./routing.js";
+export * from "./sqlite-worker-store.js";

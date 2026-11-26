@@ -20,20 +20,20 @@ import {
   TRAFFIC_ONE_WAY_REV,
   isSailableEdge,
 } from "./database.js";
-import type { FunnelResult, NavmeshRegion } from "routeiq-core";
+import type { FunnelResult, NavmeshRegion } from "./navmesh.js";
 import {
   attachWaters,
   buildRouteDescription,
   ENDPOINT_POI_RADIUS_M,
   nameEndpoints,
-} from "routeiq-core";
+} from "./route-description.js";
 import {
   bearingDeg,
   buildItinerary,
   closestCoordIndex,
   cumulativeDistances,
   limitPair,
-} from "routeiq-core";
+} from "./itinerary.js";
 import {
   CurrentProvider,
   FlowField,
@@ -43,7 +43,7 @@ import {
   noCurrentField,
   prepareStationFlowField,
   prepareTideHeights,
-} from "routeiq-core";
+} from "./tides.js";
 import type {
   BBox,
   DepartureScanStep,
@@ -53,8 +53,8 @@ import type {
   RouteResult,
   RouteWarning,
   RoutingRequest,
-} from "routeiq-core";
-import { type EngineOptions, resolveRouteInputs } from "routeiq-core";
+} from "./types.js";
+import { type EngineOptions, resolveRouteInputs } from "./engine-options.js";
 
 function isInsideBBox(lat: number, lon: number, bbox: BBox): boolean {
   return (

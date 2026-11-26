@@ -35,7 +35,7 @@ describe('POST /route/departures streaming', () => {
         step: number,
         signal?: { aborted: boolean },
       ) {
-        const { RoutingEngine } = await import('../dist-tsc/routing.js');
+        const { RoutingEngine } = await import('routeiq-core');
         const steps = RoutingEngine.departureScanSteps(hours, step);
         for (const i of RoutingEngine.departureScanOrder(steps)) {
           if (signal?.aborted) return;

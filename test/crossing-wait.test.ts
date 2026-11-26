@@ -9,7 +9,7 @@
  */
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { RoutingEngine, passesClosedSpan } from '../dist-tsc/routing.js';
+import { RoutingEngine, passesClosedSpan } from 'routeiq-core';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import type { EngineOptions } from 'routeiq-core';
 import { inputsFor, testOptions } from './engine-helper.js';

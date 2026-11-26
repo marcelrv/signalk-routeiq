@@ -6,9 +6,10 @@
 //   src/index.ts          dist/.. is the plugin root
 //   src/provider.ts       ../package.json
 //   src/plotterext.ts     createRequire(import.meta.url)
-//   src/database.ts       db-worker.js next to the module that starts it
-// db-worker is a second entry point so it exists as dist/db-worker.js, and
-// database.ts (inlined into dist/index.js) finds it in the same directory.
+//   core sqlite-worker-store.ts  db-worker.js next to the module that starts it
+// db-worker is a second entry point (taken from routeiq-core's sources) so it
+// exists as dist/db-worker.js, and sqlite-worker-store.ts (inlined into
+// dist/index.js) finds it in the same directory.
 //
 // External: node built-ins and the root package's runtime dependencies.
 // routeiq-core is a workspace package, not a dependency, and is inlined, so the published
@@ -28,7 +29,7 @@ rmSync(new URL('dist', root), { recursive: true, force: true });
 
 const options = {
   absWorkingDir: fileURLToPath(root),
-  entryPoints: { index: 'src/index.ts', 'db-worker': 'src/db-worker.ts' },
+  entryPoints: { index: 'src/index.ts', 'db-worker': 'packages/routeiq-core/src/db-worker.ts' },
   outdir: 'dist',
   bundle: true,
   format: 'esm',

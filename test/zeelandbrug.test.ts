@@ -1,9 +1,9 @@
 import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
-import { RoutingDatabase } from '../dist-tsc/database.js';
+import { RoutingDatabase } from 'routeiq-core';
 import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
-import { RoutingEngine } from '../dist-tsc/routing.js';
+import { RoutingEngine } from 'routeiq-core';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { testOptions } from './engine-helper.js';
 

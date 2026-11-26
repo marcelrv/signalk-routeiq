@@ -12,14 +12,14 @@ import * as fs from "fs";
 import * as path from "path";
 
 import { ApiHandler, coerceVesselDimension } from "./api.js";
-import type { RoutingDatabase } from "./database.js";
+import type { RoutingDatabase } from "routeiq-core";
 import { createDirectoryDatabase } from "./data-dir.js";
 import {
   registerPlotterExtension,
   setPlotterExtensionRunning,
 } from "./plotterext.js";
 import { toEngineOptions } from "./engine-options.js";
-import { RoutingEngine } from "./routing.js";
+import { RoutingEngine } from "routeiq-core";
 import {
   CurrentsApiHandle,
   localServerBase,

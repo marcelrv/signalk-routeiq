@@ -5,9 +5,9 @@ import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import {
   RoutingDatabase, POI_TYPE_HARBOUR, POI_TYPE_LOCK, POI_TYPE_BRIDGE, POI_TYPE_LOCK_CHAMBER, POI_TYPE_BRIDGE_SPAN,
-} from '../dist-tsc/database.js';
+} from 'routeiq-core';
 import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
-import { RoutingEngine } from '../dist-tsc/routing.js';
+import { RoutingEngine } from 'routeiq-core';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
 import { testOptions } from './engine-helper.js';

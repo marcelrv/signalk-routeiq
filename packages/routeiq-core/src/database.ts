@@ -1,12 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
-import * as Navmesh from "routeiq-core";
-import type {
-  BBox,
-  DataVersionEntry,
-  DescribeWorkerResult,
-  PoiResult,
-} from "routeiq-core";
+import * as Navmesh from "./navmesh.js";
+import type { BBox, DataVersionEntry, PoiResult } from "./types.js";
+import type { DescribeWorkerResult } from "./route-description.js";
 import {
   GraphEditError,
   OVERLAY_DB_INDEX,

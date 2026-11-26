@@ -16,7 +16,7 @@
  * dragging anything else across.
  */
 
-import type { DescribeWorkerResult } from "routeiq-core";
+import type { DescribeWorkerResult } from "./route-description.js";
 
 /** Edge columns the graph editor can set, and therefore the ones a user-edits
  *  overlay row can claim in `edited_fields`. Everything else on such a row is

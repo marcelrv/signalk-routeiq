@@ -11,7 +11,7 @@ import { pipeline } from "node:stream/promises";
 import { Readable, Transform } from "node:stream";
 import { ServerAPI } from "@signalk/server-api";
 import { NextFunction, Request, Response, Router } from "express";
-import { MAX_POIS_IN_BBOX, RoutingDatabase } from "./database.js";
+import { MAX_POIS_IN_BBOX, RoutingDatabase } from "routeiq-core";
 import { DISABLED_SUFFIX } from "./data-dir.js";
 import {
   DEFAULT_REQUEST_LIMITS,
@@ -31,7 +31,7 @@ import {
   savedCoordinates,
 } from "routeiq-core";
 import { PROVIDER } from "./provider.js";
-import { RoutingEngine } from "./routing.js";
+import { RoutingEngine } from "routeiq-core";
 import { runWithCaller } from "./server-access.js";
 import { VesselState, fillRequest } from "./vessel-state.js";
 import {

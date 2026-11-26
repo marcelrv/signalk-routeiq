@@ -14,7 +14,7 @@ import { DatabaseSync } from "node:sqlite";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
-import type { DescribeWorkerResult } from "routeiq-core";
+import type { DescribeWorkerResult } from "./route-description.js";
 import {
   GraphEditError,
   type DescribePair,

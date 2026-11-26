@@ -14,7 +14,7 @@ import type {
   DescribedSequence,
   DescribedWaterBody,
   DescribeWorkerResult,
-} from "routeiq-core";
+} from "./route-description.js";
 
 export interface DescribeFlags {
   /** edges.edge_sequence_id exists (the column is not in the load SELECT). */

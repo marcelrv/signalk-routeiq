@@ -3,9 +3,9 @@ import * as path from "path";
 import assert from "node:assert";
 import { after, before, describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { POI_TYPE_LOCK_CHAMBER, RoutingDatabase } from "../dist-tsc/database.js";
+import { POI_TYPE_LOCK_CHAMBER, RoutingDatabase } from "routeiq-core";
 import { createDirectoryDatabase } from "../dist-tsc/data-dir.js";
-import { RoutingEngine } from "../dist-tsc/routing.js";
+import { RoutingEngine } from "routeiq-core";
 import {
   KNOTS_TO_MS,
   prepareStationFlowField,

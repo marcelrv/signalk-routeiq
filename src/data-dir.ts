@@ -17,7 +17,7 @@ import {
   RoutingDatabase,
   type RegionFileEntry,
   type RoutingDatabaseOptions,
-} from "./database.js";
+} from "routeiq-core";
 
 /** Suffix marking an installed database the user has switched off. The file
  *  stays on disk and stays listed by the Data Manager, but nothing ever loads

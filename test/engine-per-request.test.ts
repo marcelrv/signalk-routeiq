@@ -17,9 +17,9 @@ import {
   type EngineOptions,
   type RoutingRequest,
 } from 'routeiq-core';
-import { RoutingDatabase } from '../dist-tsc/database.js';
+import { RoutingDatabase } from 'routeiq-core';
 import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
-import { RoutingEngine } from '../dist-tsc/routing.js';
+import { RoutingEngine } from 'routeiq-core';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { testOptions } from './engine-helper.js';
 
