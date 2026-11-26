@@ -51,6 +51,7 @@ import {
   RequestControl,
   effectiveBudget,
   isStopFailure,
+  StopRequested,
   type RouteCallOptions,
   type StopReason,
 } from "./request-control.js";
@@ -81,6 +82,7 @@ import {
   RouteRequestError,
   messageLanguageFor,
   resolveRouteInputs,
+  validateEngineOptions,
 } from "./engine-options.js";
 
 function isInsideBBox(lat: number, lon: number, bbox: BBox): boolean {
@@ -418,6 +420,7 @@ export class RoutingEngine {
    * search tuning.
    */
   constructor(db: RoutingDatabase, options: EngineOptions) {
+    validateEngineOptions(options);
     this.db = db;
     this._options = options;
     this.log = resolveLogger(options.logger);
@@ -539,20 +542,45 @@ export class RoutingEngine {
     // and harmonic current stations (signalk-tidal-currents) — the only source
     // of current; without them a route still gets the heights, with no
     // current. Asked at the same time, so a slow plugin costs one wait.
-    const [heights, stationField] = await Promise.all([
-      this.tides
-        ? prepareTideHeights(this.tides, anchors, departureMs, endMs, this.log)
-        : null,
-      this.currents
-        ? prepareStationFlowField(
-            this.currents,
-            anchors,
-            departureMs,
-            endMs,
-            this.log,
-          )
-        : null,
-    ]);
+    // The provider calls are raced against the request's abort signal and
+    // wall-time budget: an abort or overrun ends the wait, and the pending
+    // provider promise is ignored.
+    const control = this.controls.get(inputs);
+    const guard = <T>(work: Promise<T>): Promise<T> =>
+      control ? control.race(work) : work;
+    let heights: Awaited<ReturnType<typeof prepareTideHeights>> | null;
+    let stationField: Awaited<
+      ReturnType<typeof prepareStationFlowField>
+    > | null;
+    try {
+      [heights, stationField] = await Promise.all([
+        this.tides
+          ? guard(
+              prepareTideHeights(
+                this.tides,
+                anchors,
+                departureMs,
+                endMs,
+                this.log,
+              ),
+            )
+          : null,
+        this.currents
+          ? guard(
+              prepareStationFlowField(
+                this.currents,
+                anchors,
+                departureMs,
+                endMs,
+                this.log,
+              ),
+            )
+          : null,
+      ]);
+    } catch (e) {
+      if (e instanceof StopRequested) throw this.stopFailure(inputs, e.stop);
+      throw e;
+    }
 
     if (!stationField && !heights) return undefined;
     return {
@@ -900,6 +928,8 @@ export class RoutingEngine {
         }
 
         const newMargin = Math.min(currentMargin * 2, maxMargin);
+        // Defensive: a margin that does not grow would repeat the same box.
+        if (!(newMargin > currentMargin)) break;
         this.log.info(
           `Route search found a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`,
         );
@@ -923,11 +953,11 @@ export class RoutingEngine {
         // Expand bounding box and retry
         if (currentMargin < maxMargin) {
           const newMargin = Math.min(currentMargin * 2, maxMargin);
-          if (newMargin > currentMargin) {
-            this.log.info(
-              `Route search expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box`,
-            );
-          }
+          // Defensive: a margin that does not grow would repeat the same box.
+          if (!(newMargin > currentMargin)) break;
+          this.log.info(
+            `Route search expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box`,
+          );
           currentMargin = newMargin;
         } else {
           break;
@@ -1620,6 +1650,8 @@ export class RoutingEngine {
         }
 
         const newMargin = Math.min(currentMargin * 2, segmentMaxMargin);
+        // Defensive: a margin that does not grow would repeat the same box.
+        if (!(newMargin > currentMargin)) break;
         this.log.info(
           `Route search for ${label} found a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`,
         );
@@ -1641,11 +1673,11 @@ export class RoutingEngine {
         bbox = undefined;
         if (currentMargin >= segmentMaxMargin) break;
         const newMargin = Math.min(currentMargin * 2, segmentMaxMargin);
-        if (newMargin > currentMargin) {
-          this.log.info(
-            `Route search for ${label} expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box`,
-          );
-        }
+        // Defensive: a margin that does not grow would repeat the same box.
+        if (!(newMargin > currentMargin)) break;
+        this.log.info(
+          `Route search for ${label} expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box`,
+        );
         currentMargin = newMargin;
       }
     }

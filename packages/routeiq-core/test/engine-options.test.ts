@@ -4,13 +4,53 @@ import {
   CORE_VERSION,
   DEFAULT_ENGINE_OPTIONS,
   RouteRequestError,
+  RoutingEngine,
   resolveRouteInputs,
+  validateEngineOptions,
   type EngineOptions,
+  type RoutingDatabase,
   type RoutingRequest,
 } from '../dist/index.js';
 
 const base: RoutingRequest = { start: { latitude: 52, longitude: 5 }, end: { latitude: 52.1, longitude: 5.1 } };
 const options = (over: Partial<EngineOptions> = {}): EngineOptions => ({ ...DEFAULT_ENGINE_OPTIONS, ...over });
+
+describe('validateEngineOptions', () => {
+  it('accepts the defaults', () => {
+    assert.doesNotThrow(() => validateEngineOptions(options()));
+  });
+
+  it('rejects a bounding box margin that cannot grow', () => {
+    for (const bboxMarginDeg of [0, -1, NaN, Infinity]) {
+      assert.throws(() => validateEngineOptions(options({ bboxMarginDeg })), /bboxMarginDeg/);
+    }
+  });
+
+  it('rejects a maximum extent below the margin or not finite', () => {
+    assert.throws(() => validateEngineOptions(options({ bboxMarginDeg: 2, bboxMaxExtentDeg: 1 })), /bboxMaxExtentDeg/);
+    assert.throws(() => validateEngineOptions(options({ bboxMaxExtentDeg: NaN })), /bboxMaxExtentDeg/);
+    assert.doesNotThrow(() => validateEngineOptions(options({ bboxMarginDeg: 1, bboxMaxExtentDeg: 1 })));
+  });
+
+  it('rejects other numbers that are not finite or out of range', () => {
+    assert.throws(() => validateEngineOptions(options({ waypointToleranceM: NaN })), /waypointToleranceM/);
+    assert.throws(() => validateEngineOptions(options({ coverageGapM: -1 })), /coverageGapM/);
+    assert.throws(() => validateEngineOptions(options({ defaultLockWaitMinutes: Infinity })), /defaultLockWaitMinutes/);
+    assert.throws(() => validateEngineOptions(options({ defaultVessel: { draft: NaN, beam: 4, airDraft: 0 } })), /defaultVessel\.draft/);
+    assert.throws(() => validateEngineOptions(options({ maxSearchIterations: 0 })), /maxSearchIterations/);
+  });
+
+  it('names every problem in one error', () => {
+    assert.throws(
+      () => validateEngineOptions(options({ bboxMarginDeg: 0, losSearchRadiusM: NaN })),
+      (e: unknown) => e instanceof RangeError && /bboxMarginDeg/.test(e.message) && /losSearchRadiusM/.test(e.message),
+    );
+  });
+
+  it('is applied when an engine is constructed', () => {
+    assert.throws(() => new RoutingEngine({} as RoutingDatabase, options({ bboxMarginDeg: 0 })), /Invalid engine options/);
+  });
+});
 
 describe('resolveRouteInputs', () => {
   it('uses the option defaults for what the request leaves out', () => {

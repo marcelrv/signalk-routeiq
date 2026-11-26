@@ -327,4 +327,39 @@ describe('request budget and abort', () => {
       await engine.calculateRoute(request());
     });
   });
+
+  describe('tide providers that never answer', () => {
+    /** A height provider whose calls never settle. */
+    const hanging = {
+      findStations: () => new Promise<never>(() => undefined),
+      fetchTimeline: () => new Promise<never>(() => undefined),
+      probe: () => new Promise<never>(() => undefined),
+    };
+    const tideRequest = () => request({ useTides: true, departureTime: '2026-08-11T06:00:00.000Z' });
+
+    it('an abort ends the wait with ABORTED', async () => {
+      const engine = new RoutingEngine(db, options());
+      engine.setTidesClient(hanging);
+      const controller = new AbortController();
+      const outcome = rejection(engine.calculateRoute(tideRequest(), { signal: controller.signal }));
+      setTimeout(() => controller.abort(), 50);
+      assert.strictEqual((await outcome).code, 'ABORTED');
+    });
+
+    it('the wall-time budget ends the wait with BUDGET_EXCEEDED', async () => {
+      const engine = new RoutingEngine(db, options());
+      engine.setTidesClient(hanging);
+      const failure = await rejection(engine.calculateRoute(tideRequest(), { budget: { maxWallMs: 100 } }));
+      assert.strictEqual(failure.code, 'BUDGET_EXCEEDED');
+      assert.strictEqual(failure.params.limit, 'maxWallMs');
+    });
+
+    it('an already aborted signal stops before the provider is asked', async () => {
+      const engine = new RoutingEngine(db, options());
+      engine.setTidesClient(hanging);
+      const controller = new AbortController();
+      controller.abort();
+      assert.strictEqual((await rejection(engine.calculateRoute(tideRequest(), { signal: controller.signal }))).code, 'ABORTED');
+    });
+  });
 });

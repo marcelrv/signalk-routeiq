@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { RoutingDatabase, GraphEditError } from 'routeiq-core';
 import type { RegionFileEntry, RoutingStore } from 'routeiq-core';
 import { directoryDatabaseOptions, scanRoutingDataDir } from '../dist-tsc/data-dir.js';
-import { nodeSqliteSupportsReadOnly, readOnlyHonoured } from 'routeiq-core';
+import { probeReadOnlyConnection, readOnlyHonoured, SqliteWorkerStore } from 'routeiq-core';
 import { RoutingEngine } from 'routeiq-core';
 import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { testOptions } from './engine-helper.js';
@@ -246,14 +246,31 @@ describe('overlay contract', () => {
 });
 
 describe('read-only support probe', () => {
-  it('honours read-only only when the open refused and nothing was created', () => {
-    assert.strictEqual(readOnlyHonoured({ threw: true, created: false }), true);
-    assert.strictEqual(readOnlyHonoured({ threw: false, created: true }), false);
-    assert.strictEqual(readOnlyHonoured({ threw: false, created: false }), false);
-    assert.strictEqual(readOnlyHonoured({ threw: true, created: true }), false);
+  it('honours read-only only when the write was refused as a read-only error', () => {
+    assert.strictEqual(readOnlyHonoured({ threw: true, readOnlyError: true }), true);
+    assert.strictEqual(readOnlyHonoured({ threw: false, readOnlyError: false }), false);
+    assert.strictEqual(readOnlyHonoured({ threw: true, readOnlyError: false }), false);
   });
-  it('reports this Node as supported', () => {
-    assert.strictEqual(nodeSqliteSupportsReadOnly(), true);
+
+  it('on this Node a read-only connection refuses the probe and a normal one does not', () => {
+    const dir = tmpDir();
+    const file = path.join(dir, 'x.sqlite');
+    const w = new DatabaseSync(file);
+    w.exec('CREATE TABLE t (a)');
+    w.close();
+    const before = snapshot(dir);
+
+    const ro = new DatabaseSync(file, { readOnly: true });
+    assert.strictEqual(probeReadOnlyConnection(ro), true);
+    assert.strictEqual(ro.isTransaction, false, 'no transaction is left open');
+    ro.close();
+
+    const rw = new DatabaseSync(file);
+    assert.strictEqual(probeReadOnlyConnection(rw), false);
+    assert.strictEqual(rw.isTransaction, false, 'no transaction is left open');
+    assert.strictEqual((rw.prepare('SELECT COUNT(*) AS c FROM sqlite_master').get() as { c: number }).c, 1);
+    rw.close();
+    assert.deepStrictEqual(snapshot(dir), before, 'the file is as it was');
   });
 });
 
@@ -390,6 +407,29 @@ describe('pinned loading policy', () => {
     const r = await Promise.allSettled([bad.loadGraph(), bad.loadGraph()]);
     assert.deepStrictEqual(r.map((x) => x.status), ['rejected', 'rejected']);
     await bad.close();
+  });
+
+  it('an enabled file that is refused for its format fails loadGraph, also on retry; a disabled one does not', async () => {
+    const dir = tmpDir();
+    buildRegion(path.join(dir, 'a.sqlite'), A);
+    buildRegion(path.join(dir, 'old.sqlite'), { country: 'OLD', lat: 10.5, lon: 3.5, poiModel: false });
+    buildRegion(path.join(dir, 'off.sqlite'), { country: 'OFF', lat: 20.5, lon: 3.5, poiModel: false });
+    const db = new RoutingDatabase({
+      files: [entry(dir, 'a.sqlite'), entry(dir, 'old.sqlite'), entry(dir, 'off.sqlite', false)],
+      policy: 'pinned',
+    });
+    await db.init();
+    await assert.rejects(db.loadGraph(), /old\.sqlite/);
+    await assert.rejects(db.loadGraph(), /old\.sqlite/, 'a retry fails the same way');
+    await db.close();
+
+    const ok = new RoutingDatabase({
+      files: [entry(dir, 'a.sqlite'), entry(dir, 'old.sqlite', false), entry(dir, 'off.sqlite', false)],
+      policy: 'pinned',
+    });
+    await ok.init();
+    await ok.loadGraph();
+    await ok.close();
   });
 
   it('a failed load closes the handle it opened', async () => {
@@ -668,4 +708,32 @@ describe('an in-memory RoutingStore', () => {
       await db.close();
     });
   }
+});
+
+describe('store handles across close', () => {
+  it('a dbIndex from before close() is refused after the store reopens another file', async () => {
+    const dir = tmpDir();
+    const a = path.join(dir, 'a.sqlite');
+    const b = path.join(dir, 'b.sqlite');
+    buildRegion(a, A);
+    buildRegion(b, B);
+    const store = new SqliteWorkerStore();
+    try {
+      const opened = (await store.openDb(a)) as { dbIndex: number };
+      const oldIndex = opened.dbIndex;
+      assert.ok((await store.loadNodes({ dbIndexes: [oldIndex] })).length > 0);
+      await store.close();
+      const reopened = (await store.openDb(b)) as { dbIndex: number };
+      assert.notStrictEqual(reopened.dbIndex, oldIndex, 'the new file gets a new handle');
+      await assert.rejects(store.loadNodes({ dbIndexes: [oldIndex] }), /Stale database handle/);
+      await assert.rejects(store.loadEdges({ dbIndexes: [oldIndex] }), /Stale database handle/);
+      await assert.rejects(store.closeDb(oldIndex), /Stale database handle/);
+      assert.ok((await store.loadNodes({ dbIndexes: [reopened.dbIndex] })).length > 0, 'the new handle works');
+      // A re-initialisation ends the handles of the set before it as well.
+      await store.openAll([a, b]);
+      await assert.rejects(store.loadNodes({ dbIndexes: [reopened.dbIndex] }), /Stale database handle/);
+    } finally {
+      await store.close();
+    }
+  });
 });

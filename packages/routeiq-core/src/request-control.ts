@@ -71,6 +71,14 @@ export interface StopReason {
   params: Record<string, unknown>;
 }
 
+/** Thrown by `RequestControl.race` when the request has to stop. */
+export class StopRequested extends Error {
+  constructor(readonly stop: StopReason) {
+    super(stop.code);
+    this.name = "StopRequested";
+  }
+}
+
 export class RequestControl {
   readonly budget: SearchBudget;
   readonly signal: AbortSignal | undefined;
@@ -112,6 +120,54 @@ export class RequestControl {
       return this.over("maxWallMs", Math.round(elapsed));
     }
     return null;
+  }
+
+  /**
+   * Waits for `work`, but no longer than the request may run: an abort or the
+   * wall-time limit ends the wait by rejecting with a `StopRequested` (the
+   * pending work is ignored, its late result or error dropped). Without a
+   * signal and a finite wall limit this is `work` itself.
+   */
+  race<T>(work: Promise<T>): Promise<T> {
+    const wallLimited = Number.isFinite(this.budget.maxWallMs);
+    if (!this.signal && !wallLimited) return work;
+    // A late settlement of the abandoned work must not be an unhandled rejection.
+    work.catch(() => undefined);
+    return new Promise<T>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const signal = this.signal;
+      const finish = (): void => {
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener("abort", onStop);
+      };
+      const onStop = (): void => {
+        finish();
+        const stop =
+          this.check() ?? this.over("maxWallMs", Math.round(this.elapsedMs));
+        reject(new StopRequested(stop));
+      };
+      const early = this.check();
+      if (early) {
+        reject(new StopRequested(early));
+        return;
+      }
+      signal?.addEventListener("abort", onStop, { once: true });
+      if (wallLimited) {
+        const remaining = Math.max(0, this.budget.maxWallMs - this.elapsedMs);
+        timer = setTimeout(onStop, remaining + 1);
+        timer.unref?.();
+      }
+      work.then(
+        (v) => {
+          finish();
+          resolve(v);
+        },
+        (e) => {
+          finish();
+          reject(e);
+        },
+      );
+    });
   }
 
   private over(limit: BudgetLimit, used: number): StopReason {

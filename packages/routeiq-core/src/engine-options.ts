@@ -149,6 +149,64 @@ export function messageLanguageFor(
     : options.messageLanguage;
 }
 
+/**
+ * Throws when `options` holds a value the search cannot work with: a bounding
+ * box margin that is not above zero (the retry loop doubles it, so it would
+ * never grow), a maximum extent below the margin, or a number that is not
+ * finite or is out of range. Called when an engine is constructed.
+ */
+export function validateEngineOptions(options: EngineOptions): void {
+  const problems: string[] = [];
+  const finite = (v: unknown): v is number =>
+    typeof v === "number" && Number.isFinite(v);
+  const atLeastZero = (name: keyof EngineOptions): void => {
+    const v = options[name];
+    if (!finite(v) || v < 0) {
+      problems.push(`${name} must be a finite number, 0 or more`);
+    }
+  };
+  if (!finite(options.bboxMarginDeg) || options.bboxMarginDeg <= 0) {
+    problems.push("bboxMarginDeg must be a finite number greater than 0");
+  }
+  if (
+    !finite(options.bboxMaxExtentDeg) ||
+    (finite(options.bboxMarginDeg) &&
+      options.bboxMaxExtentDeg < options.bboxMarginDeg)
+  ) {
+    problems.push(
+      "bboxMaxExtentDeg must be a finite number, not less than bboxMarginDeg",
+    );
+  }
+  atLeastZero("losSearchRadiusM");
+  atLeastZero("waypointToleranceM");
+  atLeastZero("coverageGapM");
+  atLeastZero("maxPenaltyDetourRatio");
+  atLeastZero("defaultSpeedKnots");
+  atLeastZero("defaultLockWaitMinutes");
+  atLeastZero("defaultBridgeWaitMinutes");
+  atLeastZero("defaultSafetyMarginDraftM");
+  atLeastZero("defaultSafetyMarginBeamM");
+  atLeastZero("defaultSafetyMarginAirDraftM");
+  for (const k of ["draft", "beam", "airDraft"] as const) {
+    const v = options.defaultVessel?.[k];
+    if (!finite(v) || v < 0) {
+      problems.push(`defaultVessel.${k} must be a finite number, 0 or more`);
+    }
+  }
+  const iterations = options.maxSearchIterations;
+  if (
+    iterations !== undefined &&
+    (typeof iterations !== "number" ||
+      Number.isNaN(iterations) ||
+      iterations < 1)
+  ) {
+    problems.push("maxSearchIterations must be a number, 1 or more");
+  }
+  if (problems.length > 0) {
+    throw new RangeError(`Invalid engine options: ${problems.join("; ")}`);
+  }
+}
+
 /** Slowest speed the engine plans with, knots. */
 export const MIN_SPEED_KNOTS = 0.5;
 

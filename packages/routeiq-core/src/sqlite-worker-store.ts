@@ -14,9 +14,6 @@
  * still hold.
  */
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { DatabaseSync } from "node:sqlite";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
@@ -44,45 +41,6 @@ import {
   type StorePoiRow,
 } from "./routing-store.js";
 
-/** What the read-only probe saw when it opened a file that does not exist
- *  with `{ readOnly: true }`. */
-export interface ReadOnlyProbeOutcome {
-  /** The open threw (a read-only open of a missing file must). */
-  threw: boolean;
-  /** A file appeared at the path (a read-write open creates it). */
-  created: boolean;
-}
-
-/** Whether the probe outcome shows `readOnly` is honoured: the open refused
- *  and nothing was created. A node:sqlite that ignores the option (22.5.0)
- *  opens read-write and creates the file. */
-export function readOnlyHonoured(outcome: ReadOnlyProbeOutcome): boolean {
-  return outcome.threw && !outcome.created;
-}
-
-let readOnlySupport: boolean | null = null;
-
-/** One-time probe, in a temporary directory, of whether this Node's
- *  node:sqlite honours `readOnly`. */
-export function nodeSqliteSupportsReadOnly(): boolean {
-  if (readOnlySupport !== null) return readOnlySupport;
-  const dir = mkdtempSync(join(tmpdir(), "routeiq-ro-probe-"));
-  const file = join(dir, "probe.sqlite");
-  const outcome: ReadOnlyProbeOutcome = { threw: false, created: false };
-  try {
-    try {
-      new DatabaseSync(file, { readOnly: true }).close();
-    } catch {
-      outcome.threw = true;
-    }
-    outcome.created = existsSync(file);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-  readOnlySupport = readOnlyHonoured(outcome);
-  return readOnlySupport;
-}
-
 export interface SqliteWorkerStoreOptions {
   /** Open region files read-only (node:sqlite `readOnly`), never open an
    *  overlay, and refuse every graph edit with a `GraphEditError`
@@ -101,6 +59,13 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
   private deadReason: Error | null = null;
   private messageIdCounter = 0;
   private readonly readOnly: boolean;
+  /** Handles (`dbIndex`) are numbered across the store's whole life: the next
+   *  index the worker will hand out, and the first index of the current
+   *  generation (a worker start or an `init`). A handle below `indexBase`
+   *  belongs to a file set that is gone and is refused, so it can never
+   *  select another file after a reopen. */
+  private nextIndex = 0;
+  private indexBase = 0;
   private readonly log: Logger;
   private pending = new Map<
     number,
@@ -116,11 +81,6 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
   constructor(options: SqliteWorkerStoreOptions = {}) {
     this.readOnly = options.readOnly === true;
     this.log = resolveLogger(options.logger);
-    if (this.readOnly && !nodeSqliteSupportsReadOnly()) {
-      throw new Error(
-        `Read-only mode is not available: this Node.js (${process.version}) opens SQLite files read-write even when asked for read-only. Use a newer Node.js.`,
-      );
-    }
   }
 
   private start(): Worker {
@@ -203,10 +163,11 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
     );
 
     // The worker's own switch: every file it opens is opened read-only.
+    this.indexBase = this.nextIndex;
     worker.postMessage({
       id: 0,
       type: "configure",
-      payload: { readOnly: this.readOnly },
+      payload: { readOnly: this.readOnly, indexBase: this.indexBase },
     });
     return worker;
   }
@@ -229,9 +190,29 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
     return this.deadReason !== null;
   }
 
-  private send(type: string, payload?: any): Promise<any> {
+  /** Refuses a handle from before the current generation. */
+  private checkHandles(handles: Array<number | undefined> | undefined): void {
+    for (const h of handles ?? []) {
+      if (typeof h === "number" && h >= 0 && h < this.indexBase) {
+        throw new Error(
+          `Stale database handle ${h}: the store was closed or re-initialised since it was issued`,
+        );
+      }
+    }
+  }
+
+  private send(
+    type: string,
+    payload?: any,
+    handles?: Array<number | undefined>,
+  ): Promise<any> {
     if (this.closing) {
-      return this.closing.then(() => this.send(type, payload));
+      return this.closing.then(() => this.send(type, payload, handles));
+    }
+    try {
+      this.checkHandles(handles);
+    } catch (e) {
+      return Promise.reject(e);
     }
     // `init` (openAll) is the re-initialisation: it forgets the dead worker
     // and starts a new one. Anything else would talk to state that is gone.
@@ -259,38 +240,56 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
 
   // --- RoutingStore -------------------------------------------------------
 
-  openAll(paths: string[]): Promise<OpenAllResult> {
-    return this.send("init", { dbPaths: paths });
+  async openAll(paths: string[]): Promise<OpenAllResult> {
+    // Every earlier handle ends here: the new set is numbered from where the
+    // old ones stopped.
+    const indexBase = this.nextIndex;
+    const result: OpenAllResult = await this.send("init", {
+      dbPaths: paths,
+      indexBase,
+    });
+    this.indexBase = Math.max(this.indexBase, indexBase);
+    this.nextIndex = Math.max(
+      this.nextIndex,
+      indexBase + result.filenames.length,
+    );
+    return result;
   }
 
   peekMetadata(paths: string[]): Promise<PeekedFile[]> {
     return this.send("peekMetadata", { dbPaths: paths });
   }
 
-  openDb(path: string): Promise<OpenedFile | RefusedFile> {
-    return this.send("openDb", { dbPath: path });
+  async openDb(path: string): Promise<OpenedFile | RefusedFile> {
+    const result: OpenedFile | RefusedFile = await this.send("openDb", {
+      dbPath: path,
+    });
+    if ("dbIndex" in result) {
+      this.nextIndex = Math.max(this.nextIndex, result.dbIndex + 1);
+    }
+    return result;
   }
 
   async closeDb(dbIndex: number): Promise<void> {
-    await this.send("closeDb", { dbIndex });
+    await this.send("closeDb", { dbIndex }, [dbIndex]);
   }
 
   loadNodes(selector?: LoadSelector): Promise<StoreNodeRow[]> {
-    return this.send("loadNodes", selector);
+    return this.send("loadNodes", selector, selector?.dbIndexes);
   }
 
   loadEdges(selector?: LoadSelector): Promise<StoreEdgeRow[]> {
-    return this.send("loadEdges", selector);
+    return this.send("loadEdges", selector, selector?.dbIndexes);
   }
 
   loadPois(selector?: { dbIndexes?: number[] }): Promise<StorePoiRow[]> {
-    return this.send("loadPois", selector);
+    return this.send("loadPois", selector, selector?.dbIndexes);
   }
 
   loadNavmeshRegions(selector?: {
     dbIndexes?: number[];
   }): Promise<StoreNavmeshRow[]> {
-    return this.send("loadNavmeshRegions", selector);
+    return this.send("loadNavmeshRegions", selector, selector?.dbIndexes);
   }
 
   getMetadata(): Promise<Array<RegionMetadata & { stats: RegionStats }>> {
@@ -301,7 +300,11 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
     pairs: DescribePair[],
     lang?: string,
   ): Promise<DescribeWorkerResult> {
-    return this.send("describeRoute", { pairs, lang });
+    return this.send(
+      "describeRoute",
+      { pairs, lang },
+      pairs.map((p) => p.dbIndex),
+    );
   }
 
   poiInfo(ids: number[]): Promise<Record<string, Record<string, unknown>>> {
@@ -309,7 +312,11 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
   }
 
   routePois(pairs: RoutePoiQuery[]): Promise<RoutePoiAnswer[]> {
-    return this.send("routePois", { pairs });
+    return this.send(
+      "routePois",
+      { pairs },
+      pairs.flatMap((p) => p.dbIndexes ?? []),
+    );
   }
 
   close(): Promise<void> {
@@ -323,7 +330,9 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
 
   private async closeWorker(): Promise<void> {
     // A dead store is closed: the next call starts afresh, as after any close.
+    // Every handle issued so far ends here, whether or not a worker ran.
     this.deadReason = null;
+    this.indexBase = this.nextIndex;
     const worker = this.worker;
     if (!worker) return;
     try {
@@ -378,7 +387,7 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
     node_depth: number;
   }): Promise<void> {
     this.refuseWriteWhenReadOnly();
-    await this.send("updateNode", args);
+    await this.send("updateNode", args, [args.dbIndex]);
   }
 
   async updateEdge(
@@ -389,12 +398,12 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
     } & OverlayEdgeValues,
   ): Promise<void> {
     this.refuseWriteWhenReadOnly();
-    await this.send("updateEdge", args);
+    await this.send("updateEdge", args, [args.dbIndex]);
   }
 
   async deleteNode(args: { dbIndex: number; nodeId: number }): Promise<void> {
     this.refuseWriteWhenReadOnly();
-    await this.send("deleteNode", args);
+    await this.send("deleteNode", args, [args.dbIndex]);
   }
 
   async deleteEdge(args: {
@@ -403,7 +412,7 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
     target: number;
   }): Promise<void> {
     this.refuseWriteWhenReadOnly();
-    await this.send("deleteEdge", args);
+    await this.send("deleteEdge", args, [args.dbIndex]);
   }
 
   async clearOverlayDeletedEdges(): Promise<{ restored: number }> {
@@ -419,7 +428,7 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
     node_depth?: number;
   }): Promise<void> {
     this.refuseWriteWhenReadOnly();
-    await this.send("insertNode", args);
+    await this.send("insertNode", args, [args.dbIndex]);
   }
 
   async insertEdge(
@@ -431,6 +440,6 @@ export class SqliteWorkerStore implements RoutingStore, OverlayStore {
     } & OverlayEdgeValues,
   ): Promise<void> {
     this.refuseWriteWhenReadOnly();
-    await this.send("insertEdge", args);
+    await this.send("insertEdge", args, [args.dbIndex]);
   }
 }

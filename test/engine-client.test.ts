@@ -275,6 +275,39 @@ describe('engine client', () => {
     });
   });
 
+  describe('options that cannot be sent', () => {
+    it('a function-valued option fails the start with INIT_FAILED and the next call starts fresh', async () => {
+      const opts = clientOptions(tmpData());
+      const bad = new EngineClient({
+        ...opts,
+        engine: { ...opts.engine, notCloneable: () => 1 } as typeof opts.engine,
+      });
+      clients.push(bad);
+      const queued = rejection(bad.status());
+      const ready = await rejection(bad.ready);
+      assert.ok(ready instanceof EngineWorkerError && ready.code === 'INIT_FAILED');
+      assert.doesNotMatch(ready.message, /notCloneable/);
+      const q = await queued;
+      assert.ok(q instanceof EngineWorkerError && q.code === 'INIT_FAILED');
+      // Readiness was reset: the next call tries to start again (and fails the same way).
+      const again = await rejection(bad.status());
+      assert.ok(again instanceof EngineWorkerError && again.code === 'INIT_FAILED');
+    });
+
+    it('a logger in the options stays on the client side', async () => {
+      const opts = clientOptions(tmpData());
+      const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
+      const client = new EngineClient({
+        ...opts,
+        engine: { ...opts.engine, logger } as typeof opts.engine,
+        database: { ...opts.database, logger } as typeof opts.database,
+      });
+      clients.push(client);
+      await client.ready;
+      assert.strictEqual((await client.status()).status.counts.listed, 1);
+    });
+  });
+
   describe('departures', () => {
     const scanRequest = { ...request(), departureTime: '2026-08-11T06:00:00.000Z' };
 

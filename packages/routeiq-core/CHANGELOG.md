@@ -5,6 +5,16 @@ breaking change.
 
 ## Unreleased
 
+### Fixed
+
+- `pinned` policy: `loadGraph()` rejects when an enabled file is refused for its format or cannot load, instead of resolving with missing coverage. Disabled files stay excluded.
+- `EngineClient`: options that cannot be sent to the worker (a function, say) fail the start with `INIT_FAILED` like any other startup failure; a `logger` in the engine or database options stays on the client side.
+- Tide and current provider calls honour the request's abort signal and wall-time budget (`ABORTED` / `BUDGET_EXCEEDED`).
+- Provider error text is logged at `debug` only; the `warn` line is generic.
+- Read-only mode is checked on the opened read-only connection (a write in a rolled-back transaction) instead of in a temporary directory; `nodeSqliteSupportsReadOnly` is replaced by `probeReadOnlyConnection`.
+- A `dbIndex` issued before `close()` or a re-initialisation is refused by the store (`Stale database handle`) and never selects another file.
+- `RoutingEngine` validates its options at construction (`validateEngineOptions`; `bboxMarginDeg` above 0, `bboxMaxExtentDeg` not below it, other numbers finite and in range), and the bounding-box retry loops stop when the margin does not grow.
+
 ## 1.0.0 - 2026-11-26
 
 First release as a standalone package: the routing engine of `signalk-routeiq`,

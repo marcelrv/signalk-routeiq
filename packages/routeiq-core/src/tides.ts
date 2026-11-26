@@ -405,7 +405,11 @@ export async function prepareStationFlowField(
     if (series.length === 0) return null;
     return new StationFlowField(series);
   } catch (e) {
-    logger.warn(`[routeiq] station flow field unavailable: ${e}`);
+    // The provider's error text can carry positions: debug only.
+    logger.warn(
+      "[routeiq] Current station provider failed; continuing without station currents",
+    );
+    logger.debug(`[routeiq] station flow field unavailable: ${e}`);
     return null;
   }
 }
@@ -464,7 +468,11 @@ export async function prepareTideHeights(
 
     return new StationTideHeights(timelines);
   } catch (e) {
-    logger.warn(`[routeiq] tide heights unavailable: ${e}`);
+    // The provider's error text can carry positions: debug only.
+    logger.warn(
+      "[routeiq] Tide height provider failed; continuing without tide heights",
+    );
+    logger.debug(`[routeiq] tide heights unavailable: ${e}`);
     return null;
   }
 }

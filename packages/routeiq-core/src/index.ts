@@ -19,6 +19,7 @@ export * from "./routing-store.js";
 export * from "./route-metadata.js";
 export * from "./database.js";
 export * from "./routing.js";
+export * from "./read-only-check.js";
 export * from "./sqlite-worker-store.js";
 export * from "./codes.js";
 export * from "./messages.js";

@@ -80,6 +80,27 @@ describe('tide fields with in-memory providers', () => {
     assert.strictEqual(await prepareTideHeights(broken, pts, T0, T0 + HOUR), null);
   });
 
+  it('a failing provider logs no error text above debug', async () => {
+    const lines: Array<[string, string]> = [];
+    const logger = {
+      debug: (m: string) => lines.push(['debug', m]),
+      info: (m: string) => lines.push(['info', m]),
+      warn: (m: string) => lines.push(['warn', m]),
+      error: (m: string) => lines.push(['error', m]),
+    };
+    const secret = 'at 52.123,5.456';
+    const boom = async () => {
+      throw new Error(secret);
+    };
+    await prepareTideHeights({ ...heights(), findStations: boom }, pts, T0, T0 + HOUR, logger);
+    await prepareStationFlowField({ ...currents(), findStations: boom }, pts, T0, T0 + HOUR, logger);
+    assert.ok(lines.some(([l]) => l === 'warn'));
+    for (const [level, message] of lines) {
+      if (level !== 'debug') assert.ok(!message.includes(secret), `${level}: ${message}`);
+    }
+    assert.ok(lines.some(([l, m]) => l === 'debug' && m.includes(secret)));
+  });
+
   it('prepareStationFlowField samples station vectors, zero out of range', async () => {
     const field = await prepareStationFlowField(currents(), pts, T0, T0 + 2 * HOUR);
     assert.ok(field);

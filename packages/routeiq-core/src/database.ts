@@ -1644,10 +1644,15 @@ export class RoutingDatabase {
   async loadGraph(): Promise<void> {
     if (this.policy === "pinned") {
       // Pinned: every enabled region is loaded here, once, and stays. A file
-      // that cannot be loaded fails the call rather than leaving a gap the
-      // caller was promised there would not be.
+      // that cannot be loaded (including one refused for its format, whose
+      // reason loadDatabaseGraph throws) fails the call rather than leaving a
+      // gap the caller was promised there would not be. Disabled files are
+      // excluded; a retry fails the same way.
       const toLoad = Array.from(this.coverageIndex.values()).filter(
-        (e) => e.state === "not_loaded" || e.state === "loading",
+        (e) =>
+          e.state === "not_loaded" ||
+          e.state === "loading" ||
+          e.state === "unsupported",
       );
       for (const entry of toLoad) {
         await this.loadDatabaseGraph(entry.filename);

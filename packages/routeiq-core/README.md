@@ -33,9 +33,10 @@ Node.js `>=22.5.0`, because the engine reads the routing files with `node:sqlite
 - Node 22.13 and later, 23.4 and later, and 24: no flag is needed.
 - Read-only mode (`readOnly: true`) needs a `node:sqlite` that honours the
   `readOnly` open option. Node 22.5.0 ignores it and would open the file
-  read-write, so the store checks this once at start (it opens a missing file
-  read-only in a temporary directory) and refuses `readOnly: true` with an error
-  when the option is not honoured, rather than writing anything. Use a newer
+  read-write, so each region file is checked when it is opened read-only: a
+  write is tried inside a transaction that is always rolled back, and a
+  connection that accepts it is refused with an error, rather than writing
+  anything. Nothing is created beside the data for the check. Use a newer
   Node.js in that case.
 
 ## Install

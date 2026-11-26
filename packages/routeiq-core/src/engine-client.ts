@@ -537,8 +537,8 @@ export class EngineClient {
       type: "init",
       id: initId,
       protocolVersion: this.options.protocolVersion ?? PROTOCOL_VERSION,
-      engine: this.options.engine,
-      database: this.options.database,
+      engine: withoutLogger(this.options.engine),
+      database: withoutLogger(this.options.database),
       generation: randomBytes(8).toString("hex"),
       ...(this.options.providers ? { providers: this.options.providers } : {}),
       ...(this.options.retainedResults !== undefined
@@ -606,7 +606,20 @@ export class EngineClient {
           failStart,
         );
       });
-      worker.postMessage(init);
+      try {
+        worker.postMessage(init);
+      } catch {
+        // A value that cannot be structured-cloned (a function, say) in the
+        // options: the same cleanup as a failed start, so the next call
+        // starts fresh. The value itself is not echoed.
+        // Deferred a tick: `ensureWorker` has not stored this promise yet, and
+        // the cleanup must reset it afterwards, not before.
+        const failure = new EngineWorkerError(
+          "INIT_FAILED",
+          "The engine options could not be sent to the worker (a value that cannot be copied between threads?)",
+        );
+        queueMicrotask(() => failStart(failure));
+      }
     });
   }
 
@@ -671,6 +684,14 @@ export class EngineClient {
       () => undefined,
     );
   }
+}
+
+/** The options as they cross to the host: a logger stays on the client side
+ *  (the host logs through the client's, see `HostLogMessage`). */
+function withoutLogger<T extends object>(options: T): T {
+  if (!("logger" in options)) return options;
+  const { logger: _logger, ...rest } = options as T & { logger?: unknown };
+  return rest as T;
 }
 
 function abortedFailure(): RouteFailure {

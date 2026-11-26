@@ -1,5 +1,9 @@
 import { parentPort } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
+import {
+  ReadOnlyNotHonouredError,
+  probeReadOnlyConnection,
+} from "./read-only-check.js";
 import type { Logger, LogLevel } from "./logger.js";
 import { OVERLAY_DB_INDEX, OVERLAY_EDITABLE_COLUMNS } from "./routing-store.js";
 import {
@@ -164,12 +168,33 @@ const filenames: string[] = [];
 /** Open every region file read-only (set by the `configure` message before
  *  anything is opened). The overlay is never opened in this mode. */
 let readOnly = false;
+/** The first handle index of this worker's file set (set by `configure` and
+ *  `init`): slots below it stay empty, so an index handed out before a worker
+ *  restart or a re-initialisation never selects a file of the new set. */
+let indexBase = 0;
+function resetHandles(base: number): void {
+  indexBase = base;
+  handles.length = 0;
+  for (let i = 0; i < base; i++) handles.push(null);
+  filenames.length = 0;
+}
 /** Open a region file: read-only when configured so, which also means no
- *  journal or lock side file is ever created next to it. */
+ *  journal or lock side file is ever created next to it. The read-only
+ *  connection is checked with a write that is always rolled back. */
 function openRegionFile(path: string): DatabaseSync {
-  return readOnly
-    ? new DatabaseSync(path, { readOnly: true })
-    : new DatabaseSync(path);
+  if (!readOnly) return new DatabaseSync(path);
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    if (!probeReadOnlyConnection(db)) throw new ReadOnlyNotHonouredError();
+  } catch (e) {
+    try {
+      db.close();
+    } catch {
+      /* already closed */
+    }
+    throw e;
+  }
+  return db;
 }
 let hasCrossesLand = false;
 let hasCrossesObstacle = false;
@@ -388,6 +413,9 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
       case "configure": {
         readOnly =
           (payload as { readOnly?: boolean } | undefined)?.readOnly === true;
+        resetHandles(
+          (payload as { indexBase?: number } | undefined)?.indexBase ?? 0,
+        );
         break;
       }
       case "init": {
@@ -397,8 +425,9 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
         hasNodeDepth = false;
         hasRegionId = false;
         hasEdgeKind = false;
-        handles.length = 0;
-        filenames.length = 0;
+        resetHandles(
+          (payload as { indexBase?: number }).indexBase ?? indexBase,
+        );
         const formatErrors: Record<string, string> = {};
         for (const dbPath of dbPaths) {
           try {
@@ -444,13 +473,14 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             filenames.push(filename);
             log.info(`[db-worker] Loaded database: ${dbPath}`);
           } catch (err: any) {
+            if (err instanceof ReadOnlyNotHonouredError) throw err;
             log.warn(
               `[db-worker] Skipping invalid database ${dbPath}: ${err.message ?? String(err)}`,
             );
           }
         }
         const loadedFilenames = [...filenames];
-        if (handles.length === 0) {
+        if (handles.length === indexBase) {
           parentPort!.postMessage({
             id,
             type,
@@ -537,6 +567,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
               formatError,
             });
           } catch (err: any) {
+            if (err instanceof ReadOnlyNotHonouredError) throw err;
             log.warn(
               `[db-worker] peekMetadata: skipping invalid database ${dbPath}: ${err.message ?? String(err)}`,
             );
