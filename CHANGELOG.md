@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Listed in the App Store's "Plotter Extensions" category (#81).
+
+### Fixed
+
+- Clearing the route in the webapp also clears the distance, time and
+  waiting line under it.
+
 ## 0.1.0 — 2026-11-16
 
 First stable release.
