@@ -134,11 +134,25 @@ export function failureInfo(e: unknown): FailureInfo | undefined {
   return e instanceof RouteFailure ? e.failure : undefined;
 }
 
-/** A cause for `params.cause`: `{ code, params }` of one of our failures, else
- *  the error's text. Rendered again in the reader's language. */
+/** The cause recorded for an error that is not a catalogued failure: a
+ *  neutral one. Its own text may hold paths or SQL, so it is never put in
+ *  `params` or a message; the caller logs it. */
+export const INTERNAL_CAUSE: MessageParams = {
+  code: "NO_PATH",
+  params: { reason: "internal" },
+};
+
+/** A cause for `params.cause`: `{ code, params }` of a catalogued failure,
+ *  rendered again in the reader's language; anything else is the neutral
+ *  internal cause (see INTERNAL_CAUSE). */
 export function causeOf(e: unknown): MessageParams {
   if (e instanceof RouteFailure && e.catalogued) {
     return { code: e.code, params: e.params };
   }
-  return { message: e instanceof Error ? e.message : String(e) };
+  return INTERNAL_CAUSE;
+}
+
+/** Whether `causeOf(e)` has to fall back to the internal cause. */
+export function isInternalCause(e: unknown): boolean {
+  return !(e instanceof RouteFailure && e.catalogued);
 }

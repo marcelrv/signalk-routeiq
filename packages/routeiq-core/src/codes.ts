@@ -52,7 +52,7 @@ export const ROUTE_WARNING_CODES = [
   /** As above, with the dimension configured on the server used instead. */
   "VESSEL_DIMENSION_IGNORED_CONFIGURED",
   /** The route was found but its description could not be read. params:
-   *  reason. */
+   *  reason (`read_failed`; the raw cause is logged, never put here). */
   "DESCRIPTION_UNAVAILABLE",
 ] as const;
 export type RouteWarningCode = (typeof ROUTE_WARNING_CODES)[number];
@@ -133,6 +133,7 @@ export const OTHER_MESSAGE_KEYS = [
   "NO_PATH_GRAPH_CONNECTED",
   "NO_PATH_DESTINATION",
   "NO_PATH_START_OUTSIDE_BOX",
+  "NO_PATH_INTERNAL",
   "NO_PATH_SEARCH",
   "ROUTE_RETRIED_SUFFIX",
   "INVALID_BODY",

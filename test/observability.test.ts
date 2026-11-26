@@ -248,6 +248,15 @@ describe('structured failures', () => {
     }
   });
 
+  it('INVALID_REQUEST: a via that is not an array', async () => {
+    for (const via of ['x', { latitude: 51.6, longitude: 3.9 }, 5]) {
+      const f = await failure(engine(), request({ via: via as never }));
+      assert.ok(f instanceof RouteRequestError);
+      assert.strictEqual(f.code, 'INVALID_REQUEST');
+      assert.deepStrictEqual(f.params, { field: 'via' });
+    }
+  });
+
   it('VESSEL_INCOMPLETE: strict mode, worded in the request language when the option follows it', async () => {
     const strict = engine({ requireVesselInRequest: true, messageLanguage: 'request' });
     const f = await failure(strict, { start: START, end: END, draft: 2, beam: 5 });
@@ -324,17 +333,25 @@ describe('structured failures', () => {
       assert.match(f.message, /^No route found to destination: /);
     });
 
-    it('a plain failure message keeps its text as the cause', async () => {
-      const f = await connected(() =>
-        failure(
-          noPath(engine(), async () => {
-            throw new RouteSearchError('hand-made text');
-          }),
-          request(),
-        ),
-      );
-      assert.deepStrictEqual(f.params.cause, { message: 'hand-made text' });
-      assert.match(f.message, /Last search error: hand-made text$/);
+    it('an uncatalogued error never puts its text in params or message; the text goes to the log', async () => {
+      const secret = '/some/path.sqlite: SQL SELECT * FROM nodes failed';
+      for (const thrown of [new RouteSearchError(secret)]) {
+        log.entries.length = 0;
+        const f = await connected(() =>
+          failure(
+            noPath(engine(), async () => {
+              throw thrown;
+            }),
+            request(),
+          ),
+        );
+        assert.deepStrictEqual(f.params.cause, { code: 'NO_PATH', params: { reason: 'internal' } });
+        assert.ok(!f.message.includes('path.sqlite') && !f.message.includes('SQL'), f.message);
+        assert.ok(!JSON.stringify(f.params).includes('path.sqlite'));
+        assert.ok(!formatFailure(f.code, f.params, 'nl').includes('path.sqlite'));
+        assert.match(f.message, /Last search error: An internal error stopped the search$/);
+        assert.ok(log.entries.some((e) => e.level === 'error' && e.message.includes(secret)));
+      }
     });
 
     it('disconnected: neither end can be bridged to the main network', async () => {
@@ -587,11 +604,27 @@ describe('counters', () => {
     assert.strictEqual(c.routes.failed, 1);
   });
 
-  it('hold numbers only', async () => {
+  it('hold numbers only: the allowed fields, each a number', async () => {
     const engine = new RoutingEngine(db, options());
     await engine.calculateRoute(request());
-    const json = JSON.stringify(engine.getCounters());
-    assert.ok(!/51\.6|3\.8|3\.9/.test(json.replace(/"estimatedBytes":\d+/g, '')));
+    const c = engine.getCounters();
+    const numbers = (o: object): boolean => Object.values(o).every((v) => typeof v === 'number' && Number.isFinite(v));
+    assert.deepStrictEqual(Object.keys(c).sort(), ['budgetHits', 'failuresByCode', 'failuresOther', 'regions', 'routes', 'search']);
+    assert.deepStrictEqual(Object.keys(c.routes).sort(), ['calculated', 'failed']);
+    assert.ok(numbers(c.routes) && numbers(c.failuresByCode));
+    assert.ok(typeof c.failuresOther === 'number' && typeof c.budgetHits === 'number');
+    assert.deepStrictEqual(Object.keys(c.search).sort(), ['iterations', 'timeMs']);
+    for (const sc of [c.search.iterations, c.search.timeMs]) {
+      assert.deepStrictEqual(Object.keys(sc).sort(), ['count', 'sum']);
+      assert.ok(numbers(sc));
+    }
+    assert.deepStrictEqual(Object.keys(c.regions).sort(), ['estimatedBytes', 'loaded', 'loadsTotal']);
+    assert.ok(typeof c.regions.loadsTotal === 'number' && typeof c.regions.estimatedBytes === 'number');
+    for (const r of c.regions.loaded) {
+      assert.deepStrictEqual(Object.keys(r).sort(), ['edges', 'estimatedBytes', 'filename', 'nodes', 'pois']);
+      assert.strictEqual(typeof r.filename, 'string');
+      assert.ok(numbers({ nodes: r.nodes, edges: r.edges, pois: r.pois, b: r.estimatedBytes }));
+    }
   });
 });
 

@@ -218,11 +218,11 @@ describe('start-node better-depth swap', () => {
   it('puts the last A* error in the final "No route found" message', async () => {
     const engine = makeEngine(db) as any;
     engine.astarSearch = async () => {
-      throw new RouteSearchError('No route found between the given points — synthetic cause');
+      throw RouteSearchError.create('NO_PATH', { reason: 'start_outside_box' }, 'en');
     };
     await assert.rejects(engine.calculateRoute(request), (e: Error) => {
       assert.match(e.message, /graph is connected but A\* could not find a path/);
-      assert.match(e.message, /Last search error: .*synthetic cause/);
+      assert.match(e.message, /Last search error: Start node is outside the routing bounding box/);
       return true;
     });
   });
@@ -277,12 +277,12 @@ describe('start-node better-depth swap', () => {
   it('puts the last A* error in the message of a route with via points', async () => {
     const engine = makeEngine(db) as any;
     engine.astarSearch = async () => {
-      throw new RouteSearchError('No route found between the given points — synthetic via cause');
+      throw RouteSearchError.create('NO_PATH', { reason: 'start_outside_box' }, 'en');
     };
     const viaRequest = { ...request, via: [{ latitude: K.lat, longitude: K.lon }] };
     await assert.rejects(engine.calculateRoute(viaRequest), (e: Error) => {
       assert.match(e.message, /No route found to destination/);
-      assert.match(e.message, /Last search error: .*synthetic via cause/);
+      assert.match(e.message, /Last search error: Start node is outside the routing bounding box/);
       return true;
     });
   });

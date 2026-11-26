@@ -92,7 +92,10 @@ const SAMPLES: Record<MessageKey, Sample> = {
       IGNORED +
       'Routed with the air draft configured on the server instead; check the vessel dimensions in Signal K.',
   },
-  DESCRIPTION_UNAVAILABLE: { params: { reason: 'boom' }, en: 'Route description unavailable: boom' },
+  DESCRIPTION_UNAVAILABLE: {
+    params: { reason: 'read_failed' },
+    en: 'Route description unavailable: the water names and warnings could not be read',
+  },
   LEG_SHALLOW: { params: { minDepth: 1.5 }, en: 'Shallow (1.5m)' },
   LEG_SHALLOW_AT_PASSAGE: {
     params: { minDepth: 1.5, minDepthAtPassage: 2.3 },
@@ -144,14 +147,18 @@ const SAMPLES: Record<MessageKey, Sample> = {
     en: 'No route found — the start and end are in disconnected parts of the waterway network (e.g. separated by a lock or unconnected water body) and no bridging point could be found at either end.',
   },
   NO_PATH_PRIMARY_NETWORK: {
-    params: { cause: { message: 'inner' } },
-    en: 'No route found through the primary waterway network between the connection points: inner',
+    params: { cause: { code: 'NO_PATH', params: { reason: 'start_outside_box' } } },
+    en: 'No route found through the primary waterway network between the connection points: Start node is outside the routing bounding box',
   },
   NO_PATH_GRAPH_CONNECTED: {
-    params: { cause: { message: 'inner' } },
-    en: 'No route found — graph is connected but A* could not find a path. This should not happen with soft constraints enabled. Last search error: inner',
+    params: { cause: { code: 'NO_PATH', params: { reason: 'internal' } } },
+    en: 'No route found — graph is connected but A* could not find a path. This should not happen with soft constraints enabled. Last search error: An internal error stopped the search',
   },
-  NO_PATH_DESTINATION: { params: { cause: { message: 'inner' } }, en: 'No route found to destination: inner' },
+  NO_PATH_DESTINATION: {
+    params: { cause: { code: 'NO_PATH', params: { reason: 'internal' } } },
+    en: 'No route found to destination: An internal error stopped the search',
+  },
+  NO_PATH_INTERNAL: { params: {}, en: 'An internal error stopped the search' },
   NO_PATH_START_OUTSIDE_BOX: { params: {}, en: 'Start node is outside the routing bounding box' },
   NO_PATH_SEARCH: {
     params: SEARCH,
@@ -318,7 +325,7 @@ describe('language resolution', () => {
     assert.match(format('ROUTE_CONSTRAINED', CONSTRAINED, 'nl'), /^Route naar bestemming: beperkt voor 2 traject\(en\) 2,0 Nm — diepte 1,2 m < vereist 2,3 m; doorvaarthoogte 11,0 m < vereist 21,0 m; breedte 4,5 m < vereiste scheepsbreedte 6,0 m$/);
     assert.strictEqual(
       format('CROSSING_PASSES_CLOSED', { airDraft: 1.5, margin: 0.3, closedHeight: 2 }, 'nl'),
-      'kan gesloten gepasseerd worden (doorvaarthoogte 1,5 m + 0,3 m marge < gesloten 2,0 m)',
+      'kan gesloten gepasseerd worden (kruiphoogte 1,5 m + 0,3 m marge < gesloten 2,0 m)',
     );
     assert.strictEqual(
       format('ROUTE_DESCRIPTION_GPX', SAMPLES.ROUTE_DESCRIPTION_GPX.params, 'nl'),
@@ -327,7 +334,7 @@ describe('language resolution', () => {
   });
 
   it('names a vessel dimension and a point in the language', () => {
-    assert.match(format('VESSEL_DIMENSION_IGNORED', { dimension: 'airDraft', value: 'x', max: 150 }, 'nl'), /^De opgegeven doorvaarthoogte \(x\)/);
+    assert.match(format('VESSEL_DIMENSION_IGNORED', { dimension: 'airDraft', value: 'x', max: 150 }, 'nl'), /^De opgegeven kruiphoogte \(x\)/);
     assert.match(format('NO_NODE_NEAR_SEARCH', { point: 'start' }, 'nl'), /bij het startpunt$/);
   });
 });
@@ -353,8 +360,8 @@ describe('failure wording', () => {
       'Geen route gevonden naar de bestemming: Kon geen routeringsknooppunten vinden bij het startpunt',
     );
     assert.strictEqual(
-      formatFailure('NO_PATH', { reason: 'destination', cause: { message: 'plain error' } }, 'nl'),
-      'Geen route gevonden naar de bestemming: plain error',
+      formatFailure('NO_PATH', { reason: 'destination', cause: { message: 'plain /x.sqlite error' } }, 'nl'),
+      'Geen route gevonden naar de bestemming: Een interne fout onderbrak het zoeken',
     );
   });
 

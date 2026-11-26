@@ -78,7 +78,7 @@ export function limitPair(value: number, limit: number): [string, string] {
 
 const DIMENSION_WORD: Record<MessageLanguage, Record<string, string>> = {
   en: { draft: "draft", beam: "beam", airDraft: "air draft" },
-  nl: { draft: "diepgang", beam: "breedte", airDraft: "doorvaarthoogte" },
+  nl: { draft: "diepgang", beam: "breedte", airDraft: "kruiphoogte" },
 };
 
 const POINT_WORD: Record<MessageLanguage, Record<string, string>> = {
@@ -195,9 +195,8 @@ function formatCause(value: unknown, lang: MessageLanguage): string {
           : {};
       return formatFailure(v.code, params, lang);
     }
-    if (typeof v.message === "string") return v.message;
   }
-  return String(value);
+  return formatFailure("NO_PATH", { reason: "internal" }, lang);
 }
 
 /**
@@ -221,6 +220,8 @@ export function failureMessageKey(
         return "NO_PATH_DESTINATION";
       case "start_outside_box":
         return "NO_PATH_START_OUTSIDE_BOX";
+      case "internal":
+        return "NO_PATH_INTERNAL";
       default:
         return "NO_PATH_SEARCH";
     }
@@ -362,7 +363,7 @@ const SKIP_WORDS: Record<
     draft: (p, c) =>
       `${p.draftEdges} verbinding(en) te ondiep voor diepgang ${c.num(Number(p.draft))} m`,
     airDraft: (p, c) =>
-      `${p.airDraftEdges} verbinding(en) met onvoldoende doorvaarthoogte voor hoogte ${c.num(Number(p.airDraft))} m`,
+      `${p.airDraftEdges} verbinding(en) met onvoldoende doorvaarthoogte voor kruiphoogte ${c.num(Number(p.airDraft))} m`,
     beam: (p, c) =>
       `${p.beamEdges} verbinding(en) te smal voor breedte ${c.num(Number(p.beam))} m`,
     coastDistance: (p) =>
@@ -426,7 +427,7 @@ function searchFailure(p: MessageParams, ctx: MessageContext): string {
   const beam = ctx.num(Number(p.beam));
   const air = ctx.num(Number(p.airDraft));
   return nl
-    ? `Geen route gevonden tussen de opgegeven punten — ${detail} (scheepsafmetingen: diepgang=${draft} m, breedte=${beam} m, doorvaarthoogte=${air} m, minimale kustafstand=${coast} Nm)`
+    ? `Geen route gevonden tussen de opgegeven punten — ${detail} (scheepsafmetingen: diepgang=${draft} m, breedte=${beam} m, kruiphoogte=${air} m, minimale kustafstand=${coast} Nm)`
     : `No route found between the given points — ${detail} ` +
         `(vessel dims: draft=${draft}m, beam=${beam}m, airDraft=${air}m, minCoastDistance=${coast}nm)`;
 }
@@ -494,8 +495,8 @@ export const CATALOGUE: Record<MessageKey, CatalogueEntry> = {
     nl: "De opgegeven {dimension:dim} ({value}) is genegeerd — verwacht een getal tussen 0 en {max} meter. In plaats daarvan is de op de server ingestelde {dimension:dim} gebruikt; controleer de scheepsafmetingen in Signal K.",
   },
   DESCRIPTION_UNAVAILABLE: {
-    en: "Route description unavailable: {reason}",
-    nl: "Routebeschrijving niet beschikbaar: {reason}",
+    en: "Route description unavailable: the water names and warnings could not be read",
+    nl: "Routebeschrijving niet beschikbaar: de wateren en waarschuwingen konden niet worden gelezen",
   },
 
   // --- itinerary leg warnings ----------------------------------------------
@@ -546,11 +547,11 @@ export const CATALOGUE: Record<MessageKey, CatalogueEntry> = {
   // --- crossing notes ------------------------------------------------------
   CROSSING_PASSES_CLOSED: {
     en: "passes closed (air draft {airDraft:f1} m + {margin:f1} m margin < closed {closedHeight:f1} m)",
-    nl: "kan gesloten gepasseerd worden (doorvaarthoogte {airDraft:f1} m + {margin:f1} m marge < gesloten {closedHeight:f1} m)",
+    nl: "kan gesloten gepasseerd worden (kruiphoogte {airDraft:f1} m + {margin:f1} m marge < gesloten {closedHeight:f1} m)",
   },
   CROSSING_PASSES_CLOSED_NO_WAIT: {
     en: "passes closed (air draft {airDraft:f1} m + {margin:f1} m margin < closed {closedHeight:f1} m), no wait",
-    nl: "kan gesloten gepasseerd worden (doorvaarthoogte {airDraft:f1} m + {margin:f1} m marge < gesloten {closedHeight:f1} m), geen wachttijd",
+    nl: "kan gesloten gepasseerd worden (kruiphoogte {airDraft:f1} m + {margin:f1} m marge < gesloten {closedHeight:f1} m), geen wachttijd",
   },
 
   // --- failures ------------------------------------------------------------
@@ -627,6 +628,10 @@ export const CATALOGUE: Record<MessageKey, CatalogueEntry> = {
   NO_PATH_START_OUTSIDE_BOX: {
     en: "Start node is outside the routing bounding box",
     nl: "Het startknooppunt ligt buiten het zoekgebied van de route",
+  },
+  NO_PATH_INTERNAL: {
+    en: "An internal error stopped the search",
+    nl: "Een interne fout onderbrak het zoeken",
   },
   NO_PATH_SEARCH: { en: searchFailure, nl: searchFailure },
   ROUTE_RETRIED_SUFFIX: {

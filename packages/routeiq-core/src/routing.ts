@@ -43,6 +43,7 @@ import {
   RouteFailure,
   RouteSearchError,
   causeOf,
+  isInternalCause,
   type BlockingCause,
 } from "./failure.js";
 import { CounterSet, type EngineCounters } from "./counters.js";
@@ -429,6 +430,17 @@ export class RoutingEngine {
     });
   }
 
+  /** `params.cause` for an error: a catalogued failure as it is, anything
+   *  else as the neutral internal cause, its own text going to the log. */
+  private causeOf(e: unknown): MessageParams {
+    if (isInternalCause(e)) {
+      this.log.error(
+        `[routeiq] A search step failed with an uncatalogued error: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    return causeOf(e);
+  }
+
   /** The language this request's texts are written in. */
   private msgLang(inputs: RouteInputs): string {
     return messageLanguageFor(this._options, inputs.lang);
@@ -607,6 +619,13 @@ export class RoutingEngine {
    * `INVALID_REQUEST`, not a crash deep in the search.
    */
   private checkRequest(request: RoutingRequest, inputs: RouteInputs): void {
+    if (request.via !== undefined && !Array.isArray(request.via)) {
+      throw new RouteRequestError(
+        "INVALID_REQUEST",
+        { field: "via" },
+        format("INVALID_REQUEST", { field: "via" }, this.msgLang(inputs)),
+      );
+    }
     const isPoint = (p: unknown): boolean =>
       typeof p === "object" &&
       p !== null &&
@@ -1192,7 +1211,7 @@ export class RoutingEngine {
         } catch (e) {
           throw this.failure(inputs, "NO_PATH", {
             reason: "primary_network",
-            cause: causeOf(e),
+            cause: this.causeOf(e),
           });
         }
       }
@@ -1207,7 +1226,7 @@ export class RoutingEngine {
 
     throw this.failure(inputs, "NO_PATH", {
       reason: "graph_connected",
-      ...(searchError ? { cause: causeOf(searchError) } : {}),
+      ...(searchError ? { cause: this.causeOf(searchError) } : {}),
     });
   }
 
@@ -1634,13 +1653,13 @@ export class RoutingEngine {
         return fallback;
       } catch (e) {
         failure.reason = e instanceof Error ? e.message : String(e);
-        failure.cause = causeOf(e);
+        failure.cause = this.causeOf(e);
         this.log.info(`[routeiq] ${label}: ${failure.reason}`);
         return null;
       }
     }
     failure.reason = lastSearchError?.message;
-    if (lastSearchError) failure.cause = causeOf(lastSearchError);
+    if (lastSearchError) failure.cause = this.causeOf(lastSearchError);
     return null;
   }
 
@@ -4354,13 +4373,16 @@ export class RoutingEngine {
           attachWaters(itinerary, description, geometry);
         }
       } catch (e) {
+        this.log.warn(
+          `[routeiq] Route description unavailable: ${e instanceof Error ? e.message : String(e)}`,
+        );
         route.warnings = [
           ...(route.warnings ?? []),
           makeWarning(
             this.msgLang(inputs),
             "description_unavailable",
             "DESCRIPTION_UNAVAILABLE",
-            { reason: e instanceof Error ? e.message : String(e) },
+            { reason: "read_failed" },
           ),
         ];
       }
