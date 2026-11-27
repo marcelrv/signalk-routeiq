@@ -180,6 +180,10 @@ export interface RequestValidationError {
   field: string;
   /** English. */
   message: string;
+  /** The message catalogue key `message` was rendered from. Errors that
+   *  share a `code` (a wrong type and an out-of-range number are both
+   *  `INVALID_VALUE`) differ here. */
+  messageKey: MessageKey;
   /** Values a client needs to word the message itself. */
   params: Record<string, unknown>;
 }
@@ -243,9 +247,19 @@ function fail(
       code,
       field,
       message: format(key, { field, ...params }, lang),
+      messageKey: key,
       params,
     },
   };
+}
+
+/** What a value was, for the `received` param: its JSON kind, with numbers
+ *  that are not finite named apart. */
+function receivedKind(v: unknown): string {
+  if (typeof v === "number") return Number.isFinite(v) ? "number" : "nonFinite";
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "array";
+  return typeof v;
 }
 
 function haversineM(
@@ -375,7 +389,9 @@ export function checkRequestConstraints(
               ? "INVALID_NUMBER_METERS"
               : "INVALID_RANGE_METERS",
             key,
-            { max },
+            value === undefined
+              ? { max, received: receivedKind(raw) }
+              : { max, value },
           ),
           warnings,
         };
@@ -416,10 +432,16 @@ export function checkRequestConstraints(
     out[key] = v;
     if (v === undefined) return undefined;
     if (typeof v !== "number" || !Number.isFinite(v)) {
-      return fail(lang, "INVALID_VALUE", typeKey, key, params).error;
+      return fail(lang, "INVALID_VALUE", typeKey, key, {
+        ...params,
+        received: receivedKind(v),
+      }).error;
     }
     if (!valid(v))
-      return fail(lang, "INVALID_VALUE", rangeKey, key, params).error;
+      return fail(lang, "INVALID_VALUE", rangeKey, key, {
+        ...params,
+        value: v,
+      }).error;
     return undefined;
   };
 

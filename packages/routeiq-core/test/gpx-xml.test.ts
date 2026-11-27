@@ -53,7 +53,7 @@ function assertWellFormed(xml: string): void {
       const text = body.slice(i, next < 0 ? body.length : next);
       if (stack.length === 0) assert.ok(text.trim() === '', 'text outside the root');
       bareAmp(text, 'text');
-      assert.ok(!text.includes('>') || true);
+      assert.ok(!text.includes(']]>'), `]]> in character data: ${text.slice(0, 60)}`);
       i = next < 0 ? body.length : next;
       continue;
     }
@@ -100,6 +100,13 @@ describe('GPX text is escaped and valid XML 1.0', () => {
     assert.match(gpx, /<ar:warning [^>]*type="t&quot;&lt;/);
   });
 
+  it('a name containing a CDATA terminator is escaped', () => {
+    const gpx = GpxExporter.toGpx(route, 'a]]>b', provider);
+    assertWellFormed(gpx);
+    assert.ok(gpx.includes('<name>a]]&gt;b</name>'), 'the > of ]]> is a reference');
+    assert.ok(!gpx.includes(']]>'));
+  });
+
   it('a name that is nothing but forbidden characters leaves an empty element, not broken XML', () => {
     const gpx = GpxExporter.toGpx(route, '\u0000\u0001', { name: 'p', version: '1' });
     assertWellFormed(gpx);
@@ -111,5 +118,7 @@ describe('GPX text is escaped and valid XML 1.0', () => {
     assert.throws(() => assertWellFormed('<?xml version="1.0" encoding="UTF-8"?><a>x & y</a>'));
     assert.throws(() => assertWellFormed('<?xml version="1.0" encoding="UTF-8"?><a>\u0001</a>'));
     assert.throws(() => assertWellFormed('<?xml version="1.0" encoding="UTF-8"?><a b="x<y"/>'));
+    assert.throws(() => assertWellFormed('<?xml version="1.0" encoding="UTF-8"?><a>]]></a>'));
+    assert.doesNotThrow(() => assertWellFormed('<?xml version="1.0" encoding="UTF-8"?><a>x > y &gt; z</a>'));
   });
 });

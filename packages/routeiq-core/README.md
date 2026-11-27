@@ -243,7 +243,7 @@ the body is an object, that start and end are coordinates in range, the via list
 vessel dimensions, coast distance, waits, speed, safety margins, boolean flags
 and `lang`, and the straight-line length. It returns
 `{ ok: true, request, warnings, unknownFields }` or
-`{ ok: false, error: { code, field, message, params } }`. A fresh request object
+`{ ok: false, error: { code, field, message, messageKey, params } }`; `messageKey` is the catalogue key the message was rendered from, so errors that share a `code` (a wrong type and an out-of-range number are both `INVALID_VALUE`) can be told apart, and `params` carries `max` and, where the text applies, `received` (the kind of a value of the wrong type) or `value` (a number out of range). A fresh request object
 is built from known fields only; unknown top-level fields are reported, not
 copied.
 

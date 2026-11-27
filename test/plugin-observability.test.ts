@@ -154,6 +154,15 @@ describe('plugin: route failures and warnings', () => {
   });
 });
 
+/** Each latitude/longitude the observability test sends, as a pattern for the
+ *  value as written, and rounded or padded to 1..5 decimals. A match must not
+ *  sit inside a longer number. */
+const SENT_COORDINATES: RegExp[] = [51.613, 3.885, 51.609, 3.896].map((n) => {
+  const forms = new Set<string>([String(n)]);
+  for (let d = 1; d <= 5; d++) forms.add(n.toFixed(d));
+  return new RegExp(`(?<![\\d.])(?:${[...forms].map((f) => f.replace('.', '\\.')).join('|')})(?!\\d)`);
+});
+
 describe('plugin: console output', () => {
   it('is what it was before the core had an injected logger', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'routeiq-plugin-log-'));
@@ -197,5 +206,18 @@ describe('plugin: console output', () => {
     // Nothing the engine wrote went to the error stream, and no line has the
     // look of a coordinate.
     assert.ok(lines.every((l) => !/-?\d{1,3}\.\d{4,}/.test(l.text.replace(/<DIR>\S*/g, ''))), 'a coordinate-like number in the output');
+    // The coordinates this test sends (three decimals), in the forms a log
+    // line could print them.
+    const leaks = (text: string): boolean => SENT_COORDINATES.some((re) => re.test(text.replace(/<DIR>\S*/g, '')));
+    assert.ok(
+      lines.every((l) => !leaks(l.text)),
+      `a coordinate this test sent is in the output: ${lines.find((l) => leaks(l.text))?.text}`,
+    );
+    // Negative control: the check does see those coordinates.
+    assert.ok(leaks('Route from 51.613, 3.885 to 51.609, 3.896'));
+    assert.ok(leaks('start=[3.885,51.613]'));
+    assert.ok(leaks('near 51.61 3.89 (rounded)'));
+    assert.ok(leaks('lat 51.6130 lon 3.8850'));
+    assert.ok(!leaks('took 13.8851 ms, version 1.3.88'));
   });
 });

@@ -266,6 +266,19 @@ describe('validateRouteRequest: numbers, flags, language', () => {
     assert.strictEqual(bad({ start, end, lockWaitMinutes: 61 }, { maxWaitMinutes: 60 }).code, 'INVALID_VALUE');
   });
 
+  it('tells errors that share a code apart by messageKey and params', () => {
+    const wrongType = bad({ start, end, speedKnots: 'fast' });
+    const outOfRange = bad({ start, end, speedKnots: -1 });
+    assert.strictEqual(wrongType.code, 'INVALID_VALUE');
+    assert.strictEqual(outOfRange.code, 'INVALID_VALUE');
+    assert.strictEqual(wrongType.messageKey, 'INVALID_NUMBER_KNOTS');
+    assert.strictEqual(outOfRange.messageKey, 'INVALID_RANGE_KNOTS');
+    assert.strictEqual(wrongType.params.received, 'string');
+    assert.strictEqual(outOfRange.params.value, -1);
+    assert.strictEqual(outOfRange.params.max, 60);
+    assert.strictEqual(bad({ start, end, speedKnots: Number.NaN }).params.received, 'nonFinite');
+  });
+
   it('checks speedKnots is above 0 and within the limit', () => {
     ok({ start, end, speedKnots: 0.1 });
     ok({ start, end, speedKnots: 60 });
