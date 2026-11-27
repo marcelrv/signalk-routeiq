@@ -201,7 +201,11 @@ describe('plugin: console output', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
     const esc = dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const lines = seen.map((s) => ({ stream: s.stream, text: s.text.replace(new RegExp(esc, 'g'), '<DIR>') }));
+    // Windows joins paths with '\': read the separator after <DIR> as '/'.
+    const lines = seen.map((s) => ({
+      stream: s.stream,
+      text: s.text.replace(new RegExp(esc, 'g'), '<DIR>').replace(/<DIR>\\/g, '<DIR>/'),
+    }));
     // The lines the engine, the database and the db worker write; the plugin's
     // own lines are not under test here.
     const engine = lines
