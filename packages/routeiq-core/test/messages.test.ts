@@ -395,3 +395,17 @@ describe('logger', () => {
     assert.deepStrictEqual(calls, []);
   });
 });
+
+describe('lookups by a caller-supplied key', () => {
+  it('reads an unknown catalogue key as itself, including names an object inherits', () => {
+    for (const key of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'NOT_A_KEY']) {
+      assert.strictEqual(format(key as MessageKey, {}, 'en'), key);
+      assert.strictEqual(format(key as MessageKey, {}, 'nl'), key);
+      assert.ok(formatFailure(key, {}, 'en').startsWith(key));
+    }
+  });
+  it('reads an unknown word in a placeholder as itself', () => {
+    const out = formatFailure('NO_NODE_NEAR_POINT', { point: 'constructor' }, 'en');
+    assert.strictEqual(out, 'No routing nodes found near constructor point');
+  });
+});

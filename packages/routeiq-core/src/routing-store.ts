@@ -143,6 +143,9 @@ export interface OpenedFile {
   filename: string;
   flags: StoreSchemaFlags;
   descriptionError?: string | null;
+  /** `metadata.last_update_date` of the file this handle was opened on, read
+   *  from that same handle; null when it has none. */
+  lastUpdateDate?: string | null;
 }
 
 /** A file the store refused to open (see `PeekedFile.formatError`). */

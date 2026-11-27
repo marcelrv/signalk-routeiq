@@ -603,6 +603,44 @@ describe('status and data version', () => {
   });
 });
 
+describe('loaded data version', () => {
+  it('stays the version the graph was loaded from until unload, whatever a metadata refresh reads', async () => {
+    const dir = tmpDir();
+    buildRegion(path.join(dir, 'a.sqlite'), A);
+    buildRegion(path.join(dir, 'b.sqlite'), B);
+    const db = new RoutingDatabase({
+      ...directoryDatabaseOptions(dir, { dynamicLoading: true }),
+      files: [entry(dir, 'a.sqlite'), entry(dir, 'b.sqlite')],
+      overlayPath: path.join(dir, 'user-edits.sqlite'),
+    });
+    await db.init();
+    await db.loadGraph();
+    await db.loadDatabaseGraph('b.sqlite'); // keeps one region loaded while a.sqlite is unloaded
+    await db.loadDatabaseGraph('a.sqlite');
+    const loaded = { filename: 'a.sqlite', lastUpdateDate: A.updated };
+    const loadedB = { filename: 'b.sqlite', lastUpdateDate: B.updated };
+    assert.deepStrictEqual(db.getDataVersion(), [loaded, loadedB]);
+
+    // The file on disk is replaced by a newer build; only metadata is re-read.
+    const newer = '2026-09-09T00:00:00Z';
+    const raw = new DatabaseSync(path.join(dir, 'a.sqlite'));
+    raw.prepare('UPDATE metadata SET last_update_date = ?').run(newer);
+    raw.close();
+    await db.reloadMetadata();
+    assert.deepStrictEqual(db.getDataVersion(), [loaded, loadedB], 'the loaded version did not move');
+    assert.deepStrictEqual(db.getDataVersion('loaded'), [loaded, loadedB]);
+    const r = await engineOn(db).calculateRoute(route(A.lat, A.lon));
+    assert.deepStrictEqual(r.inputs?.data, [loaded, loadedB]);
+
+    await db.unloadDatabaseGraph('a.sqlite');
+    assert.deepStrictEqual(db.getDataVersion(), [loadedB]);
+    assert.deepStrictEqual(db.getDataVersion('all'), [{ filename: 'a.sqlite', lastUpdateDate: newer }, loadedB]);
+    await db.loadDatabaseGraph('a.sqlite');
+    assert.deepStrictEqual(db.getDataVersion(), [{ filename: 'a.sqlite', lastUpdateDate: newer }, loadedB]);
+    await db.close();
+  });
+});
+
 /** A RoutingStore over a hand-made graph: no files, no worker. */
 class MemoryStore implements RoutingStore {
   readonly opened: string[] = [];

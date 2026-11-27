@@ -152,6 +152,34 @@ describe('validateRouteRequest: departure time', () => {
       assert.strictEqual(e.message, 'Invalid departureTime — expected an ISO 8601 date string');
     }
   });
+  it('rejects dates that do not exist on the calendar', () => {
+    for (const departureTime of [
+      '2026-02-30T06:00:00Z',
+      '2026-02-29T06:00:00Z', // not a leap year
+      '1900-02-29T06:00:00Z', // century, not a leap year
+      '2026-04-31T06:00:00',
+      '2026-13-01T06:00:00Z',
+      '2026-00-10T06:00:00Z',
+      '2026-01-00T06:00:00Z',
+      '2026-06-31T06:00:00+02:00',
+      '2026-08-03T24:00:00Z',
+      '2026-08-03T06:00:00+25:00',
+    ]) {
+      assert.strictEqual(bad({ start, end, departureTime }).code, 'INVALID_DEPARTURE_TIME', departureTime);
+    }
+  });
+  it('keeps accepting valid leap days and offset forms', () => {
+    for (const departureTime of [
+      '2028-02-29T06:00:00Z',
+      '2000-02-29T06:00:00',
+      '2026-12-31T23:59:59.999Z',
+      '2026-08-03T06:00',
+      '2026-08-03T06:00:00+02:00',
+      '2026-08-03T06:00:00-05:30',
+    ]) {
+      assert.strictEqual(ok({ start, end, departureTime }).request.departureTime, departureTime);
+    }
+  });
 });
 
 describe('validateRouteRequest: vessel dimensions', () => {

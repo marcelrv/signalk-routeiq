@@ -86,6 +86,13 @@ const POINT_WORD: Record<MessageLanguage, Record<string, string>> = {
   nl: { start: "startpunt", end: "eindpunt", either: "start- of eindpunt" },
 };
 
+/** A word from a per-language table, by a value the caller supplied: only
+ *  the table's own keys count, so `"constructor"` reads as itself. */
+function word(table: Record<string, string>, value: unknown): string {
+  const key = String(value);
+  return Object.hasOwn(table, key) ? table[key] : key;
+}
+
 const HOUR_MINUTE_UNITS: Record<MessageLanguage, [string, string]> = {
   en: ["h", "m"],
   nl: ["u", "m"],
@@ -132,9 +139,9 @@ function applyFormat(
   }
   if (spec === "space") return String(value).replace(/_/g, " ");
   if (spec === "dim") {
-    return DIMENSION_WORD[lang][String(value)] ?? String(value);
+    return word(DIMENSION_WORD[lang], value);
   }
-  if (spec === "pt") return POINT_WORD[lang][String(value)] ?? String(value);
+  if (spec === "pt") return word(POINT_WORD[lang], value);
   if (spec === "hm") return hourMinutes(Number(value), lang);
   const fixed = /^f(\d)$/.exec(spec);
   if (fixed) return mark(Number(value).toFixed(Number(fixed[1])), lang);
@@ -163,8 +170,8 @@ function formatResolved(
   params: MessageParams,
   lang: MessageLanguage,
 ): string {
+  if (!Object.hasOwn(CATALOGUE, key)) return String(key);
   const entry = CATALOGUE[key];
-  if (!entry) return String(key);
   const template = entry[lang];
   return typeof template === "function"
     ? template(params, makeContext(lang))
@@ -330,7 +337,7 @@ function noNodeNear(
   ctx: MessageContext,
   search: boolean,
 ): string {
-  const point = POINT_WORD[ctx.lang][String(p.point)] ?? String(p.point);
+  const point = word(POINT_WORD[ctx.lang], p.point);
   const tail = coverageTail(p, ctx.lang);
   if (ctx.lang === "nl") {
     return `${search ? "Kon geen routeringsknooppunten vinden bij het" : "Geen routeringsknooppunten gevonden bij het"} ${point}${tail}`;

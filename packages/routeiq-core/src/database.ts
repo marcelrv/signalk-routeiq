@@ -296,6 +296,12 @@ export interface DatabaseCoverageEntry {
    *  `state` because `path` must point at the real file for peekMetadata. */
   disabled: boolean;
   meta: RegionMetadata | null;
+  /** The version of the file that supplied the graph in memory, captured when
+   *  the load succeeded and kept until unload. A metadata refresh replaces
+   *  `meta` but never this, so a result's `inputs.data` names what it was
+   *  routed on, not what is on disk now. Set exactly while `state` is
+   *  "loaded". */
+  loadedVersion?: DataVersionEntry;
   /** Row counts read directly off the file (peekMetadata's short-lived
    *  handle in dynamic mode; getMetadata()'s bulk-load round-trip in
    *  non-dynamic mode) -- available regardless of load state, unlike the
@@ -1079,7 +1085,7 @@ export class RoutingDatabase {
         formatError: entry.formatError ?? null,
         descriptionError: this.descriptionErrors.get(entry.filename) ?? null,
         stats: entry.stats,
-        version: RoutingDatabase.versionOf(entry),
+        version: RoutingDatabase.entryVersion(entry),
       });
     }
     counts.enabled = counts.listed - counts.disabled;
@@ -1093,7 +1099,10 @@ export class RoutingDatabase {
     };
   }
 
-  private static versionOf(entry: DatabaseCoverageEntry): DataVersionEntry {
+  private static versionOf(entry: {
+    filename: string;
+    meta: { lastUpdateDate: string } | null;
+  }): DataVersionEntry {
     const date = entry.meta?.lastUpdateDate;
     return {
       filename: entry.filename,
@@ -1101,16 +1110,27 @@ export class RoutingDatabase {
     };
   }
 
+  /** A loaded region reports the version captured at load; any other file
+   *  reports its catalogue metadata. */
+  private static entryVersion(entry: DatabaseCoverageEntry): DataVersionEntry {
+    return entry.state === "loaded" && entry.loadedVersion
+      ? entry.loadedVersion
+      : RoutingDatabase.versionOf(entry);
+  }
+
   /** The data version of the regions in memory (`scope: "loaded"`, the
    *  default) or of every listed file (`"all"`), sorted by filename: each
-   *  file's name and the `last_update_date` of its metadata. A file's
+   *  file's name and the `last_update_date` of its metadata. For a loaded
+   *  region that is the file the graph was read from, as of the load (a
+   *  metadata refresh does not change it); `"all"` reports catalogue
+   *  metadata for files not in memory. A file's
    *  metadata carries no build id or hash, so none is reported. This is what
    *  a route result echoes as `inputs.data`. */
   getDataVersion(scope: "loaded" | "all" = "loaded"): DataVersionEntry[] {
     const out: DataVersionEntry[] = [];
     for (const entry of this.coverageIndex.values()) {
       if (scope === "loaded" && entry.state !== "loaded") continue;
-      out.push(RoutingDatabase.versionOf(entry));
+      out.push(RoutingDatabase.entryVersion(entry));
     }
     return out.sort((a, b) =>
       a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0,
@@ -1430,6 +1450,9 @@ export class RoutingDatabase {
         disabled,
         meta: p.meta,
         stats: p.stats ?? null,
+        ...(state === "loaded" && existing?.loadedVersion
+          ? { loadedVersion: existing.loadedVersion }
+          : {}),
       });
     }
     for (const [filename, entry] of this.coverageIndex) {
@@ -1811,6 +1834,10 @@ export class RoutingDatabase {
         disabled: false,
         meta,
         stats: meta?.stats ?? null,
+        loadedVersion: RoutingDatabase.versionOf({
+          filename: file.filename,
+          meta,
+        }),
       });
     });
     // The bulk load only ever sees files it opened, so the disabled ones have
@@ -2519,6 +2546,15 @@ export class RoutingDatabase {
 
       entry.dbIndex = dbIndex;
       entry.state = "loaded";
+      entry.loadedVersion = RoutingDatabase.versionOf({
+        filename,
+        // A store that does not say (an in-memory one) falls back to the
+        // catalogue metadata of the file it was asked to open.
+        meta:
+          opened.lastUpdateDate === undefined
+            ? entry.meta
+            : { lastUpdateDate: opened.lastUpdateDate ?? "" },
+      });
       openedHandle = null; // merged: owned by the loaded region now
       // §4a M5: a freshly-loaded region is by definition the most recently
       // used one.
@@ -2689,6 +2725,7 @@ export class RoutingDatabase {
 
     entry.state = "not_loaded";
     entry.dbIndex = null;
+    delete entry.loadedVersion;
 
     // This unload just filtered `edgesBySource` and `this.pois` — any
     // bbox-query cache built before it is stale (it would still reference

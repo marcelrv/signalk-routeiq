@@ -635,8 +635,8 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
 
         const filename = filenameOf(dbPath);
         const dbIndex = handles.length;
-        const depthUnknownSentinel =
-          readMetadataRow(db, filename)?.depthUnknownSentinel ?? null;
+        const openedMeta = readMetadataRow(db, filename);
+        const depthUnknownSentinel = openedMeta?.depthUnknownSentinel ?? null;
         const handle: DbHandle = {
           db,
           path: dbPath,
@@ -657,6 +657,7 @@ parentPort.on("message", (msg: { id: number; type: string; payload?: any }) => {
             filename,
             flags,
             descriptionError: handle.describeError ?? null,
+            lastUpdateDate: openedMeta?.lastUpdateDate || null,
           },
         });
         break;

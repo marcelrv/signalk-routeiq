@@ -277,6 +277,20 @@ function isIsoDateTime(value: string): boolean {
   const minute = Number(m[5]);
   const second = m[6] === undefined ? 0 : Number(m[6]);
   if (hour > 23 || minute > 59 || second > 59) return false;
+  // Date.parse rolls an impossible day over (Feb 30 reads as Mar 2), so the
+  // calendar date is checked from its components.
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  if (month < 1 || month > 12 || day < 1) return false;
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (day > days[month - 1]) return false;
+  const offset = m[7];
+  if (offset !== undefined && offset !== "Z") {
+    if (Number(offset.slice(1, 3)) > 23 || Number(offset.slice(4, 6)) > 59)
+      return false;
+  }
   return Number.isFinite(Date.parse(value));
 }
 

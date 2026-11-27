@@ -27,9 +27,17 @@ describe('SqliteWorkerStore when its worker dies', () => {
       const worker = workerOf(store);
       assert.strictEqual(store.dead, false);
 
-      // A call that will never be answered: the worker is stopped under it.
+      // A call that can never be answered: the request is registered as
+      // pending but never delivered to the worker, which is then stopped
+      // under it. Nothing but the worker's death can settle it.
+      worker.postMessage = () => {};
       const waiting = store.peekMetadata(['/nonexistent/never-read.sqlite']);
-      const failed = rejection(waiting);
+      let settled = false;
+      const failed = rejection(waiting).finally(() => {
+        settled = true;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.strictEqual(settled, false, 'the call is still pending before the worker dies');
       await worker.terminate();
       const e = await failed;
       assert.ok(e instanceof Error);
