@@ -2958,7 +2958,13 @@ export class RoutingDatabase {
       const a =
         Math.sin(dLat / 2) ** 2 +
         cosLat * Math.cos((c.lat * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
-      const d = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      const d =
+        6371000 *
+        2 *
+        Math.atan2(
+          Math.sqrt(Math.min(1, Math.max(0, a))),
+          Math.sqrt(Math.min(1, Math.max(0, 1 - a))),
+        );
       if (d < bestDist) {
         bestDist = d;
         bestId = id;
@@ -3067,7 +3073,13 @@ export class RoutingDatabase {
       const a =
         Math.sin(dLat / 2) ** 2 +
         cosLat * Math.cos((c.lat * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
-      const d = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      const d =
+        6371000 *
+        2 *
+        Math.atan2(
+          Math.sqrt(Math.min(1, Math.max(0, a))),
+          Math.sqrt(Math.min(1, Math.max(0, 1 - a))),
+        );
       if (d <= radiusMeters)
         results.push({ id, lat: c.lat, lon: c.lon, distance: d });
     }
@@ -3869,7 +3881,14 @@ export class RoutingDatabase {
       Math.cos((lat1 * Math.PI) / 180) *
         Math.cos((lat2 * Math.PI) / 180) *
         Math.sin(dLon / 2) ** 2;
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return (
+      R *
+      2 *
+      Math.atan2(
+        Math.sqrt(Math.min(1, Math.max(0, a))),
+        Math.sqrt(Math.min(1, Math.max(0, 1 - a))),
+      )
+    );
   }
 
   private waterwaysGeoJson: any = null;

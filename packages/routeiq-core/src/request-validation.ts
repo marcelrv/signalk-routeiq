@@ -276,7 +276,14 @@ function haversineM(
     Math.cos((lat1 * Math.PI) / 180) *
       Math.cos((lat2 * Math.PI) / 180) *
       Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return (
+    2 *
+    R *
+    Math.atan2(
+      Math.sqrt(Math.min(1, Math.max(0, a))),
+      Math.sqrt(Math.min(1, Math.max(0, 1 - a))),
+    )
+  );
 }
 
 const ISO_DATE_TIME =
@@ -680,10 +687,10 @@ export function validateRouteRequest(
       );
     }
     const nm = metres / 1852;
-    if (nm > limits.maxStraightLineNm) {
+    if (!Number.isFinite(nm) || nm > limits.maxStraightLineNm) {
       return refuse(
         fail(lang, "ROUTE_TOO_LONG", "ROUTE_TOO_LONG", "end", {
-          nm: Math.round(nm),
+          nm: Number.isFinite(nm) ? Math.round(nm) : 0,
           max: limits.maxStraightLineNm,
         }),
         warnings,

@@ -79,7 +79,14 @@ function haversineM(
     Math.cos((lat1 * Math.PI) / 180) *
       Math.cos((lat2 * Math.PI) / 180) *
       Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return (
+    2 *
+    R *
+    Math.atan2(
+      Math.sqrt(Math.min(1, Math.max(0, a))),
+      Math.sqrt(Math.min(1, Math.max(0, 1 - a))),
+    )
+  );
 }
 
 /**
