@@ -1,0 +1,282 @@
+{
+  "ok": {
+    "crossings": [],
+    "features": [
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              5,
+              52
+            ],
+            [
+              5.01,
+              52
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 685,
+          "edgeTypeId": 0,
+          "maxAirDraft": 40,
+          "minDepth": 1.5,
+          "minDepthKnown": true,
+          "seconds": 266.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              5.01,
+              52
+            ],
+            [
+              5.02,
+              52
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 685,
+          "edgeTypeId": 0,
+          "maxAirDraft": 40,
+          "minDepth": 1.5,
+          "minDepthKnown": true,
+          "seconds": 266.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              5.02,
+              52
+            ],
+            [
+              5.03,
+              52
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 685,
+          "edgeTypeId": 0,
+          "maxAirDraft": 40,
+          "minDepth": 1.5,
+          "minDepthKnown": true,
+          "seconds": 266.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              5.03,
+              52
+            ],
+            [
+              5.04,
+              52
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 685,
+          "edgeTypeId": 0,
+          "maxAirDraft": 40,
+          "minDepth": 1.5,
+          "minDepthKnown": true,
+          "seconds": 266.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              5.04,
+              52
+            ],
+            [
+              5.05,
+              52
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 685,
+          "edgeTypeId": 0,
+          "maxAirDraft": 40,
+          "minDepth": 1.5,
+          "minDepthKnown": true,
+          "seconds": 266.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      }
+    ],
+    "inputs": {
+      "airDraft": 10,
+      "beam": 3,
+      "bridgeWaitMinutes": 30,
+      "coreVersion": "1.0.0",
+      "data": [
+        {
+          "filename": "desc.sqlite",
+          "lastUpdateDate": "2026-01-01T00:00:00Z"
+        }
+      ],
+      "departureTime": null,
+      "describe": false,
+      "draft": 2,
+      "lang": "nl",
+      "lockWaitMinutes": 60,
+      "minCoastDistance": 0,
+      "safetyMarginAirDraft": 1.5,
+      "safetyMarginBeam": 2,
+      "safetyMarginDraft": 0.3,
+      "speedKnots": 5,
+      "useTides": false
+    },
+    "itinerary": [
+      {
+        "coordIndex": 0,
+        "courseToNext": 90,
+        "distanceFromStart": 0,
+        "kind": "start",
+        "latitude": 52,
+        "leg": {
+          "distance": 3425,
+          "maxAirDraft": 40,
+          "minDepth": 1.5,
+          "minWidth": 3,
+          "seconds": 1332,
+          "warnings": [
+            {
+              "at": [
+                {
+                  "bounds": [
+                    5,
+                    52,
+                    5.05,
+                    52
+                  ],
+                  "coordIndex": 0,
+                  "distance": 3425,
+                  "distanceFromStart": 0,
+                  "toCoordIndex": 5
+                }
+              ],
+              "code": "LEG_SHALLOW",
+              "level": "danger",
+              "message": "Shallow (1.5m)",
+              "minDepth": 1.5,
+              "params": {
+                "minDepth": 1.5
+              },
+              "requiredDepth": 2.3,
+              "type": "shallow"
+            },
+            {
+              "at": [
+                {
+                  "bounds": [
+                    5,
+                    52,
+                    5.05,
+                    52
+                  ],
+                  "coordIndex": 0,
+                  "distance": 3425,
+                  "distanceFromStart": 0,
+                  "toCoordIndex": 5
+                }
+              ],
+              "beam": 3,
+              "code": "LEG_NARROW",
+              "level": "caution",
+              "message": "Narrow (3.0m)",
+              "minWidth": 3,
+              "params": {
+                "minWidth": 3
+              },
+              "requiredWidth": 5,
+              "type": "narrow"
+            }
+          ]
+        },
+        "longitude": 5
+      },
+      {
+        "coordIndex": 5,
+        "distanceFromStart": 3425,
+        "kind": "end",
+        "latitude": 52,
+        "longitude": 5.05
+      }
+    ],
+    "timingAssumptions": {
+      "averageSpeedKnots": 5,
+      "bridgeWaitMinutes": 30,
+      "lockWaitMinutes": 60
+    },
+    "totalCost": 417450,
+    "totalDistance": 3450,
+    "totalSeconds": 1332,
+    "type": "FeatureCollection",
+    "warnings": [
+      {
+        "code": "ROUTE_CONSTRAINED",
+        "distanceMeters": 3425,
+        "from": {
+          "latitude": 52,
+          "longitude": 5
+        },
+        "message": "Route to destination: constrained for 5 leg(s) 1.8Nm — depth 1.5m < required 2.3m; width 3.0m < required beam 5.0m",
+        "params": {
+          "beamRequired": 5,
+          "depth": 1.5,
+          "depthRequired": 2.3,
+          "distance": 3425,
+          "legs": 5,
+          "width": 3
+        },
+        "to": {
+          "latitude": 52,
+          "longitude": 5.05
+        },
+        "type": "via_constrained"
+      }
+    ],
+    "waypoints": [
+      {
+        "kind": "start",
+        "latitude": 52,
+        "longitude": 5
+      },
+      {
+        "kind": "end",
+        "latitude": 52,
+        "longitude": 5.05
+      }
+    ]
+  }
+}

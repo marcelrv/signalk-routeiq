@@ -4,9 +4,10 @@ import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { RoutingDatabase } from '../dist/database.js';
-import { RoutingEngine } from '../dist/routing.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+import { RoutingDatabase } from 'routeiq-core';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
+import { RoutingEngine } from 'routeiq-core';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import {
   attachWaters,
   buildRouteDescription,
@@ -14,15 +15,16 @@ import {
   ENDPOINT_WATER_REACH_M,
   nameEndpoints,
   noticeLevel,
-} from '../dist/route-description.js';
-import { legWarnings, limitPair } from '../dist/itinerary.js';
+} from 'routeiq-core';
+import { legWarnings, limitPair } from 'routeiq-core';
 import {
   describePairs,
   detectDescribeFlags,
   findDescribeCollision,
   languageChain,
-} from '../dist/route-metadata.js';
+} from 'routeiq-core';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 // Route description: water names and warnings along a found route, read from
 // the edge sequence / water body tables of the routing database
@@ -168,12 +170,11 @@ async function routeAcross(
     end?: { latitude: number; longitude: number };
   } = {},
 ) {
-  const db = new RoutingDatabase(dir, true);
+  const db = createDirectoryDatabase(dir, true);
   await db.init();
   await db.loadGraph();
   for (const f of opts.loadAll ?? []) await db.loadDatabaseGraph(f);
-  const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-  engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+  const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
   try {
     const route = await engine.calculateRoute({
       start: opts.start ?? { latitude: LAT, longitude: LONS[0] },
@@ -310,12 +311,11 @@ describe('route description from a routing database', () => {
   });
 
   it('does not describe the departure-scan steps', async () => {
-    const db = new RoutingDatabase(dir, true);
+    const db = createDirectoryDatabase(dir, true);
     await db.init();
     await db.loadGraph();
     await db.loadDatabaseGraph('a_navlines.sqlite');
-    const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-    engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+    const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
     let called = 0;
     const orig = db.describeRoute.bind(db);
     db.describeRoute = async (...a: Parameters<typeof orig>) => { called++; return orig(...a); };
@@ -482,7 +482,7 @@ describe('buildRouteDescription / attachWaters (pure)', () => {
   it('drops slivers under 100 m without a warning and merges the water around them', () => {
     const w = (id: number | undefined, name: string | undefined, from: number, distance: number, warn = false) => ({
       distanceFromStart: from, distance, ...(id ? { waterBodyId: id } : {}), ...(name ? { name } : {}),
-      warnings: warn ? [{ type: 'origin' as const, level: 'caution' as const, origin: 'imported', message: 'm' }] : [],
+      warnings: warn ? [{ type: 'origin' as const, level: 'caution' as const, origin: 'imported', message: 'm', code: 'ORIGIN_UNREVIEWED' as const, params: { origin: 'imported' } }] : [],
     });
     const itinerary = () => [
       { kind: 'start', distanceFromStart: 0, leg: { distance: 1000 } },
@@ -608,7 +608,7 @@ describe('id collisions between regional files', () => {
     dirs.push(dir);
     buildDb(path.join(dir, 'a_navlines.sqlite'), 'AAA');
     buildDb(path.join(dir, 'b_navlines.sqlite'), 'BBB', { sequences: [{ id: 12, a: 2, b: 4, wb: 100, origin: 1, quality: 4 }, { id: 11, a: 0, b: 2, wb: 100, origin: 1, quality: 4 }, { id: 21, a: 4, b: 5, wb: 200, origin: 2, quality: 0 }] });
-    const db = new RoutingDatabase(dir, true);
+    const db = createDirectoryDatabase(dir, true);
     await db.init();
     await db.loadGraph();
     try {
@@ -629,7 +629,7 @@ describe('id collisions between regional files', () => {
     dirs.push(dir);
     buildDb(path.join(dir, 'a_navlines.sqlite'), 'AAA');
     buildDb(path.join(dir, 'b_navlines.sqlite'), 'BBB', { sequences: [{ id: 12, a: 2, b: 4, wb: 100, origin: 1, quality: 4 }, { id: 11, a: 0, b: 2, wb: 100, origin: 1, quality: 4 }, { id: 21, a: 4, b: 5, wb: 200, origin: 2, quality: 0 }] });
-    const db = new RoutingDatabase(dir, true);
+    const db = createDirectoryDatabase(dir, true);
     await db.init();
     await db.loadGraph();
     await db.loadDatabaseGraph('a_navlines.sqlite');
@@ -640,8 +640,7 @@ describe('id collisions between regional files', () => {
       assert.strictEqual(byName.get('a_navlines.sqlite')!.descriptionError, null);
       assert.match(byName.get('b_navlines.sqlite')!.descriptionError!, /edge sequence id 12/);
       assert.strictEqual(byName.get('b_navlines.sqlite')!.state, 'loaded');
-      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
       const route = await engine.calculateRoute({
         start: { latitude: LAT, longitude: LONS[0] },
         end: { latitude: LAT, longitude: LONS[5] },
@@ -680,11 +679,10 @@ describe('real navline database', { skip: !isCurrentFormat(REAL) }, () => {
   after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
   async function nijmegenMaastricht(lang?: string) {
-    const db = new RoutingDatabase(dir, true);
+    const db = createDirectoryDatabase(dir, true);
     await db.init();
     await db.loadGraph();
-    const engine = new RoutingEngine(db, { ...DEFAULT_CONFIG });
-    engine.setVesselDimensions({ draft: 1.0, beam: 3, airDraft: 0 });
+    const engine = new RoutingEngine(db, testOptions({ ...DEFAULT_CONFIG }, { draft: 1.0, beam: 3, airDraft: 0 }));
     try {
       return await engine.calculateRoute({
         start: { latitude: 51.8497, longitude: 5.8680 },
@@ -792,7 +790,7 @@ describe('leg warnings', () => {
 
   it('shallow without tide is a danger', () => {
     assert.deepStrictEqual(legWarnings({ minDepth: 1.5 }, vessel), [
-      { type: 'shallow', level: 'danger', minDepth: 1.5, requiredDepth: 2.3, message: 'Shallow (1.5m)' },
+      { type: 'shallow', code: 'LEG_SHALLOW', params: { minDepth: 1.5 }, level: 'danger', minDepth: 1.5, requiredDepth: 2.3, message: 'Shallow (1.5m)' },
     ]);
     // A passage depth equal to the charted one means no tide was added.
     assert.strictEqual(legWarnings({ minDepth: 1.5, minDepthAtPassage: 1.5 }, vessel)[0].message, 'Shallow (1.5m)');
@@ -808,7 +806,7 @@ describe('leg warnings', () => {
 
   it('narrower than the beam is a danger, within the margin a caution', () => {
     assert.deepStrictEqual(legWarnings({ minWidth: 3.9 }, vessel), [
-      { type: 'narrow', level: 'danger', minWidth: 3.9, beam: 4.0, requiredWidth: 6.0, message: 'Narrow (3.9m)' },
+      { type: 'narrow', code: 'LEG_NARROW', params: { minWidth: 3.9 }, level: 'danger', minWidth: 3.9, beam: 4.0, requiredWidth: 6.0, message: 'Narrow (3.9m)' },
     ]);
     assert.strictEqual(legWarnings({ minWidth: 4.0 }, vessel)[0].level, 'caution');
     assert.strictEqual(legWarnings({ minWidth: 5.9 }, vessel)[0].level, 'caution');
@@ -823,6 +821,9 @@ describe('leg warnings', () => {
     assert.deepStrictEqual(legWarnings({ maxAirDraft: 6.7 }, tall), [
       {
         type: 'low_clearance',
+        code: 'LEG_LOW_CLEARANCE',
+        // The raw figures the message was worded from, noise and all.
+        params: { maxAirDraft: 6.7, requiredAirDraft: 15.56 + 1.5 },
         level: 'danger',
         maxAirDraft: 6.7,
         requiredAirDraft: 17.06,

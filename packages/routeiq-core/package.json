@@ -1,0 +1,24 @@
+{
+  "name": "routeiq-core",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Routing engine of signalk-routeiq, usable outside Signal K (internal, bundled into the plugin)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "README.md", "CHANGELOG.md", "LICENSE"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=../../scripts/count-reporter.mjs --test-reporter-destination=stdout dist-test/*.test.js"
+  }
+}

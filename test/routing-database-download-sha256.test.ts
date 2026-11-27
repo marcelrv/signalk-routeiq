@@ -7,8 +7,8 @@ import assert from "node:assert";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import { Router } from "express";
 import { ServerAPI } from "@signalk/server-api";
-import { ApiHandler } from "../dist/api.js";
-import { DEFAULT_CONFIG } from "../dist/types.js";
+import { ApiHandler } from "../dist-tsc/api.js";
+import { DEFAULT_CONFIG } from "../dist-tsc/types.js";
 
 // Regression coverage for the sha256 integrity check added to
 // /databases/download: it must reject a corrupted/mismatched transfer

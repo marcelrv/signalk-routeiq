@@ -6,17 +6,20 @@
  */
 
 import { ServerAPI } from "@signalk/server-api";
+import { CORE_VERSION } from "routeiq-core";
 import * as express from "express";
 import * as fs from "fs";
 import * as path from "path";
 
 import { ApiHandler, coerceVesselDimension } from "./api.js";
-import { RoutingDatabase } from "./database.js";
+import type { RoutingDatabase } from "routeiq-core";
+import { createDirectoryDatabase } from "./data-dir.js";
 import {
   registerPlotterExtension,
   setPlotterExtensionRunning,
 } from "./plotterext.js";
-import { RoutingEngine } from "./routing.js";
+import { toEngineOptions } from "./engine-options.js";
+import { RoutingEngine } from "routeiq-core";
 import {
   CurrentsApiHandle,
   localServerBase,
@@ -25,8 +28,13 @@ import {
   warnIfRemoteTidesApiBase,
   watchCurrentsApi,
 } from "./server-access.js";
-import { CurrentsClient, TidesClient } from "./tides.js";
-import { DEFAULT_CONFIG, PluginConfig, RETIRED_CONFIG_KEYS } from "./types.js";
+import { CurrentsClient, TidesClient } from "./tide-providers.js";
+import {
+  DEFAULT_CONFIG,
+  PluginConfig,
+  RETIRED_CONFIG_KEYS,
+  VesselDimensions,
+} from "./types.js";
 
 /**
  * Narrow surface of the Signal K server API this plugin actually calls.
@@ -61,7 +69,6 @@ let apiHandler: ApiHandler | null = null;
  */
 export function pluginConstructor(app: ServerAPI) {
   let config: PluginConfig = { ...DEFAULT_CONFIG };
-  let vesselDimensions = { draft: 0, beam: 4, airDraft: 0 };
   let subscriptionCancelled: (() => void) | null = null;
   // signalk-tidal-currents' in-process API, once it has emitted one (see
   // server-access.ts). Kept across stop/start: the provider's handle reads its
@@ -93,6 +100,8 @@ export function pluginConstructor(app: ServerAPI) {
       console.log(
         "[routeiq] Starting SignalK RouteIQ Nautical Route Planner Plugin...",
       );
+      // Optional call: test stand-ins for the server app have no debug().
+      app.debug?.(`routeiq-core ${CORE_VERSION}`);
 
       // Merge received configuration with defaults, minus every key that is
       // no longer a user setting (see RETIRED_CONFIG_KEYS) so a stale saved
@@ -513,7 +522,7 @@ export function pluginConstructor(app: ServerAPI) {
       if (!config.routingDataDir) {
         throw new Error("routingDataDir is not configured");
       }
-      db = new RoutingDatabase(
+      db = createDirectoryDatabase(
         config.routingDataDir,
         config.dynamicLoading,
         config.maxLoadedRegions,
@@ -530,7 +539,7 @@ export function pluginConstructor(app: ServerAPI) {
         `[routeiq] Database loaded: ${stats.nodes} nodes, ${stats.edges} edges, ${stats.pois} POIs`,
       );
 
-      const engine = new RoutingEngine(db, config);
+      const engine = new RoutingEngine(db, toEngineOptions(config));
       attachTideClients(engine);
 
       // Release anything a previous initialization published. Signal K normally
@@ -607,7 +616,6 @@ export function pluginConstructor(app: ServerAPI) {
       return;
     }
 
-    const currentDims = routingEngine?.vesselDims;
     // Unpublishes the API handler too, so requests answer 503 for the duration
     // of the swap rather than reaching the database being closed. A failing
     // close is logged, not thrown: propagating here would leave the plugin with
@@ -616,7 +624,7 @@ export function pluginConstructor(app: ServerAPI) {
 
     let db: RoutingDatabase | null = null;
     try {
-      db = new RoutingDatabase(
+      db = createDirectoryDatabase(
         dataDir,
         config.dynamicLoading,
         config.maxLoadedRegions,
@@ -633,7 +641,7 @@ export function pluginConstructor(app: ServerAPI) {
         `[routeiq] Database hot-reloaded: ${stats.nodes} nodes, ${stats.edges} edges, ${stats.pois} POIs`,
       );
 
-      const engine = new RoutingEngine(db, config, currentDims);
+      const engine = new RoutingEngine(db, toEngineOptions(config));
       attachTideClients(engine);
       if (!isCurrent()) {
         await discardDatabase(db, "superseded hot reload");
@@ -687,14 +695,10 @@ export function pluginConstructor(app: ServerAPI) {
       }
 
       if (draft !== undefined || beam !== undefined || airDraft !== undefined) {
-        const newDimensions: Partial<typeof vesselDimensions> = {};
-        if (draft !== undefined) newDimensions.draft = draft;
-        if (beam !== undefined) newDimensions.beam = beam;
-        if (airDraft !== undefined) newDimensions.airDraft = airDraft;
-        vesselDimensions = { ...vesselDimensions, ...newDimensions };
-        routingEngine!.setVesselDimensions(vesselDimensions);
+        const vessel = ensureApiHandler().vessel;
+        vessel.update({ draft, beam, airDraft });
         console.log(
-          `[routeiq] Vessel dimensions (from path API): ${JSON.stringify(vesselDimensions)}`,
+          `[routeiq] Vessel dimensions (from path API): ${JSON.stringify(vessel.get())}`,
         );
       }
     } catch (error) {
@@ -885,8 +889,7 @@ export function pluginConstructor(app: ServerAPI) {
    * Handle vessel dimension updates from Signal K
    */
   function handleVesselUpdate(delta: any) {
-    if (!routingEngine) return;
-    const newDimensions: Partial<typeof vesselDimensions> = {};
+    const newDimensions: VesselDimensions = {};
 
     // Extract values from delta updates array
     const updates = delta.updates || [];
@@ -922,10 +925,10 @@ export function pluginConstructor(app: ServerAPI) {
 
     // Update vessel dimensions if we got any values
     if (Object.keys(newDimensions).length > 0) {
-      vesselDimensions = { ...vesselDimensions, ...newDimensions };
-      routingEngine.setVesselDimensions(vesselDimensions);
+      const vessel = ensureApiHandler().vessel;
+      vessel.update(newDimensions);
       console.log(
-        `[routeiq] Vessel dimensions updated: ${JSON.stringify(vesselDimensions)}`,
+        `[routeiq] Vessel dimensions updated: ${JSON.stringify(vessel.get())}`,
       );
     }
   }

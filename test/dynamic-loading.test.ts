@@ -5,14 +5,16 @@ import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import {
   RoutingDatabase, POI_TYPE_HARBOUR, POI_TYPE_LOCK, POI_TYPE_BRIDGE, POI_TYPE_LOCK_CHAMBER, POI_TYPE_BRIDGE_SPAN,
-} from '../dist/database.js';
-import { RoutingEngine } from '../dist/routing.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+} from 'routeiq-core';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
+import { RoutingEngine } from 'routeiq-core';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 // §4a — dynamic database loading (PHASE_4_DESIGN.md). Covers:
 //  (a) non-dynamic mode is unaffected — already covered by every other
-//      *.test.js file staying green with `new RoutingDatabase(dir)` left at
+//      *.test.js file staying green with `createDirectoryDatabase(dir)` left at
 //      its own constructor default (false; DEFAULT_CONFIG.dynamicLoading
 //      itself defaults to true as of 2026-07-20, but those tests construct
 //      RoutingDatabase directly and never read that config field); not
@@ -347,7 +349,7 @@ describe('§4a dynamic database loading', () => {
 
     before(async () => {
       buildFixtures();
-      dynDb = new RoutingDatabase(fixturesDir, true);
+      dynDb = createDirectoryDatabase(fixturesDir, true);
       await dynDb.init();
       await dynDb.loadGraph(); // no-op in dynamic mode
     });
@@ -377,8 +379,7 @@ describe('§4a dynamic database loading', () => {
     });
 
     it('a route request inside region A triggers an inline on-demand load, and matches the non-dynamic route', async () => {
-      const dynEngine = new RoutingEngine(dynDb, DEFAULT_CONFIG);
-      dynEngine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const dynEngine = new RoutingEngine(dynDb, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
 
       const request = {
         start: { latitude: V0[0] - 0.0001, longitude: V0[1] },
@@ -398,11 +399,10 @@ describe('§4a dynamic database loading', () => {
       // loaded up front, today's default behavior) must produce the same
       // route — dynamic loading changes *when* data is loaded, never what
       // routing computes from it.
-      staticDb = new RoutingDatabase(fixturesDir, false);
+      staticDb = createDirectoryDatabase(fixturesDir, false);
       await staticDb.init();
       await staticDb.loadGraph();
-      const staticEngine = new RoutingEngine(staticDb, DEFAULT_CONFIG);
-      staticEngine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const staticEngine = new RoutingEngine(staticDb, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
       const staticRoute = await staticEngine.calculateRoute(request);
 
       assert.strictEqual(dynRoute.totalDistance, staticRoute.totalDistance);
@@ -420,7 +420,7 @@ describe('§4a dynamic database loading', () => {
 
     before(async () => {
       buildFixtures();
-      db = new RoutingDatabase(fixturesDir, true);
+      db = createDirectoryDatabase(fixturesDir, true);
       await db.init();
       await db.loadGraph();
     });
@@ -582,8 +582,7 @@ describe('§4a dynamic database loading', () => {
     });
 
     it('routes across the fixture while both databases are loaded', async () => {
-      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
       const route = await engine.calculateRoute({
         start: { latitude: V0[0] - 0.0001, longitude: V0[1] },
         end: { latitude: V2[0] + 0.0001, longitude: V2[1] },
@@ -683,8 +682,7 @@ describe('§4a dynamic database loading', () => {
     });
 
     it('routes correctly again after the reload', async () => {
-      const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
       const route = await engine.calculateRoute({
         start: { latitude: V0[0] - 0.0001, longitude: V0[1] },
         end: { latitude: V2[0] + 0.0001, longitude: V2[1] },
@@ -748,7 +746,7 @@ describe('§4a dynamic database loading', () => {
   describe('§4a M5: bounded working set (maxLoadedRegions LRU cap)', () => {
     it('maxLoadedRegions=0 (unlimited) keeps every loaded region — no eviction', async () => {
       buildFixtures();
-      const db = new RoutingDatabase(fixturesDir, true, 0);
+      const db = createDirectoryDatabase(fixturesDir, true, 0);
       try {
         await db.init();
         await db.loadGraph(); // no-op in dynamic mode
@@ -774,7 +772,7 @@ describe('§4a dynamic database loading', () => {
 
     it('maxLoadedRegions=1 evicts the least-recently-used region once a route completes', async () => {
       buildFixtures();
-      const db = new RoutingDatabase(fixturesDir, true, 1);
+      const db = createDirectoryDatabase(fixturesDir, true, 1);
       try {
         await db.init();
         await db.loadGraph(); // no-op in dynamic mode
@@ -813,7 +811,7 @@ describe('§4a dynamic database loading', () => {
 
     it('a route in progress blocks eviction — enforceRegionCap no-ops while activeRouteCount > 0', async () => {
       buildFixtures();
-      const db = new RoutingDatabase(fixturesDir, true, 1);
+      const db = createDirectoryDatabase(fixturesDir, true, 1);
       try {
         await db.init();
         await db.loadGraph();
@@ -857,7 +855,7 @@ describe('§4a dynamic database loading', () => {
       // maxLoadedRegions left unlimited (0) -- only the edge budget is
       // under test. region-a (8 edges) is already loaded; loading
       // region-b (2 more) would bring the total to 10, over a budget of 9.
-      const db = new RoutingDatabase(fixturesDir, true, 0, 9);
+      const db = createDirectoryDatabase(fixturesDir, true, 0, 9);
       try {
         await db.init();
         await db.loadGraph();
@@ -882,7 +880,7 @@ describe('§4a dynamic database loading', () => {
 
     it('the same call loads the region when the budget is not exceeded (non-vacuous: budget=10 fits exactly)', async () => {
       buildFixtures();
-      const db = new RoutingDatabase(fixturesDir, true, 0, 10);
+      const db = createDirectoryDatabase(fixturesDir, true, 0, 10);
       try {
         await db.init();
         await db.loadGraph();
@@ -918,7 +916,7 @@ describe('§4a dynamic database loading', () => {
       // deterministically interleaves at loadDatabaseGraph's first real
       // await, reproducing the race without relying on timing.
       buildFixtures();
-      const db = new RoutingDatabase(fixturesDir, true, 0, 2);
+      const db = createDirectoryDatabase(fixturesDir, true, 0, 2);
       try {
         await db.init();
         await db.loadGraph();
@@ -965,7 +963,7 @@ describe('§4a dynamic database loading', () => {
       buildFixtures();
       // maxLoadedRegions=10 alone would never trigger on 2 loaded regions.
       // maxLoadedRegionEdges=5 does: region-a (8) + region-b (2) = 10 total.
-      const db = new RoutingDatabase(fixturesDir, true, 10, 5);
+      const db = createDirectoryDatabase(fixturesDir, true, 10, 5);
       try {
         await db.init();
         await db.loadGraph();
@@ -1035,12 +1033,11 @@ describe('§4a dynamic database loading', () => {
         // containment, never budget-capped). Loading FAR's 2 more, once
         // the widening loop reaches for it, would bring the total to 4 --
         // over a budget of 3, so it must be skipped.
-        const db = new RoutingDatabase(dir, true, 0, 3);
+        const db = createDirectoryDatabase(dir, true, 0, 3);
         await db.init();
         await db.loadGraph();
         try {
-          const engine = new RoutingEngine(db, DEFAULT_CONFIG);
-          engine.setVesselDimensions({ draft: 2.0, beam: 4.0, airDraft: 10.0 });
+          const engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 2.0, beam: 4.0, airDraft: 10.0 }));
 
           const result = await engine.calculateRoute({
             start: { latitude: NEAR_A[0], longitude: NEAR_A[1] },
@@ -1067,7 +1064,7 @@ describe('§4a dynamic database loading', () => {
   describe('unload rejects unknown filenames', () => {
     it('loadDatabaseGraph/unloadDatabaseGraph reject a filename the coverage index has never seen', async () => {
       buildFixtures();
-      const db = new RoutingDatabase(fixturesDir, true);
+      const db = createDirectoryDatabase(fixturesDir, true);
       try {
         await db.init();
         await assert.rejects(() => db.loadDatabaseGraph('does-not-exist.sqlite'), /Unknown database/);
@@ -1098,7 +1095,7 @@ describe('§4a dynamic database loading', () => {
 
     it('lists a disabled database, keeps its .sqlite identity, and excludes it from `available`', async () => {
       buildWithDisabledB();
-      const db = new RoutingDatabase(fixturesDir, true);
+      const db = createDirectoryDatabase(fixturesDir, true);
       try {
         await db.init();
         const catalog = await db.getDatabaseCatalog();
@@ -1119,7 +1116,7 @@ describe('§4a dynamic database loading', () => {
 
     it('never loads a disabled region from a route request or a vessel position', async () => {
       buildWithDisabledB();
-      const db = new RoutingDatabase(fixturesDir, true);
+      const db = createDirectoryDatabase(fixturesDir, true);
       try {
         await db.init();
         const insideB = { latitude: 50.0, longitude: 50.0 };
@@ -1145,7 +1142,7 @@ describe('§4a dynamic database loading', () => {
       // Regression guard: a raw coverageIndex.size !== 1 check would see two
       // entries here and silently skip the single-region eager load.
       buildWithDisabledB();
-      const db = new RoutingDatabase(fixturesDir, true);
+      const db = createDirectoryDatabase(fixturesDir, true);
       try {
         await db.init();
         await db.eagerLoadIfSingle();
@@ -1158,7 +1155,7 @@ describe('§4a dynamic database loading', () => {
 
     it('refuses an explicit load of a disabled database', async () => {
       buildWithDisabledB();
-      const db = new RoutingDatabase(fixturesDir, true);
+      const db = createDirectoryDatabase(fixturesDir, true);
       try {
         await db.init();
         await assert.rejects(
@@ -1179,7 +1176,7 @@ describe('§4a dynamic database loading', () => {
       const disabledA = regionAPath + '.disabled';
       fs.renameSync(regionAPath, disabledA);
       fs.renameSync(regionBPath, disabledB);
-      const db = new RoutingDatabase(fixturesDir, true);
+      const db = createDirectoryDatabase(fixturesDir, true);
       try {
         await db.init();
         await db.loadGraph();
@@ -1198,7 +1195,7 @@ describe('§4a dynamic database loading', () => {
 
     it('picks up an enable/disable performed on disk, without a restart', async () => {
       buildFixtures();
-      const db = new RoutingDatabase(fixturesDir, true);
+      const db = createDirectoryDatabase(fixturesDir, true);
       try {
         await db.init();
         const stateOf = (fn: string) =>
@@ -1255,7 +1252,7 @@ describe('§4a dynamic database loading', () => {
       buildPlainRegion(midPath, 'TMID', MID_BBOX, [10.4, 15.4], [10.6, 15.6]);
       buildPlainRegion(endPath, 'TEND', END_BBOX, [10.4, 20.4], [10.6, 20.6]);
 
-      transitDb = new RoutingDatabase(transitDir, true);
+      transitDb = createDirectoryDatabase(transitDir, true);
       await transitDb.init();
       await transitDb.loadGraph(); // no-op in dynamic mode
     });
@@ -1271,8 +1268,7 @@ describe('§4a dynamic database loading', () => {
       assert.strictEqual(before.get('transit-mid.sqlite'), 'not_loaded');
       assert.strictEqual(before.get('transit-end.sqlite'), 'not_loaded');
 
-      const engine = new RoutingEngine(transitDb, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(transitDb, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
 
       const start = { latitude: 10.5, longitude: 10.5 }; // inside transit-start, nowhere near mid/end
       const end = { latitude: 10.5, longitude: 20.5 };    // inside transit-end, nowhere near mid/start
@@ -1327,7 +1323,7 @@ describe('§4a dynamic database loading', () => {
       buildPlainRegion(nearPath, 'PNEAR', NEAR_BBOX, NEAR_A, NEAR_B);
       buildPlainRegion(farPath, 'PFAR', FAR_BBOX, [10.4, 18.4], [10.6, 18.6]);
 
-      preloadDb = new RoutingDatabase(preloadDir, true);
+      preloadDb = createDirectoryDatabase(preloadDir, true);
       await preloadDb.init();
       await preloadDb.loadGraph(); // no-op in dynamic mode
     });
@@ -1342,8 +1338,7 @@ describe('§4a dynamic database loading', () => {
       assert.strictEqual(before.get('near.sqlite'), 'not_loaded');
       assert.strictEqual(before.get('far.sqlite'), 'not_loaded');
 
-      const engine = new RoutingEngine(preloadDb, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(preloadDb, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
 
       // Both endpoints are NEAR's own two nodes, joined by an edge that
       // violates nothing — so the first attempt returns an unpenalized
@@ -1390,7 +1385,7 @@ describe('§4a dynamic database loading', () => {
 
       // maxLoadedRegions = 1 with two regions loaded: every enforcement pass
       // that is allowed to run will evict one.
-      scanDb = new RoutingDatabase(scanDir, true, 1);
+      scanDb = createDirectoryDatabase(scanDir, true, 1);
       await scanDb.init();
       await scanDb.loadGraph();
       await scanDb.loadDatabaseGraph('scan-far.sqlite');
@@ -1403,8 +1398,7 @@ describe('§4a dynamic database loading', () => {
     });
 
     it('no region is evicted between scan steps, and the hold is released when the scan ends', async () => {
-      const engine = new RoutingEngine(scanDb, DEFAULT_CONFIG);
-      engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+      const engine = new RoutingEngine(scanDb, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
 
       const scan = engine.streamDepartures(
         {

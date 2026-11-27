@@ -61,6 +61,41 @@ jobs:
 
       - run: npm run lint
 
+  # Installs the packed plugin the way the registry would deliver it. The plugin
+  # bundles its workspace package routeiq-core, which is never published, so
+  # only a tarball installed into an empty directory (no workspace, no repo
+  # node_modules) shows that dist/index.js and dist/db-worker.js work without
+  # it. Also a sibling job, for the same reason lint is.
+  #
+  # Both Node versions in the matrix because the plugin is bundled for node22
+  # but must also run where node:sqlite is no longer experimental.
+  packed:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ['22', '24']
+    steps:
+      # See the lint job for why credentials are not persisted.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - run: npm run test:packed
+
+      # The core package is released as a tarball: check what it would contain
+      # (entry point, typings, worker files, README, licence; no sources or
+      # tests). Needs the build above, and no network.
+      - run: npm run test:pack-core
+
   # Also not part of the reusable workflow, and also a sibling job for the same
   # reason lint is: no input for it and no steps alongside a `uses:`. Protects
   # this release's headline guarantees — booting on a browser without

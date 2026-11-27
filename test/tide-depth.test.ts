@@ -3,17 +3,18 @@ import * as path from "path";
 import assert from "node:assert";
 import { after, before, describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { POI_TYPE_LOCK_CHAMBER, RoutingDatabase } from "../dist/database.js";
-import { RoutingEngine } from "../dist/routing.js";
+import { POI_TYPE_LOCK_CHAMBER, RoutingDatabase } from "routeiq-core";
+import { createDirectoryDatabase } from "../dist-tsc/data-dir.js";
+import { RoutingEngine } from "routeiq-core";
 import {
-  CurrentsClient,
   KNOTS_TO_MS,
   prepareStationFlowField,
   prepareTideHeights,
-  TidesClient,
-} from "../dist/tides.js";
-import { DEFAULT_CONFIG } from "../dist/types.js";
+} from "routeiq-core";
+import { CurrentsClient, TidesClient } from "../dist-tsc/tide-providers.js";
+import { DEFAULT_CONFIG } from "../dist-tsc/types.js";
 import { upgradeToPoiModel } from './poi-model-fixture.js';
+import { inputsFor, testOptions } from './engine-helper.js';
 
 // Charted depths are referenced to LAT, so they are the low-water case and the
 // router used to treat every hour of the day as low water. These cover the two
@@ -166,7 +167,7 @@ describe("tide-informed depth", () => {
 
   describe("depthAtPassage — folding the rise into a charted depth", () => {
     const engine = Object.create(RoutingEngine.prototype) as any;
-    engine._config = { ...DEFAULT_CONFIG };
+    engine._options = testOptions({ ...DEFAULT_CONFIG });
     const env = {
       departureMs: 0,
       offsetSec: 0,
@@ -210,7 +211,7 @@ describe("tide-informed depth", () => {
 
   describe("segmentDepthAtPassage — which legs the tide may touch", () => {
     const engine = Object.create(RoutingEngine.prototype) as any;
-    engine._config = { ...DEFAULT_CONFIG };
+    engine._options = testOptions({ ...DEFAULT_CONFIG });
     const env = {
       departureMs: 0,
       offsetSec: 0,
@@ -338,7 +339,7 @@ describe("tide-informed depth", () => {
         fs.unlinkSync(path.join(fixturesDir, f));
       }
       build(name, sentinel, depth);
-      const db = new RoutingDatabase(fixturesDir);
+      const db = createDirectoryDatabase(fixturesDir);
       await db.init();
       await db.loadGraph();
       const edges = await db.getOutgoingEdges(1);
@@ -389,8 +390,8 @@ describe("tide-informed depth", () => {
     // declares) to say so -- NOT `min_depth < 0`, which is still the legacy
     // per-file convention for older databases in the same loaded set.
     const engine = Object.create(RoutingEngine.prototype) as any;
-    engine._config = { ...DEFAULT_CONFIG };
-    const dims = { draft: 2.0 }; // requiredDepth = 2.0 + 0.3 margin = 2.3
+    engine._options = testOptions({ ...DEFAULT_CONFIG });
+    const dims = inputsFor(engine._options, { draft: 2.0 }); // requiredDepth = 2.0 + 0.3 margin = 2.3
 
     const baseEdge = {
       source: 1,
@@ -491,7 +492,7 @@ describe("tide-informed depth", () => {
       upgradeToPoiModel(raw);
       raw.close();
 
-      db = new RoutingDatabase(fixturesDir);
+      db = createDirectoryDatabase(fixturesDir);
       await db.init();
       await db.loadGraph();
     });
@@ -503,8 +504,7 @@ describe("tide-informed depth", () => {
     });
 
     function engineFor(lowMs: number): RoutingEngine {
-      const engine = new RoutingEngine(db, { ...DEFAULT_CONFIG });
-      engine.setVesselDimensions({ draft: 2.0, beam: 4.0, airDraft: 5.0 });
+      const engine = new RoutingEngine(db, testOptions({ ...DEFAULT_CONFIG }, { draft: 2.0, beam: 4.0, airDraft: 5.0 }));
       engine.setTidesClient(stubTidesClient(lowMs, STATIONS));
       return engine;
     }
@@ -604,7 +604,7 @@ describe("tide-informed depth", () => {
     // for it. This is the fix's first half: prove the shared walk is
     // current-aware, independent of any wait.
     const engine = Object.create(RoutingEngine.prototype) as any;
-    engine._config = { ...DEFAULT_CONFIG };
+    engine._options = testOptions({ ...DEFAULT_CONFIG });
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
 
     it("a fair current makes the true clock run ahead of the old STW-only one", () => {
@@ -631,6 +631,7 @@ describe("tide-informed depth", () => {
         coords,
         segments,
         env,
+        inputsFor(engine._options),
         0,
         [],
       );
@@ -660,6 +661,7 @@ describe("tide-informed depth", () => {
         ],
         segments,
         undefined,
+        inputsFor(engine._options),
         0,
         [],
       );
@@ -698,6 +700,7 @@ describe("tide-informed depth", () => {
         coords,
         segments,
         env,
+        inputsFor(engine._options),
         0,
         [],
       );
@@ -736,7 +739,7 @@ describe("tide-informed depth", () => {
     // longer than its ETA on a multi-hour offshore leg, because the current
     // sampled at entry doesn't hold for hours.
     const engine = Object.create(RoutingEngine.prototype) as any;
-    engine._config = { ...DEFAULT_CONFIG };
+    engine._options = testOptions({ ...DEFAULT_CONFIG });
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
     const entryAtMs = Date.parse("2026-08-12T00:00:00Z");
 
@@ -827,7 +830,7 @@ describe("tide-informed depth", () => {
     // *entry* SOG — the exact bug this whole fix exists to close, reopened
     // one layer up, at the number a client actually reads per leg.
     const engine = Object.create(RoutingEngine.prototype) as any;
-    engine._config = { ...DEFAULT_CONFIG };
+    engine._options = testOptions({ ...DEFAULT_CONFIG });
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
 
     it("a long segment's reported seconds is the integrated time, not distance/entry-sog", () => {
@@ -856,6 +859,7 @@ describe("tide-informed depth", () => {
         coords,
         segments,
         env,
+        inputsFor(engine._options),
         0,
         [],
       );
@@ -888,7 +892,7 @@ describe("tide-informed depth", () => {
 
     function buildEngine() {
       const engine = Object.create(RoutingEngine.prototype) as any;
-      engine._config = { ...DEFAULT_CONFIG };
+      engine._options = testOptions({ ...DEFAULT_CONFIG });
       engine.toRadians = (d: number) => (d * Math.PI) / 180;
       // A lock sitting exactly at the route's start, so its chainage is 0 and
       // the wait is spent before segment 0 even begins -- no real database
@@ -973,7 +977,7 @@ describe("tide-informed depth", () => {
       const engine = buildEngine();
       const meters = await engine.pathViolationMeters(
         result(),
-        { draft: DRAFT, beam: 4.0 },
+        inputsFor(engine._options, { draft: DRAFT, beam: 4.0 }),
         envWithStepRise(),
       );
       assert.strictEqual(
@@ -992,7 +996,7 @@ describe("tide-informed depth", () => {
         "destination",
         A,
         B,
-        { draft: DRAFT, beam: 4.0 },
+        inputsFor(engine._options, { draft: DRAFT, beam: 4.0 }),
         envWithStepRise(),
       );
       assert.deepStrictEqual(warnings, []);
@@ -1004,12 +1008,12 @@ describe("tide-informed depth", () => {
       // depth, so the two tests above are passing because the wait was
       // counted, not because the numbers can never violate.
       const engine = Object.create(RoutingEngine.prototype) as any;
-      engine._config = { ...DEFAULT_CONFIG };
+      engine._options = testOptions({ ...DEFAULT_CONFIG });
       engine.toRadians = (d: number) => (d * Math.PI) / 180;
       engine.db = { getRoutePois: async (pairs: unknown[]) => pairs.map(() => ({ poiIds: [], known: false })), getPoisInBBox: async () => [] }; // no lock this time
       const meters = await engine.pathViolationMeters(
         result(),
-        { draft: DRAFT, beam: 4.0 },
+        inputsFor(engine._options, { draft: DRAFT, beam: 4.0 }),
         envWithStepRise(),
       );
       assert.strictEqual(meters, 70);
@@ -1022,7 +1026,7 @@ describe("tide-informed depth", () => {
       // forward rather than the caller needing to know to reuse it.
       let calls = 0;
       const engine = Object.create(RoutingEngine.prototype) as any;
-      engine._config = { ...DEFAULT_CONFIG };
+      engine._options = testOptions({ ...DEFAULT_CONFIG });
       engine.toRadians = (d: number) => (d * Math.PI) / 180;
       engine.db = {
         getRoutePois: async (pairs: unknown[]) => pairs.map(() => ({ poiIds: [], known: false })),
@@ -1051,7 +1055,7 @@ describe("tide-informed depth", () => {
         "destination",
         A,
         B,
-        { draft: DRAFT, beam: 4.0 },
+        inputsFor(engine._options, { draft: DRAFT, beam: 4.0 }),
         envWithStepRise(),
       );
       assert.strictEqual(calls, 1, "expected exactly one POI lookup");

@@ -9,8 +9,10 @@
  */
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { RoutingEngine, passesClosedSpan } from '../dist/routing.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+import { RoutingEngine, passesClosedSpan } from 'routeiq-core';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
+import type { EngineOptions } from 'routeiq-core';
+import { inputsFor, testOptions } from './engine-helper.js';
 
 describe('crossing wait time', () => {
   /**
@@ -19,20 +21,21 @@ describe('crossing wait time', () => {
    */
   const schedule = (crossings: unknown[], config = {}, segments?: unknown[]) => {
     const engine = Object.create(RoutingEngine.prototype) as {
-      _config: unknown;
+      _options: unknown;
       crossingWaitSchedule: (
         coords: unknown[],
         s: unknown[],
         c?: unknown[],
+        inputs?: unknown,
       ) => Array<{ atMetres: number; seconds: number }>;
     };
-    engine._config = { ...DEFAULT_CONFIG, ...config };
+    engine._options = testOptions({ ...DEFAULT_CONFIG, ...config });
     const segs = (segments ?? []) as Array<{ distance?: number }>;
     // One coordinate per segment boundary; the helper only needs them to place
     // crossings that arrive without a chainage of their own.
     const coords = segs.map((_, i) => [4 + i * 0.001, 51] as [number, number]);
     coords.push([4 + segs.length * 0.001, 51]);
-    return engine.crossingWaitSchedule(coords, segs, crossings);
+    return engine.crossingWaitSchedule(coords, segs, crossings, inputsFor(engine._options as EngineOptions));
   };
   const waitSeconds = (crossings: unknown[], config = {}, segments?: unknown[]) =>
     schedule(crossings, config, segments).reduce((t, w) => t + w.seconds, 0);
@@ -377,14 +380,12 @@ describe('opening span low enough to pass closed', () => {
     { overrides, vesselAirDraft, config }: { overrides?: object; vesselAirDraft?: number; config?: object } = {},
   ) => {
     const engine = Object.create(RoutingEngine.prototype) as {
-      _config: unknown;
-      vesselDimensions: unknown;
-      crossingWaitSchedule: (c: unknown[], s: unknown[], x: unknown[], o?: object) => Array<{ seconds: number }>;
+      _options: unknown;
+      crossingWaitSchedule: (c: unknown[], s: unknown[], x: unknown[], o: object) => Array<{ seconds: number }>;
     };
-    engine._config = { ...DEFAULT_CONFIG, ...config };
-    engine.vesselDimensions = { draft: 1.5, beam: 3, airDraft: vesselAirDraft ?? 0 };
+    engine._options = testOptions({ ...DEFAULT_CONFIG, ...config }, { draft: 1.5, beam: 3, airDraft: vesselAirDraft ?? 0 });
     return engine
-      .crossingWaitSchedule([[4, 51], [4.001, 51]], [], crossings, overrides)
+      .crossingWaitSchedule([[4, 51], [4.001, 51]], [], crossings, inputsFor(engine._options as EngineOptions, overrides))
       .reduce((t, w) => t + w.seconds, 0);
   };
   const pos = { latitude: 51, longitude: 4 };
@@ -503,14 +504,14 @@ describe('a wait moves the tide clock, not just the total', () => {
    */
   const annotate = (waits: Array<{ atMetres: number; seconds: number }>) => {
     const engine = Object.create(RoutingEngine.prototype) as {
-      _config: unknown;
+      _options: unknown;
       annotateSegmentTimes: (
-        coords: unknown[], segs: unknown[], env: unknown, off: number,
+        coords: unknown[], segs: unknown[], env: unknown, inputs: unknown, off: number,
         w?: Array<{ atMetres: number; seconds: number }>,
       ) => number;
       toRadians: (d: number) => number;
     };
-    engine._config = { ...DEFAULT_CONFIG };
+    engine._options = testOptions({ ...DEFAULT_CONFIG });
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
 
     const sampledAt: number[] = [];
@@ -529,7 +530,7 @@ describe('a wait moves the tide clock, not just the total', () => {
     // Three legs of 3 km each, due east.
     const coords = [[4.0, 51.0], [4.043, 51.0], [4.086, 51.0], [4.129, 51.0]];
     const segs = [{ distance: 3000 }, { distance: 3000 }, { distance: 3000 }];
-    const total = engine.annotateSegmentTimes(coords, segs, env, 0, waits);
+    const total = engine.annotateSegmentTimes(coords, segs, env, inputsFor(engine._options as EngineOptions), 0, waits);
     return { total, sampledAt };
   };
 
@@ -611,7 +612,7 @@ describe('one crossing per whole (parent_id grouping)', () => {
   /** Run detectRouteStructures (an unknown stretch: the geometric fallback) for a route along `lon`, with `parts` and `wholes` as the database holds them. */
   const detect = async (parts: Part[], wholes: Whole[], lon: number) => {
     const engine = Object.create(RoutingEngine.prototype) as StubEngine;
-    engine._config = { ...DEFAULT_CONFIG };
+    engine._options = testOptions({ ...DEFAULT_CONFIG });
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
     engine.db = {
       getRoutePois: async (pairs: unknown[]) => pairs.map(() => ({ poiIds: [], known: false })),
@@ -705,7 +706,7 @@ describe('one crossing per whole (parent_id grouping)', () => {
       { id: 2, name: 'fixed', lat: 52.16678, lon: 4.63934, typeId: 6, parentId: 7, properties: { subtype: 'fixed' }, info: { height: 2.61 } },
     ];
     const engine = Object.create(RoutingEngine.prototype) as StubEngine;
-    engine._config = { ...DEFAULT_CONFIG };
+    engine._options = testOptions({ ...DEFAULT_CONFIG });
     engine.toRadians = (d: number) => (d * Math.PI) / 180;
     engine.db = {
       getRoutePois: async (pairs: unknown[]) => pairs.map(() => ({ poiIds: [], known: false })),
@@ -724,21 +725,21 @@ describe('one crossing per whole (parent_id grouping)', () => {
 
 /** The private parts of RoutingEngine these tests reach into, on an engine built without a constructor. */
 interface StubEngine {
-  _config: unknown;
+  _options: unknown;
   toRadians: (d: number) => number;
   db: unknown;
   detectRouteStructures: (coords: unknown[], segs: unknown[]) => Promise<Array<{ name: string }>>;
-  crossingWaitSchedule: (coords: unknown[], segs: unknown[], crossings: unknown[]) => Array<{ seconds: number }>;
+  crossingWaitSchedule: (coords: unknown[], segs: unknown[], crossings: unknown[], inputs: unknown) => Array<{ seconds: number }>;
 }
 
 describe('synthetic lock entry from the edges', () => {
   const run = (db: unknown) => {
     const engine = Object.create(RoutingEngine.prototype) as StubEngine;
-    engine._config = { ...DEFAULT_CONFIG };
+    engine._options = testOptions({ ...DEFAULT_CONFIG });
     engine.db = db;
     const crossings: Array<{ name: string; waitMinutes?: number }> = [];
     const segs = [{ distance: 100, lockIds: [100] }, { distance: 100 }];
-    const sched = engine.crossingWaitSchedule([[4, 51], [4.001, 51], [4.002, 51]], segs, crossings);
+    const sched = engine.crossingWaitSchedule([[4, 51], [4.001, 51], [4.002, 51]], segs, crossings, inputsFor(engine._options as EngineOptions));
     return { crossings, sched };
   };
 

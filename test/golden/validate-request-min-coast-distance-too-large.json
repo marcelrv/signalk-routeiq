@@ -1,0 +1,17 @@
+{
+  "request": {
+    "end": {
+      "latitude": 52.1,
+      "longitude": 5.1
+    },
+    "minCoastDistance": 101,
+    "start": {
+      "latitude": 52,
+      "longitude": 5
+    }
+  },
+  "result": {
+    "error": "Invalid minCoastDistance — expected 0..100 nautical miles",
+    "warnings": []
+  }
+}

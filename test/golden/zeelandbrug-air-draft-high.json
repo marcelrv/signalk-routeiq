@@ -1,0 +1,1615 @@
+{
+  "ok": {
+    "crossings": [
+      {
+        "distanceFromStart": 1008,
+        "height": 11,
+        "kind": "bridge",
+        "name": "Zeelandbrug (fixed, 11.0m)",
+        "partId": 2128123058316551,
+        "passage": 0,
+        "position": {
+          "latitude": 51.625819376160756,
+          "longitude": 3.9097048780774633
+        },
+        "structure": "9000000000001",
+        "subtype": "fixed",
+        "type": "bridge"
+      },
+      {
+        "distanceFromStart": 1519,
+        "kind": "bridge",
+        "name": "Zeelandbrug (opening span)",
+        "partId": 4146545408540650,
+        "passage": 1,
+        "position": {
+          "latitude": 51.62677541092233,
+          "longitude": 3.9110051221300246
+        },
+        "structure": "9000000000001",
+        "subtype": "opening",
+        "type": "bridge",
+        "waitSeconds": 1800
+      }
+    ],
+    "features": [
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9,
+              51.62
+            ],
+            [
+              3.900913855260088,
+              51.619530400690074
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.2,
+          "distance": 82,
+          "maxAirDraft": -1,
+          "minDepth": -1,
+          "minDepthKnown": false,
+          "seconds": 31.9,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.900913855260088,
+              51.619530400690074
+            ],
+            [
+              3.901733799999999,
+              51.62014549999999
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.0004448150657168,
+          "distance": 89,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 34.6,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.901733799999999,
+              51.62014549999999
+            ],
+            [
+              3.9024,
+              51.62058
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.0004448150657168,
+          "distance": 67,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 26,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9024,
+              51.62058
+            ],
+            [
+              3.9026239999999994,
+              51.620794800000006
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.0004448150657168,
+          "distance": 28,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 10.9,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9026239999999994,
+              51.620794800000006
+            ],
+            [
+              3.903513199999998,
+              51.621444999999994
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.0004448150657168,
+          "distance": 95,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 36.9,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.903513199999998,
+              51.621444999999994
+            ],
+            [
+              3.904439543520587,
+              51.62211365827913
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.0004448150657168,
+          "distance": 98,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 38.1,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.904439543520587,
+              51.62211365827913
+            ],
+            [
+              3.90476,
+              51.62231
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.0004448150657168,
+          "distance": 31,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 12.1,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.90476,
+              51.62231
+            ],
+            [
+              3.904897348595264,
+              51.62242169157782
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.0004448150657168,
+          "distance": 16,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 6.2,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.904897348595264,
+              51.62242169157782
+            ],
+            [
+              3.90504,
+              51.62253
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.0004448150657168,
+          "distance": 16,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 6.2,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.90504,
+              51.62253
+            ],
+            [
+              3.9052735105798804,
+              51.622779974903835
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.0004448150657168,
+          "distance": 32,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 12.4,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9052735105798804,
+              51.622779974903835
+            ],
+            [
+              3.9061403999999995,
+              51.62340079999999
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.0004448150657168,
+          "distance": 91,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 35.4,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9061403999999995,
+              51.62340079999999
+            ],
+            [
+              3.9069994560383217,
+              51.62401202188007
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.0004448150657168,
+          "distance": 90,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 35,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9069994560383217,
+              51.62401202188007
+            ],
+            [
+              3.9079562000000005,
+              51.624705599999984
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.0004448150657168,
+          "distance": 102,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 39.7,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9079562000000005,
+              51.624705599999984
+            ],
+            [
+              3.90829,
+              51.62489
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.0004448150657168,
+          "distance": 31,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 12.1,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.90829,
+              51.62489
+            ],
+            [
+              3.9086,
+              51.62512
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.0004448150657168,
+          "distance": 33,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 12.8,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9086,
+              51.62512
+            ],
+            [
+              3.91185,
+              51.62833
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.2,
+          "distance": 422.14,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 5.5,
+          "minDepthKnown": true,
+          "seconds": 164.1,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.91185,
+              51.62833
+            ],
+            [
+              3.91141,
+              51.62761
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.2,
+          "distance": 85.71,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 10,
+          "minDepthKnown": true,
+          "seconds": 33.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.91141,
+              51.62761
+            ],
+            [
+              3.9114,
+              51.62752
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.2,
+          "distance": 10.04,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 10,
+          "minDepthKnown": true,
+          "seconds": 3.9,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9114,
+              51.62752
+            ],
+            [
+              3.91126,
+              51.62744
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.2,
+          "distance": 13.16,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 8,
+          "minDepthKnown": true,
+          "seconds": 5.1,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.91126,
+              51.62744
+            ],
+            [
+              3.91081,
+              51.6269
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.2,
+          "distance": 67.68,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 3.5,
+          "minDepthKnown": true,
+          "seconds": 26.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.91081,
+              51.6269
+            ],
+            [
+              3.91101,
+              51.62678
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.2,
+          "distance": 19.24,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 4.5,
+          "minDepthKnown": true,
+          "seconds": 7.5,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.91101,
+              51.62678
+            ],
+            [
+              3.91127,
+              51.62684
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.2,
+          "distance": 19.2,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 3.5,
+          "minDepthKnown": true,
+          "seconds": 7.5,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.91127,
+              51.62684
+            ],
+            [
+              3.9113303,
+              51.626880899999996
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 6,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 2.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9113303,
+              51.626880899999996
+            ],
+            [
+              3.911483654636424,
+              51.62699140751622
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 16,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 6.2,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.911483654636424,
+              51.62699140751622
+            ],
+            [
+              3.9126289741261475,
+              51.627563700717815
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 101,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 39.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9126289741261475,
+              51.627563700717815
+            ],
+            [
+              3.91343,
+              51.62825
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 94,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 36.5,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.91343,
+              51.62825
+            ],
+            [
+              3.914914289066457,
+              51.628322454844
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 103,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 40,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.914914289066457,
+              51.628322454844
+            ],
+            [
+              3.9176109221661317,
+              51.628207656580926
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 187,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 72.7,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9176109221661317,
+              51.628207656580926
+            ],
+            [
+              3.918470821559999,
+              51.62827145639802
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 60,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 23.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.918470821559999,
+              51.62827145639802
+            ],
+            [
+              3.91887,
+              51.62827
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 28,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 10.9,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.91887,
+              51.62827
+            ],
+            [
+              3.9196719055940688,
+              51.62821533275965
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 56,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 21.8,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9196719055940688,
+              51.62821533275965
+            ],
+            [
+              3.91968,
+              51.62822
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 1,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 0.4,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.91968,
+              51.62822
+            ],
+            [
+              3.9199110000000013,
+              51.628187899999986
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 16,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 6.2,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9199110000000013,
+              51.628187899999986
+            ],
+            [
+              3.9216140920170908,
+              51.62812303845049
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 118,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 45.9,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9216140920170908,
+              51.62812303845049
+            ],
+            [
+              3.9217866000000012,
+              51.628103700000004
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 12,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 4.7,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9217866000000012,
+              51.628103700000004
+            ],
+            [
+              3.9219383,
+              51.62809619999999
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 11,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 4.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9219383,
+              51.62809619999999
+            ],
+            [
+              3.9254063368606174,
+              51.62810717809559
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 239,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 92.9,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9254063368606174,
+              51.62810717809559
+            ],
+            [
+              3.9258,
+              51.62815
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 28,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 10.9,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9258,
+              51.62815
+            ],
+            [
+              3.9254063368606174,
+              51.62810717809559
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 28,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 10.9,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9254063368606174,
+              51.62810717809559
+            ],
+            [
+              3.9219383,
+              51.62809619999999
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 239,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 92.9,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9219383,
+              51.62809619999999
+            ],
+            [
+              3.9217866000000012,
+              51.628103700000004
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 11,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 4.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9217866000000012,
+              51.628103700000004
+            ],
+            [
+              3.9216140920170908,
+              51.62812303845049
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 12,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 4.7,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9216140920170908,
+              51.62812303845049
+            ],
+            [
+              3.9199110000000013,
+              51.628187899999986
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 118,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 45.9,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9199110000000013,
+              51.628187899999986
+            ],
+            [
+              3.91979,
+              51.6282
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 8,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 3.1,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.91979,
+              51.6282
+            ],
+            [
+              3.91922,
+              51.62827
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.2,
+          "distance": 40.23,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 0,
+          "minDepthKnown": true,
+          "seconds": 15.6,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.91922,
+              51.62827
+            ],
+            [
+              3.92067,
+              51.62844
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.2,
+          "distance": 102.17,
+          "edgeTypeId": 0,
+          "maxAirDraft": 999,
+          "minDepth": 0,
+          "minDepthKnown": true,
+          "seconds": 39.7,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.92067,
+              51.62844
+            ],
+            [
+              3.9202092566212103,
+              51.62959300255267
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 676,
+          "edgeTypeId": 0,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 262.8,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.9202092566212103,
+              51.62959300255267
+            ],
+            [
+              3.92,
+              51.63
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1.2,
+          "distance": 48,
+          "maxAirDraft": -1,
+          "minDepth": -1,
+          "minDepthKnown": false,
+          "seconds": 18.7,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      }
+    ],
+    "inputs": {
+      "airDraft": 25,
+      "beam": 5,
+      "bridgeWaitMinutes": 30,
+      "coreVersion": "1.0.0",
+      "data": [
+        {
+          "filename": "netherlands.sqlite",
+          "lastUpdateDate": "2026-07-12T13:35:41Z"
+        }
+      ],
+      "departureTime": null,
+      "describe": true,
+      "draft": 2,
+      "lang": null,
+      "lockWaitMinutes": 60,
+      "minCoastDistance": 0,
+      "safetyMarginAirDraft": 1.5,
+      "safetyMarginBeam": 2,
+      "safetyMarginDraft": 0.3,
+      "speedKnots": 5,
+      "useTides": false
+    },
+    "itinerary": [
+      {
+        "coordIndex": 0,
+        "courseToNext": 130,
+        "distanceFromStart": 0,
+        "kind": "start",
+        "latitude": 51.62,
+        "leg": {
+          "distance": 82,
+          "seconds": 32
+        },
+        "longitude": 3.9
+      },
+      {
+        "coordIndex": 1,
+        "courseToNext": 38,
+        "distanceFromStart": 82,
+        "kind": "turn",
+        "latitude": 51.619530400690074,
+        "leg": {
+          "crossings": [
+            {
+              "distanceFromStart": 1008,
+              "height": 11,
+              "kind": "bridge",
+              "name": "Zeelandbrug (fixed, 11.0m)",
+              "partId": 2128123058316551,
+              "passage": 0,
+              "position": {
+                "latitude": 51.625819376160756,
+                "longitude": 3.9097048780774633
+              },
+              "structure": "9000000000001",
+              "subtype": "fixed",
+              "type": "bridge"
+            }
+          ],
+          "distance": 1241,
+          "maxAirDraft": 999,
+          "minDepth": 5.5,
+          "minWidth": 999,
+          "seconds": 483
+        },
+        "longitude": 3.900913855260088,
+        "turn": -92
+      },
+      {
+        "coordIndex": 16,
+        "courseToNext": 199,
+        "distanceFromStart": 1323,
+        "kind": "turn",
+        "latitude": 51.62833,
+        "leg": {
+          "distance": 196,
+          "maxAirDraft": 999,
+          "minDepth": 3.5,
+          "minWidth": 999,
+          "seconds": 76
+        },
+        "longitude": 3.91185,
+        "turn": 161
+      },
+      {
+        "coordIndex": 21,
+        "courseToNext": 46,
+        "distanceFromStart": 1519,
+        "kind": "turn",
+        "latitude": 51.62678,
+        "leg": {
+          "crossings": [
+            {
+              "distanceFromStart": 1519,
+              "kind": "bridge",
+              "name": "Zeelandbrug (opening span)",
+              "partId": 4146545408540650,
+              "passage": 1,
+              "position": {
+                "latitude": 51.62677541092233,
+                "longitude": 3.9110051221300246
+              },
+              "structure": "9000000000001",
+              "subtype": "opening",
+              "type": "bridge",
+              "waitSeconds": 1800
+            }
+          ],
+          "distance": 236,
+          "maxAirDraft": 999,
+          "minDepth": 3.5,
+          "minWidth": 999,
+          "seconds": 1892,
+          "waitSeconds": 1800
+        },
+        "longitude": 3.91101,
+        "turn": -153
+      },
+      {
+        "coordIndex": 26,
+        "courseToNext": 91,
+        "distanceFromStart": 1755,
+        "kind": "turn",
+        "latitude": 51.62825,
+        "leg": {
+          "distance": 859,
+          "minDepth": 6,
+          "seconds": 334
+        },
+        "longitude": 3.91343,
+        "turn": 45
+      },
+      {
+        "coordIndex": 38,
+        "courseToNext": 272,
+        "distanceFromStart": 2614,
+        "kind": "turn",
+        "latitude": 51.62815,
+        "leg": {
+          "distance": 456,
+          "maxAirDraft": 999,
+          "minDepth": 0,
+          "minWidth": 999,
+          "seconds": 177,
+          "warnings": [
+            {
+              "at": [
+                {
+                  "bounds": [
+                    3.91922,
+                    51.6282,
+                    3.91979,
+                    51.62827
+                  ],
+                  "coordIndex": 44,
+                  "distance": 40,
+                  "distanceFromStart": 3030,
+                  "toCoordIndex": 45
+                }
+              ],
+              "code": "LEG_SHALLOW",
+              "level": "danger",
+              "message": "Shallow (0.0m)",
+              "minDepth": 0,
+              "params": {
+                "minDepth": 0
+              },
+              "requiredDepth": 2.3,
+              "type": "shallow"
+            }
+          ]
+        },
+        "longitude": 3.9258,
+        "turn": -179
+      },
+      {
+        "coordIndex": 45,
+        "courseToNext": 79,
+        "distanceFromStart": 3070,
+        "kind": "turn",
+        "latitude": 51.62827,
+        "leg": {
+          "distance": 102,
+          "maxAirDraft": 999,
+          "minDepth": 0,
+          "minWidth": 999,
+          "seconds": 40,
+          "warnings": [
+            {
+              "at": [
+                {
+                  "bounds": [
+                    3.91922,
+                    51.62827,
+                    3.92067,
+                    51.62844
+                  ],
+                  "coordIndex": 45,
+                  "distance": 102,
+                  "distanceFromStart": 3070,
+                  "toCoordIndex": 46
+                }
+              ],
+              "code": "LEG_SHALLOW",
+              "level": "danger",
+              "message": "Shallow (0.0m)",
+              "minDepth": 0,
+              "params": {
+                "minDepth": 0
+              },
+              "requiredDepth": 2.3,
+              "type": "shallow"
+            }
+          ]
+        },
+        "longitude": 3.91922,
+        "turn": 168
+      },
+      {
+        "coordIndex": 46,
+        "courseToNext": 345,
+        "distanceFromStart": 3173,
+        "kind": "turn",
+        "latitude": 51.62844,
+        "leg": {
+          "distance": 724,
+          "minDepth": 6,
+          "seconds": 282
+        },
+        "longitude": 3.92067,
+        "turn": -94
+      },
+      {
+        "coordIndex": 48,
+        "distanceFromStart": 3897,
+        "kind": "end",
+        "latitude": 51.63,
+        "longitude": 3.92
+      }
+    ],
+    "timingAssumptions": {
+      "averageSpeedKnots": 5,
+      "bridgeWaitMinutes": 30,
+      "lockWaitMinutes": 60
+    },
+    "totalCost": 45968.87271622078,
+    "totalDistance": 3356.5618538920257,
+    "totalSeconds": 3315,
+    "totalWaitSeconds": 1800,
+    "type": "FeatureCollection",
+    "warnings": [
+      {
+        "code": "CONNECTOR_START",
+        "distanceMeters": 82,
+        "from": {
+          "latitude": 51.62,
+          "longitude": 3.9
+        },
+        "message": "82m from the start position to the nearest charted waterway.",
+        "params": {
+          "distance": 82
+        },
+        "to": {
+          "latitude": 51.619530400690074,
+          "longitude": 3.900913855260088
+        },
+        "type": "start_connecting"
+      },
+      {
+        "code": "CONNECTOR_END",
+        "distanceMeters": 48,
+        "from": {
+          "latitude": 51.62959300255267,
+          "longitude": 3.9202092566212103
+        },
+        "message": "48m from the nearest charted waterway to the destination.",
+        "params": {
+          "distance": 48
+        },
+        "to": {
+          "latitude": 51.63,
+          "longitude": 3.92
+        },
+        "type": "end_connecting"
+      }
+    ],
+    "waypoints": [
+      {
+        "kind": "start",
+        "latitude": 51.62,
+        "longitude": 3.9
+      },
+      {
+        "latitude": 51.619530400690074,
+        "longitude": 3.900913855260088
+      },
+      {
+        "latitude": 51.62512,
+        "longitude": 3.9086
+      },
+      {
+        "latitude": 51.62833,
+        "longitude": 3.91185
+      },
+      {
+        "latitude": 51.62678,
+        "longitude": 3.91101
+      },
+      {
+        "latitude": 51.62825,
+        "longitude": 3.91343
+      },
+      {
+        "latitude": 51.62815,
+        "longitude": 3.9258
+      },
+      {
+        "latitude": 51.62827,
+        "longitude": 3.91922
+      },
+      {
+        "latitude": 51.62844,
+        "longitude": 3.92067
+      },
+      {
+        "kind": "end",
+        "latitude": 51.63,
+        "longitude": 3.92
+      }
+    ]
+  }
+}

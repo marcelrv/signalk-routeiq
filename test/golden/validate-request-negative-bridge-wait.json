@@ -1,0 +1,17 @@
+{
+  "request": {
+    "bridgeWaitMinutes": -5,
+    "end": {
+      "latitude": 52.1,
+      "longitude": 5.1
+    },
+    "start": {
+      "latitude": 52,
+      "longitude": 5
+    }
+  },
+  "result": {
+    "error": "Invalid bridgeWaitMinutes — expected 0..1440 minutes",
+    "warnings": []
+  }
+}

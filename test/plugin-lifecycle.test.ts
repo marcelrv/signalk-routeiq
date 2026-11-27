@@ -3,7 +3,7 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import type { IRouter, Router } from 'express';
 import type { ServerAPI } from '@signalk/server-api';
-import { pluginConstructor } from '../dist/index.js';
+import { pluginConstructor } from '../dist-tsc/index.js';
 
 // Signal K calls stop() and then start() on every config save, and it does not
 // reliably await stop() — the server-api docs only ask the plugin to *return* a

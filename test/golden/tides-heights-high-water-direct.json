@@ -1,0 +1,147 @@
+{
+  "ok": {
+    "arrivalTime": "2026-08-11T06:28:07.491Z",
+    "crossings": [],
+    "departureTime": "2026-08-11T06:12:36.000Z",
+    "features": [
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              5,
+              52
+            ],
+            [
+              5.035,
+              52
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 2396,
+          "edgeTypeId": 1,
+          "maxAirDraft": 20,
+          "minDepth": 1.5,
+          "minDepthAtPassage": 3,
+          "minDepthKnown": true,
+          "seconds": 931.5,
+          "tideRiseM": 1.5,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      }
+    ],
+    "inputs": {
+      "airDraft": 5,
+      "beam": 4,
+      "bridgeWaitMinutes": 30,
+      "coreVersion": "1.0.0",
+      "data": [
+        {
+          "filename": "tide.sqlite",
+          "lastUpdateDate": "2026-01-01T00:00:00Z"
+        }
+      ],
+      "departureTime": "2026-08-11T06:12:36.000Z",
+      "describe": true,
+      "draft": 2,
+      "lang": null,
+      "lockWaitMinutes": 60,
+      "minCoastDistance": 0,
+      "safetyMarginAirDraft": 1.5,
+      "safetyMarginBeam": 2,
+      "safetyMarginDraft": 0.3,
+      "speedKnots": 5,
+      "useTides": true
+    },
+    "itinerary": [
+      {
+        "coordIndex": 0,
+        "courseToNext": 90,
+        "distanceFromStart": 0,
+        "kind": "start",
+        "latitude": 52,
+        "leg": {
+          "distance": 2396,
+          "maxAirDraft": 20,
+          "minDepth": 1.5,
+          "minDepthAtPassage": 3,
+          "minWidth": 10,
+          "seconds": 932,
+          "warnings": [
+            {
+              "at": [
+                {
+                  "bounds": [
+                    5,
+                    52,
+                    5.035,
+                    52
+                  ],
+                  "coordIndex": 0,
+                  "distance": 2396,
+                  "distanceFromStart": 0,
+                  "toCoordIndex": 1
+                }
+              ],
+              "code": "LEG_SHALLOW_AT_PASSAGE",
+              "level": "caution",
+              "message": "Shallow (1.5m charted, 3.0m at passage)",
+              "minDepth": 1.5,
+              "minDepthAtPassage": 3,
+              "params": {
+                "minDepth": 1.5,
+                "minDepthAtPassage": 3
+              },
+              "requiredDepth": 2.3,
+              "type": "shallow"
+            }
+          ]
+        },
+        "longitude": 5
+      },
+      {
+        "coordIndex": 1,
+        "distanceFromStart": 2396,
+        "kind": "end",
+        "latitude": 52,
+        "longitude": 5.035
+      }
+    ],
+    "tide": {
+      "depthAware": true,
+      "enabled": true,
+      "estimated": true,
+      "source": "heights",
+      "stations": [
+        "north",
+        "south",
+        "east"
+      ]
+    },
+    "timingAssumptions": {
+      "averageSpeedKnots": 5,
+      "bridgeWaitMinutes": 30,
+      "lockWaitMinutes": 60
+    },
+    "totalCost": 2396,
+    "totalDistance": 2396,
+    "totalSeconds": 931,
+    "totalSecondsNoTide": 931,
+    "type": "FeatureCollection",
+    "waypoints": [
+      {
+        "kind": "start",
+        "latitude": 52,
+        "longitude": 5
+      },
+      {
+        "kind": "end",
+        "latitude": 52,
+        "longitude": 5.035
+      }
+    ]
+  }
+}

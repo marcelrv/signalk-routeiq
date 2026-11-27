@@ -1,0 +1,123 @@
+{
+  "ok": {
+    "crossings": [],
+    "features": [
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.885,
+              51.61299999999999
+            ],
+            [
+              3.886048618776918,
+              51.61343114334636
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 87,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 33.8,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              3.886048618776918,
+              51.61343114334636
+            ],
+            [
+              3.8874999999999997,
+              51.613499999999995
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 101,
+          "maxAirDraft": -1,
+          "minDepth": 6,
+          "minDepthKnown": true,
+          "seconds": 39.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      }
+    ],
+    "inputs": {
+      "airDraft": 19.5,
+      "beam": 5,
+      "bridgeWaitMinutes": 30,
+      "coreVersion": "1.0.0",
+      "data": [
+        {
+          "filename": "netherlands.sqlite",
+          "lastUpdateDate": "2026-07-12T13:35:41Z"
+        }
+      ],
+      "departureTime": null,
+      "describe": true,
+      "draft": 2,
+      "lang": null,
+      "lockWaitMinutes": 60,
+      "minCoastDistance": 0,
+      "safetyMarginAirDraft": 1.5,
+      "safetyMarginBeam": 2,
+      "safetyMarginDraft": 0.3,
+      "speedKnots": 5,
+      "useTides": false
+    },
+    "itinerary": [
+      {
+        "coordIndex": 0,
+        "courseToNext": 72,
+        "distanceFromStart": 0,
+        "kind": "start",
+        "latitude": 51.61299999999999,
+        "leg": {
+          "distance": 188,
+          "minDepth": 6,
+          "seconds": 73
+        },
+        "longitude": 3.885
+      },
+      {
+        "coordIndex": 2,
+        "distanceFromStart": 188,
+        "kind": "end",
+        "latitude": 51.613499999999995,
+        "longitude": 3.8874999999999997
+      }
+    ],
+    "timingAssumptions": {
+      "averageSpeedKnots": 5,
+      "bridgeWaitMinutes": 30,
+      "lockWaitMinutes": 60
+    },
+    "totalCost": 187,
+    "totalDistance": 187,
+    "totalSeconds": 73,
+    "type": "FeatureCollection",
+    "waypoints": [
+      {
+        "kind": "start",
+        "latitude": 51.61299999999999,
+        "longitude": 3.885
+      },
+      {
+        "kind": "end",
+        "latitude": 51.613499999999995,
+        "longitude": 3.8874999999999997
+      }
+    ]
+  }
+}

@@ -136,9 +136,48 @@ export default tseslint.config(
     },
   },
   {
+    // routeiq-core must stay usable outside Signal K and free of third-party
+    // runtime dependencies: node built-ins and its own files only. The same
+    // property is checked on the compiled output by
+    // packages/routeiq-core/test/import-boundary.test.ts.
+    files: ['packages/routeiq-core/src/**/*.ts'],
+    rules: {
+      // Core logs through the injected Logger (logger.ts), never the console.
+      'no-console': 'error',
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: [
+                '@signalk/*',
+                'express',
+                'express/*',
+                'signalk-plotterext-bus',
+                'signalk-plotterext-bus/*',
+                'node:v8',
+                'v8',
+              ],
+              message:
+                'routeiq-core must not depend on Signal K, express, the plotter bus or node:v8.',
+            },
+            {
+              group: ['../*'],
+              message:
+                'routeiq-core must not import from outside its own src/ (plugin code or another package).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     ignores: [
       'dist/**/*',
       'dist-test/**/*',
+      'dist-tsc/**/*',
+      'packages/*/dist/**/*',
+      'packages/*/dist-test/**/*',
       'node_modules/**/*',
       // Third-party, and the world-countries GeoJSON. public/app.js is ours
       // and is linted — see the block above.

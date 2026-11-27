@@ -3,10 +3,12 @@ import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { RoutingDatabase } from '../dist/database.js';
-import { RouteSearchError, RoutingEngine } from '../dist/routing.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+import { RoutingDatabase } from 'routeiq-core';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
+import { RouteSearchError, RoutingEngine } from 'routeiq-core';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 // The start node's "better depth" swap. When every edge from the nearest
 // node toward the destination is too shallow, astarSearch looks within 2 km
@@ -144,12 +146,11 @@ function buildFixture(dir: string, opts: FixtureOptions = {}): void {
 }
 
 function makeEngine(db: RoutingDatabase): RoutingEngine {
-  const engine = new RoutingEngine(db, {
+  const engine = new RoutingEngine(db, testOptions({
     ...DEFAULT_CONFIG,
     safetyMarginDraft: 0.2,
     lineOfSightSearchRadius: 0,
-  });
-  engine.setVesselDimensions({ draft: 1.9, beam: 3.6, airDraft: 16 });
+  }, { draft: 1.9, beam: 3.6, airDraft: 16 }));
   return engine;
 }
 
@@ -174,7 +175,7 @@ describe('start-node better-depth swap', () => {
 
   before(async () => {
     buildFixture(dir);
-    db = new RoutingDatabase(dir);
+    db = createDirectoryDatabase(dir);
     await db.init();
     await db.loadGraph();
   });
@@ -217,11 +218,11 @@ describe('start-node better-depth swap', () => {
   it('puts the last A* error in the final "No route found" message', async () => {
     const engine = makeEngine(db) as any;
     engine.astarSearch = async () => {
-      throw new RouteSearchError('No route found between the given points — synthetic cause');
+      throw RouteSearchError.create('NO_PATH', { reason: 'start_outside_box' }, 'en');
     };
     await assert.rejects(engine.calculateRoute(request), (e: Error) => {
       assert.match(e.message, /graph is connected but A\* could not find a path/);
-      assert.match(e.message, /Last search error: .*synthetic cause/);
+      assert.match(e.message, /Last search error: Start node is outside the routing bounding box/);
       return true;
     });
   });
@@ -276,12 +277,12 @@ describe('start-node better-depth swap', () => {
   it('puts the last A* error in the message of a route with via points', async () => {
     const engine = makeEngine(db) as any;
     engine.astarSearch = async () => {
-      throw new RouteSearchError('No route found between the given points — synthetic via cause');
+      throw RouteSearchError.create('NO_PATH', { reason: 'start_outside_box' }, 'en');
     };
     const viaRequest = { ...request, via: [{ latitude: K.lat, longitude: K.lon }] };
     await assert.rejects(engine.calculateRoute(viaRequest), (e: Error) => {
       assert.match(e.message, /No route found to destination/);
-      assert.match(e.message, /Last search error: .*synthetic via cause/);
+      assert.match(e.message, /Last search error: Start node is outside the routing bounding box/);
       return true;
     });
   });
@@ -293,7 +294,7 @@ describe('start-node better-depth swap into other water', () => {
 
   before(async () => {
     buildFixture(dir, { otherWater: true });
-    db = new RoutingDatabase(dir);
+    db = createDirectoryDatabase(dir);
     await db.init();
     await db.loadGraph();
   });
@@ -316,7 +317,7 @@ describe('start-node better-depth swap past a land-crossing edge', () => {
 
   before(async () => {
     buildFixture(dir, { otherWater: true, landToOtherWater: true });
-    db = new RoutingDatabase(dir);
+    db = createDirectoryDatabase(dir);
     await db.init();
     await db.loadGraph();
   });
@@ -338,7 +339,7 @@ describe('start-node better-depth swap past deep water that leads on only across
 
   before(async () => {
     buildFixture(dir, { otherWater: true, landLockedDeep: true });
-    db = new RoutingDatabase(dir);
+    db = createDirectoryDatabase(dir);
     await db.init();
     await db.loadGraph();
   });
@@ -368,7 +369,7 @@ describe('end-node better-depth swap with a one-way approach', () => {
 
   before(async () => {
     buildFixture(dir, { oneWayApproach: true });
-    db = new RoutingDatabase(dir);
+    db = createDirectoryDatabase(dir);
     await db.init();
     await db.loadGraph();
   });

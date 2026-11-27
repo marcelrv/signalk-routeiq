@@ -39,7 +39,7 @@ An offline-first, vessel-aware nautical route planner designed to run natively a
 RouteIQ is made up of three pieces:
 
 1. **A cloud data pipeline** (separate repo, [signalk-router-pipeline](https://github.com/marcelrv/signalk-router-pipeline)) that processes nautical charts into compiled routing databases.
-2. **This Signal K plugin**, which runs on your Signal K server, loads one or more of those databases, and calculates routes.
+2. **This Signal K plugin**, which runs on your Signal K server, loads one or more of those databases, and calculates routes. The routing engine is an internal package (`routeiq-core`) that is bundled into the plugin.
 3. **A web app**, served by the plugin, for planning routes on a chart and exporting them.
 
 Compiled routing databases are published to [signalk-router-data](https://github.com/marcelrv/signalk-router-data) and can be downloaded directly from the plugin's "Manage Routing Data" screen — you don't need to run the pipeline yourself.

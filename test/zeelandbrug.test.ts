@@ -1,9 +1,11 @@
 import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
-import { RoutingDatabase } from '../dist/database.js';
-import { RoutingEngine } from '../dist/routing.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+import { RoutingDatabase } from 'routeiq-core';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
+import { RoutingEngine } from 'routeiq-core';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
+import { testOptions } from './engine-helper.js';
 
 // Real Phase-1-pipeline-generated database for the Zeelandbrug scenario
 // (test/fixtures/zeelandbrug/netherlands.sqlite, regenerated from
@@ -38,11 +40,10 @@ describe('Zeelandbrug opening-bridge routing (Phase 2 Hardening Round 3 regressi
   let engine: RoutingEngine;
 
   before(async () => {
-    db = new RoutingDatabase(fixturesDir);
+    db = createDirectoryDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
-    engine = new RoutingEngine(db, DEFAULT_CONFIG);
-    engine.setVesselDimensions({ draft: 2.0, beam: 5.0, airDraft: 19.5 });
+    engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 2.0, beam: 5.0, airDraft: 19.5 }));
   });
 
   after(async () => {

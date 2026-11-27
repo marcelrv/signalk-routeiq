@@ -13,11 +13,11 @@ import {
   TimeoutError,
   warnIfRemoteTidesApiBase,
   watchCurrentsApi,
-} from "../dist/server-access.js";
+} from "../dist-tsc/server-access.js";
 import type { ServerAPI } from "@signalk/server-api";
-import { ApiHandler } from "../dist/api.js";
-import { CurrentsClient, TidesClient } from "../dist/tides.js";
-import { DEFAULT_CONFIG } from "../dist/types.js";
+import { ApiHandler } from "../dist-tsc/api.js";
+import { CurrentsClient, TidesClient } from "../dist-tsc/tide-providers.js";
+import { DEFAULT_CONFIG } from "../dist-tsc/types.js";
 
 // routeiq reaches the tide plugins in the same Signal K server either
 // in-process (signalk-tidal-currents' `currentsApi` PropertyValue) or over

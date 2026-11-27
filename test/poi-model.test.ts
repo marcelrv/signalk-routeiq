@@ -19,10 +19,12 @@ import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
-import { RoutingDatabase } from '../dist/database.js';
-import { RoutingEngine } from '../dist/routing.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+import { RoutingDatabase } from 'routeiq-core';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
+import { RoutingEngine } from 'routeiq-core';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { EDGE_POIS_DDL, POIS_DDL, upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 const LAT = 52.0;
 const lonOf = (node: number) => 5.0 + 0.01 * (node - 1);
@@ -144,7 +146,7 @@ describe('files that are not in the POI model are refused', () => {
     describe(dynamic ? 'dynamic loading' : 'bulk loading', () => {
       let db: RoutingDatabase;
       before(async () => {
-        db = new RoutingDatabase(dir, dynamic);
+        db = createDirectoryDatabase(dir, dynamic);
         await db.init();
         await db.loadGraph();
       });
@@ -212,7 +214,7 @@ describe('files that are not in the POI model are refused', () => {
     const d = tmpDir();
     try {
       buildFile(path.join(d, 'a.sqlite'), { country: 'AAA', nodes: [1, 2], edges: [[1, 2]] });
-      const db = new RoutingDatabase(d, true);
+      const db = createDirectoryDatabase(d, true);
       await db.init();
       fs.unlinkSync(path.join(d, 'a.sqlite'));
       buildFile(path.join(d, 'a.sqlite'), { country: 'AAA', nodes: [1, 2], edges: [[1, 2]], format: { kind: 'schema3' } });
@@ -233,7 +235,7 @@ describe('files that are not in the POI model are refused', () => {
     const only = tmpDir();
     try {
       buildFile(path.join(only, 'schema3.sqlite'), { country: 'SCH3', nodes: [1, 2], edges: [[1, 2]], format: { kind: 'schema3' } });
-      const db = new RoutingDatabase(only, false);
+      const db = createDirectoryDatabase(only, false);
       await assert.rejects(db.init(), /schema3\.sqlite: Built with an older database format/);
       await db.close();
     } finally {
@@ -263,7 +265,7 @@ describe('POIs: wholes, parts, info on demand', () => {
       ],
       edgePois: MODEL_EDGE_POIS,
     });
-    db = new RoutingDatabase(dir, false);
+    db = createDirectoryDatabase(dir, false);
     await db.init();
     await db.loadGraph();
   });
@@ -373,11 +375,10 @@ describe('a route reports the whole and uses the part', () => {
       pois: MODEL_POIS,
       edgePois: MODEL_EDGE_POIS,
     });
-    db = new RoutingDatabase(dir, false);
+    db = createDirectoryDatabase(dir, false);
     await db.init();
     await db.loadGraph();
-    engine = new RoutingEngine(db, DEFAULT_CONFIG);
-    engine.setVesselDimensions({ draft: 1.0, beam: 3.0, airDraft: 5.0 });
+    engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 1.0, beam: 3.0, airDraft: 5.0 }));
   });
   after(async () => {
     await db.close();
@@ -479,7 +480,7 @@ describe('edge_pois of several files are united', () => {
     ];
     buildFile(path.join(dir, 'west.sqlite'), { country: 'WST', nodes: [1, 2, 3], edges: [[1, 2], [2, 3]], pois: lockPois, edgePois: [[2, 3, 101]] });
     buildFile(path.join(dir, 'east.sqlite'), { country: 'EST', nodes: [2, 3, 4], edges: [[2, 3], [3, 4]], pois: lockPois, edgePois: [[2, 3, 102]] });
-    db = new RoutingDatabase(dir, true);
+    db = createDirectoryDatabase(dir, true);
     await db.init();
     await db.loadGraph();
     await db.loadDatabaseGraph('west.sqlite');
@@ -506,7 +507,7 @@ describe('edge_pois of several files are united', () => {
       });
       buildFile(path.join(d, 'a.sqlite'), mk('AAA', 3));
       buildFile(path.join(d, 'b.sqlite'), mk('BBB', 4));
-      const db2 = new RoutingDatabase(d, false);
+      const db2 = createDirectoryDatabase(d, false);
       await db2.init();
       await db2.loadGraph();
       assert.deepStrictEqual(await db2.getPoiInfo([7]), { '7': { height: 3 } });
@@ -531,10 +532,10 @@ interface EngineProbe {
   ): Promise<{ features: Array<{ properties: { segments: unknown } }> }>;
   detectRouteStructures(coords: [number, number][], segs: unknown[]): Promise<unknown[]>;
 }
-/** RoutingDatabase with its edge lookup and message channel replaced. */
+/** RoutingDatabase with its edge lookup and store replaced. */
 interface DbProbe {
   getEdgeSync: (a: number, b: number) => object | null;
-  sendMessage: (t: string, p: { pairs: Array<{ dbIndexes: number[] | null }> }) => Promise<unknown[]>;
+  store: { routePois: (pairs: Array<{ dbIndexes: number[] | null }>) => Promise<unknown[]> };
   getRoutePois(pairs: Array<[number, number]>): Promise<unknown>;
 }
 
@@ -544,9 +545,11 @@ describe('POI lookups: direction and ground distance', () => {
     const edges = new Map<string, object>();
     const db = Object.create(RoutingDatabase.prototype) as DbProbe;
     db.getEdgeSync = (a: number, b: number) => edges.get(`${a}>${b}`) ?? null;
-    db.sendMessage = async (_t: string, p: { pairs: Array<{ dbIndexes: number[] | null }> }) => {
-      sent.push(p);
-      return [];
+    db.store = {
+      routePois: async (pairs) => {
+        sent.push({ pairs });
+        return [];
+      },
     };
     edges.set('1>2', { dbIndex: 0 });
     edges.set('2>1', { dbIndex: 1, extraDbIndexes: [2, -1, 0] });
@@ -568,7 +571,7 @@ describe('POI lookups: direction and ground distance', () => {
           { id: 2, type: 0, name: 'East', lat: 52.0, lon: 5.012 }, // 0.82 km at 52N
         ],
       });
-      const db = new RoutingDatabase(d, false);
+      const db = createDirectoryDatabase(d, false);
       await db.init();
       await db.loadGraph();
       const r = await db.getPoisInBBox(51.9, 4.9, 52.1, 5.1, 1, { includeInfo: false });
@@ -607,11 +610,10 @@ describe('structure kind: a power line is told apart from a bridge', () => {
       pois: KIND_POIS,
       edgePois: [[1, 2, 501], [2, 3, 601], [3, 4, 701], [4, 5, 801]],
     });
-    db = new RoutingDatabase(dir, false);
+    db = createDirectoryDatabase(dir, false);
     await db.init();
     await db.loadGraph();
-    engine = new RoutingEngine(db, DEFAULT_CONFIG);
-    engine.setVesselDimensions({ draft: 1.0, beam: 3.0, airDraft: 5.0 });
+    engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 1.0, beam: 3.0, airDraft: 5.0 }));
   });
   after(async () => {
     await db.close();

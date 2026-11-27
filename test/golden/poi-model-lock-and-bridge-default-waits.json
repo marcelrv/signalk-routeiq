@@ -1,0 +1,342 @@
+{
+  "ok": {
+    "crossings": [
+      {
+        "distanceFromStart": 0,
+        "height": 3.2,
+        "kind": "bridge",
+        "name": "Test Bridge (fixed, 3.2m)",
+        "partId": 301,
+        "passage": 0,
+        "position": {
+          "latitude": 52.0002,
+          "longitude": 5
+        },
+        "structure": "300",
+        "subtype": "fixed",
+        "type": "bridge"
+      },
+      {
+        "distanceFromStart": 685,
+        "lockSpan": [
+          685,
+          2055
+        ],
+        "name": "Test Lock",
+        "partId": 101,
+        "passage": 0,
+        "position": {
+          "latitude": 52,
+          "longitude": 5.01
+        },
+        "structure": "100",
+        "type": "lock",
+        "waitMinutes": 20,
+        "waitSeconds": 1200
+      },
+      {
+        "distanceFromStart": 1370,
+        "kind": "bascule",
+        "name": "Road bridge (bascule, opening span)",
+        "partId": 401,
+        "passage": 0,
+        "position": {
+          "latitude": 52,
+          "longitude": 5.02
+        },
+        "structure": "100",
+        "subtype": "opening",
+        "type": "bridge",
+        "waitMinutes": 3
+      },
+      {
+        "distanceFromStart": 2055,
+        "lockSpan": [
+          2055,
+          2740
+        ],
+        "name": "Lock B",
+        "partId": 201,
+        "passage": 0,
+        "position": {
+          "latitude": 52,
+          "longitude": 5.03
+        },
+        "structure": "200",
+        "type": "lock",
+        "waitMinutes": 0
+      }
+    ],
+    "features": [
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              5,
+              52
+            ],
+            [
+              5.01,
+              52
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 685,
+          "edgeTypeId": 1,
+          "maxAirDraft": 20,
+          "minDepth": 10,
+          "minDepthKnown": true,
+          "seconds": 266.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              5.01,
+              52
+            ],
+            [
+              5.02,
+              52
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 685,
+          "edgeTypeId": 1,
+          "maxAirDraft": 20,
+          "minDepth": 10,
+          "minDepthKnown": true,
+          "seconds": 266.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              5.02,
+              52
+            ],
+            [
+              5.03,
+              52
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 685,
+          "edgeTypeId": 1,
+          "maxAirDraft": 20,
+          "minDepth": 10,
+          "minDepthKnown": true,
+          "seconds": 266.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              5.03,
+              52
+            ],
+            [
+              5.04,
+              52
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 685,
+          "edgeTypeId": 1,
+          "maxAirDraft": 20,
+          "minDepth": 10,
+          "minDepthKnown": true,
+          "seconds": 266.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      },
+      {
+        "geometry": {
+          "coordinates": [
+            [
+              5.04,
+              52
+            ],
+            [
+              5.05,
+              52
+            ]
+          ],
+          "type": "LineString"
+        },
+        "properties": {
+          "costFactor": 1,
+          "distance": 685,
+          "edgeTypeId": 1,
+          "maxAirDraft": 20,
+          "minDepth": 10,
+          "minDepthKnown": true,
+          "seconds": 266.3,
+          "trafficMode": 0
+        },
+        "type": "Feature"
+      }
+    ],
+    "inputs": {
+      "airDraft": 5,
+      "beam": 3,
+      "bridgeWaitMinutes": 30,
+      "coreVersion": "1.0.0",
+      "data": [
+        {
+          "filename": "poi.sqlite",
+          "lastUpdateDate": "2026-01-01T00:00:00Z"
+        }
+      ],
+      "departureTime": null,
+      "describe": true,
+      "draft": 1,
+      "lang": null,
+      "lockWaitMinutes": 60,
+      "minCoastDistance": 0,
+      "safetyMarginAirDraft": 1.5,
+      "safetyMarginBeam": 2,
+      "safetyMarginDraft": 0.3,
+      "speedKnots": 5,
+      "useTides": false
+    },
+    "itinerary": [
+      {
+        "coordIndex": 0,
+        "courseToNext": 90,
+        "distanceFromStart": 0,
+        "kind": "start",
+        "latitude": 52,
+        "leg": {
+          "crossings": [
+            {
+              "distanceFromStart": 0,
+              "height": 3.2,
+              "kind": "bridge",
+              "name": "Test Bridge (fixed, 3.2m)",
+              "partId": 301,
+              "passage": 0,
+              "position": {
+                "latitude": 52.0002,
+                "longitude": 5
+              },
+              "structure": "300",
+              "subtype": "fixed",
+              "type": "bridge"
+            },
+            {
+              "distanceFromStart": 685,
+              "lockSpan": [
+                685,
+                2055
+              ],
+              "name": "Test Lock",
+              "partId": 101,
+              "passage": 0,
+              "position": {
+                "latitude": 52,
+                "longitude": 5.01
+              },
+              "structure": "100",
+              "type": "lock",
+              "waitMinutes": 20,
+              "waitSeconds": 1200
+            },
+            {
+              "distanceFromStart": 1370,
+              "kind": "bascule",
+              "name": "Road bridge (bascule, opening span)",
+              "partId": 401,
+              "passage": 0,
+              "position": {
+                "latitude": 52,
+                "longitude": 5.02
+              },
+              "structure": "100",
+              "subtype": "opening",
+              "type": "bridge",
+              "waitMinutes": 3
+            },
+            {
+              "distanceFromStart": 2055,
+              "lockSpan": [
+                2055,
+                2740
+              ],
+              "name": "Lock B",
+              "partId": 201,
+              "passage": 0,
+              "position": {
+                "latitude": 52,
+                "longitude": 5.03
+              },
+              "structure": "200",
+              "type": "lock",
+              "waitMinutes": 0
+            }
+          ],
+          "distance": 3425,
+          "maxAirDraft": 20,
+          "minDepth": 10,
+          "minWidth": 10,
+          "seconds": 2532,
+          "waitSeconds": 1200
+        },
+        "longitude": 5,
+        "name": "Test Bridge",
+        "nameSource": "poi"
+      },
+      {
+        "coordIndex": 5,
+        "distanceFromStart": 3425,
+        "kind": "end",
+        "latitude": 52,
+        "longitude": 5.05
+      }
+    ],
+    "timingAssumptions": {
+      "averageSpeedKnots": 5,
+      "bridgeWaitMinutes": 30,
+      "lockWaitMinutes": 60
+    },
+    "totalCost": 3450,
+    "totalDistance": 3450,
+    "totalSeconds": 2532,
+    "totalWaitSeconds": 1200,
+    "type": "FeatureCollection",
+    "waypoints": [
+      {
+        "kind": "start",
+        "latitude": 52,
+        "longitude": 5
+      },
+      {
+        "kind": "end",
+        "latitude": 52,
+        "longitude": 5.05
+      }
+    ]
+  }
+}

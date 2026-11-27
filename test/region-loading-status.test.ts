@@ -3,7 +3,8 @@ import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { RoutingDatabase } from '../dist/database.js';
+import { RoutingDatabase } from 'routeiq-core';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // A route or a position update can trigger a region to be read into the graph
@@ -99,7 +100,7 @@ describe('regions being read into the graph are reported', () => {
     raw.close();
     buildNameless();
 
-    db = new RoutingDatabase(fixturesDir, true);
+    db = createDirectoryDatabase(fixturesDir, true);
     await db.init();
     await db.loadGraph();
   });

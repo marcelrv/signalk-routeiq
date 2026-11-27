@@ -3,10 +3,12 @@ import * as fs from 'fs';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { RoutingDatabase } from '../dist/database.js';
-import { RoutingEngine } from '../dist/routing.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+import { RoutingDatabase } from 'routeiq-core';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
+import { RoutingEngine } from 'routeiq-core';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 // Regression test for the "finalResult.features[0].properties.segments is
 // not iterable" crash (found live on the Puerto Rico dataset, Round 24).
@@ -83,11 +85,10 @@ describe('via route with a disconnected final leg (Round 24 regression)', () => 
     upgradeToPoiModel(raw);
     raw.close();
 
-    db = new RoutingDatabase(fixturesDir);
+    db = createDirectoryDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
-    engine = new RoutingEngine(db, DEFAULT_CONFIG);
-    engine.setVesselDimensions({ draft: 1.0, beam: 3.0, airDraft: 5.0 });
+    engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 1.0, beam: 3.0, airDraft: 5.0 }));
   });
 
   after(async () => {

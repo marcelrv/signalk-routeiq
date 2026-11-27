@@ -1,0 +1,16 @@
+{
+  "request": {
+    "end": {
+      "latitude": 52.1,
+      "longitude": 5.1
+    },
+    "start": {
+      "latitude": 52,
+      "longitude": 5
+    }
+  },
+  "result": {
+    "error": null,
+    "warnings": []
+  }
+}

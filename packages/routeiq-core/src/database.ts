@@ -1,0 +1,4840 @@
+import { existsSync, readFileSync } from "node:fs";
+import { basename } from "node:path";
+import * as Navmesh from "./navmesh.js";
+import type { BBox, DataVersionEntry, PoiResult } from "./types.js";
+import type { DescribeWorkerResult } from "./route-description.js";
+import {
+  GraphEditError,
+  OVERLAY_DB_INDEX,
+  OVERLAY_EDITABLE_COLUMNS,
+  type OverlayStore,
+  type PeekedFile,
+  type RegionFileEntry,
+  type RegionMetadata,
+  type RegionStats,
+  type RoutingStore,
+} from "./routing-store.js";
+import { SqliteWorkerStore } from "./sqlite-worker-store.js";
+import { resolveLogger, type Logger } from "./logger.js";
+
+export {
+  GraphEditError,
+  OVERLAY_EDITABLE_COLUMNS,
+  type OverlayStore,
+  type RegionFileEntry,
+  type RoutingStore,
+} from "./routing-store.js";
+
+// Node type constants (encoded in the node ID via coordinate hashing)
+export const NODE_TYPE_COASTAL = 0;
+export const NODE_TYPE_INLAND = 1;
+
+/** Extract node type integer from a type-packed node ID. */
+export function getNodeTypeInt(id: number): number {
+  return Math.floor(id / 648000000000000);
+}
+
+// Edge type constants
+export const EDGE_TYPE_COASTAL = 0;
+export const EDGE_TYPE_INLAND = 1;
+
+// POI type constants
+export const POI_TYPE_HARBOUR = 0;
+export const POI_TYPE_LOCK = 1;
+export const POI_TYPE_BRIDGE = 2;
+export const POI_TYPE_FAIRWAY = 3;
+export const POI_TYPE_WATERWAY = 4;
+/** A chamber of a lock (part; its parent is a POI_TYPE_LOCK whole). */
+export const POI_TYPE_LOCK_CHAMBER = 5;
+/** A span or opening of a bridge (part; its parent is a bridge whole, or a
+ *  lock whole when the bridge is carried over the lock's heads). */
+export const POI_TYPE_BRIDGE_SPAN = 6;
+/** The POI types this build handles. Rows of any other type are dropped when
+ *  POIs are loaded (spec §1.1 rule 2: unknown = ignored). Types 3 and 4 are
+ *  in the enum table but have no rows in the POI model. */
+export const KNOWN_POI_TYPES: ReadonlySet<number> = new Set([
+  POI_TYPE_HARBOUR,
+  POI_TYPE_LOCK,
+  POI_TYPE_BRIDGE,
+  POI_TYPE_LOCK_CHAMBER,
+  POI_TYPE_BRIDGE_SPAN,
+]);
+/** Part types: what a route passes (it goes through a chamber, under a span). */
+export const POI_PART_TYPES: ReadonlySet<number> = new Set([
+  POI_TYPE_LOCK_CHAMBER,
+  POI_TYPE_BRIDGE_SPAN,
+]);
+/** Whole types that have parts. */
+export const POI_WHOLE_TYPES: ReadonlySet<number> = new Set([
+  POI_TYPE_LOCK,
+  POI_TYPE_BRIDGE,
+]);
+
+/** Most POIs the map/API returns for one box; their `info` is read from the
+ *  files per result. Callers (the API) apply it; route building does not. */
+export const MAX_POIS_IN_BBOX = 500;
+
+/** Caps on what a POI query may ask for. They are parameters of the database
+ *  (`RoutingDatabaseOptions.limits`); a call's own limit can only lower them. */
+export interface PoiLimits {
+  /** Most POIs a client-facing bounding-box query returns (see
+   *  `clampBBoxLimit`). `getPoisInBBox` itself takes the limit it is given:
+   *  route building asks for parts uncapped. */
+  maxBBoxResults: number;
+  /** Most results one name search returns. */
+  maxSearchResults: number;
+  /** Metres. Largest radius a nearest-POI query looks within. */
+  maxNearestRadiusM: number;
+  /** Characters of a search text that are used; the rest is dropped. */
+  maxSearchQueryLength: number;
+}
+
+export const DEFAULT_POI_LIMITS: PoiLimits = Object.freeze({
+  maxBBoxResults: MAX_POIS_IN_BBOX,
+  maxSearchResults: Infinity,
+  maxNearestRadiusM: Infinity,
+  maxSearchQueryLength: 256,
+});
+
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+
+/** The search text as the database uses it: control characters (C0, DEL, C1,
+ *  and the Unicode line/paragraph separators) removed, cut to `maxLength`. */
+export function sanitizeSearchQuery(query: string, maxLength: number): string {
+  const clean = String(query).replace(CONTROL_CHARS, "");
+  return clean.length > maxLength ? clean.slice(0, maxLength) : clean;
+}
+
+/** A POI as the bounding-box query returns it. */
+export interface PoiBBoxResult {
+  id: number;
+  name: string;
+  typeId: number;
+  /** The whole a part belongs to; null on a harbour. */
+  parentId: number | null;
+  /** The name to show: the whole's for a chamber or a span of a bridge
+   *  (spec §2.10: a part's own name only where there is no whole's), a span
+   *  over a lock head keeps its own, being the bridge's name. */
+  displayName: string;
+  /** Routing facts (spec §2.10.1). */
+  properties: Record<string, unknown>;
+  /** Display facts (spec §2.10.2), read on demand. */
+  info: Record<string, unknown>;
+  /** A bridge span's structure kind (`info.kind`: "bridge", "cable", "weir",
+   *  ...): its own, else its bridge whole's (see `spanKind`). Absent on other
+   *  POIs, where no file says, and when `info` was not read. Clients treat
+   *  absent as a bridge. */
+  kind?: string;
+  /** A bridge span whose height is unknown (`info.height_unknown`, its own,
+   *  else its bridge whole's; see `spanHeightUnknown`): any `info.height` is
+   *  only an estimate. Present only when true. */
+  heightUnknown?: boolean;
+  lat: number;
+  lon: number;
+}
+
+/** Parse a POI's `properties`/`info` JSON. Anything that is not a JSON object
+ *  (malformed text, an array, a scalar) reads as an empty object: a bad row
+ *  must never fail a bounding-box query or a search. */
+export function parsePoiJson(
+  raw: string | null | undefined,
+): Record<string, unknown> {
+  if (typeof raw !== "string" || raw === "") return {};
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" && !Array.isArray(v)
+      ? (v as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+// Traffic mode: 0=two-way, 1=one-way fwd (source->target), 2=one-way rev
+export const TRAFFIC_TWO_WAY = 0;
+export const TRAFFIC_ONE_WAY_FWD = 1;
+export const TRAFFIC_ONE_WAY_REV = 2;
+
+/**
+ * Whether A* can sail this edge source→target at all: not a wrong-way
+ * one-way edge, not one across land or an obstacle. The rule the endpoint
+ * swap's reach checks (leadsAnywhere, localGraphReach) share.
+ */
+export function isSailableEdge(edge: EdgeRow): boolean {
+  return (
+    edge.traffic_mode !== TRAFFIC_ONE_WAY_REV &&
+    edge.crosses_land !== 1 &&
+    edge.crosses_obstacle !== 1
+  );
+}
+
+/** OVERLAY_EDITABLE_COLUMNS as a set, for the membership checks on the merge
+ *  path — the shared array is the contract, this is just how it is asked. */
+const EDITABLE_COLUMN_SET = new Set<string>(OVERLAY_EDITABLE_COLUMNS);
+
+// Edge kind: 0=centerline (default), 1=navmesh boundary (fallback/funnel-augmented),
+// 2=lane, 3=macro (spec §2.5)
+export const EDGE_KIND_CENTERLINE = 0;
+export const EDGE_KIND_NAVMESH_BOUNDARY = 1;
+export const EDGE_KIND_LANE = 2;
+export const EDGE_KIND_MACRO = 3;
+
+export interface EdgeRow {
+  source: number;
+  target: number;
+  distance: number;
+  min_depth: number;
+  /** Whether min_depth is a real reading (possibly negative -- a charted
+   *  drying height, on schema_version >= 2) rather than "no data". Computed
+   *  once in db-worker.ts (the only place that knows this row's file's
+   *  schema_version); every depth check here and in routing.ts must read
+   *  this instead of `min_depth < 0` / `>= 0` (ROUTEIQ_NEXT_PHASES.md,
+   *  "Negative charted depths are read as unknown"). Optional only for rows
+   *  synthesized on the main thread (e.g. manual/connector legs), which set
+   *  it explicitly to false alongside their placeholder min_depth. */
+  min_depth_known?: boolean;
+  max_air_draft: number;
+  min_width: number;
+  cost_factor: number;
+  distance_to_land: number;
+  edge_type_id: number;
+  traffic_mode: number;
+  edge_kind_id?: number;
+  crosses_land?: number;
+  crosses_obstacle?: number;
+  // No coordinates here by design: an edge's endpoints are always resolvable
+  // from `this.nodes` via `source`/`target`, and every edge in edgesBySource
+  // is guaranteed to have both endpoints present (the loaders skip edges
+  // whose endpoints are missing; deleteNode/unloadDatabaseGraph sweep edges
+  // whose endpoints go away). Caching lat/lon/source_lat/source_lon on the
+  // row cost ~100 bytes/edge in separate V8 heap numbers — ~25 MB per 270k
+  // edge region, several of which can be loaded at once.
+  /** Intermediate [lat,lon] points of a funnel-computed navmesh path along this
+   *  edge (set only when this edge_kind_id=1 edge was upgraded from a straight
+   *  fallback chord to a real taut path by precomputeFunnelEdges). */
+  path_points?: Array<[number, number]>;
+  /** Worker handle index this edge came from (-1 = overlay), or the dbIndex
+   *  of the navmesh region that produced it when it's a synthetic
+   *  funnel/anchor-shortcut edge (see addFunnelShortcutEdge). Only
+   *  meaningful in dynamic-loading mode, where unloadDatabaseGraph uses it
+   *  to remove exactly one database's edges (real and synthetic) without
+   *  touching any other loaded database's. */
+  dbIndex?: number;
+  /** Other dbIndexes that also author this same (source,target) edge, set
+   *  only at a seam where overlapping files both carry it (see spliceEdge).
+   *  Absent on the overwhelming majority of edges, which have one
+   *  contributor. Read by unloadDatabaseGraph: evicting the file in `dbIndex`
+   *  promotes the first of these to primary and keeps the edge, because a
+   *  still-loaded file authors it too. Without this the de-duplication would
+   *  cut seam edges on eviction — the duplicate copies used to be what kept
+   *  them alive. */
+  extraDbIndexes?: number[];
+  /** On a user-edits overlay row: the columns the user actually set, parsed
+   *  from the overlay's `edited_fields`. Those columns outrank whatever the
+   *  region file says for the same edge; the rest of the row is placeholders
+   *  and must be ignored. Absent on rows written before the column existed —
+   *  their intent is unrecoverable, so they keep the conservative merge.
+   *  Carried onto the merged entry so a file loaded later cannot quietly
+   *  overwrite an edit that is already in force. */
+  editedFields?: string[];
+}
+
+export interface PoiRow {
+  id: number;
+  name: string;
+  type_id: number;
+  properties: string | null;
+  lat: number;
+  lon: number;
+  /** The whole this part belongs to; null on wholes and harbours. */
+  parent_id: number | null;
+  /** Worker handle index this row was loaded from (-1 = overlay). Only
+   *  populated in dynamic-loading mode; used by unloadDatabaseGraph to know
+   *  which POIs belong to the database being evicted. */
+  dbIndex?: number;
+}
+
+/** A navmesh region tagged with the worker dbIndex of the database it was
+ *  loaded from, so unloadDatabaseGraph can drop exactly the regions (and,
+ *  via addFunnelShortcutEdge, the synthetic funnel/anchor edges) that came
+ *  from an evicted database. Non-dynamic mode also tags regions this way
+ *  (harmless — dbIndex is simply never used for eviction there). */
+type NavmeshRegionWithDb = Navmesh.NavmeshRegion & { dbIndex: number };
+
+/** Coverage/state entry for one locally-discovered .sqlite file — the
+ *  backing store for getCoverageStatus() and getDatabaseCatalog() (the
+ *  latter backing GET .../databases) in both dynamic and non-dynamic mode
+ *  (§4a task 1/5). Built by peekMetadata in dynamic mode before anything
+ *  loads; derived from the bulk load's metadata in non-dynamic mode, where
+ *  every file is always 'loaded'. */
+export interface DatabaseCoverageEntry {
+  filename: string;
+  path: string;
+  /** Parsed metadata.bounding_box JSON — kept in the same
+   *  {min_lat,min_lon,max_lat,max_lon} shape getDatabaseCatalog() already
+   *  exposes elsewhere in this file's public API, rather than converted to
+   *  camelCase. */
+  bbox: {
+    min_lat: number;
+    min_lon: number;
+    max_lat: number;
+    max_lon: number;
+  } | null;
+  boundary: GeoJSON.Polygon | GeoJSON.MultiPolygon | null;
+  /** 'disabled' is a user-set on-disk state (the .disabled suffix), not a
+   *  transient one: nothing ever promotes a disabled entry to 'loading'
+   *  without an explicit enable, so every region-selection path must skip it. */
+  state: "not_loaded" | "loading" | "loaded" | "disabled" | "unsupported";
+  /** Why this file is refused (unknown format generation, or built before the
+   *  POI model); set exactly when `state` is "unsupported". The file is never
+   *  opened for routing. Shown as `formatError` in GET /databases. */
+  formatError?: string;
+  /** Worker-side handle index once loaded; null while not_loaded/disabled. */
+  dbIndex: number | null;
+  /** True while the on-disk file carries the .disabled suffix. Kept alongside
+   *  `state` because `path` must point at the real file for peekMetadata. */
+  disabled: boolean;
+  meta: RegionMetadata | null;
+  /** The version of the file that supplied the graph in memory, captured when
+   *  the load succeeded and kept until unload. A metadata refresh replaces
+   *  `meta` but never this, so a result's `inputs.data` names what it was
+   *  routed on, not what is on disk now. Set exactly while `state` is
+   *  "loaded". */
+  loadedVersion?: DataVersionEntry;
+  /** Row counts read directly off the file (peekMetadata's short-lived
+   *  handle in dynamic mode; getMetadata()'s bulk-load round-trip in
+   *  non-dynamic mode) -- available regardless of load state, unlike the
+   *  in-memory graph, so a not-yet-loaded database can still report the
+   *  same stats a loaded one shows. */
+  stats: RegionStats | null;
+}
+
+export interface EdgeSnapResult {
+  source: number;
+  target: number;
+  fraction: number;
+  point: { lat: number; lon: number };
+  distance: number;
+  nearNode: number;
+  farNode: number;
+  edge: EdgeRow;
+}
+
+/** The store refused to open a file (see formatRefusal in db-worker.ts). */
+class FormatRefusal extends Error {}
+
+/** How regions are brought into memory.
+ *
+ *  - `dynamic`: a region loads when a route, a position or an API call needs
+ *    it, and least-recently-used regions are evicted past `maxLoadedRegions` /
+ *    `maxLoadedRegionEdges`.
+ *  - `pinned`: `loadGraph` loads every enabled listed region; nothing is ever
+ *    loaded or evicted on demand (`ensureRegionsLoaded`,
+ *    `ensureRegionsForBbox` and the `eagerLoad*` methods do nothing) and the
+ *    caps do not apply. Memory use is the sum of the listed regions, known
+ *    up front.
+ *  - `bulk`: every enabled region is opened and loaded in one pass by
+ *    `loadGraph`, through handles opened together; no per-region load or
+ *    unload exists (the original non-dynamic mode). */
+export type RegionPolicy = "dynamic" | "pinned" | "bulk";
+
+export type RegionFileList =
+  | RegionFileEntry[]
+  | (() => RegionFileEntry[] | Promise<RegionFileEntry[]>);
+
+/** Rough in-memory cost of one node, edge and POI of a loaded region, bytes.
+ *  Planning figures for the counters; not measured. */
+export const ESTIMATED_BYTES_PER_NODE = 120;
+export const ESTIMATED_BYTES_PER_EDGE = 260;
+export const ESTIMATED_BYTES_PER_POI = 400;
+
+export interface RoutingDatabaseOptions {
+  /** The region files that exist, or a function returning that list (called
+   *  by `init` and by `reloadMetadata`, so a caller can re-scan after files
+   *  were added, removed or switched). The database never lists a directory
+   *  itself. A file with `enabled: false` is peeked for its metadata but never
+   *  loaded. */
+  files: RegionFileList;
+  /** Where the file list comes from, for the "no files" error message. */
+  fileSource?: string;
+  /** Default `dynamic`. */
+  policy?: RegionPolicy;
+  /** `dynamic` only: keep at most this many regions loaded; 0 = unlimited. */
+  maxLoadedRegions?: number;
+  /** `dynamic` only: keep at most this many edges loaded across regions
+   *  (weighted by size, see eviction); 0 = unlimited. */
+  maxLoadedRegionEdges?: number;
+  /** Open region files read-only, open no overlay, write nothing anywhere
+   *  (no caches, temp files or SQLite side files), and reject every graph
+   *  edit with a `GraphEditError` (`READ_ONLY`). */
+  readOnly?: boolean;
+  /** Persistence. Default: a `SqliteWorkerStore` (SQLite files read in a
+   *  worker thread). */
+  store?: RoutingStore;
+  /** Graph-edit persistence. Supported only as the store itself (its graph
+   *  reads return the overlay's rows), so this is either that same object,
+   *  null (none) or absent (the store when it implements `OverlayStore`, as
+   *  the SQLite store does). Anything else makes the constructor throw. Always
+   *  none when `readOnly`. */
+  overlay?: OverlayStore | null;
+  /** Where the overlay lives; it is opened (and created) at `init`. Required
+   *  for an overlay; without it graph edits reject with `GraphEditError`
+   *  (`NO_OVERLAY`). */
+  overlayPath?: string | null;
+  /** GeoJSON of inland waterway lines for the map; null = none. */
+  waterwaysPath?: string | null;
+  /** GeoJSON of land polygons for the land-crossing check; null = none. */
+  landPolygonsPath?: string | null;
+  /** Caps on POI queries (see `PoiLimits`). Defaults keep the API's long-time
+   *  behaviour: 500 per box, no cap on search results or nearest radius. */
+  limits?: Partial<PoiLimits>;
+  /** Where the database logs to. Also given to the default store, so the
+   *  worker thread's lines reach it. Default: silent. */
+  logger?: Logger;
+}
+
+/** Whether a store also keeps graph edits. */
+function isOverlayStore(
+  store: RoutingStore,
+): store is RoutingStore & OverlayStore {
+  return typeof (store as Partial<OverlayStore>).openOverlay === "function";
+}
+
+/** One region file's state, as `getStatus` reports it. */
+export interface RegionFileStatus {
+  filename: string;
+  state: DatabaseCoverageEntry["state"];
+  enabled: boolean;
+  formatError: string | null;
+  descriptionError: string | null;
+  stats: RegionStats | null;
+  /** The file's data version (see `getDataVersion`). */
+  version: DataVersionEntry;
+}
+
+export interface DatabaseStatus {
+  files: RegionFileStatus[];
+  /** Counts over `files`. */
+  counts: {
+    listed: number;
+    enabled: number;
+    loaded: number;
+    loading: number;
+    notLoaded: number;
+    disabled: number;
+    unsupported: number;
+  };
+  policy: RegionPolicy;
+  readOnly: boolean;
+  /** Whether a graph-edit overlay is open. */
+  overlayPresent: boolean;
+  graphLoaded: boolean;
+}
+
+/** One point's coverage in `checkCoverage`. */
+export interface PointCoverage {
+  lat: number;
+  lon: number;
+  /** Enabled regions whose coverage box contains the point. */
+  regions: Array<{ filename: string; loaded: boolean }>;
+  served: boolean;
+  loaded: boolean;
+}
+
+/** `checkCoverage` answer: which enabled regions serve the points, and
+ *  whether they are in memory. Answered from the coverage index only. */
+export interface CoverageCheck {
+  points: PointCoverage[];
+  /** Every point is inside at least one enabled region. */
+  served: boolean;
+  /** Every point is served by at least one region that is loaded now. */
+  loaded: boolean;
+  /** The distinct enabled regions involved (all that serve any point, or
+   *  that overlap the box), with their loaded flag. */
+  regions: Array<{ filename: string; loaded: boolean }>;
+}
+
+export class RoutingDatabase {
+  private store: RoutingStore;
+  /** Graph-edit persistence; null in read-only mode or when none was given. */
+  private overlay: OverlayStore | null;
+  private overlayPath: string | null;
+  private overlayOpen = false;
+  private readOnly: boolean;
+  private policy: RegionPolicy;
+  private fileList: RegionFileList;
+  private fileSource: string;
+  /** Entries of the last file list read, by path. */
+  private entryByPath: Map<string, RegionFileEntry> = new Map();
+  private waterwaysPath: string | null;
+  private landPolygonsPath: string | null;
+  private nodes: Map<
+    number,
+    {
+      lat: number;
+      lon: number;
+      regionId: number;
+      nodeDepth: number;
+      nodeDepthKnown: boolean;
+    }
+  > = new Map();
+  private edgesBySource: Map<number, Array<EdgeRow>> = new Map();
+  private pois: PoiRow[] = [];
+  private navmeshRegions: NavmeshRegionWithDb[] = [];
+  private spatialGrid: Map<string, number[]> = new Map();
+
+  /** Lazy cache of `this.pois` bucketed into the same 0.01° grid cells as
+   *  spatialGrid (see buildPoiGrid) — null whenever it may be stale, built
+   *  on first use afterward. Backs getPoisInBBox/getNearestPoi so a map pan
+   *  no longer linearly scans every loaded POI. Every build is from scratch
+   *  over the current `this.pois`, so a rebuilt cache is always correct —
+   *  correctness never depends on incrementally patching it. */
+  private poiGrid: Map<string, PoiRow[]> | null = null;
+  /** Lazy id and parent maps, see getPoiIndex. */
+  private poiIndex: {
+    byId: Map<number, PoiRow>;
+    childrenOf: Map<number, PoiRow[]>;
+  } | null = null;
+
+  /** Lazy cache of edgesBySource's edges bucketed into the same 0.01° grid
+   *  cells, each edge registered under BOTH its source-endpoint cell and its
+   *  target-endpoint cell (see buildEdgeGrid) — necessary because a long
+   *  (e.g. macro/anchor-shortcut) edge's two endpoints can fall in cells far
+   *  apart, and a bbox query must find the edge from whichever endpoint (or
+   *  neither, if only the middle crosses the box — same limitation the old
+   *  full scan had, since path_points were never tested either). Null
+   *  whenever it may be stale; rebuilt from scratch on next use, same
+   *  correctness argument as poiGrid. Backs getEdgesInBBox. */
+  private edgeGrid: Map<string, Array<EdgeRow>> | null = null;
+
+  private hasCrossesLand: boolean = false;
+  private hasCrossesObstacle: boolean = false;
+  private hasNodeDepth: boolean = false;
+  private hasRegionId: boolean = false;
+
+  /** Non-dynamic bulk-load mode only: the worker-reported filename (falling
+   *  back to the path's basename) for each dbPaths entry, in the same order
+   *  init() opened them — the bridge rebuildCoverageIndexAfterBulkLoad()
+   *  uses at the end of loadGraph() to assign the same `dbIndex` a plain
+   *  positional index would have given (dbPaths[i] -> dbIndex i), without
+   *  a separate cachedDatabaseList catalog. Not read by anything else. */
+  private bulkFileList: Array<{ filename: string; path: string }> = [];
+
+  /** True once loadGraph() completes successfully (in dynamic mode, once
+   *  init()'s peek completes — see loadGraph()'s no-op branch). */
+  private graphLoaded: boolean = false;
+
+  /** §4a: when false (default), behavior is byte-for-byte identical to
+   *  every deployment before this feature existed — init()/loadGraph() open
+   *  and load every .sqlite in the data directory up front, same as always.
+   *  When true, init() only peeks metadata/coverage and loadGraph() is a
+   *  no-op; individual databases load on demand via loadDatabaseGraph(),
+   *  triggered by ensureRegionsLoaded() or the /databases/load endpoint. */
+  /** Regions are loaded one file at a time (policy dynamic or pinned);
+   *  false = the bulk path (policy bulk). */
+  private dynamicLoading: boolean;
+
+  /** filename -> coverage/state. Built by peekMetadata in dynamic mode
+   *  before anything is opened; derived from the bulk load's metadata in
+   *  non-dynamic mode (every file reported 'loaded'). The single
+   *  authoritative "installed/loaded databases" catalog — every one of
+   *  getDatabaseCatalog(), getLoadingStatus(), and getCoverageStatus()
+   *  (backing GET .../databases, .../databases/status, and the `databases`
+   *  field of the /databases/load and /databases/unload POST responses,
+   *  respectively) derives its answer from this map alone, so they can
+   *  never drift out of sync with each other. */
+  private coverageIndex: Map<string, DatabaseCoverageEntry> = new Map();
+
+  /** filename -> why this loaded file's route description is switched off
+   *  (its edge sequence / water body ids collide with another loaded file's).
+   *  The file still routes. Shown as `descriptionError` in GET /databases. */
+  private descriptionErrors: Map<string, string> = new Map();
+
+  /** Peeked *.sqlite.disabled entries, kept aside in non-dynamic mode so the
+   *  bulk load's coverageIndex rebuild can re-merge them — the bulk path only
+   *  ever knows about files it actually opened. Empty in dynamic mode, where
+   *  the single peekMetadata pass already covers both states. */
+  private disabledEntries: DatabaseCoverageEntry[] = [];
+
+  /** dbIndex -> node ids that database contributed to `nodes`, so
+   *  unloadDatabaseGraph knows which ids to consider removing. Only
+   *  populated by the per-file dynamic loader (loadDatabaseGraph). */
+  private nodesByDbIndex: Map<number, Set<number>> = new Map();
+
+  /** node id -> number of currently-loaded databases containing it.
+   *  Coordinate-hash collisions at region seams mean a node id is not
+   *  always unique to one database (PHASE_4_DESIGN.md §4a.1) — a node is
+   *  only actually removed from `nodes` once this refcount reaches zero. */
+  private nodeDbCount: Map<number, number> = new Map();
+
+  /** True once the user-edits overlay's own added nodes/edges rows have
+   *  been merged into memory at least once. In dynamic mode, every
+   *  subsequent per-file load passes includeOverlay=false to db-worker so
+   *  those rows are never merged a second time (which would duplicate them
+   *  in edgesBySource). Reset only by close()/reload(). */
+  private overlayMergedOnce: boolean = false;
+
+  /** In-flight loadDatabaseGraph() calls keyed by filename, so concurrent
+   *  callers racing to trigger the same on-demand load (e.g. two route
+   *  requests landing in the same not-yet-loaded region) await the same
+   *  load instead of double-loading it. */
+  private loadingPromises: Map<string, Promise<void>> = new Map();
+
+  /** Routes currently executing (see RoutingEngine.calculateRoute's
+   *  beginRoute/endRoute wrapper) — unloadDatabaseGraph refuses while this
+   *  is > 0, a simple guard against evicting a database's graph data out
+   *  from under an in-progress search (PHASE_4_DESIGN.md §4a task 2). */
+  private activeRouteCount: number = 0;
+
+  /** §4a M5: bounded working-set cap. 0 (default) = unlimited, byte-for-byte
+   *  today's behavior — enforceRegionCap() no-ops. >0 = keep at most this
+   *  many databases in the 'loaded' state, evicting least-recently-used ones
+   *  (see regionLastUsedAt) once no route is in flight. Only meaningful when
+   *  dynamicLoading is also true. */
+  private maxLoadedRegions: number;
+
+  /** Sibling cap to maxLoadedRegions, weighted by size (stats.edges) rather
+   *  than count — see the PluginConfig doc comment on maxLoadedRegionEdges
+   *  for the incident that motivated it. 0 = unlimited. Enforced in two
+   *  places: ensureRegionsForBbox skips a discretionary transit/widening
+   *  load that would exceed it, and enforceRegionCapPass evicts past it the
+   *  same way it evicts past maxLoadedRegions. */
+  private maxLoadedRegionEdges: number;
+
+  /** filename -> monotonic "last used" counter, driving LRU eviction in
+   *  enforceRegionCap(). Bumped every time a region is loaded or found
+   *  relevant to a route/position request (loadDatabaseGraphInner on
+   *  success, and by ensureRegionsLoaded/ensureRegionsForBbox/
+   *  eagerLoadForPosition for every region they touch — including ones
+   *  already loaded — so an actively-used region is never the eviction
+   *  candidate). A monotonic counter rather than Date.now() avoids clock-tie
+   *  ambiguity between two regions touched in the same millisecond. Only
+   *  ever consulted when maxLoadedRegions > 0. */
+  private regionLastUsedAt: Map<string, number> = new Map();
+
+  /** Source of the monotonic values in regionLastUsedAt. */
+  private lruCounter: number = 0;
+
+  /** Tail of the chain of enforceRegionCap() passes, so two of them never
+   *  run concurrently against the same pre-eviction snapshot. Null until the
+   *  first pass. See enforceRegionCap. */
+  private capEnforcement: Promise<void> | null = null;
+
+  /** Injected logger (silent by default). */
+  private readonly log: Logger;
+
+  /** Regions loaded into memory since this database opened (see
+   *  getRegionCounters). */
+  private regionLoadCount = 0;
+
+  private readonly poiLimits: PoiLimits;
+
+  constructor(options: RoutingDatabaseOptions) {
+    this.poiLimits = { ...DEFAULT_POI_LIMITS, ...options.limits };
+    this.log = resolveLogger(options.logger);
+    this.readOnly = options.readOnly === true;
+    this.policy = options.policy ?? "dynamic";
+    this.dynamicLoading = this.policy !== "bulk";
+    // The caps are the dynamic policy's; pinned never evicts.
+    this.maxLoadedRegions =
+      this.policy === "dynamic" ? (options.maxLoadedRegions ?? 0) : 0;
+    this.maxLoadedRegionEdges =
+      this.policy === "dynamic" ? (options.maxLoadedRegionEdges ?? 0) : 0;
+    this.fileList = options.files;
+    this.fileSource = options.fileSource ?? "the region file list";
+    this.store =
+      options.store ??
+      new SqliteWorkerStore({ readOnly: this.readOnly, logger: this.log });
+    this.overlay = null;
+    this.overlayPath = null;
+    if (!this.readOnly) {
+      // The store merges the overlay's rows into the graph reads it answers,
+      // so an overlay is supported only as the store itself, with a path.
+      if (
+        options.overlay != null &&
+        (options.overlay as unknown) !== this.store
+      ) {
+        throw new Error(
+          "RoutingDatabase: the overlay must be the same object as the store",
+        );
+      }
+      const overlay = isOverlayStore(this.store) ? this.store : null;
+      if (options.overlayPath) {
+        if (!overlay || options.overlay === null) {
+          throw new Error(
+            "RoutingDatabase: overlayPath was given but the store has no overlay",
+          );
+        }
+        this.overlay = overlay;
+        this.overlayPath = options.overlayPath;
+      } else if (options.overlay != null) {
+        throw new Error("RoutingDatabase: an overlay needs an overlayPath");
+      }
+    }
+    this.waterwaysPath = options.waterwaysPath ?? null;
+    this.landPolygonsPath = options.landPolygonsPath ?? null;
+  }
+
+  /** The overlay to write a graph edit to; rejects when there is none
+   *  (read-only, or no overlay was configured). Checked before an edit
+   *  touches the in-memory graph. */
+  private requireOverlay(): OverlayStore {
+    if (this.readOnly) throw new GraphEditError("READ_ONLY");
+    if (!this.overlay || !this.overlayOpen) {
+      throw new GraphEditError("NO_OVERLAY");
+    }
+    return this.overlay;
+  }
+
+  /** Read the file list and remember each entry by path. */
+  private async listFiles(): Promise<RegionFileEntry[]> {
+    const list =
+      typeof this.fileList === "function"
+        ? await this.fileList()
+        : this.fileList;
+    const byKey = new Map<string, string>();
+    for (const e of list) {
+      const key = RoutingDatabase.keyOf(e.path);
+      const other = byKey.get(key);
+      if (other !== undefined) {
+        throw new Error(
+          `The region file list names "${key}" twice (${other} and ${e.path})`,
+        );
+      }
+      byKey.set(key, e.path);
+    }
+    this.entryByPath = new Map(list.map((e) => [e.path, e]));
+    return list;
+  }
+
+  /** The plain filename a file is known by (coverage index key): its
+   *  basename, with a trailing `.disabled` removed from `<name>.sqlite`. */
+  private static keyOf(path: string): string {
+    const base = basename(path.replace(/\\/g, "/"));
+    return base.endsWith(".sqlite.disabled")
+      ? base.slice(0, -".disabled".length)
+      : base;
+  }
+
+  private keyOfPath(path: string): string {
+    return RoutingDatabase.keyOf(path);
+  }
+
+  private isEnabledPath(path: string): boolean {
+    return this.entryByPath.get(path)?.enabled !== false;
+  }
+
+  /** Sum of stats.edges across every currently-loaded region, *and* every
+   *  region currently mid-load — see maxLoadedRegionEdges. Counting only
+   *  'loaded' would race two concurrent route requests each loading a
+   *  different region: both could pass the budget check before either
+   *  finishes, landing combined above it with nothing able to correct it
+   *  (eviction never runs while a route is active). state flips to
+   *  'loading' synchronously, before the first await in
+   *  loadDatabaseGraphInner, and back to 'not_loaded' if the load fails —
+   *  so a reservation here is exact, not just optimistic, and never gets
+   *  stuck counted after a failed load. stats is populated for every
+   *  installed region, loaded or not, so this is a cheap in-memory sum,
+   *  not a fresh read. */
+  private totalLoadedEdges(): number {
+    let total = 0;
+    for (const entry of this.coverageIndex.values()) {
+      if (entry.state === "loaded" || entry.state === "loading") {
+        total += entry.stats?.edges ?? 0;
+      }
+    }
+    return total;
+  }
+
+  /** Bump filename's LRU recency to "most recently used". See
+   *  regionLastUsedAt. */
+  private touchRegion(filename: string): void {
+    this.regionLastUsedAt.set(filename, ++this.lruCounter);
+  }
+
+  /** True for the `dynamic` policy (regions load and unload on demand);
+   *  false for `pinned` and `bulk`. */
+  isDynamicLoadingEnabled(): boolean {
+    return this.policy === "dynamic";
+  }
+
+  /** The region loading policy this database was built with. */
+  getPolicy(): RegionPolicy {
+    return this.policy;
+  }
+
+  isReadOnly(): boolean {
+    return this.readOnly;
+  }
+
+  /** See activeRouteCount. Called by RoutingEngine.calculateRoute. */
+  beginRoute(): void {
+    this.activeRouteCount++;
+  }
+
+  endRoute(): void {
+    if (this.activeRouteCount > 0) this.activeRouteCount--;
+    if (this.activeRouteCount === 0) {
+      // §4a M5: trim the working set now that no route is in flight. Fire-
+      // and-forget — endRoute is sync and callers don't need to wait for
+      // eviction. enforceRegionCap() re-checks activeRouteCount === 0 (and
+      // unloadDatabaseGraph guards on it too), so a new route beginning
+      // before this settles just makes enforcement a no-op, never unsafe.
+      void this.enforceRegionCap().catch(() => {});
+    }
+  }
+
+  /** Test seam only: enforceRegionCap() runs fire-and-forget off endRoute()
+   *  so production code never awaits it; tests that need a deterministic
+   *  point to assert post-eviction state can await this instead of racing
+   *  the background pass. Behaves identically to what endRoute() triggers. */
+  async enforceRegionCapForTest(): Promise<void> {
+    await this.enforceRegionCap();
+  }
+
+  /** Basenames of every currently-loaded (state === 'loaded') database,
+   *  derived from coverageIndex in that map's iteration (insertion) order —
+   *  replaces what used to be a separately hand-synced loadedDbFilenames
+   *  array. Backing data for getLoadingStatus().filenames. */
+  private loadedFilenames(): string[] {
+    const result: string[] = [];
+    for (const entry of this.coverageIndex.values()) {
+      if (entry.state === "loaded") result.push(entry.filename);
+    }
+    return result;
+  }
+
+  async init(): Promise<void> {
+    // A failing file list (an unreadable directory, say) propagates as it is.
+    const listed = await this.listFiles();
+    // Only an empty list is fatal. A list holding nothing but disabled files
+    // initialises fine with an empty graph: GET /databases answers 503 while
+    // `db` is null, so throwing here would leave the Data Manager unable to
+    // list — and therefore unable to re-enable — the very files the user just
+    // switched off.
+    if (listed.length === 0) {
+      throw new Error(`No .sqlite files found in ${this.fileSource}`);
+    }
+    const dbPaths = listed.filter((f) => f.enabled).map((f) => f.path);
+    const disabledPaths = listed.filter((f) => !f.enabled).map((f) => f.path);
+
+    if (!this.dynamicLoading) {
+      // Legacy path (dynamicLoading explicitly set to false): open every
+      // handle up front and load everything in loadGraph(). No longer the
+      // default (flipped 2026-07-20, see types.ts) — kept for deployments
+      // that genuinely have one region file and want today's simpler
+      // eager-load behavior instead of the on-demand path.
+      const schema = await this.store.openAll(dbPaths);
+      this.hasCrossesLand = schema.hasCrossesLand;
+      this.hasCrossesObstacle = schema.hasCrossesObstacle;
+      this.hasNodeDepth = schema.hasNodeDepth;
+      this.hasRegionId = schema.hasRegionId;
+      // Enabled files are opened under their plain filename, which is the
+      // store's basename and the coverage key alike.
+      this.descriptionErrors = new Map(
+        Object.entries(schema.descriptionErrors ?? {}),
+      );
+      // Files the worker refused (format generation, or built before the POI
+      // model) were never opened; list them with their message instead.
+      const formatErrors: Record<string, string> = schema.formatErrors ?? {};
+      const refusedPaths = dbPaths.filter(
+        (p) => basename(p.replace(/\\/g, "/")) in formatErrors,
+      );
+      this.bulkFileList = dbPaths
+        .filter((p) => !refusedPaths.includes(p))
+        .map((p) => ({
+          filename: this.keyOfPath(p),
+          path: p,
+        }));
+      // Bulk mode never opens disabled files, but the Data Manager still has
+      // to list them (and offer the switch back on), so peek them separately
+      // and keep the result for rebuildCoverageIndexAfterBulkLoad to merge.
+      this.disabledEntries = [
+        ...(await this.peekDisabled(disabledPaths)),
+        ...(await this.peekRefused(refusedPaths, formatErrors)),
+      ];
+    } else {
+      // Dynamic loading: peek every file's metadata/coverage/schema-flags
+      // without opening a lasting handle for any of them (§4a task 1). Real
+      // graph data loads later, on demand — see loadDatabaseGraph() and
+      // ensureRegionsLoaded().
+      const peeked: PeekedFile[] = await this.store.peekMetadata(
+        // Disabled files are peeked too — a short-lived read-only handle, so
+        // their cards keep name/coverage/stats and the coverage map can still
+        // draw them. Only their `state` keeps them out of the graph.
+        [...dbPaths, ...disabledPaths],
+      );
+
+      this.coverageIndex.clear();
+      for (const p of peeked) {
+        const disabled = !this.isEnabledPath(p.path);
+        // A disabled file's schema flags must not widen the engine's
+        // capabilities — nothing from it ever enters the graph.
+        if (!disabled && !p.formatError) {
+          this.hasCrossesLand = this.hasCrossesLand || p.flags.hasCrossesLand;
+          this.hasCrossesObstacle =
+            this.hasCrossesObstacle || p.flags.hasCrossesObstacle;
+          this.hasNodeDepth = this.hasNodeDepth || p.flags.hasNodeDepth;
+          this.hasRegionId = this.hasRegionId || p.flags.hasRegionId;
+        }
+        const key = this.keyOfPath(p.path);
+        this.coverageIndex.set(key, {
+          filename: key,
+          path: p.path,
+          bbox: p.coverage.boundingBox ?? null,
+          boundary: p.coverage.boundaryGeometry ?? null,
+          state: disabled
+            ? "disabled"
+            : p.formatError
+              ? "unsupported"
+              : "not_loaded",
+          ...(p.formatError && !disabled ? { formatError: p.formatError } : {}),
+          dbIndex: null,
+          disabled,
+          meta: p.meta,
+          stats: p.stats ?? null,
+        });
+      }
+      this.log.info(
+        `[routeiq] Dynamic loading enabled: peeked ${peeked.length} database(s) in ${this.fileSource}, none loaded yet`,
+      );
+    }
+
+    // Open the graph-edit overlay (created if it does not exist). Never in
+    // read-only mode: nothing is created or opened then.
+    if (this.overlay && this.overlayPath) {
+      await this.overlay.openOverlay(this.overlayPath);
+      this.overlayOpen = true;
+      this.log.info(`[routeiq] User-edits overlay ready: ${this.overlayPath}`);
+    }
+  }
+
+  private regionIdCol(): string {
+    return this.hasRegionId ? "region_id" : "0 AS region_id";
+  }
+
+  async getMetadata(): Promise<Array<RegionMetadata & { stats: RegionStats }>> {
+    return this.store.getMetadata();
+  }
+
+  /** Backing data for GET .../databases — one record per entry in
+   *  coverageIndex, i.e. every installed database in every state (not just
+   *  currently-loaded ones), each record the union of what the old
+   *  getDatabaseInfo() (rich metadata, loaded-only) and getCoverageStatus()
+   *  (state/coverage, all installed) used to return separately. `state`,
+   *  `coverage` (= entry.bbox), `dbIndex`, and `stats` always come from the
+   *  entry itself; the descriptive fields come from entry.meta using the
+   *  same JSON-parsing/null-handling getDatabaseInfo() used to apply
+   *  (tags/boundingBox/boundaryGeometry parsed from JSON strings). Unlike
+   *  the old loaded-only getDatabaseInfo(), a null entry.meta (e.g. a
+   *  legacy database with no metadata table) no longer drops the record —
+   *  the entry-derived fields are still emitted, with the meta-derived
+   *  fields defaulted to null/empty so the database still appears in the
+   *  catalog. `boundingBox` carries the same bbox shape as `coverage`; both
+   *  keys are included so the frontend needs no field renames. */
+  async getDatabaseCatalog(): Promise<
+    Array<{
+      filename: string;
+      state: DatabaseCoverageEntry["state"];
+      coverage: DatabaseCoverageEntry["bbox"];
+      dbIndex: number | null;
+      stats: DatabaseCoverageEntry["stats"];
+      id: number | null;
+      country: string | null;
+      name: string | null;
+      description: string | null;
+      lastUpdateDate: string | null;
+      tags: string[];
+      boundingBox: {
+        min_lat: number;
+        min_lon: number;
+        max_lat: number;
+        max_lon: number;
+      } | null;
+      boundaryGeometry: any | null;
+      schemaVersion: number | null;
+      contributor: string | null;
+      url: string | null;
+      descriptionError: string | null;
+      formatError: string | null;
+    }>
+  > {
+    const result: Array<{
+      filename: string;
+      state: DatabaseCoverageEntry["state"];
+      coverage: DatabaseCoverageEntry["bbox"];
+      dbIndex: number | null;
+      stats: DatabaseCoverageEntry["stats"];
+      id: number | null;
+      country: string | null;
+      name: string | null;
+      description: string | null;
+      lastUpdateDate: string | null;
+      tags: string[];
+      boundingBox: {
+        min_lat: number;
+        min_lon: number;
+        max_lat: number;
+        max_lon: number;
+      } | null;
+      boundaryGeometry: any | null;
+      schemaVersion: number | null;
+      contributor: string | null;
+      url: string | null;
+      descriptionError: string | null;
+      formatError: string | null;
+    }> = [];
+    for (const entry of this.coverageIndex.values()) {
+      const m = entry.meta;
+      result.push({
+        filename: entry.filename,
+        state: entry.state,
+        coverage: entry.bbox,
+        dbIndex: entry.dbIndex,
+        stats: entry.stats,
+        id: m ? m.id : null,
+        country: m ? m.country : null,
+        name: m ? m.name : null,
+        description: m ? m.description : null,
+        lastUpdateDate: m ? m.lastUpdateDate : null,
+        tags: m && m.tags ? JSON.parse(m.tags) : [],
+        boundingBox: m && m.boundingBox ? JSON.parse(m.boundingBox) : null,
+        boundaryGeometry:
+          m && m.boundaryGeometry ? JSON.parse(m.boundaryGeometry) : null,
+        schemaVersion: m ? m.schemaVersion : null,
+        contributor: m ? m.contributor : null,
+        url: m ? m.url : null,
+        descriptionError: this.descriptionErrors.get(entry.filename) ?? null,
+        formatError: entry.formatError ?? null,
+      });
+    }
+    return result;
+  }
+
+  /** Return loading status info. `available` is the number of installed
+   *  databases known to the plugin (peeked in dynamic mode, all loaded in
+   *  non-dynamic mode) — lets the UI distinguish "nothing installed" from
+   *  "installed but none loaded yet under dynamic loading". */
+  getLoadingStatus(): {
+    loaded: boolean;
+    filenames: string[];
+    available: number;
+    disabled: number;
+    unsupported: number;
+    loading: Array<{ filename: string; name: string }>;
+  } {
+    let disabled = 0;
+    let unsupported = 0;
+    const loading: Array<{ filename: string; name: string }> = [];
+    for (const entry of this.coverageIndex.values()) {
+      if (entry.state === "disabled") disabled++;
+      if (entry.state === "unsupported") unsupported++;
+      // Regions being read into the graph right now. A route or a position
+      // update can trigger a load inline, and the request that triggered it
+      // simply takes tens of seconds longer with nothing to show for it —
+      // this is what lets a client say which region it is waiting on. The
+      // human-readable name if the file has one, since "Loading
+      // us_east_md.sqlite" is not what a helm wants to read.
+      if (entry.state === "loading") {
+        loading.push({
+          filename: entry.filename,
+          name: entry.meta?.name || entry.filename,
+        });
+      }
+    }
+    return {
+      loaded: this.graphLoaded,
+      filenames: this.loadedFilenames(),
+      // `available` stays the count of databases that can actually route.
+      // The webapp's first-run check keys off it, so counting disabled files
+      // here would make an all-disabled install look like a fresh one.
+      available: this.coverageIndex.size - disabled - unsupported,
+      disabled,
+      unsupported,
+      loading,
+    };
+  }
+
+  /** Structured status: every listed file with its state, the counts, the
+   *  loading policy, and whether the database is read-only or has an
+   *  overlay. Format refusals and description errors appear per file (the
+   *  same messages GET /databases shows). */
+  getStatus(): DatabaseStatus {
+    const files: RegionFileStatus[] = [];
+    const counts = {
+      listed: 0,
+      enabled: 0,
+      loaded: 0,
+      loading: 0,
+      notLoaded: 0,
+      disabled: 0,
+      unsupported: 0,
+    };
+    for (const entry of this.coverageIndex.values()) {
+      counts.listed++;
+      if (entry.state === "loaded") counts.loaded++;
+      else if (entry.state === "loading") counts.loading++;
+      else if (entry.state === "not_loaded") counts.notLoaded++;
+      else if (entry.state === "disabled") counts.disabled++;
+      else if (entry.state === "unsupported") counts.unsupported++;
+      files.push({
+        filename: entry.filename,
+        state: entry.state,
+        enabled: !entry.disabled,
+        formatError: entry.formatError ?? null,
+        descriptionError: this.descriptionErrors.get(entry.filename) ?? null,
+        stats: entry.stats,
+        version: RoutingDatabase.entryVersion(entry),
+      });
+    }
+    counts.enabled = counts.listed - counts.disabled;
+    return {
+      files,
+      counts,
+      policy: this.policy,
+      readOnly: this.readOnly,
+      overlayPresent: this.overlayOpen,
+      graphLoaded: this.graphLoaded,
+    };
+  }
+
+  private static versionOf(entry: {
+    filename: string;
+    meta: { lastUpdateDate: string } | null;
+  }): DataVersionEntry {
+    const date = entry.meta?.lastUpdateDate;
+    return {
+      filename: entry.filename,
+      lastUpdateDate: typeof date === "string" && date !== "" ? date : null,
+    };
+  }
+
+  /** A loaded region reports the version captured at load; any other file
+   *  reports its catalogue metadata. */
+  private static entryVersion(entry: DatabaseCoverageEntry): DataVersionEntry {
+    return entry.state === "loaded" && entry.loadedVersion
+      ? entry.loadedVersion
+      : RoutingDatabase.versionOf(entry);
+  }
+
+  /** The data version of the regions in memory (`scope: "loaded"`, the
+   *  default) or of every listed file (`"all"`), sorted by filename: each
+   *  file's name and the `last_update_date` of its metadata. For a loaded
+   *  region that is the file the graph was read from, as of the load (a
+   *  metadata refresh does not change it); `"all"` reports catalogue
+   *  metadata for files not in memory. A file's
+   *  metadata carries no build id or hash, so none is reported. This is what
+   *  a route result echoes as `inputs.data`. */
+  getDataVersion(scope: "loaded" | "all" = "loaded"): DataVersionEntry[] {
+    const out: DataVersionEntry[] = [];
+    for (const entry of this.coverageIndex.values()) {
+      if (scope === "loaded" && entry.state !== "loaded") continue;
+      out.push(RoutingDatabase.entryVersion(entry));
+    }
+    return out.sort((a, b) =>
+      a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0,
+    );
+  }
+
+  /** Which enabled regions serve the given points (or box), and whether they
+   *  are in memory. Answered from the coverage index alone: nothing is
+   *  loaded, opened or read. Disabled and format-refused files never serve.
+   *
+   *  For points, `served` is true when every point lies in at least one
+   *  enabled region's coverage box and `loaded` when every point is served
+   *  by a region that is loaded now. For a box, `served` is true when it
+   *  overlaps an enabled region and `loaded` when every region it overlaps
+   *  is loaded (those are the regions a search of the box would need). */
+  checkCoverage(
+    target: Array<{ lat: number; lon: number }> | BBox,
+  ): CoverageCheck {
+    const enabled = Array.from(this.coverageIndex.values()).filter(
+      (e) => e.state !== "disabled" && e.state !== "unsupported" && e.bbox,
+    );
+    const regionsAt = (
+      pred: (b: NonNullable<(typeof enabled)[0]["bbox"]>) => boolean,
+    ) =>
+      enabled
+        .filter((e) => pred(e.bbox!))
+        .map((e) => ({ filename: e.filename, loaded: e.state === "loaded" }));
+    if (!Array.isArray(target)) {
+      const box = target;
+      const regions = regionsAt(
+        (b) =>
+          b.min_lat <= box.maxLat &&
+          b.max_lat >= box.minLat &&
+          b.min_lon <= box.maxLon &&
+          b.max_lon >= box.minLon,
+      );
+      return {
+        points: [],
+        regions,
+        served: regions.length > 0,
+        loaded: regions.length > 0 && regions.every((r) => r.loaded),
+      };
+    }
+    const points: PointCoverage[] = target.map((pt) => {
+      const regions = regionsAt(
+        (b) =>
+          pt.lat >= b.min_lat &&
+          pt.lat <= b.max_lat &&
+          pt.lon >= b.min_lon &&
+          pt.lon <= b.max_lon,
+      );
+      return {
+        lat: pt.lat,
+        lon: pt.lon,
+        regions,
+        served: regions.length > 0,
+        loaded: regions.some((r) => r.loaded),
+      };
+    });
+    const union = new Map<string, boolean>();
+    for (const pt of points)
+      for (const r of pt.regions) union.set(r.filename, r.loaded);
+    return {
+      points,
+      regions: Array.from(union, ([filename, loaded]) => ({
+        filename,
+        loaded,
+      })),
+      served: points.length > 0 && points.every((pt) => pt.served),
+      loaded: points.length > 0 && points.every((pt) => pt.loaded),
+    };
+  }
+
+  /** For a "no routing nodes" error: when a refused file covers the point, a
+   *  suffix saying why it is not in use ("" otherwise). */
+  unsupportedCoverageNote(lat: number, lon: number): string {
+    for (const e of this.coverageIndex.values()) {
+      if (
+        e.state === "unsupported" &&
+        e.bbox &&
+        lat >= e.bbox.min_lat &&
+        lat <= e.bbox.max_lat &&
+        lon >= e.bbox.min_lon &&
+        lon <= e.bbox.max_lon
+      ) {
+        return ` (${e.filename} covers this area but is not used: ${e.formatError ?? "unsupported format"})`;
+      }
+    }
+    return "";
+  }
+
+  /**
+   * What the loaded regions hold, for the engine's counters: how many loads
+   * happened since the database opened, and the regions in memory now with a
+   * rough size each (planning figures from the row counts: about
+   * ESTIMATED_BYTES_PER_* each, not a measurement). Regions are tracked per
+   * file only under the dynamic policy; with bulk loading the list is empty.
+   */
+  getRegionCounters(): {
+    loadsTotal: number;
+    loaded: Array<{
+      filename: string;
+      nodes: number;
+      edges: number;
+      pois: number;
+      estimatedBytes: number;
+    }>;
+  } {
+    const loaded = [...this.coverageIndex.values()]
+      .filter((e) => e.state === "loaded")
+      .map((e) => {
+        const nodes = e.stats?.nodes ?? 0;
+        const edges = e.stats?.edges ?? 0;
+        const pois = e.stats?.pois ?? 0;
+        return {
+          filename: e.filename,
+          nodes,
+          edges,
+          pois,
+          estimatedBytes:
+            nodes * ESTIMATED_BYTES_PER_NODE +
+            edges * ESTIMATED_BYTES_PER_EDGE +
+            pois * ESTIMATED_BYTES_PER_POI,
+        };
+      });
+    return { loadsTotal: this.regionLoadCount, loaded };
+  }
+
+  /**
+   * Why a point has no routing region, for a "no routing nodes" failure: a
+   * refused file covers it (`unsupported`, with the file's name and reason), or
+   * the coverage index knows the regions and none covers it (`outside`), or
+   * null when the index cannot say (non-dynamic mode keeps none).
+   */
+  coverageProblemAt(
+    lat: number,
+    lon: number,
+  ):
+    | { kind: "unsupported"; file: string; reason: string }
+    | { kind: "outside" }
+    | null {
+    const inside = (e: DatabaseCoverageEntry): boolean =>
+      !!e.bbox &&
+      lat >= e.bbox.min_lat &&
+      lat <= e.bbox.max_lat &&
+      lon >= e.bbox.min_lon &&
+      lon <= e.bbox.max_lon;
+    const entries = [...this.coverageIndex.values()];
+    for (const e of entries) {
+      if (e.state === "unsupported" && inside(e)) {
+        return {
+          kind: "unsupported",
+          file: e.filename,
+          reason: e.formatError ?? "unsupported format",
+        };
+      }
+    }
+    if (
+      entries.length > 0 &&
+      entries.every((e) => e.bbox) &&
+      !entries.some(inside)
+    ) {
+      return { kind: "outside" };
+    }
+    return null;
+  }
+
+  /** Peek *.sqlite.disabled files into ready-made coverage entries. Shared by
+   *  init()'s non-dynamic branch and reloadMetadata(); returns [] for an empty
+   *  list without troubling the worker. */
+  private async peekDisabled(
+    disabledPaths: string[],
+  ): Promise<DatabaseCoverageEntry[]> {
+    if (disabledPaths.length === 0) return [];
+    try {
+      const peeked = await this.store.peekMetadata(disabledPaths);
+      return peeked.map((p) => {
+        const key = this.keyOfPath(p.path);
+        return {
+          filename: key,
+          path: p.path,
+          bbox: p.coverage.boundingBox ?? null,
+          boundary: p.coverage.boundaryGeometry ?? null,
+          state: "disabled" as const,
+          dbIndex: null,
+          disabled: true,
+          meta: p.meta,
+          stats: p.stats ?? null,
+        };
+      });
+    } catch (e) {
+      // A corrupt or unreadable disabled file must not break startup — it is
+      // by definition not participating in routing.
+      this.log.warn(`[routeiq] Could not peek disabled database(s): ${e}`);
+      return [];
+    }
+  }
+
+  /** Coverage entries for files the bulk `init` refused, so the Data Manager
+   *  still lists them (with `formatError`) instead of silently dropping them. */
+  private async peekRefused(
+    paths: string[],
+    formatErrors: Record<string, string>,
+  ): Promise<DatabaseCoverageEntry[]> {
+    if (paths.length === 0) return [];
+    let peeked: PeekedFile[] = [];
+    try {
+      peeked = await this.store.peekMetadata(paths);
+    } catch (e) {
+      this.log.warn(`[routeiq] Could not peek refused database(s): ${e}`);
+    }
+    return paths.map((path) => {
+      const filename = this.keyOfPath(path) || path;
+      const p = peeked.find((x) => x.path === path);
+      return {
+        filename,
+        path,
+        bbox: p?.coverage.boundingBox ?? null,
+        boundary: p?.coverage.boundaryGeometry ?? null,
+        state: "unsupported" as const,
+        formatError: formatErrors[filename],
+        dbIndex: null,
+        disabled: false,
+        meta: p?.meta ?? null,
+        stats: p?.stats ?? null,
+      };
+    });
+  }
+
+  /**
+   * Re-scan the data directory for .sqlite files and merge fresh metadata
+   * into coverageIndex — the single catalog every GET .../databases* route
+   * reads from. Used after downloading a new database to show it in the
+   * installed list without restart. Unlike a bulk rebuild, this preserves
+   * the state/dbIndex of any database that's currently 'loading' or
+   * 'loaded' (this method never touches actual graph data — only
+   * coverageIndex's descriptive fields), and drops only the 'not_loaded'
+   * entries for files no longer found on disk.
+   */
+  async reloadMetadata(): Promise<void> {
+    let files: RegionFileEntry[];
+    try {
+      files = await this.listFiles();
+    } catch {
+      return;
+    }
+    if (files.length === 0) {
+      this.mergeMetadataIntoCoverageIndex([]);
+      return;
+    }
+
+    // Both states go through the same peek — mergeMetadataIntoCoverageIndex
+    // reads each listed file's `enabled` flag to decide the state, which is
+    // what makes an enable/disable visible without a restart.
+    const dbPaths = files.map((f) => f.path);
+
+    try {
+      // Reuse the existing main worker's peekMetadata support instead of
+      // spinning up a second Worker: it opens each file on a short-lived
+      // handle just long enough to read metadata/coverage/stats and closes
+      // it again, without touching `handles` — so a metadata refresh can
+      // never disturb any database this worker already has loaded (unlike
+      // `init`, which would reset `handles` and drop them).
+      const peeked = await this.store.peekMetadata(dbPaths);
+
+      this.mergeMetadataIntoCoverageIndex(peeked);
+    } catch (err) {
+      this.log.warn(
+        `[routeiq] reloadMetadata: peekMetadata failed, coverage index left unchanged: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  /** Shared by reloadMetadata() (and conceptually the same shape
+   *  init()'s dynamic-mode peek loop builds for the initial boot-time peek):
+   *  merge a fresh peekMetadata array into coverageIndex, keyed by filename.
+   *  Preserves each existing entry's `state`/`dbIndex` (a metadata refresh
+   *  never itself loads or unloads a database's graph data) and only adds
+   *  brand-new entries as 'not_loaded'. Entries whose filename isn't in
+   *  `peeked` and are still 'not_loaded' are dropped (the file is gone from
+   *  disk); a 'loading'/'loaded' entry is left alone even if its file
+   *  vanished, since this method never touches in-memory graph data. */
+  private mergeMetadataIntoCoverageIndex(peeked: PeekedFile[]): void {
+    const seen = new Set<string>();
+    for (const p of peeked) {
+      // Key on the plain .sqlite identity so a database keeps the same name
+      // across a toggle — the suffix is a state, not a new database.
+      const key = this.keyOfPath(p.path);
+      const disabled = !this.isEnabledPath(p.path);
+      seen.add(key);
+      const existing = this.coverageIndex.get(key);
+      // The on-disk suffix wins over the remembered state: that is precisely
+      // how an enable/disable becomes visible without a restart. Callers
+      // unload a database's graph data before disabling it, so dropping
+      // dbIndex here cannot orphan loaded nodes.
+      let state: DatabaseCoverageEntry["state"];
+      if (disabled) state = "disabled";
+      else if (p.formatError && (!existing || existing.state !== "loaded"))
+        state = "unsupported";
+      else if (
+        !existing ||
+        existing.state === "disabled" ||
+        existing.state === "unsupported"
+      )
+        state = "not_loaded";
+      else state = existing.state;
+      this.coverageIndex.set(key, {
+        filename: key,
+        path: p.path,
+        bbox: p.coverage.boundingBox ?? null,
+        boundary: p.coverage.boundaryGeometry ?? null,
+        state,
+        ...(state === "unsupported" && p.formatError
+          ? { formatError: p.formatError }
+          : {}),
+        dbIndex: disabled ? null : (existing?.dbIndex ?? null),
+        disabled,
+        meta: p.meta,
+        stats: p.stats ?? null,
+        ...(state === "loaded" && existing?.loadedVersion
+          ? { loadedVersion: existing.loadedVersion }
+          : {}),
+      });
+    }
+    for (const [filename, entry] of this.coverageIndex) {
+      if (
+        !seen.has(filename) &&
+        (entry.state === "not_loaded" ||
+          entry.state === "disabled" ||
+          entry.state === "unsupported")
+      ) {
+        this.coverageIndex.delete(filename);
+      }
+    }
+  }
+
+  private crossesLandCol(): string {
+    return this.hasCrossesLand ? ", e.crosses_land" : "";
+  }
+
+  /** Fold two files' values for one physical limit (depth, air draft, width)
+   *  into the more constrained one. A negative value is the UNKNOWN
+   *  convention — consumers exclude it from constraint checks (see
+   *  routing.ts's `min_depth < 0` / `max_air_draft >= 0` guards) — so it is
+   *  the *least* constrained reading there is, and a known value always beats
+   *  it. Between two known values the smaller wins. Real builds give both
+   *  sides of a seam the same numbers; this only decides the case where a
+   *  rebuild left them disagreeing, and it decides it by failing safe. */
+  static tighterLimit(a: number, b: number): number {
+    if (typeof a !== "number" || a < 0) return b;
+    if (typeof b !== "number" || b < 0) return a;
+    return Math.min(a, b);
+  }
+
+  /** Same seam-merge rule as tighterLimit, but min_depth-aware: an unknown
+   *  side always loses to a known one (including a known value that happens
+   *  to be negative -- a charted drying height, schema_version >= 2), and
+   *  between two known values the shallower/more-restrictive one wins.
+   *  tighterLimit itself is untouched and still governs max_air_draft/
+   *  min_width, which have no such distinction. */
+  static tighterDepth(
+    a: number,
+    aKnown: boolean,
+    b: number,
+    bKnown: boolean,
+  ): { value: number; known: boolean } {
+    if (!aKnown) return { value: b, known: bKnown };
+    if (!bKnown) return { value: a, known: aKnown };
+    return { value: Math.min(a, b), known: true };
+  }
+
+  /** Add one edge row to `edgesBySource`, merging into an existing
+   *  (source,target) rather than appending a second copy of it.
+   *
+   *  Overlapping region files both author the edges in their overlap band, so
+   *  at a seam the same edge arrives once per file. Union of the two files'
+   *  edges is what makes the merged graph connected and must be kept; a
+   *  second *copy* of an edge both files hold is pure inflation of exactly
+   *  the adjacency every cross-region route traverses (measured 24,506
+   *  duplicate entries on the CT<->RI pair alone). A* only re-relaxes a
+   *  neighbour it has already settled, so this was never wrong, just wasteful.
+   *
+   *  Attribute conflicts resolve to the more constrained value rather than by
+   *  insertion order — the same rule whoever wrote the row. That deliberately
+   *  gives a user's overlay edit no special precedence here: an overlay row
+   *  written by updateEdge fills every column the edit did not mention with a
+   *  placeholder (distance 0, the limits -1, cost_factor 1.2), so letting it
+   *  overwrite wholesale would hand the graph a zero-length edge. Which of an
+   *  edit and a file's own values should win is a real question, but it is
+   *  the pre-existing one this de-duplication has no business answering: only
+   *  the *duplicate entry* goes away here, not the precedence.
+   *
+   *  Only the three physical limits and cost_factor are folded. `distance` is
+   *  geometry — both sides derive it from the same two node coordinates — and
+   *  the identity/kind columns are descriptive, so the first row's stand.
+   *
+   *  `mayDuplicate` says whether this row can possibly collide with one
+   *  already stored, and exists to keep the scan off the hot path: a second
+   *  contributor's edge out of node S requires S itself to be shared, so
+   *  callers pass false for the overwhelming majority of rows — those whose
+   *  source node this same load introduced — and skip straight to the append.
+   *  Overlay rows always pass true; they duplicate by intent, not by seam.
+   *
+   *  Returns true if a new adjacency entry was created. */
+  /** Settle the user-edited columns between an entry already in the graph and
+   *  a row being merged into it, and return the set of columns now spoken for
+   *  by an edit — which the caller must then leave out of the conservative
+   *  fold, since an edit is an instruction, not another opinion to average.
+   *
+   *  Only `editedFields` columns move: an overlay row's other columns are
+   *  placeholders written by updateEdge for values the edit never mentioned
+   *  (`distance` 0, the limits -1), and letting those through would hand the
+   *  graph a zero-length or unconstrained edge. Rows from before that column
+   *  existed carry no `editedFields` and are folded conservatively, as they
+   *  were before this — their intent cannot be recovered after the fact. */
+  /** Parse an overlay row's `edited_fields` JSON into `editedFields`, in
+   *  place. Tolerant by design: a marker that will not parse leaves the row
+   *  unmarked, which costs the edit its precedence but never corrupts the
+   *  graph — the same trade the rest of this file's JSON columns make. */
+  private static parseEditedFields(
+    edge: EdgeRow & { edited_fields?: string | null },
+  ): void {
+    if (!edge.edited_fields) return;
+    try {
+      const parsed = JSON.parse(edge.edited_fields);
+      if (Array.isArray(parsed)) {
+        // Allowlisted, not merely type-checked. applyEdit copies each named
+        // field across by computed property, so a row naming `source` or
+        // `target` would rewrite the endpoints of an edge that lives in a
+        // bucket keyed by its source — silent adjacency corruption, from a
+        // file this plugin writes but a user can also hand-edit or carry
+        // across versions. Only the columns the editor can actually set are
+        // ever meant to appear here.
+        edge.editedFields = parsed.filter(
+          (f: unknown): f is string =>
+            typeof f === "string" && EDITABLE_COLUMN_SET.has(f),
+        );
+        if (edge.editedFields.length === 0) delete edge.editedFields;
+      }
+    } catch {
+      // Leave unmarked.
+    }
+  }
+
+  private static applyEdit(existing: EdgeRow, incoming: EdgeRow): Set<string> {
+    const claimed = new Set<string>(existing.editedFields ?? []);
+    for (const field of incoming.editedFields ?? []) {
+      // Belt and braces with parseEditedFields' allowlist: this is the line
+      // that turns a field name into an assignment, so it checks for itself
+      // rather than trusting every future caller to have filtered first.
+      if (!EDITABLE_COLUMN_SET.has(field)) continue;
+      // An edit landing on a column an *earlier* edit already claimed is just
+      // the newer of two edits; last write wins, same as editing twice in one
+      // session.
+      (existing as unknown as Record<string, unknown>)[field] = (
+        incoming as unknown as Record<string, unknown>
+      )[field];
+      claimed.add(field);
+    }
+    if (claimed.size > 0) existing.editedFields = [...claimed].sort();
+    return claimed;
+  }
+
+  private spliceEdge(edge: EdgeRow, mayDuplicate: boolean): boolean {
+    let bucket = this.edgesBySource.get(edge.source);
+    if (!bucket) {
+      bucket = [];
+      this.edgesBySource.set(edge.source, bucket);
+    }
+    const existing = mayDuplicate
+      ? bucket.find((e) => e.target === edge.target)
+      : undefined;
+    if (!existing) {
+      bucket.push(edge);
+      return true;
+    }
+
+    // A user's edit outranks any file, but only for the columns the user
+    // actually set — the rest of an overlay row is placeholders. Applied
+    // whichever order the two arrive in: an overlay row landing on a file's
+    // entry overwrites those columns and stakes its claim on the merged
+    // entry, and a file row landing afterwards must respect that claim.
+    const claimed = RoutingDatabase.applyEdit(existing, edge);
+
+    if (!claimed.has("min_depth")) {
+      const merged = RoutingDatabase.tighterDepth(
+        existing.min_depth,
+        existing.min_depth_known ?? existing.min_depth >= 0,
+        edge.min_depth,
+        edge.min_depth_known ?? edge.min_depth >= 0,
+      );
+      existing.min_depth = merged.value;
+      existing.min_depth_known = merged.known;
+    } else {
+      // applyEdit just copied min_depth from whichever side claimed it
+      // (a user's overlay edit), bypassing tighterDepth entirely -- so
+      // min_depth_known has to be recomputed here too, or it keeps
+      // reporting the pre-edit file's known-ness. Overlay edits are
+      // user-entered, not pipeline output: always the legacy convention,
+      // same as addNode/updateNode.
+      existing.min_depth_known = existing.min_depth >= 0;
+    }
+    if (!claimed.has("max_air_draft"))
+      existing.max_air_draft = RoutingDatabase.tighterLimit(
+        existing.max_air_draft,
+        edge.max_air_draft,
+      );
+    if (!claimed.has("min_width"))
+      existing.min_width = RoutingDatabase.tighterLimit(
+        existing.min_width,
+        edge.min_width,
+      );
+    // Higher cost_factor = more penalised = the conservative reading.
+    if (!claimed.has("cost_factor") && typeof edge.cost_factor === "number") {
+      existing.cost_factor =
+        typeof existing.cost_factor === "number"
+          ? Math.max(existing.cost_factor, edge.cost_factor)
+          : edge.cost_factor;
+    }
+
+    // Contributor bookkeeping, so eviction knows the edge outlives the file
+    // in `dbIndex`. Only tracked when the incoming row names a file — the
+    // bulk loadGraph path leaves dbIndex undefined and never evicts.
+    if (
+      edge.dbIndex !== undefined &&
+      edge.dbIndex !== existing.dbIndex &&
+      !existing.extraDbIndexes?.includes(edge.dbIndex)
+    ) {
+      (existing.extraDbIndexes ??= []).push(edge.dbIndex);
+    }
+    return false;
+  }
+
+  async loadGraph(): Promise<void> {
+    if (this.policy === "pinned") {
+      // Pinned: every enabled region is loaded here, once, and stays. A file
+      // that cannot be loaded (including one refused for its format, whose
+      // reason loadDatabaseGraph throws) fails the call rather than leaving a
+      // gap the caller was promised there would not be. Disabled files are
+      // excluded; a retry fails the same way.
+      const toLoad = Array.from(this.coverageIndex.values()).filter(
+        (e) =>
+          e.state === "not_loaded" ||
+          e.state === "loading" ||
+          e.state === "unsupported",
+      );
+      for (const entry of toLoad) {
+        await this.loadDatabaseGraph(entry.filename);
+      }
+      this.graphLoaded = true;
+      return;
+    }
+    if (this.dynamicLoading) {
+      // Dynamic mode never bulk-loads at startup — init()'s peekMetadata
+      // already built the coverage index, which is enough to mark the
+      // engine ready-for-on-demand. loadDatabaseGraph() (via
+      // ensureRegionsLoaded(), called from RoutingEngine.calculateRoute, or
+      // the POST /databases/load endpoint) loads a specific region's actual
+      // graph data later, the first time it's needed.
+      this.graphLoaded = true;
+      return;
+    }
+
+    const allNodes = await this.store.loadNodes();
+    // Bulk mode opens every file at once, so a node two overlapping files both
+    // author arrives twice and the Map silently collapses it. Those ids are
+    // exactly the ones whose edges can arrive twice as well — see spliceEdge.
+    const sharedSources = new Set<number>();
+    for (const n of allNodes) {
+      if (this.nodes.has(n.id)) sharedSources.add(n.id);
+      this.nodes.set(n.id, {
+        lat: n.lat,
+        lon: n.lon,
+        regionId: n.region_id ?? 0,
+        nodeDepth: n.node_depth,
+        nodeDepthKnown: n.node_depth_known ?? n.node_depth >= 0,
+      });
+    }
+
+    // Apply overlay deletions — remove nodes/edges the user deleted
+    const deletedNodeIds: number[] = this.overlay
+      ? await this.overlay.getDeletedNodeIds()
+      : [];
+    const deletedEdges: Array<{ source: number; target: number }> = this.overlay
+      ? await this.overlay.getDeletedEdgePairs()
+      : [];
+
+    for (const nid of deletedNodeIds) {
+      this.nodes.delete(nid);
+    }
+
+    const deletedNodeSet = new Set(deletedNodeIds);
+    const deletedEdgeSet = new Set(
+      deletedEdges.map((d) => `${d.source}:${d.target}`),
+    );
+
+    const allEdges: Array<EdgeRow & { db_index?: number }> =
+      await this.store.loadEdges();
+    for (const edge of allEdges) {
+      // Skip if source or target was deleted
+      if (deletedNodeSet.has(edge.source) || deletedNodeSet.has(edge.target))
+        continue;
+      // Skip if this specific edge was deleted
+      if (deletedEdgeSet.has(`${edge.source}:${edge.target}`)) continue;
+      // Both endpoints must resolve — every consumer looks the edge's
+      // coordinates up from `this.nodes`, so an edge with a dangling
+      // endpoint has no usable geometry and is dropped here.
+      if (!this.nodes.has(edge.source) || !this.nodes.has(edge.target))
+        continue;
+      // Overlapping regions' shared seam edges arrive in this same batch and
+      // need the same de-duplication the per-file path does. File rows are
+      // deliberately left untagged here — bulk mode has no per-file eviction,
+      // and tagging them would give unloadDatabaseGraph's by-dbIndex filter
+      // something to match. Overlay rows are tagged, because -1 is not a file
+      // handle and so can never match that filter: it only marks the row as
+      // the user's, which is what decides whether its edit outranks a file's.
+      const isOverlay = edge.db_index === OVERLAY_DB_INDEX;
+      if (isOverlay) {
+        edge.dbIndex = OVERLAY_DB_INDEX;
+        RoutingDatabase.parseEditedFields(edge);
+      }
+      this.spliceEdge(edge, isOverlay || sharedSources.has(edge.source));
+    }
+
+    this.buildSpatialIndex();
+
+    const allPois = await this.store.loadPois();
+    this.pois.push(...allPois);
+
+    const metadata = await this.getMetadata();
+
+    const rawRegions = await this.store.loadNavmeshRegions();
+    this.navmeshRegions = rawRegions.map((r) => ({
+      ...Navmesh.buildNavmeshRegion(r, (id) => this.nodes.get(id)),
+      dbIndex: r.db_index ?? -1,
+    }));
+    this.precomputeFunnelEdges();
+
+    this.graphLoaded = true;
+
+    // Populate the coverage index too so GET .../databases reports
+    // something sensible in non-dynamic mode as well — every
+    // locally-discovered file, all 'loaded' (today's unconditional
+    // load-everything behavior, just also exposed through that catalog).
+    this.rebuildCoverageIndexAfterBulkLoad(metadata);
+
+    // Bulk load just repopulated `this.pois` and `edgesBySource` (incl. the
+    // synthetic funnel/anchor edges precomputeFunnelEdges added above) —
+    // any bbox-query cache built against the pre-load (empty) state is
+    // stale.
+    this.invalidateBBoxCaches();
+  }
+
+  /** Non-dynamic-mode counterpart to init()'s peekMetadata coverage-index
+   *  build — derives the same DatabaseCoverageEntry shape from the bulk
+   *  load's own metadata round-trip (init()'s bulkFileList gives the
+   *  filename/path/dbIndex triple in the exact order+index dbPaths were
+   *  opened in, so this reproduces the same dbIndex assignment a
+   *  cachedDatabaseList array used to), so GET .../databases and
+   *  getCoverageStatus() have something to report without changing
+   *  anything about the bulk load itself. Never throws — malformed
+   *  metadata JSON just leaves that file's coverage fields null, same
+   *  tolerance as the rest of this file. */
+  private rebuildCoverageIndexAfterBulkLoad(
+    metadata: Array<{
+      id: number;
+      country: string;
+      name: string;
+      description: string | null;
+      lastUpdateDate: string;
+      tags: string | null;
+      boundingBox: string | null;
+      boundaryGeometry: string | null;
+      schemaVersion: number | null;
+      contributor: string | null;
+      url: string | null;
+      filename: string;
+      stats: { nodes: number; edges: number; pois: number };
+    }>,
+  ): void {
+    this.coverageIndex.clear();
+    this.bulkFileList.forEach((file, index) => {
+      const meta =
+        metadata.find((m) => m.filename === basename(file.path)) ?? null;
+      let bbox: DatabaseCoverageEntry["bbox"] = null;
+      let boundary: DatabaseCoverageEntry["boundary"] = null;
+      try {
+        if (meta?.boundingBox) bbox = JSON.parse(meta.boundingBox);
+        if (meta?.boundaryGeometry)
+          boundary = JSON.parse(meta.boundaryGeometry);
+      } catch {
+        /* malformed metadata JSON — leave coverage null, non-fatal */
+      }
+      this.coverageIndex.set(file.filename, {
+        filename: file.filename,
+        path: file.path,
+        bbox,
+        boundary,
+        state: "loaded",
+        dbIndex: index,
+        disabled: false,
+        meta,
+        stats: meta?.stats ?? null,
+        loadedVersion: RoutingDatabase.versionOf({
+          filename: file.filename,
+          meta,
+        }),
+      });
+    });
+    // The bulk load only ever sees files it opened, so the disabled ones have
+    // to be put back or they would vanish from the Data Manager (and with
+    // them any way to switch them on again).
+    for (const entry of this.disabledEntries) {
+      this.coverageIndex.set(entry.filename, entry);
+    }
+  }
+
+  /**
+   * Upgrade Phase 1's straight-line edge_kind_id=1 fallback edges between a
+   * region's boundary nodes to the real funnel-computed taut path (spec §6's
+   * "prefer the funnel-computed path over the fallback edges" runtime
+   * strategy), and add genuine interior shortcuts between the region's
+   * anchors (see NEXT_PHASES.md's "Boundary Shortcut Sparsification" fix) —
+   * done once here, at graph-load time, so astarSearch's per-edge relaxation
+   * loop never has to know navmesh regions exist at all.
+   *
+   * Defaults to every currently-loaded region (the non-dynamic bulk-load
+   * behavior). Dynamic mode's per-file loader passes just the newly-loaded
+   * database's own regions, so an incremental load never recomputes work
+   * already done for regions loaded earlier (§4a task 2).
+   */
+  private precomputeFunnelEdges(
+    regions: NavmeshRegionWithDb[] = this.navmeshRegions,
+  ): void {
+    let emptyCount = 0;
+    regions.forEach((region, index) => {
+      if (region.boundaryNodeIds.length === 0) {
+        emptyCount++;
+        // region_id is not a unique key in real generated databases (all rows
+        // observed with region_id=1 in zeeland.sqlite) — log the load-order
+        // index too so individual occurrences are distinguishable.
+        this.log.warn(
+          `[routeiq] Navmesh region_id=${region.regionId} (load index ${index}) has no ` +
+            "boundary_node_ids — funnel-edge upgrade and anchor shortcuts are silently skipped for it, " +
+            "leaving only straight-line edge_kind_id=1 fallback edges (see NEXT_PHASES.md, Round 9 master finding).",
+        );
+        return;
+      }
+      this.upgradeRingBoundaryEdges(region);
+      this.addAnchorShortcutEdges(region);
+    });
+    if (emptyCount > 0) {
+      this.log.warn(
+        `[routeiq] ${emptyCount}/${regions.length} navmesh regions have empty ` +
+          "boundary_node_ids — funnel-upgrade coverage is degraded for this database.",
+      );
+    }
+  }
+
+  /** Upgrade existing ring-adjacency edge_kind_id=1 edges (Phase 1 only ever
+   *  creates these between ring-adjacent perimeter vertices) to their real
+   *  funnel-computed taut path. Cheap regardless of region size — each
+   *  boundary node has ~2 such edges (prev/next in the ring), not one per
+   *  pair, so there's no need to cap this by boundary-node count. */
+  private upgradeRingBoundaryEdges(region: Navmesh.NavmeshRegion): void {
+    const computed = new Map<string, Navmesh.FunnelResult>();
+    const boundarySet = new Set(region.boundaryNodeIds);
+
+    for (const nodeId of region.boundaryNodeIds) {
+      const edges = this.edgesBySource.get(nodeId);
+      if (!edges) continue;
+      for (const edge of edges) {
+        if (edge.edge_kind_id !== EDGE_KIND_NAVMESH_BOUNDARY) continue;
+        if (!boundarySet.has(edge.target)) continue;
+
+        // Always compute in a canonical (lo -> hi) direction so the cache
+        // is correct regardless of which direction's edge row is visited
+        // first — orientation is then just "did I ask for lo or hi first".
+        const [lo, hi] =
+          nodeId < edge.target ? [nodeId, edge.target] : [edge.target, nodeId];
+        const pairKey = `${lo}:${hi}`;
+        let result = computed.get(pairKey);
+        if (!result) {
+          result = Navmesh.funnelBetweenNodes(region, lo, hi) ?? undefined;
+          if (result) computed.set(pairKey, result);
+        }
+        if (!result) continue;
+
+        // Sanity guard: never let a degenerate funnel make routing worse
+        // than doing nothing — keep the original straight-line fallback.
+        if (result.distance > edge.distance * 3 + 50) continue;
+
+        edge.distance = result.distance;
+        const path = nodeId === lo ? result.path : [...result.path].reverse();
+        edge.path_points = path.slice(1, -1);
+      }
+    }
+  }
+
+  /**
+   * Ring-adjacency edges alone only ever connect two *immediately adjacent*
+   * perimeter points — there was never a mechanism to cheaply cross a large
+   * region between two *distant* boundary nodes, which is exactly what's
+   * needed when a route crosses from one region, through a stitch point,
+   * into an adjacent one. Fix: a genuine interior "highway" between every
+   * pair of a small, bounded set of well-distributed anchors, plus a cheap
+   * link from every other boundary node to its nearest 1-2 anchors (by real
+   * geometric distance — see Round 4 comment below on why not ring index).
+   */
+  private addAnchorShortcutEdges(region: NavmeshRegionWithDb): void {
+    const anchors = region.anchorNodeIds;
+    if (anchors.length < 2) return;
+
+    for (let i = 0; i < anchors.length; i++) {
+      for (let j = i + 1; j < anchors.length; j++) {
+        this.addFunnelShortcutEdge(region, anchors[i], anchors[j]);
+      }
+    }
+
+    // Pick each non-anchor boundary node's nearest anchors by real (haversine)
+    // geometric distance, not ring arc-index. Round 4 found ring arc-distance
+    // a poor proxy on Zeeland's convoluted coastline — arc-adjacent doesn't
+    // mean geometrically close — which both picked a lower-quality "nearest"
+    // anchor and made its corridor search needlessly expensive (a genuinely
+    // distant target visits far more of the triangle mesh). The distance
+    // computation itself is 40 cheap haversine calls per node, negligible
+    // next to the corridor search it feeds.
+    const anchorSet = new Set(anchors);
+    const anchorCoords: Array<{
+      id: number;
+      pos: { lat: number; lon: number };
+    }> = [];
+    for (const id of anchors) {
+      const pos = this.nodes.get(id);
+      if (pos) anchorCoords.push({ id, pos });
+    }
+
+    region.boundaryNodeIds.forEach((nodeId) => {
+      if (anchorSet.has(nodeId)) return;
+      const nodePos = this.nodes.get(nodeId);
+      if (!nodePos) return;
+      const nearest = anchorCoords
+        .map((a) => ({
+          id: a.id,
+          d: this.haversineMeters(
+            nodePos.lat,
+            nodePos.lon,
+            a.pos.lat,
+            a.pos.lon,
+          ),
+        }))
+        .sort((a, b) => a.d - b.d)
+        .slice(0, 2);
+      for (const { id } of nearest) {
+        this.addFunnelShortcutEdge(region, nodeId, id);
+      }
+    });
+  }
+
+  /** Insert a new funnel-computed shortcut between two boundary nodes of the
+   *  same region as a pair of directional in-memory edges (mirrors the shape
+   *  `addEdge` builds, minus the async DB round-trip — these are derived,
+   *  load-time-only edges, never persisted). No-op if a ring-adjacency
+   *  edge_kind_id=1 edge already connects the pair directly — that one is
+   *  handled (and upgraded) by `upgradeRingBoundaryEdges` instead. */
+  private addFunnelShortcutEdge(
+    region: NavmeshRegionWithDb,
+    nodeA: number,
+    nodeB: number,
+  ): void {
+    if (nodeA === nodeB) return;
+    const alreadyDirectEdge = this.edgesBySource
+      .get(nodeA)
+      ?.some(
+        (e) =>
+          e.target === nodeB && e.edge_kind_id === EDGE_KIND_NAVMESH_BOUNDARY,
+      );
+    if (alreadyDirectEdge) return;
+
+    const result = Navmesh.funnelBetweenNodes(region, nodeA, nodeB);
+    if (!result) return;
+
+    if (!this.nodes.has(nodeA) || !this.nodes.has(nodeB)) return;
+
+    const forwardPath = result.path.slice(1, -1);
+    const reversePath = [...forwardPath].reverse();
+    const shared = {
+      distance: result.distance,
+      min_depth: region.depthCeilingM,
+      max_air_draft: -1,
+      min_width: -1,
+      cost_factor: 1.0,
+      distance_to_land: 9999,
+      edge_type_id: EDGE_TYPE_COASTAL,
+      traffic_mode: TRAFFIC_TWO_WAY,
+      edge_kind_id: EDGE_KIND_NAVMESH_BOUNDARY,
+      // Tags this synthetic edge with the dbIndex of the region that
+      // created it, so unloadDatabaseGraph can remove it along with the
+      // rest of that database's edges — these never exist in any .sqlite
+      // file, so they'd otherwise leak in memory across an unload.
+      dbIndex: region.dbIndex,
+    };
+
+    if (!this.edgesBySource.has(nodeA)) this.edgesBySource.set(nodeA, []);
+    this.edgesBySource.get(nodeA)!.push({
+      ...shared,
+      source: nodeA,
+      target: nodeB,
+      path_points: forwardPath,
+    });
+
+    if (!this.edgesBySource.has(nodeB)) this.edgesBySource.set(nodeB, []);
+    this.edgesBySource.get(nodeB)!.push({
+      ...shared,
+      source: nodeB,
+      target: nodeA,
+      path_points: reversePath,
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // §4a dynamic database loading — per-file load/unload, coverage index,
+  // and on-demand resolution for route requests. Everything below is a
+  // no-op (ensureRegionsLoaded) or simply unreachable from the API
+  // (loadDatabaseGraph/unloadDatabaseGraph are only ever invoked when
+  // dynamicLoading is true — see api.ts's /databases/load, /unload) when
+  // dynamicLoading is false, so none of it can affect non-dynamic behavior.
+  // ---------------------------------------------------------------------
+
+  /** Coverage/state for every locally-known database, in both modes —
+   *  folded into getDatabaseCatalog() (GET .../databases), and used
+   *  directly as the `databases` field of the /databases/load and
+   *  /databases/unload POST responses, and by tests as the per-file state
+   *  inspector. */
+  getCoverageStatus(): Array<{
+    filename: string;
+    state: DatabaseCoverageEntry["state"];
+    coverage: DatabaseCoverageEntry["bbox"];
+    nodes?: number;
+    stats: DatabaseCoverageEntry["stats"];
+  }> {
+    const result: Array<{
+      filename: string;
+      state: DatabaseCoverageEntry["state"];
+      coverage: DatabaseCoverageEntry["bbox"];
+      nodes?: number;
+      stats: DatabaseCoverageEntry["stats"];
+    }> = [];
+    for (const entry of this.coverageIndex.values()) {
+      const nodes =
+        entry.dbIndex !== null
+          ? this.nodesByDbIndex.get(entry.dbIndex)?.size
+          : undefined;
+      result.push({
+        filename: entry.filename,
+        state: entry.state,
+        coverage: entry.bbox,
+        nodes,
+        stats: entry.stats,
+      });
+    }
+    return result;
+  }
+
+  /** True iff `filename` is a database this RoutingDatabase knows about
+   *  locally (peeked or bulk-loaded), regardless of its current state. */
+  hasKnownDatabase(filename: string): boolean {
+    return this.coverageIndex.has(filename);
+  }
+
+  /**
+   * Dynamic-loading mode only (no-op otherwise): given a route request's
+   * anchor points (start/end/via), load every not-yet-loaded database whose
+   * metadata bounding box contains one of them, synchronously, before the
+   * caller proceeds to search the graph. Called from
+   * RoutingEngine.calculateRoute before any node lookup.
+   *
+   * Waypoint containment only — a route can also *transit* a database it
+   * has no waypoint inside (e.g. a strait between start and end). That case
+   * is handled separately by ensureRegionsForBbox, called per search
+   * attempt/segment once the search's bounding box is known (PHASE_4_DESIGN.md
+   * §4a.1 task 4).
+   */
+  async ensureRegionsLoaded(
+    points: Array<{ latitude: number; longitude: number }>,
+  ): Promise<void> {
+    if (this.policy !== "dynamic") return;
+    const toLoad = new Set<string>();
+    for (const p of points) {
+      for (const entry of this.coverageIndex.values()) {
+        if (entry.state === "disabled" || entry.state === "unsupported")
+          continue;
+        if (!entry.bbox) continue;
+        if (
+          p.latitude >= entry.bbox.min_lat &&
+          p.latitude <= entry.bbox.max_lat &&
+          p.longitude >= entry.bbox.min_lon &&
+          p.longitude <= entry.bbox.max_lon
+        ) {
+          // §4a M5: touch every region this request falls inside, whether or
+          // not it's already loaded — an actively-relevant region must never
+          // look like the LRU candidate to enforceRegionCap().
+          this.touchRegion(entry.filename);
+          if (entry.state !== "loaded") toLoad.add(entry.filename);
+        }
+      }
+    }
+    for (const filename of toLoad) {
+      const t0 = Date.now();
+      this.log.info(
+        `[routeiq] Route request falls inside not-yet-loaded database ${filename} — loading inline before search`,
+      );
+      await this.loadDatabaseGraph(filename);
+      this.log.info(
+        `[routeiq] Inline on-demand load of ${filename} completed in ${Date.now() - t0}ms`,
+      );
+    }
+  }
+
+  /**
+   * Dynamic-loading mode only (no-op otherwise): given the bounding box a
+   * route search is about to examine — already bounded by
+   * routingBBoxMaxExtent, see routing.ts's tryRouteSegment/calculateRouteImpl —
+   * load every not-yet-loaded database whose coverage bbox *intersects* it
+   * (standard AABB overlap test), synchronously, before the caller proceeds
+   * to search the graph. This is what makes transit regions available: a
+   * database the route passes through but has no start/dest/via waypoint
+   * inside (ensureRegionsLoaded above only covers waypoint containment).
+   * Called from RoutingEngine per search attempt/segment, immediately
+   * before astarSearch — PHASE_4_DESIGN.md §4a.1 task 4.
+   */
+  async ensureRegionsForBbox(bbox: BBox): Promise<void> {
+    if (this.policy !== "dynamic") return;
+    const toLoad = new Set<string>();
+    for (const entry of this.coverageIndex.values()) {
+      if (entry.state === "disabled" || entry.state === "unsupported") continue;
+      if (!entry.bbox) continue;
+      const intersects =
+        entry.bbox.min_lat <= bbox.maxLat &&
+        entry.bbox.max_lat >= bbox.minLat &&
+        entry.bbox.min_lon <= bbox.maxLon &&
+        entry.bbox.max_lon >= bbox.minLon;
+      if (intersects) {
+        // §4a M5: see ensureRegionsLoaded — touch relevant regions whether
+        // newly loaded or already loaded.
+        this.touchRegion(entry.filename);
+        if (entry.state !== "loaded") toLoad.add(entry.filename);
+      }
+    }
+    for (const filename of toLoad) {
+      // A discretionary load (this method, not ensureRegionsLoaded) can be
+      // skipped rather than made to fit — the search just runs with a gap
+      // in the graph, which the existing penalized/stalled/fallbackRoute
+      // machinery already handles the same way it handles any other reason
+      // an attempt comes up short. See maxLoadedRegionEdges' doc comment.
+      //
+      // Only for a genuinely new (not_loaded) candidate: toLoad also
+      // collects regions a concurrent caller is already mid-load on
+      // (state === "loading"), and totalLoadedEdges() already reserves
+      // those regions' edges. Budget-checking one of those here would
+      // double-count it (once in the running total, once as `need`) and
+      // could skip a region that's already being loaded and about to be
+      // available for free — the fix must still fall through to
+      // loadDatabaseGraph() below for it, which awaits the shared in-flight
+      // promise rather than starting a second load.
+      const entry = this.coverageIndex.get(filename);
+      if (this.maxLoadedRegionEdges > 0 && entry?.state !== "loading") {
+        const need = entry?.stats?.edges ?? 0;
+        const current = this.totalLoadedEdges();
+        if (current + need > this.maxLoadedRegionEdges) {
+          this.log.info(
+            `[routeiq] Skipping load of ${filename} (${need} edges) — would push loaded ` +
+              `edges from ${current} to ${current + need}, over maxLoadedRegionEdges=` +
+              `${this.maxLoadedRegionEdges}. Search continues without it; a shorter or ` +
+              `less circuitous route may find one that doesn't need it.`,
+          );
+          continue;
+        }
+      }
+      const t0 = Date.now();
+      this.log.info(
+        `[routeiq] Route search bounding box overlaps not-yet-loaded database ${filename} — loading inline before search`,
+      );
+      await this.loadDatabaseGraph(filename);
+      this.log.info(
+        `[routeiq] Inline on-demand load of ${filename} completed in ${Date.now() - t0}ms`,
+      );
+    }
+  }
+
+  /** Dynamic mode only: eager-load every not-yet-loaded database whose
+   *  coverage bbox contains the vessel position, optionally expanded by a
+   *  `radiusNm` proactive band (load a region just before the vessel crosses
+   *  into it). Called at startup once a position is known and on each
+   *  throttled position update — so a positioned vessel boots with its local
+   *  region loaded and routable instead of an empty graph. No-op in
+   *  non-dynamic mode (everything is already loaded). */
+  async eagerLoadForPosition(
+    lat: number,
+    lon: number,
+    radiusNm: number = 0,
+  ): Promise<void> {
+    if (this.policy !== "dynamic") return;
+    // ~1 nm of latitude ≈ 1/60°; scale longitude by cos(lat) so the band is
+    // roughly circular. Cheap prefilter — the containment test below is what
+    // actually decides membership.
+    const dLat = radiusNm / 60;
+    const dLon = radiusNm / 60 / Math.max(0.1, Math.cos((lat * Math.PI) / 180));
+    const toLoad = new Set<string>();
+    for (const entry of this.coverageIndex.values()) {
+      if (entry.state === "disabled" || entry.state === "unsupported") continue;
+      if (!entry.bbox) continue;
+      if (
+        lat >= entry.bbox.min_lat - dLat &&
+        lat <= entry.bbox.max_lat + dLat &&
+        lon >= entry.bbox.min_lon - dLon &&
+        lon <= entry.bbox.max_lon + dLon
+      ) {
+        // §4a M5: touch every region within the band, whether or not it's
+        // already loaded — see ensureRegionsLoaded.
+        this.touchRegion(entry.filename);
+        if (entry.state === "not_loaded") toLoad.add(entry.filename);
+      }
+    }
+    for (const filename of toLoad) {
+      const t0 = Date.now();
+      this.log.debug(
+        `[routeiq] Vessel position (${lat.toFixed(4)},${lon.toFixed(4)}) is inside not-yet-loaded database ${filename} — eager-loading`,
+      );
+      try {
+        await this.loadDatabaseGraph(filename);
+        this.log.info(
+          `[routeiq] Eager position load of ${filename} completed in ${Date.now() - t0}ms`,
+        );
+      } catch (e) {
+        this.log.warn(
+          `[routeiq] Eager position load of ${filename} failed: ${e instanceof Error ? e.message : e}`,
+        );
+      }
+    }
+    // Position-triggered, not route-triggered — no beginRoute()/endRoute()
+    // bracket runs the usual cap enforcement here, so trigger it directly.
+    if (toLoad.size > 0) this.enforceRegionCapForNonRouteLoad();
+  }
+
+  /** Dynamic mode only: if exactly one database is installed, load it at
+   *  startup unconditionally — a single-region deployment has nothing to
+   *  choose between, so it should be ready-at-boot even with dynamicLoading
+   *  on, rather than presenting an empty graph until a route or position
+   *  triggers the sole region. No-op in non-dynamic mode. */
+  async eagerLoadIfSingle(): Promise<void> {
+    if (this.policy !== "dynamic") return;
+    // Count only databases that can actually route: with one enabled region
+    // and any number of disabled ones there is still nothing to choose
+    // between, and a raw coverageIndex.size check would silently stop
+    // eager-loading the moment a second region was installed-then-disabled.
+    const enabled = Array.from(this.coverageIndex.values()).filter(
+      (e) => e.state !== "disabled" && e.state !== "unsupported",
+    );
+    if (enabled.length !== 1) return;
+    const [only] = enabled;
+    if (!only || only.state === "loaded") return;
+    this.log.info(
+      `[routeiq] Single installed database ${only.filename} — eager-loading at startup`,
+    );
+    try {
+      await this.loadDatabaseGraph(only.filename);
+    } catch (e) {
+      this.log.warn(
+        `[routeiq] Single-database eager load failed: ${e instanceof Error ? e.message : e}`,
+      );
+    }
+  }
+
+  /**
+   * Load exactly one locally-known database's nodes/edges/pois/navmesh
+   * regions and merge them into the already-in-memory graph (dynamic mode
+   * only — coverageIndex is empty in non-dynamic mode, so this always
+   * throws "Unknown database" there, which is intentional: unload/reload of
+   * a single file isn't a supported operation on the bulk-load path).
+   * Idempotent — a no-op if already loaded — and concurrent callers for the
+   * same filename share a single in-flight load rather than double-loading.
+   */
+  async loadDatabaseGraph(filename: string): Promise<void> {
+    const entry = this.coverageIndex.get(filename);
+    if (!entry) throw new Error(`Unknown database: ${filename}`);
+    // Belt-and-braces: every selection path already skips disabled entries,
+    // so reaching here means an explicit /databases/load for a switched-off
+    // region. Refuse rather than silently loading what the user turned off.
+    if (entry.state === "disabled") {
+      throw new Error(
+        `Database ${filename} is disabled — enable it before loading`,
+      );
+    }
+    // Refused at peek (format generation, or built before the POI model):
+    // report why, and stay unsupported rather than becoming loadable.
+    if (entry.state === "unsupported") {
+      throw new Error(
+        `${filename}: ${entry.formatError ?? "unsupported database format"}`,
+      );
+    }
+    if (entry.state === "loaded") return;
+
+    const inflight = this.loadingPromises.get(filename);
+    if (inflight) {
+      await inflight;
+      return;
+    }
+
+    const promise = this.loadDatabaseGraphInner(filename, entry);
+    this.loadingPromises.set(filename, promise);
+    try {
+      await promise;
+    } finally {
+      this.loadingPromises.delete(filename);
+    }
+  }
+
+  /** Enforce the cap(s) after a load that didn't happen inside a route's
+   *  own beginRoute()/endRoute() bracket -- eagerLoadForPosition (vessel
+   *  movement) and the direct /databases/load API call (api.ts) both load
+   *  through loadDatabaseGraph() with no route in flight, so endRoute()
+   *  never fires for them and a load there could otherwise sit over either
+   *  cap until some later route happens to finish. Not folded into
+   *  loadDatabaseGraph() itself: that would also fire on every
+   *  route-triggered load (ensureRegionsLoaded/ensureRegionsForBbox, already
+   *  inside a route's own bracket, where enforceRegionCap() correctly
+   *  no-ops) and on tests' direct use of the primitive to set up
+   *  loaded-but-not-yet-enforced fixture state -- harmless in production,
+   *  but a footgun for exactly the kind of setup this class's own tests
+   *  rely on. Fire-and-forget, same as endRoute()'s own trigger. */
+  enforceRegionCapForNonRouteLoad(): void {
+    void this.enforceRegionCap().catch(() => {});
+  }
+
+  private async loadDatabaseGraphInner(
+    filename: string,
+    entry: DatabaseCoverageEntry,
+  ): Promise<void> {
+    entry.state = "loading";
+    const tombstones = { nodes: new Set<number>(), edges: new Set<string>() };
+    this.loadTombstones.add(tombstones);
+    // The handle this attempt opened, until its region is merged.
+    let openedHandle: number | null = null;
+    try {
+      // Everything is read from the worker, and the navmesh parsed, before
+      // the in-memory graph is touched: a load that fails (a worker error, a
+      // bad navmesh row) must leave no half-merged seam behind. spliceEdge
+      // tightens an already-loaded neighbour's copy of a shared edge, and a
+      // route already found would otherwise be judged against limits from a
+      // file that never finished loading.
+      const opened = await this.store.openDb(entry.path);
+      if ("refused" in opened) throw new FormatRefusal(opened.refused);
+      const dbIndex = opened.dbIndex;
+      openedHandle = dbIndex;
+
+      // The overlay's own added nodes/edges rows must be merged into memory
+      // exactly once across the whole process lifetime, no matter how many
+      // per-file loads happen afterward — merging them again on a later
+      // load would duplicate them in edgesBySource.
+      const includeOverlay = !this.overlayMergedOnce;
+
+      const nodes = await this.store.loadNodes({
+        dbIndexes: [dbIndex],
+        includeOverlay,
+      });
+
+      // Overlay deletions apply regardless of includeOverlay (they're a
+      // filter, not a merge, and cheap enough to just refetch every load).
+      const deletedNodeIds: number[] = this.overlay
+        ? await this.overlay.getDeletedNodeIds()
+        : [];
+      const deletedEdges: Array<{ source: number; target: number }> = this
+        .overlay
+        ? await this.overlay.getDeletedEdgePairs()
+        : [];
+
+      const edges: Array<EdgeRow & { db_index: number }> =
+        await this.store.loadEdges({
+          dbIndexes: [dbIndex],
+          includeOverlay,
+        });
+
+      const pois = await this.store.loadPois({ dbIndexes: [dbIndex] });
+
+      const rawRegions = await this.store.loadNavmeshRegions({
+        dbIndexes: [dbIndex],
+      });
+
+      // Nothing awaits from here on, so these are all the deletions made
+      // while the reads above were in flight.
+      deletedNodeIds.push(...tombstones.nodes);
+      for (const key of tombstones.edges) {
+        const [source, target] = key.split(":").map(Number);
+        deletedEdges.push({ source, target });
+      }
+
+      // The navmesh's node coordinates as the graph will hold them once this
+      // load is applied: this file's nodes, then the ones already loaded,
+      // minus the overlay's deletions.
+      const deletedNodeSet = new Set(deletedNodeIds);
+      const incomingNodes = new Map<number, { lat: number; lon: number }>();
+      for (const n of nodes) incomingNodes.set(n.id, n);
+      const nodeAfterLoad = (id: number) =>
+        deletedNodeSet.has(id)
+          ? undefined
+          : (incomingNodes.get(id) ?? this.nodes.get(id));
+      const newRegions: NavmeshRegionWithDb[] = rawRegions.map((r) => ({
+        ...Navmesh.buildNavmeshRegion(r, nodeAfterLoad),
+        dbIndex,
+      }));
+
+      // Apply. From here on nothing waits on the worker.
+      if (opened.descriptionError) {
+        this.descriptionErrors.set(filename, opened.descriptionError);
+      } else {
+        this.descriptionErrors.delete(filename);
+      }
+      this.hasCrossesLand = this.hasCrossesLand || opened.flags.hasCrossesLand;
+      this.hasCrossesObstacle =
+        this.hasCrossesObstacle || opened.flags.hasCrossesObstacle;
+      this.hasNodeDepth = this.hasNodeDepth || opened.flags.hasNodeDepth;
+      this.hasRegionId = this.hasRegionId || opened.flags.hasRegionId;
+
+      const nodeIdSet = this.nodesByDbIndex.get(dbIndex) ?? new Set<number>();
+      // Nodes an already-loaded database (or the overlay) also contributed —
+      // the seam. Only edges out of these can duplicate one already stored,
+      // which is what keeps spliceEdge's scan off the bulk of this load.
+      const sharedSources = new Set<number>();
+      for (const n of nodes) {
+        // Only ids not already in `this.nodes` are genuinely new to the
+        // in-memory grid — a shared-id/refcount collision (region-seam
+        // coordinate hash collision, or this same node already loaded from
+        // another database) must NOT be re-inserted, or the id would appear
+        // twice in its grid cell and corrupt every grid-backed query (M6).
+        const isNewNode = !this.nodes.has(n.id);
+        if (!isNewNode) sharedSources.add(n.id);
+        this.nodes.set(n.id, {
+          lat: n.lat,
+          lon: n.lon,
+          regionId: n.region_id ?? 0,
+          nodeDepth: n.node_depth,
+          nodeDepthKnown: n.node_depth_known ?? n.node_depth >= 0,
+        });
+        if (isNewNode) this.gridInsertNode(n.id, n.lat, n.lon);
+        if (n.db_index === dbIndex) {
+          // Real per-file node (not an overlay row) — track provenance and
+          // bump the refcount so a coordinate-hash collision with another
+          // loaded database's node id (rare, but possible at region seams —
+          // PHASE_4_DESIGN.md §4a.1) doesn't get deleted out from under the
+          // other database when just one of the two is unloaded later.
+          nodeIdSet.add(n.id);
+          this.nodeDbCount.set(n.id, (this.nodeDbCount.get(n.id) ?? 0) + 1);
+        }
+        // Overlay-added nodes (db_index === -1) are never refcounted against
+        // a specific file — only close()/reload() drops them.
+      }
+      this.nodesByDbIndex.set(dbIndex, nodeIdSet);
+
+      for (const nid of deletedNodeIds) {
+        // Capture coords before deleting — needed to find the grid cell the
+        // node was inserted into (a node's id encodes its coordinate, so the
+        // cell it hashes to never changes across loads).
+        const removedCoords = this.nodes.get(nid);
+        if (this.nodes.delete(nid)) {
+          nodeIdSet.delete(nid);
+          if (removedCoords)
+            this.gridRemoveNode(nid, removedCoords.lat, removedCoords.lon);
+        }
+      }
+      const deletedEdgeSet = new Set(
+        deletedEdges.map((d) => `${d.source}:${d.target}`),
+      );
+
+      let edgeCount = 0;
+      for (const edge of edges) {
+        if (deletedNodeSet.has(edge.source) || deletedNodeSet.has(edge.target))
+          continue;
+        if (deletedEdgeSet.has(`${edge.source}:${edge.target}`)) continue;
+        // Same dangling-endpoint drop as loadGraph — coordinates always come
+        // from `this.nodes`, never from the edge row.
+        if (!this.nodes.has(edge.source) || !this.nodes.has(edge.target))
+          continue;
+        edge.dbIndex = edge.db_index;
+        if (edge.dbIndex === OVERLAY_DB_INDEX)
+          RoutingDatabase.parseEditedFields(edge);
+        // Merges into an already-loaded neighbour's copy at a seam instead of
+        // storing this file's duplicate of it — the edge-level counterpart of
+        // the node-ID merge above.
+        if (
+          this.spliceEdge(
+            edge,
+            sharedSources.has(edge.source) || edge.dbIndex === OVERLAY_DB_INDEX,
+          )
+        )
+          edgeCount++;
+      }
+
+      // spatialGrid is maintained incrementally above (gridInsertNode on new
+      // nodes, gridRemoveNode on overlay deletions) — no full rebuild needed
+      // here (M6). buildSpatialIndex() is still used by the bulk loadGraph()
+      // path below, where one full build after the whole load is simplest.
+
+      for (const p of pois) this.pois.push({ ...p, dbIndex: p.db_index });
+
+      this.navmeshRegions.push(...newRegions);
+      // Only precompute funnel/anchor edges for the regions this load just
+      // added — regions from already-loaded databases were done on their
+      // own load and must not be recomputed here (§4a task 2).
+      if (newRegions.length > 0) this.precomputeFunnelEdges(newRegions);
+
+      if (includeOverlay) this.overlayMergedOnce = true;
+
+      entry.dbIndex = dbIndex;
+      entry.state = "loaded";
+      entry.loadedVersion = RoutingDatabase.versionOf({
+        filename,
+        // A store that does not say (an in-memory one) falls back to the
+        // catalogue metadata of the file it was asked to open.
+        meta:
+          opened.lastUpdateDate === undefined
+            ? entry.meta
+            : { lastUpdateDate: opened.lastUpdateDate ?? "" },
+      });
+      openedHandle = null; // merged: owned by the loaded region now
+      // §4a M5: a freshly-loaded region is by definition the most recently
+      // used one.
+      this.touchRegion(filename);
+      this.regionLoadCount++;
+
+      // This load just added to `this.pois` and `edgesBySource` (incl. its
+      // own newly-precomputed synthetic funnel/anchor edges) — any
+      // bbox-query cache built before this load is stale.
+      this.invalidateBBoxCaches();
+
+      this.log.info(
+        `[routeiq] Loaded database ${filename} (dbIndex=${dbIndex}): ` +
+          `${nodeIdSet.size} nodes, ${edgeCount} edges, ${pois.length} POIs, ${newRegions.length} navmesh regions`,
+      );
+    } catch (err) {
+      // A failed attempt must not leave its file open: nothing refers to the
+      // handle, and a later attempt opens a fresh one.
+      if (openedHandle !== null) {
+        await this.store.closeDb(openedHandle).catch(() => {});
+      }
+      if (err instanceof FormatRefusal) {
+        // The file is not in a format this build reads (possibly replaced on
+        // disk after the peek): keep it out of every selection path.
+        entry.state = "unsupported";
+        entry.formatError = err.message;
+        throw new Error(`${filename}: ${err.message}`);
+      }
+      // Leave the coverage entry loadable again on failure rather than
+      // stuck 'loading' forever.
+      entry.state = "not_loaded";
+      throw err;
+    } finally {
+      this.loadTombstones.delete(tombstones);
+    }
+  }
+
+  /**
+   * Remove exactly one database's contribution from the in-memory graph:
+   * its edges (including synthetic funnel/anchor-shortcut edges, tagged
+   * with this dbIndex by addFunnelShortcutEdge), its navmesh regions, its
+   * POIs, and its nodes — except any node id another still-loaded database
+   * also contributed (coordinate-hash collision at a region seam; tracked
+   * via nodeDbCount's refcount). Refuses when this is the only loaded
+   * database, or while a route calculation is in progress (see
+   * beginRoute/endRoute) — evicting graph data out from under an
+   * in-progress search is worse than a temporarily-stale eviction request.
+   */
+  async unloadDatabaseGraph(
+    filename: string,
+  ): Promise<{ nodesRemoved: number; edgesRemoved: number }> {
+    const entry = this.coverageIndex.get(filename);
+    if (!entry) throw new Error(`Unknown database: ${filename}`);
+    if (entry.state !== "loaded" || entry.dbIndex === null) {
+      throw new Error(`Database ${filename} is not currently loaded`);
+    }
+    const loadedCount = Array.from(this.coverageIndex.values()).filter(
+      (e) => e.state === "loaded",
+    ).length;
+    if (loadedCount <= 1) {
+      throw new Error(
+        "Cannot unload the only loaded database — routing would have no coverage left",
+      );
+    }
+    if (this.activeRouteCount > 0) {
+      throw new Error(
+        "Cannot unload a database while a route calculation is in progress",
+      );
+    }
+
+    const dbIndex = entry.dbIndex;
+
+    // Drop this database's edges — except a seam edge a still-loaded file
+    // also authors. Since spliceEdge stores such an edge once rather than
+    // once per file, "does anyone else author it" is a question only
+    // extraDbIndexes can answer: hand the edge over to one of the remaining
+    // contributors instead of removing it. (Before de-duplication this fell
+    // out of the duplication itself — each file had its own copy, so
+    // filtering by dbIndex left the other file's behind.)
+    let edgesRemoved = 0;
+    for (const [src, edges] of this.edgesBySource) {
+      const kept: Array<EdgeRow> = [];
+      for (const e of edges) {
+        if (e.dbIndex === dbIndex) {
+          const heir = e.extraDbIndexes?.shift();
+          if (heir === undefined) {
+            edgesRemoved++;
+            continue;
+          }
+          e.dbIndex = heir;
+          if (e.extraDbIndexes!.length === 0) delete e.extraDbIndexes;
+        } else if (e.extraDbIndexes) {
+          const at = e.extraDbIndexes.indexOf(dbIndex);
+          if (at >= 0) e.extraDbIndexes.splice(at, 1);
+          if (e.extraDbIndexes.length === 0) delete e.extraDbIndexes;
+        }
+        kept.push(e);
+      }
+      if (kept.length === 0) this.edgesBySource.delete(src);
+      else if (kept.length !== edges.length) this.edgesBySource.set(src, kept);
+    }
+
+    const nodeIds = this.nodesByDbIndex.get(dbIndex) ?? new Set<number>();
+    let nodesRemoved = 0;
+    for (const nodeId of nodeIds) {
+      const remaining = (this.nodeDbCount.get(nodeId) ?? 1) - 1;
+      if (remaining <= 0) {
+        this.nodeDbCount.delete(nodeId);
+        // Capture coords before deleting — same reasoning as
+        // loadDatabaseGraphInner's overlay-deletion handling above.
+        const removedCoords = this.nodes.get(nodeId);
+        this.nodes.delete(nodeId);
+        if (removedCoords)
+          this.gridRemoveNode(nodeId, removedCoords.lat, removedCoords.lon);
+        nodesRemoved++;
+      } else {
+        this.nodeDbCount.set(nodeId, remaining);
+      }
+    }
+    this.nodesByDbIndex.delete(dbIndex);
+
+    // The by-dbIndex edge removal above only drops edges tagged with THIS
+    // dbIndex — it deliberately keeps overlay (user-edit) edges, which are
+    // tagged dbIndex === -1, or left `undefined` entirely for edges added
+    // in-memory via addEdge (see addEdge's newEdge literal, which never sets
+    // dbIndex). If such an overlay edge happens to reference a node that
+    // just got deleted above (refcount hit 0 — e.g. a graph-editor edge the
+    // user drew from a node in another region to a node in this now-evicted
+    // one), it's left dangling in edgesBySource: its source or target no
+    // longer resolves via this.nodes.get(), which a later A* relaxation or
+    // buildRouteResult would hit as `undefined` and either crash or silently
+    // produce a broken route. Sweep those out now that node removal is done.
+    //
+    // This only ever removes an edge whose source or target is gone — every
+    // edge with both endpoints still loaded is left untouched — so it can
+    // only catch dangling overlay/stray edges, never a live one. It's an
+    // O(edges) pass, but unload is infrequent, so that's fine.
+    //
+    // Known, accepted limitation: the dropped overlay edge still exists as a
+    // row in user-edits.sqlite. Because overlay rows are merged into memory
+    // only once (see overlayMergedOnce), a later reload of this region will
+    // NOT re-add this specific in-memory overlay edge until a full
+    // close()/reload() re-merges everything from scratch. That's fine —
+    // dropping an inactive cross-region overlay edge from memory beats
+    // leaving a dangling reference, and the edit itself is preserved on
+    // disk, just not re-merged automatically. Not attempting to solve that
+    // re-merge gap here.
+    for (const [src, edges] of this.edgesBySource) {
+      if (!this.nodes.has(src)) {
+        this.edgesBySource.delete(src);
+        continue;
+      }
+      const kept = edges.filter((e) => this.nodes.has(e.target));
+      if (kept.length === 0) this.edgesBySource.delete(src);
+      else if (kept.length !== edges.length) this.edgesBySource.set(src, kept);
+    }
+
+    this.navmeshRegions = this.navmeshRegions.filter(
+      (r) => r.dbIndex !== dbIndex,
+    );
+    this.pois = this.pois.filter((p) => p.dbIndex !== dbIndex);
+
+    await this.store.closeDb(dbIndex);
+    this.descriptionErrors.delete(filename);
+
+    // spatialGrid is maintained incrementally above (gridRemoveNode for
+    // exactly the nodes actually removed) — no full rebuild needed (M6).
+
+    entry.state = "not_loaded";
+    entry.dbIndex = null;
+    delete entry.loadedVersion;
+
+    // This unload just filtered `edgesBySource` and `this.pois` — any
+    // bbox-query cache built before it is stale (it would still reference
+    // the just-removed database's rows).
+    this.invalidateBBoxCaches();
+
+    this.log.info(
+      `[routeiq] Unloaded database ${filename} (dbIndex=${dbIndex}): removed ${nodesRemoved} nodes, ${edgesRemoved} edges`,
+    );
+    return { nodesRemoved, edgesRemoved };
+  }
+
+  /**
+   * §4a M5: bounded working set, by count and by size. No-op unless dynamic
+   * loading is on and at least one of maxLoadedRegions/maxLoadedRegionEdges
+   * is > 0 (both default finite via DEFAULT_CONFIG). No-op while a route is
+   * in flight (activeRouteCount > 0) — never evict out from under an
+   * in-progress or about-to-run search; endRoute() is the only caller, and
+   * only once activeRouteCount reaches 0.
+   *
+   * While more databases are 'loaded' than maxLoadedRegions allows, or the
+   * total edges across them exceeds maxLoadedRegionEdges, evicts the
+   * least-recently-used one (smallest regionLastUsedAt; a region never
+   * touched sorts as oldest) via unloadDatabaseGraph, which itself refuses
+   * to drop the last loaded database or run while a route is active — both
+   * cases are also checked here to avoid looping, and either one aborts the
+   * whole enforcement pass rather than crashing a route.
+   *
+   * Passes are serialized against each other (capEnforcement). endRoute()
+   * fires this and forgets it, so two routes finishing close together can
+   * otherwise have two passes in flight at once — each picking its victim
+   * from the same pre-eviction snapshot, so both evict the *same* region
+   * (harmless but for the wasted reload) or, with a third region loaded,
+   * both evict a different one and together drop below the one-region floor
+   * the loop below is written to hold. Chaining rather than dropping the
+   * second request: a pass that arrives while another is running may have
+   * newly-loaded regions to trim that the running one already looked past.
+   */
+  private async enforceRegionCap(): Promise<void> {
+    const mine = (this.capEnforcement ?? Promise.resolve()).then(() =>
+      this.enforceRegionCapPass(),
+    );
+    // enforceRegionCapPass never rejects, but the chain must survive a
+    // caller's rejection regardless — a broken link would serialize nothing.
+    this.capEnforcement = mine.catch(() => {});
+    await mine;
+  }
+
+  /** One enforcement pass. See enforceRegionCap, which serializes these. */
+  private async enforceRegionCapPass(): Promise<void> {
+    if (this.policy !== "dynamic") return;
+    if (this.maxLoadedRegions <= 0 && this.maxLoadedRegionEdges <= 0) return;
+    if (this.activeRouteCount > 0) return;
+
+    for (;;) {
+      const loaded = Array.from(this.coverageIndex.values()).filter(
+        (e) => e.state === "loaded",
+      );
+      if (loaded.length <= 1) return;
+      const overCount =
+        this.maxLoadedRegions > 0 && loaded.length > this.maxLoadedRegions;
+      const totalEdges = this.totalLoadedEdges();
+      const overEdges =
+        this.maxLoadedRegionEdges > 0 && totalEdges > this.maxLoadedRegionEdges;
+      if (!overCount && !overEdges) return;
+      if (this.activeRouteCount > 0) return;
+
+      let victim: DatabaseCoverageEntry | null = null;
+      let victimScore = Infinity;
+      for (const entry of loaded) {
+        const score = this.regionLastUsedAt.get(entry.filename) ?? -Infinity;
+        if (score < victimScore) {
+          victimScore = score;
+          victim = entry;
+        }
+      }
+      if (!victim) return;
+
+      try {
+        await this.unloadDatabaseGraph(victim.filename);
+        this.regionLastUsedAt.delete(victim.filename);
+        // Logged because the *next* route that needs this region will read it
+        // from disk again and log a second "Loaded database" for it. Without
+        // this line that reload looks unexplained, when it is in fact a
+        // working set larger than the cap(s) cycling against them — which is
+        // the thing worth seeing in the log.
+        this.log.info(
+          `[routeiq] Evicted database ${victim.filename} (least recently used; ` +
+            `${loaded.length} loaded [maxLoadedRegions=${this.maxLoadedRegions}], ` +
+            `${totalEdges} edges loaded [maxLoadedRegionEdges=${this.maxLoadedRegionEdges}], ` +
+            `over ${overCount && overEdges ? "count and size" : overCount ? "count" : "size"})`,
+        );
+      } catch (e) {
+        // Last-loaded-database guard or a route that started concurrently —
+        // either way, stop enforcing rather than loop or throw out of a
+        // fire-and-forget background pass.
+        this.log.warn(
+          `[routeiq] enforceRegionCap: stopping (${e instanceof Error ? e.message : e})`,
+        );
+        return;
+      }
+    }
+  }
+
+  async getNodeById(id: number): Promise<{
+    lat: number;
+    lon: number;
+    regionId: number;
+    nodeDepth: number;
+    nodeDepthKnown: boolean;
+  } | null> {
+    if (this.graphLoaded) {
+      return this.nodes.get(id) || null;
+    }
+    return null;
+  }
+
+  getNodeSync(id: number): {
+    lat: number;
+    lon: number;
+    regionId: number;
+    nodeDepth: number;
+    nodeDepthKnown: boolean;
+  } | null {
+    if (!this.graphLoaded) {
+      throw new Error("Graph must be loaded for synchronous node lookup");
+    }
+    return this.nodes.get(id) || null;
+  }
+
+  /** Read-only view of the loaded node map, for hot loops that resolve one
+   *  node's coordinates per iteration (A*'s edge relaxation, which reads the
+   *  target node of every edge it considers) — a single Map.get instead of a
+   *  getNodeSync() call each time. The map is mutated in place by
+   *  load/unload, never replaced, so a hoisted reference stays live for the
+   *  caller's whole loop. Callers must treat it as read-only. */
+  getNodeMap(): ReadonlyMap<
+    number,
+    {
+      lat: number;
+      lon: number;
+      regionId: number;
+      nodeDepth: number;
+      nodeDepthKnown: boolean;
+    }
+  > {
+    return this.nodes;
+  }
+
+  async getOutgoingEdges(nodeId: number): Promise<Array<EdgeRow>> {
+    if (this.graphLoaded) {
+      return this.edgesBySource.get(nodeId) || [];
+    }
+    return [];
+  }
+
+  /**
+   * Water names and warnings for a found route's segments (the worker reads
+   * the databases' edge sequence tables; nothing of it lives in the graph).
+   * Segments are node pairs; ones that are not database edges (connectors,
+   * manual legs, overlay edits) come back null.
+   */
+  async describeRoute(
+    segments: Array<{ from: number; to: number }>,
+    lang?: string,
+  ): Promise<DescribeWorkerResult> {
+    const pairs = segments.map((seg) => {
+      const edge = this.edgesBySource
+        .get(seg.from)
+        ?.find((e) => e.target === seg.to);
+      return {
+        source: seg.from,
+        target: seg.to,
+        ...(edge?.dbIndex !== undefined ? { dbIndex: edge.dbIndex } : {}),
+      };
+    });
+    return this.store.describeRoute(pairs, lang);
+  }
+
+  async getEdge(source: number, target: number): Promise<EdgeRow | null> {
+    if (this.graphLoaded) {
+      const edges = this.edgesBySource.get(source);
+      if (edges) {
+        return edges.find((e) => e.target === target) || null;
+      }
+    }
+    return null;
+  }
+
+  async getEdgesBySources(
+    nodeIds: number[],
+  ): Promise<Map<number, Array<EdgeRow>>> {
+    const result = new Map<number, Array<EdgeRow>>();
+    if (!this.graphLoaded) return result;
+    for (const id of nodeIds) {
+      const edges = this.edgesBySource.get(id);
+      if (edges) {
+        result.set(id, edges);
+      }
+    }
+    return result;
+  }
+
+  async findNearestNode(
+    latitude: number,
+    longitude: number,
+    maxDistanceMeters: number = 50000,
+  ): Promise<number | null> {
+    if (!this.graphLoaded) return null;
+    let bestId: number | null = null;
+    let bestDist = maxDistanceMeters;
+    const latRad = (latitude * Math.PI) / 180;
+    const cosLat = Math.cos(latRad);
+    const marginDeg = maxDistanceMeters / 111320;
+    // cos(lat)-corrected longitude margin (see gridCandidateIds) — the same
+    // superset the old full-scan prefilter below re-applies exactly.
+    const marginLonDeg = marginDeg / cosLat;
+    for (const id of this.gridCandidateIds(
+      latitude,
+      longitude,
+      marginDeg,
+      marginLonDeg,
+    )) {
+      const c = this.nodes.get(id);
+      if (!c) continue;
+      if (Math.abs(c.lat - latitude) > marginDeg) continue;
+      if (Math.abs(c.lon - longitude) > marginLonDeg) continue;
+      const dLat = ((c.lat - latitude) * Math.PI) / 180;
+      const dLon = ((c.lon - longitude) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        cosLat * Math.cos((c.lat * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
+      const d =
+        6371000 *
+        2 *
+        Math.atan2(
+          Math.sqrt(Math.min(1, Math.max(0, a))),
+          Math.sqrt(Math.min(1, Math.max(0, 1 - a))),
+        );
+      if (d < bestDist) {
+        bestDist = d;
+        bestId = id;
+      }
+    }
+    return bestId;
+  }
+
+  async findKNearestMainGraphNodes(
+    latitude: number,
+    longitude: number,
+    k: number,
+    maxDistMeters: number = 5000,
+  ): Promise<
+    Array<{ id: number; lat: number; lon: number; distance: number }>
+  > {
+    if (!this.graphLoaded) return [];
+    const latRad = (latitude * Math.PI) / 180;
+    const cosLat = Math.cos(latRad);
+    const marginDeg = maxDistMeters / 111320;
+    const marginLonDeg = marginDeg / cosLat;
+    const candidates: Array<{
+      id: number;
+      lat: number;
+      lon: number;
+      distance: number;
+    }> = [];
+    for (const id of this.gridCandidateIds(
+      latitude,
+      longitude,
+      marginDeg,
+      marginLonDeg,
+    )) {
+      const c = this.nodes.get(id);
+      if (!c) continue;
+      if (c.regionId === 0) continue;
+      if (Math.abs(c.lat - latitude) > marginDeg) continue;
+      if (Math.abs(c.lon - longitude) > marginLonDeg) continue;
+      const d = this.haversineMeters(latitude, longitude, c.lat, c.lon);
+      if (d <= maxDistMeters)
+        candidates.push({ id, lat: c.lat, lon: c.lon, distance: d });
+    }
+    candidates.sort((a, b) => a.distance - b.distance);
+    return candidates.slice(0, k);
+  }
+
+  async findNearestNodeInSet(
+    latitude: number,
+    longitude: number,
+    candidates: Set<number>,
+    maxDistanceMeters: number = 5000,
+  ): Promise<{
+    id: number;
+    lat: number;
+    lon: number;
+    distance: number;
+  } | null> {
+    if (candidates.size === 0 || !this.graphLoaded) return null;
+    let best: {
+      id: number;
+      lat: number;
+      lon: number;
+      distance: number;
+    } | null = null;
+    for (const id of candidates) {
+      const c = this.nodes.get(id);
+      if (!c) continue;
+      const d = this.haversineMeters(latitude, longitude, c.lat, c.lon);
+      if (d <= maxDistanceMeters && (!best || d < best.distance)) {
+        best = { id, lat: c.lat, lon: c.lon, distance: d };
+      }
+    }
+    return best;
+  }
+
+  async getNodesInRadius(
+    latitude: number,
+    longitude: number,
+    radiusMeters: number,
+  ): Promise<
+    Array<{ id: number; lat: number; lon: number; distance: number }>
+  > {
+    const results: Array<{
+      id: number;
+      lat: number;
+      lon: number;
+      distance: number;
+    }> = [];
+    if (!this.graphLoaded) return results;
+    const latRad = (latitude * Math.PI) / 180;
+    const cosLat = Math.cos(latRad);
+    const marginDeg = radiusMeters / 111320;
+    const marginLonDeg = marginDeg / cosLat;
+    for (const id of this.gridCandidateIds(
+      latitude,
+      longitude,
+      marginDeg,
+      marginLonDeg,
+    )) {
+      const c = this.nodes.get(id);
+      if (!c) continue;
+      if (Math.abs(c.lat - latitude) > marginDeg) continue;
+      if (Math.abs(c.lon - longitude) > marginLonDeg) continue;
+      const dLat = ((c.lat - latitude) * Math.PI) / 180;
+      const dLon = ((c.lon - longitude) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        cosLat * Math.cos((c.lat * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
+      const d =
+        6371000 *
+        2 *
+        Math.atan2(
+          Math.sqrt(Math.min(1, Math.max(0, a))),
+          Math.sqrt(Math.min(1, Math.max(0, 1 - a))),
+        );
+      if (d <= radiusMeters)
+        results.push({ id, lat: c.lat, lon: c.lon, distance: d });
+    }
+    results.sort((a, b) => a.distance - b.distance);
+    return results;
+  }
+
+  async findNearestEdge(
+    latitude: number,
+    longitude: number,
+    maxDistMeters: number = 20000,
+  ): Promise<EdgeSnapResult | null> {
+    if (!this.graphLoaded) return null;
+
+    const radiusDeg = maxDistMeters / 111320;
+    const cellSize = 0.01;
+    const cells = Math.ceil(radiusDeg / cellSize);
+    const centerCol = Math.floor(longitude / cellSize);
+    const centerRow = Math.floor(latitude / cellSize);
+
+    const visitedEdges = new Set<string>();
+    let best: EdgeSnapResult | null = null;
+    let bestDist = maxDistMeters;
+
+    for (let dr = -cells; dr <= cells; dr++) {
+      for (let dc = -cells; dc <= cells; dc++) {
+        const key = `${centerRow + dr}:${centerCol + dc}`;
+        const nodeIds = this.spatialGrid.get(key);
+        if (!nodeIds) continue;
+
+        for (const nodeId of nodeIds) {
+          const edges = this.edgesBySource.get(nodeId);
+          if (!edges) continue;
+
+          for (const edge of edges) {
+            const edgeKey = `${edge.source}:${edge.target}`;
+            if (visitedEdges.has(edgeKey)) continue;
+            visitedEdges.add(edgeKey);
+
+            const s = this.nodes.get(edge.source);
+            const t = this.nodes.get(edge.target);
+            if (!s || !t) continue;
+
+            const { fraction, point, distance } = this.projectOnEdge(
+              s.lon,
+              s.lat,
+              t.lon,
+              t.lat,
+              longitude,
+              latitude,
+            );
+
+            if (distance < bestDist) {
+              bestDist = distance;
+              const distToSource = this.haversineMeters(
+                latitude,
+                longitude,
+                s.lat,
+                s.lon,
+              );
+              const distToTarget = this.haversineMeters(
+                latitude,
+                longitude,
+                t.lat,
+                t.lon,
+              );
+              const nearNode =
+                distToSource <= distToTarget ? edge.source : edge.target;
+              const farNode =
+                nearNode === edge.source ? edge.target : edge.source;
+              best = {
+                source: edge.source,
+                target: edge.target,
+                fraction,
+                point,
+                distance,
+                nearNode,
+                farNode,
+                edge,
+              };
+            }
+          }
+        }
+      }
+    }
+
+    return best;
+  }
+
+  public projectOnEdge(
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number,
+    px: number,
+    py: number,
+  ): {
+    fraction: number;
+    point: { lat: number; lon: number };
+    distance: number;
+  } {
+    // Scale longitude differences by cos(midLat) so that 1° lon and 1° lat
+    // have equal weight in the projection. Without this correction the result
+    // is distorted above ~40° latitude (1° lon < 1° lat in real distance).
+    const midLat = (((ay + by) / 2) * Math.PI) / 180;
+    const cosLat = Math.cos(midLat);
+
+    const dx = (bx - ax) * cosLat;
+    const dy = by - ay;
+    const lenSq = dx * dx + dy * dy;
+
+    if (lenSq < 1e-12) {
+      const d = this.haversineMeters(py, px, ay, ax);
+      return { fraction: 0, point: { lat: ay, lon: ax }, distance: d };
+    }
+
+    const qx = (px - ax) * cosLat;
+    const qy = py - ay;
+    const t = Math.max(0, Math.min(1, (qx * dx + qy * dy) / lenSq));
+
+    // Back-project to geographic coordinates
+    const projLon = ax + t * (bx - ax);
+    const projLat = ay + t * (by - ay);
+    const dist = this.haversineMeters(py, px, projLat, projLon);
+
+    return {
+      fraction: t,
+      point: { lat: projLat, lon: projLon },
+      distance: dist,
+    };
+  }
+
+  getReachableNodes(startNode: number): Set<number> {
+    if (!this.graphLoaded) {
+      throw new Error("Graph must be loaded before checking reachability");
+    }
+    const visited = new Set<number>();
+    const queue: number[] = [startNode];
+    visited.add(startNode);
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      const edges = this.edgesBySource.get(current);
+      if (edges) {
+        for (const edge of edges) {
+          // TRAFFIC_ONE_WAY_REV (=2) means only target→source is legal;
+          // do not follow it source→target or reachability is wrong.
+          if (edge.traffic_mode === TRAFFIC_ONE_WAY_REV) continue;
+          if (!visited.has(edge.target)) {
+            visited.add(edge.target);
+            queue.push(edge.target);
+          }
+        }
+      }
+    }
+    return visited;
+  }
+
+  /**
+   * Whether `startNode` leads anywhere: a forward search over the edges
+   * A* can sail (no wrong-way one-way edge, none across land or an
+   * obstacle) that reaches one of `targets`, or visits
+   * more than `maxNodes` nodes, says yes; running out of nodes first says
+   * it sits in a small island of its own. Bounded, so the common "yes" on a
+   * big graph costs at most `maxNodes` visits.
+   */
+  leadsAnywhere(
+    startNode: number,
+    targets: ReadonlySet<number>,
+    maxNodes: number,
+  ): boolean {
+    if (targets.has(startNode)) return true;
+    const visited = new Set<number>([startNode]);
+    const queue: number[] = [startNode];
+    for (let i = 0; i < queue.length; i++) {
+      const edges = this.edgesBySource.get(queue[i]);
+      if (!edges) continue;
+      for (const edge of edges) {
+        if (!isSailableEdge(edge)) continue;
+        if (visited.has(edge.target)) continue;
+        if (targets.has(edge.target)) return true;
+        visited.add(edge.target);
+        if (visited.size > maxNodes) return true;
+        queue.push(edge.target);
+      }
+    }
+    return false;
+  }
+
+  /** The navmesh region (if any) whose boundary_geometry contains this point. */
+  findNavmeshRegionAt(lat: number, lon: number): Navmesh.NavmeshRegion | null {
+    for (const region of this.navmeshRegions) {
+      if (
+        lat < region.bbox.minLat ||
+        lat > region.bbox.maxLat ||
+        lon < region.bbox.minLon ||
+        lon > region.bbox.maxLon
+      )
+        continue;
+      if (Navmesh.pointInPolygon(lat, lon, region.boundaryGeometry))
+        return region;
+    }
+    return null;
+  }
+
+  /** Read-only accessor, e.g. for graph-editor visualization. */
+  getNavmeshRegions(): Navmesh.NavmeshRegion[] {
+    return this.navmeshRegions;
+  }
+
+  funnelPathBetweenNodes(
+    region: Navmesh.NavmeshRegion,
+    nodeA: number,
+    nodeB: number,
+  ): Navmesh.FunnelResult | null {
+    return Navmesh.funnelBetweenNodes(region, nodeA, nodeB);
+  }
+
+  funnelPathFromPoint(
+    region: Navmesh.NavmeshRegion,
+    lat: number,
+    lon: number,
+    targetNodeId: number,
+  ): Navmesh.FunnelResult | null {
+    return Navmesh.funnelFromPoint(region, lat, lon, targetNodeId);
+  }
+
+  funnelPathBetweenPoints(
+    region: Navmesh.NavmeshRegion,
+    latA: number,
+    lonA: number,
+    latB: number,
+    lonB: number,
+  ): Navmesh.FunnelResult | null {
+    return Navmesh.funnelBetweenPoints(region, latA, lonA, latB, lonB);
+  }
+
+  /**
+   * Look up a precomputed navmesh shortcut edge (ring-adjacency upgrade or
+   * anchor shortcut — see `addAnchorShortcutEdges`) between two boundary
+   * nodes of the same region, if one exists. Lets a caller compose a cheap,
+   * non-live approximate cost to a non-anchor boundary node — live anchor
+   * result + this precomputed hop — instead of a live `funnelPathFromPoint`
+   * call per node (NEXT_PHASES.md's boundary-shortcut-sparsification fix).
+   */
+  getPrecomputedNavmeshShortcut(
+    source: number,
+    target: number,
+  ): { distance: number; path_points?: Array<[number, number]> } | null {
+    const edge = this.edgesBySource
+      .get(source)
+      ?.find(
+        (e) =>
+          e.target === target && e.edge_kind_id === EDGE_KIND_NAVMESH_BOUNDARY,
+      );
+    return edge
+      ? { distance: edge.distance, path_points: edge.path_points }
+      : null;
+  }
+
+  async searchPois(
+    query: string,
+    maxResults: number = 20,
+  ): Promise<PoiResult[]> {
+    const pattern = sanitizeSearchQuery(
+      query,
+      this.poiLimits.maxSearchQueryLength,
+    ).toLowerCase();
+    // Nothing but control characters is not "match everything".
+    if (pattern === "" && query !== "") return [];
+    // A count: whole, never negative (a negative would slice from the end).
+    let count = Math.floor(Number(maxResults));
+    if (Number.isNaN(count) || count < 0) count = 0;
+    maxResults = Math.min(count, this.poiLimits.maxSearchResults);
+    if (maxResults === 0) return [];
+    // Wholes and harbours only: a part is found through its whole, so the
+    // same lock never appears once per chamber. Sort before slicing so
+    // results are alphabetically consistent regardless of the order rows were
+    // inserted into the database. One entry per id (a whole in two files).
+    const rows = [...this.getPoiIndex().byId.values()]
+      .filter(
+        (row) =>
+          KNOWN_POI_TYPES.has(row.type_id) &&
+          !POI_PART_TYPES.has(row.type_id) &&
+          (row.name ?? "").toLowerCase().includes(pattern),
+      )
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .slice(0, maxResults);
+    const info = await this.getPoiInfo(rows.map((r) => r.id));
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      typeId: row.type_id,
+      properties: parsePoiJson(row.properties),
+      info: info[String(row.id)] ?? {},
+      latitude: row.lat,
+      longitude: row.lon,
+    }));
+  }
+
+  /** Display facts (`pois.info`) for the given POIs, read from the database
+   *  files on demand (the graph never holds them). Keyed by id as a string;
+   *  a POI with no usable `info` has no entry. */
+  async getPoiInfo(
+    ids: number[],
+  ): Promise<Record<string, Record<string, unknown>>> {
+    if (ids.length === 0) return {};
+    return this.store.poiInfo(ids);
+  }
+
+  /**
+   * The chambers and spans each edge pair passes (`edge_pois`), unioned over
+   * every file that holds the pair. `known` is false for a pair no open file
+   * holds (overlay edits, connectors, navmesh shortcuts): "no data", as
+   * opposed to a known pair that passes nothing.
+   */
+  async getRoutePois(
+    pairs: Array<[number, number]>,
+  ): Promise<Array<{ poiIds: number[]; known: boolean }>> {
+    if (pairs.length === 0) return [];
+    const request = pairs.map(([a, b]) => {
+      // Both directions: each directed edge may be held by different files,
+      // and edge_pois is keyed by the unordered pair.
+      const edges = [this.getEdgeSync(a, b), this.getEdgeSync(b, a)].filter(
+        (e) => e !== null && e !== undefined,
+      );
+      let dbIndexes: number[] | null;
+      if (edges.some((e) => e.dbIndex === undefined)) {
+        dbIndexes = null; // bulk mode leaves file edges untagged: the worker checks every file
+      } else {
+        const set = new Set<number>();
+        for (const e of edges) {
+          for (const i of [e.dbIndex as number, ...(e.extraDbIndexes ?? [])]) {
+            if (i >= 0) set.add(i);
+          }
+        }
+        dbIndexes = [...set];
+      }
+      // A navmesh boundary edge may be a synthetic funnel/anchor edge that
+      // carries its region's dbIndex but is in no file: the worker must check
+      // the file holds it. Other tagged edges came from those files.
+      const verify = edges.some(
+        (e) => e.edge_kind_id === EDGE_KIND_NAVMESH_BOUNDARY,
+      );
+      return { lo: Math.min(a, b), hi: Math.max(a, b), dbIndexes, verify };
+    });
+    return this.store.routePois(request);
+  }
+
+  async getOverlayStats(): Promise<{
+    nodes: number;
+    edges: number;
+    deletedNodes: number;
+    deletedEdges: number;
+  }> {
+    // No overlay (read-only, or none configured): nothing was ever edited.
+    if (!this.overlay) {
+      return { nodes: 0, edges: 0, deletedNodes: 0, deletedEdges: 0 };
+    }
+    return this.overlay.getOverlayStats();
+  }
+
+  async getStats(): Promise<{ nodes: number; edges: number; pois: number }> {
+    let edgeCount = 0;
+    for (const edges of this.edgesBySource.values()) {
+      edgeCount += edges.length;
+    }
+    return {
+      nodes: this.nodes.size,
+      edges: edgeCount,
+      pois: this.pois.length,
+    };
+  }
+
+  /** Number of distinct source nodes with at least one outgoing edge.
+   *  Exposed for §4a dynamic-loading tests: a load/unload/reload cycle
+   *  should return this to its pre-load value, catching any leaked
+   *  synthetic funnel/anchor-shortcut edge (or leaked source-key entry)
+   *  that unloadDatabaseGraph failed to remove. */
+  getEdgesBySourceSize(): number {
+    return this.edgesBySource.size;
+  }
+
+  async getNodesInBBox(
+    minLat: number,
+    minLon: number,
+    maxLat: number,
+    maxLon: number,
+    limit: number = 5000,
+  ): Promise<
+    Array<{
+      id: number;
+      lat: number;
+      lon: number;
+      min_depth: number;
+      /** Whether `min_depth` is a reading at all. Sent because a negative
+       *  depth is a charted drying height on schema_version >= 2 data, and a
+       *  client cannot tell that from the unknown sentinel on its own — the
+       *  test depends on the file's schema version, which never leaves the
+       *  server. Without it the graph editor renders a real drying height as
+       *  "no data", and its depth field blanks a value the user can then
+       *  save over. */
+      min_depth_known: boolean;
+      region_id: number;
+    }>
+  > {
+    const results: Array<{
+      id: number;
+      lat: number;
+      lon: number;
+      min_depth: number;
+      min_depth_known: boolean;
+      region_id: number;
+    }> = [];
+    // Box query, not a radius query — no cos(lat) correction needed: iterate
+    // every grid cell whose row/col range overlaps [minLat,maxLat] x
+    // [minLon,maxLon] exactly (same Math.floor cell math buildSpatialIndex
+    // uses), then apply the same exact box test the old full scan used.
+    const cellSize = 0.01;
+    const minRow = Math.floor(minLat / cellSize);
+    const maxRow = Math.floor(maxLat / cellSize);
+    const minCol = Math.floor(minLon / cellSize);
+    const maxCol = Math.floor(maxLon / cellSize);
+    outer: for (let row = minRow; row <= maxRow; row++) {
+      for (let col = minCol; col <= maxCol; col++) {
+        const ids = this.spatialGrid.get(`${row}:${col}`);
+        if (!ids) continue;
+        for (const id of ids) {
+          const c = this.nodes.get(id);
+          if (!c) continue;
+          if (
+            c.lat >= minLat &&
+            c.lat <= maxLat &&
+            c.lon >= minLon &&
+            c.lon <= maxLon
+          ) {
+            results.push({
+              id,
+              lat: c.lat,
+              lon: c.lon,
+              min_depth: c.nodeDepth,
+              min_depth_known: c.nodeDepthKnown,
+              region_id: c.regionId,
+            });
+            if (results.length >= limit) break outer;
+          }
+        }
+      }
+    }
+    results.sort((a, b) => a.id - b.id);
+    return results;
+  }
+
+  async getEdgesInBBox(
+    minLat: number,
+    minLon: number,
+    maxLat: number,
+    maxLon: number,
+    limit: number = 5000,
+  ): Promise<
+    Array<{
+      source: number;
+      target: number;
+      source_lat: number;
+      source_lon: number;
+      target_lat: number;
+      target_lon: number;
+      distance: number;
+      min_depth: number;
+      /** See the same field on getNodesInBBox — a negative depth is a real
+       *  drying height on newer data, and the client cannot tell that from
+       *  the unknown sentinel by itself. */
+      min_depth_known: boolean;
+      max_air_draft: number;
+      min_width: number;
+      edge_type_id: number;
+      edge_kind_id: number;
+      traffic_mode: number;
+      cost_factor: number;
+      /** Interior [lat,lon] points (source→target order, same as the internal
+       *  EdgeRow.path_points and the pts array buildRouteResult walks — NOT
+       *  GeoJSON [lon,lat] order) for edges whose real geometry is a curved
+       *  funnel path rather than the source-target straight chord. Omitted
+       *  entirely (not an empty array) when the edge has no such geometry, to
+       *  keep the common-case payload the same size as before this field
+       *  existed. Round 23b (see NEXT_PHASES.md §5.3). */
+      path_points?: Array<[number, number]>;
+    }>
+  > {
+    const results: Array<{
+      source: number;
+      target: number;
+      source_lat: number;
+      source_lon: number;
+      target_lat: number;
+      target_lon: number;
+      distance: number;
+      min_depth: number;
+      min_depth_known: boolean;
+      max_air_draft: number;
+      min_width: number;
+      edge_type_id: number;
+      edge_kind_id: number;
+      traffic_mode: number;
+      cost_factor: number;
+      path_points?: Array<[number, number]>;
+    }> = [];
+    if (!this.edgeGrid) this.edgeGrid = this.buildEdgeGrid();
+
+    // Box query, not a radius query — no cos(lat) correction needed: iterate
+    // every grid cell whose row/col range overlaps [minLat,maxLat] x
+    // [minLon,maxLon] exactly (same Math.floor cell math buildSpatialIndex
+    // uses), then apply the same exact endpoint-in-bbox test the old full
+    // scan used. Every qualifying edge has at least one endpoint whose cell
+    // falls in this range (buildEdgeGrid registers both endpoints), so the
+    // candidate set is a superset of the true answer — identical result to
+    // the full scan once the exact test below is reapplied.
+    const cellSize = 0.01;
+    const minRow = Math.floor(minLat / cellSize);
+    const maxRow = Math.floor(maxLat / cellSize);
+    const minCol = Math.floor(minLon / cellSize);
+    const maxCol = Math.floor(maxLon / cellSize);
+    // An edge is registered under up to two cells (source + target), and
+    // both could fall in the queried row/col range — dedup by (source,
+    // target) so a qualifying edge is only ever emitted once, exactly as a
+    // full scan over edgesBySource (which stores each directed edge once)
+    // would.
+    const visited = new Set<string>();
+    outer: for (let row = minRow; row <= maxRow; row++) {
+      for (let col = minCol; col <= maxCol; col++) {
+        const bucket = this.edgeGrid.get(`${row}:${col}`);
+        if (!bucket) continue;
+        for (const e of bucket) {
+          const edgeKey = `${e.source}:${e.target}`;
+          if (visited.has(edgeKey)) continue;
+          // Endpoint coordinates live only in the node map — this response
+          // still exposes them (the webapp draws each edge from them), so
+          // they're resolved here, at serialization time, rather than kept
+          // on every EdgeRow. Both lookups always hit for a gridded edge
+          // (buildEdgeGrid only buckets edges whose endpoints resolve).
+          const s = this.nodes.get(e.source);
+          const t = this.nodes.get(e.target);
+          if (!s || !t) continue;
+          if (
+            (s.lat >= minLat &&
+              s.lat <= maxLat &&
+              s.lon >= minLon &&
+              s.lon <= maxLon) ||
+            (t.lat >= minLat &&
+              t.lat <= maxLat &&
+              t.lon >= minLon &&
+              t.lon <= maxLon)
+          ) {
+            visited.add(edgeKey);
+            results.push({
+              source: e.source,
+              target: e.target,
+              source_lat: s.lat,
+              source_lon: s.lon,
+              target_lat: t.lat,
+              target_lon: t.lon,
+              distance: e.distance,
+              min_depth: e.min_depth,
+              min_depth_known: e.min_depth_known ?? e.min_depth >= 0,
+              max_air_draft: e.max_air_draft,
+              min_width: e.min_width,
+              edge_type_id: e.edge_type_id,
+              edge_kind_id: e.edge_kind_id ?? EDGE_KIND_CENTERLINE,
+              traffic_mode: e.traffic_mode,
+              cost_factor: e.cost_factor,
+              ...(e.path_points && e.path_points.length > 0
+                ? { path_points: e.path_points }
+                : {}),
+            });
+            if (results.length >= limit) break outer;
+          }
+        }
+      }
+    }
+    return results;
+  }
+
+  /** The limit to pass `getPoisInBBox` for a client's request: what it asked
+   *  for, at least 1, never more than `limits.maxBBoxResults`. */
+  clampBBoxLimit(requested?: number): number {
+    const max = Math.max(1, Math.floor(this.poiLimits.maxBBoxResults));
+    return requested === undefined || Number.isNaN(requested)
+      ? max
+      : Math.max(1, Math.min(max, Math.floor(requested)));
+  }
+
+  /**
+   * POIs inside a box, for the map and for crossing detection: parts (chambers
+   * and spans) and harbours, never a whole, so a lock is not drawn once as a
+   * whole and again as each chamber. One entry per id. At most
+   * MAX_POIS_IN_BBOX results (`info` is read from the files for each result,
+   * so the cap bounds that read); `limit` can only lower it.
+   *
+   * Each result carries `properties` (routing facts) and `info` (display
+   * facts) as separate fields, and `parentId` for a part.
+   */
+  async getPoisInBBox(
+    minLat: number,
+    minLon: number,
+    maxLat: number,
+    maxLon: number,
+    limit: number = MAX_POIS_IN_BBOX,
+    opts: { types?: ReadonlySet<number>; includeInfo?: boolean } = {},
+  ): Promise<PoiBBoxResult[]> {
+    const cap = limit;
+    const includeInfo = opts.includeInfo ?? true;
+    const rows: PoiRow[] = [];
+    const seen = new Set<number>();
+    if (!this.poiGrid) this.poiGrid = this.buildPoiGrid();
+    // Box query, not a radius query — no cos(lat) correction needed: iterate
+    // every grid cell whose row/col range overlaps [minLat,maxLat] x
+    // [minLon,maxLon] exactly (same Math.floor cell math buildSpatialIndex
+    // uses), then apply the same exact box test the old full scan used.
+    const cellSize = 0.01;
+    const minRow = Math.floor(minLat / cellSize);
+    const maxRow = Math.floor(maxLat / cellSize);
+    const minCol = Math.floor(minLon / cellSize);
+    const maxCol = Math.floor(maxLon / cellSize);
+    for (let row = minRow; row <= maxRow; row++) {
+      for (let col = minCol; col <= maxCol; col++) {
+        const bucket = this.poiGrid.get(`${row}:${col}`);
+        if (!bucket) continue;
+        for (const poi of bucket) {
+          if (!KNOWN_POI_TYPES.has(poi.type_id)) continue;
+          if (POI_WHOLE_TYPES.has(poi.type_id)) continue;
+          if (opts.types && !opts.types.has(poi.type_id)) continue;
+          if (seen.has(poi.id)) continue;
+          if (
+            poi.lat >= minLat &&
+            poi.lat <= maxLat &&
+            poi.lon >= minLon &&
+            poi.lon <= maxLon
+          ) {
+            seen.add(poi.id);
+            rows.push(poi);
+          }
+        }
+      }
+    }
+    // Over the cap, keep the POIs nearest the box centre: cutting in grid
+    // order would favour one corner of the box.
+    if (rows.length > cap) {
+      const cLat = (minLat + maxLat) / 2;
+      const cLon = (minLon + maxLon) / 2;
+      // Longitude degrees shrink with latitude: scale them so the ranking is
+      // by ground distance (still a cheap squared distance).
+      const cosLat = Math.max(0.01, Math.cos((cLat * Math.PI) / 180));
+      const d2 = (r: PoiRow) =>
+        (r.lat - cLat) ** 2 + ((r.lon - cLon) * cosLat) ** 2;
+      rows.sort((a, b) => d2(a) - d2(b));
+      rows.length = cap;
+    }
+    // The spans' bridge wholes are read too, but only for their kind.
+    const info = includeInfo
+      ? await this.getPoiInfo(this.withSpanKindSources(rows.map((r) => r.id)))
+      : {};
+    const results: PoiBBoxResult[] = rows.map((poi) => {
+      const kind = this.spanKind(poi.id, info);
+      const heightUnknown = this.spanHeightUnknown(poi.id, info);
+      return {
+        id: poi.id,
+        name: poi.name,
+        displayName: this.poiDisplayName(poi),
+        typeId: poi.type_id,
+        parentId: poi.parent_id ?? null,
+        properties: parsePoiJson(poi.properties),
+        info: info[String(poi.id)] ?? {},
+        ...(kind !== undefined ? { kind } : {}),
+        ...(heightUnknown ? { heightUnknown } : {}),
+        lat: poi.lat,
+        lon: poi.lon,
+      };
+    });
+    results.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+    return results;
+  }
+
+  /**
+   * The nearest part or harbour (as on the map) within `maxDistanceMeters`,
+   * and its distance in metres; null when there is none. `accept` narrows
+   * the candidates further.
+   */
+  private nearestPoiRow(
+    lat: number,
+    lon: number,
+    maxDistanceMeters: number,
+    accept?: (poi: PoiRow) => boolean,
+  ): { row: PoiRow; distance: number } | null {
+    if (!this.poiGrid) this.poiGrid = this.buildPoiGrid();
+    let best: PoiRow | null = null;
+    let bestDist = Infinity;
+    // Gather candidates from every cell overlapping the cos(lat)-corrected
+    // radius box — same superset technique gridCandidateIds uses for nodes —
+    // then apply the same exact haversine + `d <= maxDistanceMeters` +
+    // nearest selection the old full scan used. Parts and harbours only, as
+    // on the map.
+    const latRad = (lat * Math.PI) / 180;
+    const cosLat = Math.cos(latRad);
+    const marginLat = maxDistanceMeters / 111320;
+    const marginLon = marginLat / Math.max(1e-9, cosLat);
+    const cellSize = 0.01;
+    const minRow = Math.floor((lat - marginLat) / cellSize);
+    const maxRow = Math.floor((lat + marginLat) / cellSize);
+    const minCol = Math.floor((lon - marginLon) / cellSize);
+    const maxCol = Math.floor((lon + marginLon) / cellSize);
+    for (let row = minRow; row <= maxRow; row++) {
+      for (let col = minCol; col <= maxCol; col++) {
+        const bucket = this.poiGrid.get(`${row}:${col}`);
+        if (!bucket) continue;
+        for (const poi of bucket) {
+          if (!KNOWN_POI_TYPES.has(poi.type_id)) continue;
+          if (POI_WHOLE_TYPES.has(poi.type_id)) continue;
+          const d = this.haversineMeters(lat, lon, poi.lat, poi.lon);
+          if (
+            d < bestDist &&
+            d <= maxDistanceMeters &&
+            (!accept || accept(poi))
+          ) {
+            bestDist = d;
+            best = poi;
+          }
+        }
+      }
+    }
+    return best ? { row: best, distance: bestDist } : null;
+  }
+
+  /**
+   * The name to call a position by when it lies at a point of interest: the
+   * display name (a chamber or bridge span reads as its whole) of the nearest
+   * named part or harbour within `maxDistanceMeters`. Undefined when there
+   * is none.
+   */
+  nearestPoiName(
+    lat: number,
+    lon: number,
+    maxDistanceMeters: number,
+  ): string | undefined {
+    const found = this.nearestPoiRow(
+      lat,
+      lon,
+      maxDistanceMeters,
+      (poi) => this.poiDisplayName(poi).trim() !== "",
+    );
+    return found ? this.poiDisplayName(found.row).trim() : undefined;
+  }
+
+  async getNearestPoi(
+    lat: number,
+    lon: number,
+    maxDistanceMeters: number = 250,
+  ): Promise<{
+    id: number;
+    name: string;
+    typeId: number;
+    parentId: number | null;
+    properties: Record<string, unknown>;
+    info: Record<string, unknown>;
+    latitude: number;
+    longitude: number;
+    distance: number;
+  } | null> {
+    const found = this.nearestPoiRow(
+      lat,
+      lon,
+      Math.min(maxDistanceMeters, this.poiLimits.maxNearestRadiusM),
+    );
+    if (!found) return null;
+    const { row: best, distance: bestDist } = found;
+    const info = await this.getPoiInfo([best.id]);
+    return {
+      id: best.id,
+      name: best.name,
+      typeId: best.type_id,
+      parentId: best.parent_id ?? null,
+      properties: parsePoiJson(best.properties),
+      info: info[String(best.id)] ?? {},
+      latitude: best.lat,
+      longitude: best.lon,
+      distance: Math.round(bestDist),
+    };
+  }
+
+  private haversineMeters(
+    lat1: number,
+    lon1: number,
+    lat2: number,
+    lon2: number,
+  ): number {
+    const R = 6371000;
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLon = ((lon2 - lon1) * Math.PI) / 180;
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos((lat1 * Math.PI) / 180) *
+        Math.cos((lat2 * Math.PI) / 180) *
+        Math.sin(dLon / 2) ** 2;
+    return (
+      R *
+      2 *
+      Math.atan2(
+        Math.sqrt(Math.min(1, Math.max(0, a))),
+        Math.sqrt(Math.min(1, Math.max(0, 1 - a))),
+      )
+    );
+  }
+
+  private waterwaysGeoJson: any = null;
+
+  async getWaterways(
+    minLat: number,
+    minLon: number,
+    maxLat: number,
+    maxLon: number,
+  ): Promise<any[]> {
+    if (!this.waterwaysGeoJson) {
+      if (!this.waterwaysPath || !existsSync(this.waterwaysPath)) {
+        this.waterwaysGeoJson = { type: "FeatureCollection", features: [] };
+      } else {
+        const raw = readFileSync(this.waterwaysPath, "utf-8");
+        try {
+          this.waterwaysGeoJson = JSON.parse(raw);
+        } catch {
+          this.waterwaysGeoJson = { type: "FeatureCollection", features: [] };
+        }
+      }
+    }
+
+    if (!this.waterwaysGeoJson.features) return [];
+
+    const result: any[] = [];
+    for (const f of this.waterwaysGeoJson.features) {
+      if (featureIntersectsBBox(f, minLat, minLon, maxLat, maxLon)) {
+        result.push(f);
+      }
+    }
+    return result;
+  }
+
+  /** Null both bbox-query caches (poiGrid, edgeGrid) so the next
+   *  getPoisInBBox/getNearestPoi/getEdgesInBBox call rebuilds them from
+   *  scratch over the then-current `this.pois`/`edgesBySource`. Called at
+   *  every site that mutates either of those: loadGraph (bulk),
+   *  loadDatabaseGraphInner and unloadDatabaseGraph (dynamic per-file
+   *  load/unload), addEdge, deleteEdge, deleteNode, addNode, and close().
+   *  Over-invalidation (calling this when nothing actually changed) is
+   *  cheap and safe — just an extra rebuild on the next query; a *missed*
+   *  invalidation is the only real risk (a query would silently serve stale
+   *  results), so mutation sites call this even where it may look
+   *  redundant. */
+  private invalidateBBoxCaches(): void {
+    this.graphGeneration++;
+    this.poiGrid = null;
+    this.poiIndex = null;
+    this.edgeGrid = null;
+  }
+
+  /** Bumped on every change to the in-memory graph (each call of
+   *  invalidateBBoxCaches: a load, an edit). A route found at one generation
+   *  and judged at a later one has to re-read its limits and crossings from
+   *  the graph (RoutingEngine.refreshCandidateLimits). */
+  graphGeneration = 0;
+
+  /** Deletions made while a per-file load is reading from the worker, one
+   *  set per load in flight. The load applies its own snapshot of the
+   *  overlay deletions, taken before these happened, so without them it
+   *  would put a node or edge the user just deleted back. */
+  private loadTombstones = new Set<{
+    nodes: Set<number>;
+    edges: Set<string>;
+  }>();
+
+  /** Lazy id -> row and whole -> parts maps over `this.pois`, rebuilt from
+   *  scratch after any change (see invalidateBBoxCaches). A POI present in
+   *  several files (a whole cut by a region border) is one entry; the first
+   *  row wins, the rows being identical by the spec (§2.10). */
+  private getPoiIndex(): {
+    byId: Map<number, PoiRow>;
+    childrenOf: Map<number, PoiRow[]>;
+  } {
+    if (this.poiIndex) return this.poiIndex;
+    const byId = new Map<number, PoiRow>();
+    for (const row of this.pois) if (!byId.has(row.id)) byId.set(row.id, row);
+    const childrenOf = new Map<number, PoiRow[]>();
+    for (const row of byId.values()) {
+      if (row.parent_id === null || row.parent_id === undefined) continue;
+      const list = childrenOf.get(row.parent_id);
+      if (list) list.push(row);
+      else childrenOf.set(row.parent_id, [row]);
+    }
+    this.poiIndex = { byId, childrenOf };
+    return this.poiIndex;
+  }
+
+  /** See PoiBBoxResult.displayName. */
+  poiDisplayName(poi: PoiRow): string {
+    const whole = this.getPoiParent(poi);
+    const wholeNamesIt =
+      whole !== undefined &&
+      ((poi.type_id === POI_TYPE_LOCK_CHAMBER &&
+        whole.type_id === POI_TYPE_LOCK) ||
+        (poi.type_id === POI_TYPE_BRIDGE_SPAN &&
+          whole.type_id === POI_TYPE_BRIDGE));
+    return (
+      (wholeNamesIt ? whole.name : poi.name) || poi.name || whole?.name || ""
+    );
+  }
+
+  /** The bridge whole a span reads its kind from when it has none of its
+   *  own; undefined for anything else (a span over a lock head is a bridge
+   *  in its own right and has no bridge whole). */
+  private spanKindWhole(id: number): PoiRow | undefined {
+    const row = this.bridgeSpanRow(id);
+    if (!row) return undefined;
+    const whole = this.getPoiParent(row);
+    return whole && whole.type_id === POI_TYPE_BRIDGE ? whole : undefined;
+  }
+
+  /** The POI row of `id` when it is a bridge span, else undefined. */
+  private bridgeSpanRow(id: number): PoiRow | undefined {
+    const row = this.getPoiRow(id);
+    return row && row.type_id === POI_TYPE_BRIDGE_SPAN ? row : undefined;
+  }
+
+  /** A bridge span's `info[key]`: its own when `accept` takes it, else its
+   *  bridge whole's when `accept` takes that; undefined for other POIs. */
+  private spanInfoValue<T>(
+    id: number,
+    info: Record<string, Record<string, unknown>>,
+    key: string,
+    accept: (v: unknown) => v is T,
+  ): T | undefined {
+    if (!this.bridgeSpanRow(id)) return undefined;
+    const own = info[String(id)]?.[key];
+    if (accept(own)) return own;
+    const whole = this.spanKindWhole(id);
+    const w = whole ? info[String(whole.id)]?.[key] : undefined;
+    return accept(w) ? w : undefined;
+  }
+
+  /** `ids` plus the bridge wholes of the spans among them, deduplicated: the
+   *  ids to read `info` for so `spanKind` can answer for every span. */
+  withSpanKindSources(ids: number[]): number[] {
+    const out = new Set(ids);
+    for (const id of ids) {
+      const whole = this.spanKindWhole(id);
+      if (whole) out.add(whole.id);
+    }
+    return [...out];
+  }
+
+  /**
+   * A bridge span's structure kind (spec §2.10.2 `info.kind`: "bridge",
+   * "cable", "weir", ...): the span's own, else its bridge whole's — the
+   * producer usually writes it on the whole only. undefined for any other
+   * POI and where neither says, which readers take as a bridge. `info` must
+   * hold the ids `withSpanKindSources` gave.
+   */
+  spanKind(
+    id: number,
+    info: Record<string, Record<string, unknown>>,
+  ): string | undefined {
+    return this.spanInfoValue(
+      id,
+      info,
+      "kind",
+      (v): v is string => typeof v === "string" && v !== "",
+    );
+  }
+
+  /**
+   * Whether a bridge span's height is unknown (spec §2.10.2
+   * `info.height_unknown`: any `height` given is only an estimate): the
+   * span's own flag when it has one, else its bridge whole's, like
+   * `spanKind`. false for any other POI and where neither says. `info` must
+   * hold the ids `withSpanKindSources` gave.
+   */
+  spanHeightUnknown(
+    id: number,
+    info: Record<string, Record<string, unknown>>,
+  ): boolean {
+    return (
+      this.spanInfoValue(
+        id,
+        info,
+        "height_unknown",
+        (v): v is boolean => typeof v === "boolean",
+      ) === true
+    );
+  }
+
+  /** A POI row by id, or undefined. */
+  getPoiRow(id: number): PoiRow | undefined {
+    return this.getPoiIndex().byId.get(id);
+  }
+
+  /** The whole a part belongs to. Undefined for a whole or a harbour, and for
+   *  a part whose parent is not loaded (a dangling `parent_id`: spec §2.10 says
+   *  to treat such a part as a whole of its own). */
+  getPoiParent(row: { parent_id: number | null }): PoiRow | undefined {
+    if (row.parent_id === null || row.parent_id === undefined) return undefined;
+    return this.getPoiIndex().byId.get(row.parent_id);
+  }
+
+  /** The parts of a whole. */
+  getPoiChildren(wholeId: number): PoiRow[] {
+    return this.getPoiIndex().childrenOf.get(wholeId) ?? [];
+  }
+
+  /** Bucket every row in `this.pois` into the same 0.01° grid cells
+   *  buildSpatialIndex uses for nodes. Always built from scratch — see
+   *  invalidateBBoxCaches — so it's trivially correct: a from-scratch
+   *  iteration over `this.pois` cannot disagree with a from-scratch full
+   *  scan over the same array. */
+  private buildPoiGrid(): Map<string, PoiRow[]> {
+    const grid = new Map<string, PoiRow[]>();
+    const cellSize = 0.01;
+    for (const row of this.pois) {
+      const col = Math.floor(row.lon / cellSize);
+      const gridRow = Math.floor(row.lat / cellSize);
+      const key = `${gridRow}:${col}`;
+      let bucket = grid.get(key);
+      if (!bucket) {
+        bucket = [];
+        grid.set(key, bucket);
+      }
+      bucket.push(row);
+    }
+    return grid;
+  }
+
+  /** Bucket every edge in edgesBySource into the same 0.01° grid cells,
+   *  under BOTH its source-endpoint cell and its target-endpoint cell (an
+   *  edge whose two endpoints land in the same cell is simply pushed twice
+   *  under the same key — harmless, getEdgesInBBox dedups via its own
+   *  `visited` set). Registering both endpoints, not just one, is required
+   *  for correctness: a long edge (macro/anchor-shortcut edges can span a
+   *  whole region) or a one-way edge must still be found by a bbox query
+   *  that only overlaps one of its two ends — exactly the semantics the old
+   *  full scan's `(source in bbox) || (target in bbox)` test already
+   *  encoded, just without an index to prune the search. Always built from
+   *  scratch — see invalidateBBoxCaches. */
+  private buildEdgeGrid(): Map<string, Array<EdgeRow>> {
+    const grid = new Map<string, Array<EdgeRow>>();
+    const cellSize = 0.01;
+    const push = (key: string, edge: EdgeRow) => {
+      let bucket = grid.get(key);
+      if (!bucket) {
+        bucket = [];
+        grid.set(key, bucket);
+      }
+      bucket.push(edge);
+    };
+    for (const edges of this.edgesBySource.values()) {
+      for (const e of edges) {
+        // Endpoint coordinates come from the node map (edges carry none).
+        // An edge whose endpoints don't both resolve has no position to
+        // bucket by, so it's left out of the grid rather than silently
+        // mis-bucketed at (0,0) — getEdgesInBBox skips such an edge anyway.
+        const s = this.nodes.get(e.source);
+        const t = this.nodes.get(e.target);
+        if (!s || !t) continue;
+        const sourceKey = `${Math.floor(s.lat / cellSize)}:${Math.floor(s.lon / cellSize)}`;
+        const targetKey = `${Math.floor(t.lat / cellSize)}:${Math.floor(t.lon / cellSize)}`;
+        push(sourceKey, e);
+        push(targetKey, e);
+      }
+    }
+    return grid;
+  }
+
+  private buildSpatialIndex(): void {
+    this.spatialGrid = new Map();
+    const cellSize = 0.01;
+    for (const [id, coords] of this.nodes) {
+      const col = Math.floor(coords.lon / cellSize);
+      const row = Math.floor(coords.lat / cellSize);
+      const key = `${row}:${col}`;
+      let ids = this.spatialGrid.get(key);
+      if (!ids) {
+        ids = [];
+        this.spatialGrid.set(key, ids);
+      }
+      ids.push(id);
+    }
+  }
+
+  /** Incremental counterpart to buildSpatialIndex(): insert a single node id
+   *  into the grid cell its (lat, lon) hashes to, using the exact same
+   *  cellSize/Math.floor math. Used by the incremental mutation sites
+   *  (loadDatabaseGraphInner, addNode) instead of a full rebuild — see M6 in
+   *  the spatial-index refactor notes. Caller must only pass ids not already
+   *  present in the grid — inserting an id that's already present would
+   *  duplicate it in its cell array, corrupting every grid-backed query
+   *  (each id must appear at most once across the whole grid). */
+  private gridInsertNode(id: number, lat: number, lon: number): void {
+    const cellSize = 0.01;
+    const col = Math.floor(lon / cellSize);
+    const row = Math.floor(lat / cellSize);
+    const key = `${row}:${col}`;
+    let ids = this.spatialGrid.get(key);
+    if (!ids) {
+      ids = [];
+      this.spatialGrid.set(key, ids);
+    }
+    ids.push(id);
+  }
+
+  /** Incremental counterpart to buildSpatialIndex(): remove a single node id
+   *  from the grid cell its (lat, lon) hashes to, deleting the cell entry
+   *  entirely once it's empty (matching what a from-scratch rebuild would
+   *  produce — an empty array left behind would make gridCandidateIds do
+   *  pointless work forever, and would change nothing else, but there's no
+   *  reason to leave the litter). Used by the incremental mutation sites
+   *  (loadDatabaseGraphInner's overlay-deletion handling, unloadDatabaseGraph,
+   *  addNode's upsert-move case, deleteNode) instead of a full rebuild. */
+  private gridRemoveNode(id: number, lat: number, lon: number): void {
+    const cellSize = 0.01;
+    const col = Math.floor(lon / cellSize);
+    const row = Math.floor(lat / cellSize);
+    const key = `${row}:${col}`;
+    const ids = this.spatialGrid.get(key);
+    if (!ids) return;
+    const idx = ids.indexOf(id);
+    if (idx === -1) return;
+    ids.splice(idx, 1);
+    if (ids.length === 0) this.spatialGrid.delete(key);
+  }
+
+  /** Gather every node id in every grid cell overlapping the axis-aligned
+   *  box [latitude-marginLatDeg, latitude+marginLatDeg] x
+   *  [longitude-marginLonDeg, longitude+marginLonDeg] — a SUPERSET of any
+   *  node within marginLatDeg/marginLonDeg of (latitude, longitude), never a
+   *  subset: the row/col bounds are found by flooring the box's own edges
+   *  with the exact same math buildSpatialIndex uses to assign a node to a
+   *  cell, so any node whose coordinate lies inside the box necessarily
+   *  falls in a visited cell (possibly along with some that don't — callers
+   *  re-apply the same exact distance/margin filter the former full-scan
+   *  code used on top of this, so results are unaffected; this only prunes
+   *  candidates that filter would have rejected anyway). Callers doing a
+   *  radius query pass a cos(lat)-corrected marginLonDeg (see M4 in the
+   *  refactor notes) since 1° of longitude covers less ground than 1° of
+   *  latitude away from the equator — using a plain marginLatDeg for both
+   *  axes would under-cover longitude and silently drop real candidates. */
+  private gridCandidateIds(
+    latitude: number,
+    longitude: number,
+    marginLatDeg: number,
+    marginLonDeg: number,
+  ): number[] {
+    const cellSize = 0.01;
+    const minRow = Math.floor((latitude - marginLatDeg) / cellSize);
+    const maxRow = Math.floor((latitude + marginLatDeg) / cellSize);
+    const minCol = Math.floor((longitude - marginLonDeg) / cellSize);
+    const maxCol = Math.floor((longitude + marginLonDeg) / cellSize);
+    const result: number[] = [];
+    for (let row = minRow; row <= maxRow; row++) {
+      for (let col = minCol; col <= maxCol; col++) {
+        const ids = this.spatialGrid.get(`${row}:${col}`);
+        if (ids) result.push(...ids);
+      }
+    }
+    return result;
+  }
+
+  hasNodeWithinRadius(lat: number, lon: number, radiusMeters: number): boolean {
+    if (!this.graphLoaded) return false;
+    const cellSize = 0.01;
+    const radiusDeg = radiusMeters / 111320;
+    const cells = Math.ceil(radiusDeg / cellSize);
+    const centerCol = Math.floor(lon / cellSize);
+    const centerRow = Math.floor(lat / cellSize);
+
+    for (let dr = -cells; dr <= cells; dr++) {
+      for (let dc = -cells; dc <= cells; dc++) {
+        const key = `${centerRow + dr}:${centerCol + dc}`;
+        const ids = this.spatialGrid.get(key);
+        if (!ids) continue;
+        for (const id of ids) {
+          const c = this.nodes.get(id)!;
+          const d = this.haversineMeters(lat, lon, c.lat, c.lon);
+          if (d <= radiusMeters) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  getEdgeSync(source: number, target: number): EdgeRow | null {
+    if (!this.graphLoaded) return null;
+    const edges = this.edgesBySource.get(source);
+    if (!edges) return null;
+    return edges.find((e) => e.target === target) || null;
+  }
+
+  /**
+   * Walk the original (unsmoothed) A* path between `fromNode` and `toNode`
+   * and aggregate every underlying edge's attributes — used whenever
+   * path-smoothing (compressCollinear's pure node-position collinearity
+   * check, or the optional LOS string-pulling in smoothPath) leaves two
+   * smoothed-path nodes with no *direct* edge between them.
+   *
+   * Also concatenates each underlying edge's own `path_points` (plus the
+   * coordinate of every original-path node strictly between fromNode and
+   * toNode) into a single ordered polyline, so a stretch that happens to
+   * span one or more funnel-upgraded navmesh edges still renders its real
+   * curved geometry instead of buildRouteResult falling back to a flat
+   * chord (see NEXT_PHASES.md, "Round 11"/"Round 12"). Direction is not an
+   * issue here: getEdgeSync(source, target) always returns that edge's own
+   * path_points already oriented source→target (upgradeRingBoundaryEdges
+   * and addFunnelShortcutEdge both store each direction's edge row with its
+   * own correctly-oriented path_points, mirroring how they're consumed
+   * directly in buildRouteResult), so no reversal is needed when walking
+   * originalPath forward.
+   */
+  aggregateSegmentEdges(
+    fromNode: number,
+    toNode: number,
+    originalPath: number[],
+  ): EdgeRow | null {
+    if (!this.graphLoaded) return null;
+
+    const startIdx = originalPath.indexOf(fromNode);
+    const endIdx = originalPath.indexOf(toNode);
+    if (startIdx === -1 || endIdx === -1 || startIdx >= endIdx) return null;
+
+    let totalDist = 0;
+    let minDepth = Infinity;
+    let minDepthKnown = false;
+    // The lowest known clearance: starts at +Infinity like minWidth (it
+    // started at -Infinity, so Math.min never moved it and every aggregated
+    // segment read as unknown air draft).
+    let maxAirDraft = Infinity;
+    let minWidth = Infinity;
+    let weightedCostFactor = 0;
+    let trafficMode = TRAFFIC_TWO_WAY;
+    let edgeTypeId = EDGE_TYPE_COASTAL;
+    let crossesLand = 0;
+    let crossesObstacle = 0;
+    const pathPoints: Array<[number, number]> = [];
+
+    for (let i = startIdx; i < endIdx; i++) {
+      const edge = this.getEdgeSync(originalPath[i], originalPath[i + 1]);
+      if (edge) {
+        totalDist += edge.distance;
+        if (
+          typeof edge.min_depth === "number" &&
+          (edge.min_depth_known ?? edge.min_depth >= 0)
+        ) {
+          minDepth = Math.min(minDepth, edge.min_depth);
+          minDepthKnown = true;
+        }
+        if (typeof edge.max_air_draft === "number" && edge.max_air_draft >= 0)
+          maxAirDraft = Math.min(maxAirDraft, edge.max_air_draft);
+        if (typeof edge.min_width === "number" && edge.min_width >= 0)
+          minWidth = Math.min(minWidth, edge.min_width);
+        weightedCostFactor += edge.cost_factor * edge.distance;
+        // Preserve the most restrictive traffic direction across sub-edges.
+        // REV (2) beats FWD (1) beats TWO_WAY (0) — never collapse to two-way.
+        if (edge.traffic_mode === TRAFFIC_ONE_WAY_REV)
+          trafficMode = TRAFFIC_ONE_WAY_REV;
+        else if (
+          edge.traffic_mode === TRAFFIC_ONE_WAY_FWD &&
+          trafficMode !== TRAFFIC_ONE_WAY_REV
+        )
+          trafficMode = TRAFFIC_ONE_WAY_FWD;
+        edgeTypeId = edge.edge_type_id;
+        if (edge.crosses_land === 1) crossesLand = 1;
+        if (edge.crosses_obstacle === 1) crossesObstacle = 1;
+
+        if (edge.path_points && edge.path_points.length > 0)
+          pathPoints.push(...edge.path_points);
+        // The intermediate original-path node itself is a real vertex of the
+        // aggregated polyline (not just curve interior) — include it, except
+        // after the final edge, whose target *is* toNode (added separately
+        // by buildRouteResult, same as the single-edge path_points case).
+        if (i < endIdx - 1) {
+          const midNode = this.nodes.get(originalPath[i + 1]);
+          if (midNode) pathPoints.push([midNode.lat, midNode.lon]);
+        }
+      }
+    }
+
+    return {
+      source: fromNode,
+      target: toNode,
+      distance: totalDist,
+      min_depth: minDepthKnown ? minDepth : -1,
+      min_depth_known: minDepthKnown,
+      max_air_draft: maxAirDraft === Infinity ? -1 : maxAirDraft,
+      min_width: minWidth === Infinity ? -1 : minWidth,
+      cost_factor: totalDist > 0 ? weightedCostFactor / totalDist : 1.2,
+      distance_to_land: 0,
+      edge_type_id: edgeTypeId,
+      traffic_mode: trafficMode,
+      crosses_land: crossesLand,
+      crosses_obstacle: crossesObstacle,
+      ...(pathPoints.length > 0 ? { path_points: pathPoints } : {}),
+    };
+  }
+
+  async updateNode(
+    dbIndex: number,
+    nodeId: number,
+    updates: { node_depth?: number },
+  ): Promise<void> {
+    const overlay = this.requireOverlay();
+    const cur = this.nodes.get(nodeId);
+    if (!cur) throw new Error(`Node ${nodeId} not found`);
+    const node_depth = updates.node_depth ?? cur.nodeDepth;
+    await overlay.updateNode({
+      dbIndex,
+      nodeId,
+      lat: cur.lat,
+      lon: cur.lon,
+      node_depth,
+    });
+    cur.nodeDepth = node_depth;
+    // User-entered edit, not pipeline output -- legacy convention (negative =
+    // unknown), same as addNode. Left stale before this, so a node edited
+    // from a known depth to -1 (or back) kept reporting the pre-edit
+    // known-ness through getNodeById()/getNodeMap().
+    cur.nodeDepthKnown = node_depth >= 0;
+  }
+
+  async updateEdge(
+    dbIndex: number,
+    source: number,
+    target: number,
+    updates: {
+      distance?: number;
+      min_depth?: number;
+      max_air_draft?: number;
+      min_width?: number;
+      traffic_mode?: number;
+      cost_factor?: number;
+    },
+  ): Promise<void> {
+    const overlay = this.requireOverlay();
+    const edges = this.edgesBySource.get(source);
+    if (!edges) throw new Error(`No edges from source ${source}`);
+    const edge = edges.find((e) => e.target === target);
+    if (!edge) throw new Error(`Edge ${source}->${target} not found`);
+    if (
+      updates.distance !== undefined &&
+      (updates.distance < 0 || !updates.distance)
+    ) {
+      const s = this.nodes.get(source);
+      const t = this.nodes.get(target);
+      if (s && t) {
+        updates.distance = Math.round(
+          this.haversineMeters(s.lat, s.lon, t.lat, t.lon),
+        );
+      }
+    }
+    // Send full edge context so the overlay can store a complete row
+    await overlay.updateEdge({
+      dbIndex,
+      source,
+      target,
+      distance_to_land: edge.distance_to_land ?? 0,
+      edge_type_id: edge.edge_type_id ?? 0,
+      ...updates,
+    });
+    if (updates.distance !== undefined) edge.distance = updates.distance;
+    if (updates.min_depth !== undefined) edge.min_depth = updates.min_depth;
+    if (updates.max_air_draft !== undefined)
+      edge.max_air_draft = updates.max_air_draft;
+    if (updates.min_width !== undefined) edge.min_width = updates.min_width;
+    if (updates.traffic_mode !== undefined)
+      edge.traffic_mode = updates.traffic_mode;
+    if (updates.cost_factor !== undefined)
+      edge.cost_factor = updates.cost_factor;
+    // A route already found reads its limits again on a new generation
+    // (RoutingEngine.refreshCandidateLimits). Not invalidateBBoxCaches: the
+    // edge's geometry, which those caches index, has not changed.
+    this.graphGeneration++;
+
+    // Mark the same columns the worker just marked in the overlay, so the
+    // live entry already behaves the way it will after the next load — a
+    // region loading later in this session must not fold over an edit the
+    // user has already made.
+    const claimed = new Set<string>(edge.editedFields ?? []);
+    for (const [field, value] of Object.entries(updates)) {
+      if (value !== undefined) claimed.add(field);
+    }
+    if (claimed.size > 0) edge.editedFields = [...claimed].sort();
+  }
+
+  async deleteNode(dbIndex: number, nodeId: number): Promise<void> {
+    const overlay = this.requireOverlay();
+    for (const t of this.loadTombstones) t.nodes.add(nodeId);
+    this.edgesBySource.delete(nodeId);
+    for (const [src, edges] of this.edgesBySource) {
+      const filtered = edges.filter((e) => e.target !== nodeId);
+      if (filtered.length !== edges.length)
+        this.edgesBySource.set(src, filtered);
+    }
+    // Capture coords before deleting so the grid entry (which was otherwise
+    // left stale here — a latent bug, since queries now rely on the grid
+    // instead of a full scan) can be removed from the correct cell too.
+    const existing = this.nodes.get(nodeId);
+    this.nodes.delete(nodeId);
+    if (existing) this.gridRemoveNode(nodeId, existing.lat, existing.lon);
+    this.invalidateBBoxCaches();
+    await overlay.deleteNode({ dbIndex, nodeId });
+  }
+
+  async deleteEdge(
+    dbIndex: number,
+    source: number,
+    target: number,
+  ): Promise<void> {
+    const overlay = this.requireOverlay();
+    for (const t of this.loadTombstones) t.edges.add(`${source}:${target}`);
+    const edges = this.edgesBySource.get(source);
+    if (edges) {
+      const idx = edges.findIndex((e) => e.target === target);
+      if (idx >= 0) edges.splice(idx, 1);
+    }
+    this.invalidateBBoxCaches();
+    await overlay.deleteEdge({ dbIndex, source, target });
+  }
+
+  async addNode(
+    dbIndex: number,
+    node: { id: number; lat: number; lon: number; node_depth?: number },
+  ): Promise<void> {
+    // A re-add is the user's latest word on this id.
+    const overlay = this.requireOverlay();
+    for (const t of this.loadTombstones) t.nodes.delete(node.id);
+    await overlay.insertNode({ dbIndex, ...node });
+    // This is an upsert (see handleUpsertNode) — an existing node id can be
+    // re-added at a different (lat, lon), which would move it to a
+    // different grid cell. Remove the stale grid entry at its old cell
+    // first (no-op if this id is genuinely new) before inserting fresh, or
+    // the id would be left behind in the wrong cell as well as duplicated.
+    const existing = this.nodes.get(node.id);
+    if (existing) this.gridRemoveNode(node.id, existing.lat, existing.lon);
+    const nodeDepth = node.node_depth ?? -1;
+    this.nodes.set(node.id, {
+      lat: node.lat,
+      lon: node.lon,
+      regionId: 0,
+      nodeDepth,
+      nodeDepthKnown: nodeDepth >= 0,
+    });
+    this.gridInsertNode(node.id, node.lat, node.lon);
+    // addNode doesn't itself touch edgesBySource/pois, but a moved node's
+    // stale coordinates could otherwise linger in edgeGrid via other edges'
+    // source/target — invalidate for safety (over-invalidation is cheap).
+    this.invalidateBBoxCaches();
+  }
+
+  async addEdge(
+    dbIndex: number,
+    edge: {
+      source: number;
+      target: number;
+      distance: number;
+      min_depth?: number;
+      max_air_draft?: number;
+      min_width?: number;
+      cost_factor?: number;
+      distance_to_land?: number;
+      edge_type_id?: number;
+      traffic_mode?: number;
+    },
+  ): Promise<void> {
+    const overlay = this.requireOverlay();
+    for (const ts of this.loadTombstones)
+      ts.edges.delete(`${edge.source}:${edge.target}`);
+    const s = this.nodes.get(edge.source);
+    const t = this.nodes.get(edge.target);
+    if (!s || !t) throw new Error("Source or target node not found");
+    if (!edge.distance || edge.distance <= 0) {
+      edge.distance = Math.round(
+        this.haversineMeters(s.lat, s.lon, t.lat, t.lon),
+      );
+    }
+    await overlay.insertEdge({ dbIndex, ...edge });
+    const newEdge: EdgeRow = {
+      source: edge.source,
+      target: edge.target,
+      distance: edge.distance,
+      min_depth: edge.min_depth ?? -1,
+      max_air_draft: edge.max_air_draft ?? -1,
+      min_width: edge.min_width ?? -1,
+      cost_factor: edge.cost_factor ?? 1.2,
+      distance_to_land: edge.distance_to_land ?? 0,
+      edge_type_id: edge.edge_type_id ?? 0,
+      traffic_mode: edge.traffic_mode ?? 0,
+      // Claims every column, matching the row insertEdge just wrote to the
+      // overlay. A drawn edge is authored outright rather than corrected, so
+      // if a region loaded later in this session turns out to describe the
+      // same pair, it must not fold over what the user drew. Without this the
+      // in-memory row would be unmarked until the next restart re-read it
+      // from the overlay, and behave differently before and after.
+      editedFields: [...OVERLAY_EDITABLE_COLUMNS],
+    };
+    if (!this.edgesBySource.has(edge.source)) {
+      this.edgesBySource.set(edge.source, []);
+    }
+    this.edgesBySource.get(edge.source)!.push(newEdge);
+    this.invalidateBBoxCaches();
+  }
+
+  async clearOverlayDeletedEdges(): Promise<{ restored: number }> {
+    return this.requireOverlay().clearOverlayDeletedEdges();
+  }
+
+  async close(): Promise<void> {
+    await this.store.close();
+    this.overlayOpen = false;
+    this.nodes.clear();
+    this.edgesBySource.clear();
+    this.descriptionErrors.clear();
+    this.pois = [];
+    this.navmeshRegions = [];
+    this.spatialGrid.clear();
+    this.poiGrid = null;
+    this.poiIndex = null;
+    this.edgeGrid = null;
+    this.waterwaysGeoJson = null;
+    this.landGeoJson = null;
+    this.landBBoxIndex = null;
+    this.graphLoaded = false;
+    this.coverageIndex.clear();
+    this.bulkFileList = [];
+    this.nodesByDbIndex.clear();
+    this.nodeDbCount.clear();
+    this.loadingPromises.clear();
+    this.overlayMergedOnce = false;
+    this.activeRouteCount = 0;
+    this.regionLastUsedAt.clear();
+    this.lruCounter = 0;
+  }
+
+  /**
+   * Hot-reload: close existing connection, re-scan data directory, and reload graph.
+   * Used after downloading a new database to replace the old one.
+   */
+  async reload(): Promise<void> {
+    await this.close();
+    await this.init();
+    await this.loadGraph();
+  }
+
+  private landGeoJson: any = null;
+  private landBBoxIndex: Float64Array | null = null;
+
+  isLineCrossingLand(
+    lat1: number,
+    lon1: number,
+    lat2: number,
+    lon2: number,
+    numSamples: number,
+  ): boolean {
+    if (!this.landGeoJson) {
+      if (!this.landPolygonsPath || !existsSync(this.landPolygonsPath)) {
+        this.landGeoJson = { type: "FeatureCollection", features: [] };
+      } else {
+        try {
+          this.landGeoJson = JSON.parse(
+            readFileSync(this.landPolygonsPath, "utf-8"),
+          );
+        } catch {
+          this.landGeoJson = { type: "FeatureCollection", features: [] };
+        }
+      }
+    }
+
+    const features: any[] = this.landGeoJson.features ?? [];
+    if (features.length === 0) {
+      return false;
+    }
+
+    if (!this.landBBoxIndex) {
+      this.landBBoxIndex = buildBBoxIndex(features);
+    }
+
+    for (let i = 1; i < numSamples; i++) {
+      const t = i / numSamples;
+      const lat = lat1 + (lat2 - lat1) * t;
+      const lon = lon1 + (lon2 - lon1) * t;
+      if (this.isPointInAnyPolygon(lat, lon, features, this.landBBoxIndex))
+        return true;
+    }
+    return false;
+  }
+
+  private isPointInAnyPolygon(
+    lat: number,
+    lon: number,
+    features: any[],
+    bboxIndex: Float64Array | null,
+  ): boolean {
+    const idx = bboxIndex;
+    const STRIDE = 5;
+    if (idx) {
+      const n = idx.length / STRIDE;
+      for (let i = 0; i < n; i++) {
+        const base = i * STRIDE;
+        if (
+          lon < idx[base] ||
+          lon > idx[base + 2] ||
+          lat < idx[base + 1] ||
+          lat > idx[base + 3]
+        )
+          continue;
+        const fi = idx[base + 4];
+        const geom = features[fi]?.geometry;
+        if (!geom) continue;
+        if (geom.type === "Polygon") {
+          if (this.raycastPolygon(lon, lat, geom.coordinates)) return true;
+        } else if (geom.type === "MultiPolygon") {
+          for (const poly of geom.coordinates) {
+            if (this.raycastPolygon(lon, lat, poly)) return true;
+          }
+        }
+      }
+      return false;
+    }
+    for (const f of features) {
+      const geom = f.geometry;
+      if (!geom) continue;
+      if (geom.type === "Polygon") {
+        if (this.raycastPolygon(lon, lat, geom.coordinates)) return true;
+      } else if (geom.type === "MultiPolygon") {
+        for (const poly of geom.coordinates) {
+          if (this.raycastPolygon(lon, lat, poly)) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private raycastPolygon(x: number, y: number, rings: number[][][]): boolean {
+    if (!this.raycastRing(x, y, rings[0])) return false;
+    for (let h = 1; h < rings.length; h++) {
+      if (this.raycastRing(x, y, rings[h])) return false;
+    }
+    return true;
+  }
+
+  private raycastRing(x: number, y: number, ring: number[][]): boolean {
+    let inside = false;
+    const n = ring.length;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = ring[i][0],
+        yi = ring[i][1];
+      const xj = ring[j][0],
+        yj = ring[j][1];
+      if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+}
+
+function buildBBoxIndex(features: any[]): Float64Array {
+  const STRIDE = 5;
+  const buf = new Float64Array(features.length * STRIDE);
+  let count = 0;
+  for (let fi = 0; fi < features.length; fi++) {
+    const geom = features[fi]?.geometry;
+    if (!geom) continue;
+    const type = geom.type;
+    if (type !== "Polygon" && type !== "MultiPolygon") continue;
+    let minLon = Infinity,
+      minLat = Infinity,
+      maxLon = -Infinity,
+      maxLat = -Infinity;
+    const polys: number[][][] =
+      type === "MultiPolygon"
+        ? geom.coordinates.map((p: number[][][]) => p[0])
+        : [geom.coordinates[0]];
+    for (const ring of polys) {
+      for (const pt of ring) {
+        if (pt[0] < minLon) minLon = pt[0];
+        if (pt[0] > maxLon) maxLon = pt[0];
+        if (pt[1] < minLat) minLat = pt[1];
+        if (pt[1] > maxLat) maxLat = pt[1];
+      }
+    }
+    const base = count * STRIDE;
+    buf[base] = minLon;
+    buf[base + 1] = minLat;
+    buf[base + 2] = maxLon;
+    buf[base + 3] = maxLat;
+    buf[base + 4] = fi;
+    count++;
+  }
+  return buf.subarray(0, count * STRIDE);
+}
+
+function featureIntersectsBBox(
+  feature: any,
+  minLat: number,
+  minLon: number,
+  maxLat: number,
+  maxLon: number,
+): boolean {
+  const coords = feature.geometry?.coordinates;
+  if (!coords) return false;
+
+  let fMinLat = Infinity,
+    fMaxLat = -Infinity;
+  let fMinLon = Infinity,
+    fMaxLon = -Infinity;
+
+  const type = feature.geometry.type;
+  if (type === "LineString") {
+    for (const pt of coords) {
+      const lon = pt[0],
+        lat = pt[1];
+      if (lat < fMinLat) fMinLat = lat;
+      if (lat > fMaxLat) fMaxLat = lat;
+      if (lon < fMinLon) fMinLon = lon;
+      if (lon > fMaxLon) fMaxLon = lon;
+    }
+  } else if (type === "MultiLineString") {
+    for (const line of coords) {
+      for (const pt of line) {
+        const lon = pt[0],
+          lat = pt[1];
+        if (lat < fMinLat) fMinLat = lat;
+        if (lat > fMaxLat) fMaxLat = lat;
+        if (lon < fMinLon) fMinLon = lon;
+        if (lon > fMaxLon) fMaxLon = lon;
+      }
+    }
+  } else {
+    const rings = type === "MultiPolygon" ? coords.flat() : coords;
+    for (const ring of rings) {
+      for (const pt of ring) {
+        const lon = pt[0],
+          lat = pt[1];
+        if (lat < fMinLat) fMinLat = lat;
+        if (lat > fMaxLat) fMaxLat = lat;
+        if (lon < fMinLon) fMinLon = lon;
+        if (lon > fMaxLon) fMaxLon = lon;
+      }
+    }
+  }
+
+  return (
+    fMinLon <= maxLon &&
+    fMaxLon >= minLon &&
+    fMinLat <= maxLat &&
+    fMaxLat >= minLat
+  );
+}

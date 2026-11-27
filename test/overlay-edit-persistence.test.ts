@@ -3,7 +3,8 @@ import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { RoutingDatabase } from '../dist/database.js';
+import { RoutingDatabase } from 'routeiq-core';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
 
 // Graph-editor edits to an *existing* edge did not survive a reload.
@@ -137,7 +138,7 @@ describe('user edits survive a reload (overlay edited_fields)', () => {
   /** Open the fixture directory fresh — the overlay on disk is all that
    *  carries an edit from one instance to the next. */
   async function open(): Promise<RoutingDatabase> {
-    const db = new RoutingDatabase(fixturesDir, true);
+    const db = createDirectoryDatabase(fixturesDir, true);
     await db.init();
     await db.loadGraph();
     await db.loadDatabaseGraph('region.sqlite');
@@ -147,7 +148,7 @@ describe('user edits survive a reload (overlay edited_fields)', () => {
   /** Same, through the non-dynamic bulk path, which merges every file and the
    *  overlay in one batch instead of per file. */
   async function openBulk(): Promise<RoutingDatabase> {
-    const db = new RoutingDatabase(fixturesDir, false);
+    const db = createDirectoryDatabase(fixturesDir, false);
     await db.init();
     await db.loadGraph();
     return db;
@@ -297,7 +298,7 @@ describe('user edits survive a reload (overlay edited_fields)', () => {
     before(async () => {
       buildFixture();
       buildOverlapRegion();
-      db = new RoutingDatabase(fixturesDir, true);
+      db = createDirectoryDatabase(fixturesDir, true);
       await db.init();
       await db.loadGraph();
       await db.loadDatabaseGraph('region.sqlite');
@@ -334,7 +335,7 @@ describe('user edits survive a reload (overlay edited_fields)', () => {
 
     it('behaves the same after a restart as it did before one', async () => {
       await db.close();
-      db = new RoutingDatabase(fixturesDir, true);
+      db = createDirectoryDatabase(fixturesDir, true);
       await db.init();
       await db.loadGraph();
       await db.loadDatabaseGraph('region.sqlite');

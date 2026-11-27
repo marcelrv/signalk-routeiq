@@ -3,10 +3,12 @@ import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { RoutingDatabase } from '../dist/database.js';
-import { RoutingEngine } from '../dist/routing.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+import { RoutingDatabase } from 'routeiq-core';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
+import { RoutingEngine } from 'routeiq-core';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 // Deterministic node ID formula per routing-database-format-specification.md §2.7
 function nodeIdFor(lat: number, lon: number): number {
@@ -138,11 +140,10 @@ describe('navmesh_regions consumption (integration)', () => {
     upgradeToPoiModel(plainDb);
     plainDb.close();
 
-    db = new RoutingDatabase(fixturesDir);
+    db = createDirectoryDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
-    engine = new RoutingEngine(db, DEFAULT_CONFIG);
-    engine.setVesselDimensions({ draft: 0, beam: 4, airDraft: 0 });
+    engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG, { draft: 0, beam: 4, airDraft: 0 }));
   });
 
   after(async () => {
@@ -334,7 +335,7 @@ describe('navmesh boundary-shortcut sparsification (regression)', () => {
     originalWarn = console.warn;
     console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
 
-    db = new RoutingDatabase(fixturesDir);
+    db = createDirectoryDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
   });
@@ -444,7 +445,7 @@ describe('empty boundary_node_ids (Round 9 warn-on-empty)', () => {
     originalWarn = console.warn;
     console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
 
-    db = new RoutingDatabase(fixturesDir);
+    db = createDirectoryDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
   });

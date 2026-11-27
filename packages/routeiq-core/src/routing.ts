@@ -1,0 +1,6024 @@
+/**
+ * A* Pathfinding Engine for Nautical Routing
+ * Implements vessel-aware directed A* with multi-layered cost function
+ */
+
+import { resolveLogger, type Logger } from "./logger.js";
+import {
+  EdgeRow,
+  PoiRow,
+  type PoiBBoxResult,
+  RoutingDatabase,
+  parsePoiJson,
+  getNodeTypeInt,
+  NODE_TYPE_INLAND,
+  EDGE_TYPE_COASTAL,
+  POI_TYPE_BRIDGE,
+  POI_TYPE_BRIDGE_SPAN,
+  POI_TYPE_LOCK,
+  POI_TYPE_LOCK_CHAMBER,
+  TRAFFIC_TWO_WAY,
+  TRAFFIC_ONE_WAY_REV,
+  isSailableEdge,
+} from "./database.js";
+import type { FunnelResult, NavmeshRegion } from "./navmesh.js";
+import {
+  attachWaters,
+  buildRouteDescription,
+  ENDPOINT_POI_RADIUS_M,
+  nameEndpoints,
+} from "./route-description.js";
+import {
+  bearingDeg,
+  buildItinerary,
+  closestCoordIndex,
+  cumulativeDistances,
+} from "./itinerary.js";
+import type {
+  CrossingNoteCode,
+  FailureCode,
+  RouteWarningCode,
+} from "./codes.js";
+import {
+  RouteFailure,
+  RouteSearchError,
+  causeOf,
+  isInternalCause,
+  type BlockingCause,
+} from "./failure.js";
+import { CounterSet, type EngineCounters } from "./counters.js";
+import {
+  RequestControl,
+  effectiveBudget,
+  isStopFailure,
+  StopRequested,
+  type RouteCallOptions,
+  type StopReason,
+} from "./request-control.js";
+import { format, type MessageParams } from "./messages.js";
+import {
+  CurrentProvider,
+  FlowField,
+  KNOTS_TO_MS,
+  TideHeightField,
+  TideHeightProvider,
+  noCurrentField,
+  prepareStationFlowField,
+  prepareTideHeights,
+} from "./tides.js";
+import type {
+  BBox,
+  DepartureScanStep,
+  LegMode,
+  RouteInputs,
+  RouteCrossing,
+  RouteResult,
+  RouteWarning,
+  RoutingRequest,
+} from "./types.js";
+import {
+  DEFAULT_MAX_SEARCH_ITERATIONS,
+  type EngineOptions,
+  RouteRequestError,
+  messageLanguageFor,
+  resolveRouteInputs,
+  validateEngineOptions,
+} from "./engine-options.js";
+
+function isInsideBBox(lat: number, lon: number, bbox: BBox): boolean {
+  return (
+    lat >= bbox.minLat &&
+    lat <= bbox.maxLat &&
+    lon >= bbox.minLon &&
+    lon <= bbox.maxLon
+  );
+}
+
+/**
+ * Whether a vessel can pass under an opening span without waiting for it to
+ * open: only with a known closed clearance, a known air draft (0 means unknown,
+ * as in the edge checks) and airDraft + margin strictly below the clearance.
+ * Fixed spans and locks never qualify — this decides waits, not air-draft limits.
+ */
+export function passesClosedSpan(
+  crossing: Pick<RouteCrossing, "type" | "subtype" | "closedHeight">,
+  airDraft: number | undefined,
+  margin: number,
+): boolean {
+  if (crossing.type !== "bridge" || crossing.subtype !== "opening")
+    return false;
+  const closed = crossing.closedHeight;
+  if (typeof closed !== "number" || !Number.isFinite(closed) || closed <= 0)
+    return false;
+  if (
+    typeof airDraft !== "number" ||
+    !Number.isFinite(airDraft) ||
+    airDraft <= 0
+  )
+    return false;
+  return toCm(airDraft + margin) < closed;
+}
+
+interface RouteEnv {
+  flow: FlowField;
+  /** Tide heights, when a height source covers the route. Separate from
+   *  `flow` because the two need not come from the same place: when real
+   *  current stations are available they win the flow, and they carry no
+   *  heights at all. Absent means depth stays charted-only. */
+  heights?: TideHeightField;
+  departureMs: number; // departure time of the overall route
+  offsetSec: number; // elapsed seconds before this sub-search (via legs)
+  speedMs: number; // vessel speed through water
+}
+
+/** What the edge penalty needs in order to ask the tide about one edge:
+ *  where the edge is, when the search expects to be there, and the height
+ *  field to ask. Only built when a height field actually exists. */
+interface EdgeTideContext {
+  env: RouteEnv;
+  heights: TideHeightField;
+  atMs: number | undefined;
+  lat: number;
+  lon: number;
+}
+
+function bboxFromPoints(
+  start: { latitude: number; longitude: number },
+  end: { latitude: number; longitude: number },
+  marginDeg: number,
+): BBox {
+  return {
+    minLat: Math.min(start.latitude, end.latitude) - marginDeg,
+    maxLat: Math.max(start.latitude, end.latitude) + marginDeg,
+    minLon: Math.min(start.longitude, end.longitude) - marginDeg,
+    maxLon: Math.max(start.longitude, end.longitude) + marginDeg,
+  };
+}
+
+// A "successful" A* search can still be a bad route: getEdgePenalty adds a
+// per-meter violation surcharge for soft constraints (air draft, depth,
+// width — see VIOLATION_RATE_CONSTRAINT/VIOLATION_RATE_COAST below) so a
+// route through a forbidden edge is technically findable but expensive
+// rather than rejected outright. A tight bounding box can hide the real,
+// unconstrained route while still leaving a penalized one reachable inside
+// the box, which used to return silently wrong routes: the bbox-expansion
+// retry below only ever triggered on "no route found", never on "found a
+// terrible one".
+//
+// Round 13-18 detected this ("materially penalized") by comparing cost to
+// distance × a flat factor. That broke once penalties became rate-based
+// (Round 19): the flat +1,000,000-per-violation constant used to dwarf any
+// plausible unpenalized cost on its own, so a cost/distance ratio was a
+// reliable tripwire; a bounded per-meter rate does not blow past any fixed
+// ratio the same way, and coast-distance violations (a soft comfort
+// preference, not a hard constraint) legitimately fire on many otherwise
+// fine routes and would make a ratio-based check trigger the retry almost
+// unconditionally near any coastline.
+//
+// So detection is now explicit rather than magnitude-based: see
+// pathViolationMeters, which walks the winning path's segments and sums the
+// length of any depth/air-draft/beam violation (coast-distance excluded on
+// purpose — see its doc comment). The retry triggers whenever that sum is
+// nonzero, i.e. the route touches even one hard-constraint-violating edge.
+
+/** One completed bounding-box attempt, kept until the expansion loop ends so
+ *  the winner can be picked across the whole set at once — see
+ *  RoutingEngine.selectBestCandidate for why folding them pairwise is wrong. */
+interface RouteCandidate {
+  result: RouteResult;
+  violatingMeters: number;
+  cost: number;
+  distance: number;
+  /** The graph generation (RoutingDatabase.graphGeneration) the limits,
+   *  crossings and violating meters were read at. */
+  generation: number;
+}
+
+// A* search state
+interface SearchState {
+  nodeId: number;
+  g: number; // actual cost from start
+  f: number; // estimated total cost (g + h)
+  parent: number | null;
+}
+
+// Tally of why edges were skipped/penalized during a search, so a failed
+// route can report its actual cause instead of a generic constraint guess.
+interface SearchSkipReasons {
+  land: number;
+  obstacle: number;
+  airDraft: number;
+  draft: number;
+  beam: number;
+  coastDistance: number;
+  bbox: number;
+}
+
+/**
+ * Which leg of a request a warning or log line is about: a via point (1-based),
+ * the destination of a via route (`end`), or the destination of a route
+ * without vias (`route`).
+ */
+type LegTarget = { via: number } | "end" | "route";
+
+/** The English words for a leg, as the log lines have always had them. */
+function legLabel(target: LegTarget): string {
+  return typeof target === "object"
+    ? `Via point ${target.via}`
+    : target === "end"
+      ? "Destination"
+      : "destination";
+}
+
+/** A route warning: the text is rendered from `code` and `params` in `lang`. */
+function makeWarning(
+  lang: string,
+  type: RouteWarning["type"],
+  code: RouteWarningCode,
+  params: MessageParams,
+  extra: Partial<RouteWarning> = {},
+): RouteWarning {
+  return { type, code, params, message: format(code, params, lang), ...extra };
+}
+
+/**
+ * How many nodes a forward search from a "better depth" replacement endpoint
+ * must reach (failing the original node or the other endpoint) before it
+ * counts as part of the main network rather than an island.
+ */
+const IMPROVE_NODE_MIN_REACH = 5000;
+
+// Priority queue for A* (min-heap)
+class MinHeap<T> {
+  private data: T[] = [];
+  private score: (item: T) => number;
+
+  constructor(score: (item: T) => number) {
+    this.score = score;
+  }
+
+  push(item: T): void {
+    this.data.push(item);
+    this.bubbleUp(this.data.length - 1);
+  }
+
+  pop(): T | undefined {
+    if (this.data.length === 0) return undefined;
+    const top = this.data[0];
+    const bottom = this.data.pop()!;
+    if (this.data.length > 0) {
+      this.data[0] = bottom;
+      this.sinkDown(0);
+    }
+    return top;
+  }
+
+  get size(): number {
+    return this.data.length;
+  }
+
+  isEmpty(): boolean {
+    return this.data.length === 0;
+  }
+
+  peek(): T | undefined {
+    return this.data[0];
+  }
+
+  private bubbleUp(index: number): void {
+    while (index > 0) {
+      const parentIndex = Math.floor((index - 1) / 2);
+      if (this.score(this.data[index]) >= this.score(this.data[parentIndex]))
+        break;
+      [this.data[index], this.data[parentIndex]] = [
+        this.data[parentIndex],
+        this.data[index],
+      ];
+      index = parentIndex;
+    }
+  }
+
+  private sinkDown(index: number): void {
+    const length = this.data.length;
+    for (;;) {
+      const left = 2 * index + 1;
+      const right = 2 * index + 2;
+      let smallest = index;
+
+      if (
+        left < length &&
+        this.score(this.data[left]) < this.score(this.data[smallest])
+      ) {
+        smallest = left;
+      }
+      if (
+        right < length &&
+        this.score(this.data[right]) < this.score(this.data[smallest])
+      ) {
+        smallest = right;
+      }
+      if (smallest === index) break;
+      [this.data[index], this.data[smallest]] = [
+        this.data[smallest],
+        this.data[index],
+      ];
+      index = smallest;
+    }
+  }
+}
+
+/** The POI types route building looks for: lock chambers and bridge spans. */
+const ROUTE_PART_TYPES: ReadonlySet<number> = new Set([
+  POI_TYPE_LOCK_CHAMBER,
+  POI_TYPE_BRIDGE_SPAN,
+]);
+
+/** The graph-edge node sequence each route segment covers, recorded where
+ *  the segment is built (a segment names only its two ends, or `nodes` when
+ *  it spans several). Read by detectRouteStructures. */
+const segmentHops = new WeakMap<object, number[]>();
+
+/** How tryRouteSegment checked a via leg it returned, so routeViaPoints can
+ *  check it again once the later legs have loaded more regions
+ *  (recheckViaLegs): the addViolationWarnings arguments, the warnings that
+ *  call added, and the graph generation it ran at. */
+interface LegCheck {
+  target: LegTarget;
+  startPt: { latitude: number; longitude: number };
+  endPt: { latitude: number; longitude: number };
+  inputs: RouteInputs;
+  env?: RouteEnv;
+  warnings: RouteWarning[];
+  generation: number;
+}
+const legChecks = new WeakMap<RouteResult, LegCheck>();
+
+/** The straight legs connectUserPoint draws from a user's point to where the
+ *  route joins the graph (over land or open water, in no charted water body).
+ *  Recorded where they are built, because their from/to (-1) look the same
+ *  as the cut edge pieces next to them. Read by finalizeRoute to count the
+ *  water reach of the end names from where the route joins the graph. */
+const connectorLegs = new WeakSet<object>();
+
+/**
+ * Hand a segment's graph edges and lock ids on to the piece of it that
+ * replaces it when a connector cuts the edge at the user's point: the piece
+ * still runs along those edges, so its links (`edge_pois`) and lock span
+ * must not turn into an unknown stretch.
+ */
+function keepSegmentEdges(
+  old:
+    | { from: number; to: number; nodes?: number[]; lockIds?: number[] }
+    | undefined,
+  piece: { lockIds?: number[] },
+): void {
+  if (!old) return;
+  const hops =
+    segmentHops.get(old) ??
+    (old.nodes && old.nodes.length >= 2
+      ? old.nodes
+      : old.from >= 0 && old.to >= 0
+        ? [old.from, old.to]
+        : undefined);
+  if (hops) segmentHops.set(piece, hops);
+  if (old.lockIds) piece.lockIds = [...old.lockIds];
+}
+
+/**
+ * How close (m) a route stretch no database knows must pass to a bridge span
+ * or lock chamber for it to count as a crossing. Known stretches use the
+ * `edge_pois` links instead. Lowered from 150 m (measured from route vertices)
+ * to 50 m (measured to the route line) because 150 m listed bridges on
+ * neighbouring and crossing canals: #57.
+ */
+const FALLBACK_MAX_DIST = 50;
+
+/** A vessel limit (dimension + safety margin) to the centimetre. The sum is
+ *  floating point — 2.1 + 0.2 is 2.3000000000000003, 15.56 + 1.5 is
+ *  17.060000000000002 — and unrounded it calls a charted value exactly at the
+ *  limit (2.3 m deep, 17.06 m clearance) a violation. */
+function toCm(m: number): number {
+  return Math.round(m * 100) / 100;
+}
+
+export class RoutingEngine {
+  private db: RoutingDatabase;
+  private _options: EngineOptions;
+  private tides: TideHeightProvider | null = null;
+  private currents: CurrentProvider | null = null;
+  private readonly log: Logger;
+  private readonly counters = new CounterSet();
+  /** The budget and abort signal of each request in flight, by the request's
+   *  own inputs object (which no other request shares). Nothing about a
+   *  request outlives it: the entry goes with the inputs. */
+  private readonly controls = new WeakMap<RouteInputs, RequestControl>();
+
+  /**
+   * The engine keeps no vessel or user state: draft, beam, air draft, speed,
+   * margins, waits and the tide choice come with each request (see
+   * resolveRouteInputs), the options below are only the defaults and the
+   * search tuning.
+   */
+  constructor(db: RoutingDatabase, options: EngineOptions) {
+    validateEngineOptions(options);
+    this.db = db;
+    this._options = options;
+    this.log = resolveLogger(options.logger);
+  }
+
+  get options(): EngineOptions {
+    return this._options;
+  }
+
+  /**
+   * Cumulative counters of this engine's work (routes, failures by code,
+   * search iterations and time, regions loaded and their estimated memory).
+   * A snapshot: later calculations do not change it. Numbers only, nothing
+   * about any request.
+   */
+  getCounters(): EngineCounters {
+    const regions = this.db.getRegionCounters();
+    return this.counters.snapshot({
+      loadsTotal: regions.loadsTotal,
+      loaded: regions.loaded,
+      estimatedBytes: regions.loaded.reduce((n, r) => n + r.estimatedBytes, 0),
+    });
+  }
+
+  /** `params.cause` for an error: a catalogued failure as it is, anything
+   *  else as the neutral internal cause, its own text going to the log. */
+  private causeOf(e: unknown): MessageParams {
+    if (isInternalCause(e)) {
+      this.log.error(
+        `[routeiq] A search step failed with an uncatalogued error: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    return causeOf(e);
+  }
+
+  /** The language this request's texts are written in. */
+  private msgLang(inputs: RouteInputs): string {
+    return messageLanguageFor(this._options, inputs.lang);
+  }
+
+  /** A failure with its message rendered in the request's language. */
+  private failure(
+    inputs: RouteInputs,
+    code: FailureCode,
+    params: MessageParams = {},
+    blocking?: BlockingCause[],
+  ): RouteFailure {
+    return RouteFailure.create(code, params, this.msgLang(inputs), blocking);
+  }
+
+  /** As `failure`, but a search failure the bounding-box loop retries on. */
+  private searchFailure(
+    inputs: RouteInputs,
+    code: FailureCode,
+    params: MessageParams = {},
+    blocking?: BlockingCause[],
+  ): RouteSearchError {
+    return RouteSearchError.create(
+      code,
+      params,
+      this.msgLang(inputs),
+      blocking,
+    );
+  }
+
+  setTidesClient(client: TideHeightProvider | null): void {
+    this.tides = client;
+  }
+
+  get tidesClient(): TideHeightProvider | null {
+    return this.tides;
+  }
+
+  setCurrentsClient(client: CurrentProvider | null): void {
+    this.currents = client;
+  }
+
+  get currentsClient(): CurrentProvider | null {
+    return this.currents;
+  }
+
+  /**
+   * Build the per-request environmental context: resolve departure time and
+   * prepare the tidal flow field over the request area and travel window.
+   * Returns undefined when tides are off or unavailable (route falls back to
+   * plain distance-based behavior, bit-identical to before this feature).
+   */
+  private async prepareEnv(
+    inputs: RouteInputs,
+    anchors: Array<{ latitude: number; longitude: number }>,
+  ): Promise<RouteEnv | undefined> {
+    if (!inputs.useTides || (!this.tides && !this.currents)) return undefined;
+
+    const parsed = inputs.departureTime
+      ? Date.parse(inputs.departureTime)
+      : NaN;
+    const departureMs = Number.isFinite(parsed) ? parsed : Date.now();
+    const speedMs = inputs.speedKnots * KNOTS_TO_MS;
+
+    // Travel window estimate: 3× the direct distance at STW covers detours,
+    // clamped to sane bounds so timeline fetches stay small.
+    let directM = 0;
+    for (let i = 1; i < anchors.length; i++) {
+      directM += this.haversineDistance(
+        anchors[i - 1].latitude,
+        anchors[i - 1].longitude,
+        anchors[i].latitude,
+        anchors[i].longitude,
+      );
+    }
+    const windowSec = Math.min(
+      72 * 3600,
+      Math.max(6 * 3600, (3 * directM) / speedMs),
+    );
+
+    const endMs = departureMs + windowSec * 1000;
+
+    // Tide heights (signalk-tides) — used for depth at the time of passage —
+    // and harmonic current stations (signalk-tidal-currents) — the only source
+    // of current; without them a route still gets the heights, with no
+    // current. Asked at the same time, so a slow plugin costs one wait.
+    // The provider calls are raced against the request's abort signal and
+    // wall-time budget: an abort or overrun ends the wait, and the pending
+    // provider promise is ignored.
+    const control = this.controls.get(inputs);
+    const guard = <T>(work: Promise<T>): Promise<T> =>
+      control ? control.race(work) : work;
+    let heights: Awaited<ReturnType<typeof prepareTideHeights>> | null;
+    let stationField: Awaited<
+      ReturnType<typeof prepareStationFlowField>
+    > | null;
+    try {
+      [heights, stationField] = await Promise.all([
+        this.tides
+          ? guard(
+              prepareTideHeights(
+                this.tides,
+                anchors,
+                departureMs,
+                endMs,
+                this.log,
+              ),
+            )
+          : null,
+        this.currents
+          ? guard(
+              prepareStationFlowField(
+                this.currents,
+                anchors,
+                departureMs,
+                endMs,
+                this.log,
+              ),
+            )
+          : null,
+      ]);
+    } catch (e) {
+      if (e instanceof StopRequested) throw this.stopFailure(inputs, e.stop);
+      throw e;
+    }
+
+    if (!stationField && !heights) return undefined;
+    return {
+      flow: stationField ?? noCurrentField(heights!.stations),
+      heights: heights ?? undefined,
+      departureMs,
+      offsetSec: 0,
+      speedMs,
+    };
+  }
+
+  /**
+   * No routing node near a request's start or end: `REGION_UNAVAILABLE` when a
+   * refused routing file covers the point, `OUTSIDE_COVERAGE` when the known
+   * regions do not, else `NO_NODE_NEAR_POINT`. The file's name and reason are
+   * in the params.
+   */
+  private noNodeFailure(
+    inputs: RouteInputs,
+    point: "start" | "end",
+    at: { latitude: number; longitude: number },
+  ): RouteFailure {
+    const problem = this.db.coverageProblemAt(at.latitude, at.longitude);
+    if (problem?.kind === "unsupported") {
+      return this.failure(inputs, "REGION_UNAVAILABLE", {
+        point,
+        file: problem.file,
+        reason: problem.reason,
+      });
+    }
+    return this.failure(
+      inputs,
+      problem?.kind === "outside" ? "OUTSIDE_COVERAGE" : "NO_NODE_NEAR_POINT",
+      { point },
+    );
+  }
+
+  /**
+   * Calculate a route using directed A* algorithm with bounding-box pruning.
+   * Falls back to partial routing when the route cannot be completed
+   * (disconnected components or unreachable due to constraints),
+   * returning warnings for teleported segments.
+   *
+   * The bounding box starts tight around start+end (plus margin) and expands
+   * on failure, so short routes are very fast.
+   *
+   * Thin wrapper around calculateRouteImpl: counts this request as "in
+   * flight" for the whole calculation (§4a — RoutingDatabase.unloadDatabaseGraph
+   * refuses to evict a database while any route is executing) without
+   * touching the body of the actual search logic.
+   */
+  async calculateRoute(
+    request: RoutingRequest,
+    options: RouteCallOptions = {},
+  ): Promise<RouteResult> {
+    return this.runRoute(request, this.newControl(options));
+  }
+
+  /** The control of one request: the engine's budget, lowered by the call's. */
+  private newControl(options: RouteCallOptions): RequestControl {
+    return new RequestControl(
+      effectiveBudget(this._options.budget, options.budget),
+      options.signal,
+    );
+  }
+
+  /** Throws `BUDGET_EXCEEDED` / `ABORTED` when the request owning `inputs` has
+   *  to stop. A no-op for inputs that carry no control. */
+  private checkStop(inputs: RouteInputs): void {
+    const stop = this.controls.get(inputs)?.check();
+    if (stop) throw this.stopFailure(inputs, stop);
+  }
+
+  private stopFailure(inputs: RouteInputs, stop: StopReason): RouteFailure {
+    return this.failure(inputs, stop.code, stop.params as MessageParams);
+  }
+
+  /** One route calculation under `control` (a scan shares one across steps). */
+  private async runRoute(
+    request: RoutingRequest,
+    control: RequestControl,
+  ): Promise<RouteResult> {
+    // Resolved once, before anything is counted or loaded: strict mode refuses
+    // an incomplete request here.
+    let inputs: RouteInputs | undefined;
+    try {
+      inputs = resolveRouteInputs(request, this._options);
+      this.controls.set(inputs, control);
+      this.checkRequest(request, inputs);
+      this.checkStop(inputs);
+      this.db.beginRoute();
+      try {
+        const route = await this.calculateRouteImpl(request, inputs);
+        // Also covers a path with no A* (same-region navmesh route).
+        this.checkStop(inputs);
+        this.counters.routeCalculated();
+        return route;
+      } finally {
+        this.db.endRoute();
+      }
+    } catch (e) {
+      this.counters.routeFailed(e instanceof RouteFailure ? e.code : undefined);
+      throw e;
+    }
+  }
+
+  /**
+   * The cheap shape check a host that skipped the request validator needs:
+   * start, end and every via are latitude/longitude pairs. Anything else is an
+   * `INVALID_REQUEST`, not a crash deep in the search.
+   */
+  private checkRequest(request: RoutingRequest, inputs: RouteInputs): void {
+    if (request.via !== undefined && !Array.isArray(request.via)) {
+      throw new RouteRequestError(
+        "INVALID_REQUEST",
+        { field: "via" },
+        format("INVALID_REQUEST", { field: "via" }, this.msgLang(inputs)),
+      );
+    }
+    const isPoint = (p: unknown): boolean =>
+      typeof p === "object" &&
+      p !== null &&
+      Number.isFinite((p as { latitude?: unknown }).latitude) &&
+      Number.isFinite((p as { longitude?: unknown }).longitude);
+    const fields: Array<[string, unknown]> = [
+      ["start", request.start],
+      ["end", request.end],
+      ...(request.via ?? []).map((v, i): [string, unknown] => [`via[${i}]`, v]),
+    ];
+    for (const [field, value] of fields) {
+      if (!isPoint(value)) {
+        throw new RouteRequestError(
+          "INVALID_REQUEST",
+          { field },
+          format("INVALID_REQUEST", { field }, this.msgLang(inputs)),
+        );
+      }
+    }
+  }
+
+  /** Loads the regions a route needs; a region that cannot be loaded ends the
+   *  request as `REGION_UNAVAILABLE`, with the detail in the log rather than
+   *  in the message. */
+  private async ensureRegions(
+    inputs: RouteInputs,
+    load: () => Promise<void>,
+  ): Promise<void> {
+    try {
+      await load();
+    } catch (e) {
+      this.log.error(
+        `[routeiq] A routing region could not be loaded: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      throw this.failure(inputs, "REGION_UNAVAILABLE");
+    }
+  }
+
+  /** Records one finished A* loop in the counters. */
+  private noteSearch(iterations: number, startedAt: number): void {
+    this.counters.searchDone(iterations, performance.now() - startedAt);
+  }
+
+  private async calculateRouteImpl(
+    request: RoutingRequest,
+    inputs: RouteInputs,
+  ): Promise<RouteResult> {
+    const { start, end, via = [] } = request;
+    // No coast clearance unless the request asks for one: the factory
+    // databases carry no distance_to_land, so a server-wide default was a
+    // no-op there (and the setting for it is retired).
+    const effectiveCoastDistance = inputs.minCoastDistance;
+
+    // §4a dynamic loading: no-op in non-dynamic mode. In dynamic mode, load
+    // (inline, before the search runs) any not-yet-loaded database whose
+    // coverage bbox contains start/end/any via point — waypoint containment
+    // only for this phase, not the full transit-bbox a route might also
+    // pass through (PHASE_4_DESIGN.md §4a.1 task 4 is that follow-up).
+    await this.ensureRegions(inputs, () =>
+      this.db.ensureRegionsLoaded([start, end, ...via]),
+    );
+
+    const coastDistanceMeters = effectiveCoastDistance * 1852;
+
+    // Same-region navmesh fast path: when both endpoints land inside the
+    // same navmesh_regions polygon, the whole route is a single funnel
+    // path with no point-graph traversal needed at all — astarSearch's
+    // multi-candidate boundary-node seeding (below) can't produce this on
+    // its own, since it always seeds/goal-tests against boundary nodes.
+    if (via.length === 0 && request.endMode !== "manual") {
+      const navmeshRoute = await this.trySameRegionNavmeshRoute(
+        start,
+        end,
+        inputs,
+      );
+      if (navmeshRoute) {
+        // Prepared before the warnings, not after: they now read depths at the
+        // time of passage and need the tide to do it.
+        const sameRegionEnv = await this.prepareEnv(inputs, [start, end]);
+        const violationWarnings: RouteWarning[] = [];
+        await this.addViolationWarnings(
+          navmeshRoute,
+          violationWarnings,
+          "route",
+          start,
+          end,
+          inputs,
+          sameRegionEnv,
+        );
+        if (violationWarnings.length) navmeshRoute.warnings = violationWarnings;
+        await this.finalizeRoute(navmeshRoute, inputs, [], sameRegionEnv);
+        return navmeshRoute;
+      }
+    }
+
+    // Find nearest graph nodes to start/end. A missing node is only fatal
+    // when the adjacent leg is auto-routed — manual legs are straight lines
+    // and work in areas with no graph coverage at all.
+    const startNode = await this.db.findNearestNode(
+      start.latitude,
+      start.longitude,
+    );
+    const endNode = await this.db.findNearestNode(end.latitude, end.longitude);
+    const firstLegMode = via.length > 0 ? via[0].mode : request.endMode;
+    const lastLegMode = request.endMode;
+
+    if (!startNode && firstLegMode !== "manual")
+      throw this.noNodeFailure(inputs, "start", start);
+    if (!endNode && lastLegMode !== "manual")
+      throw this.noNodeFailure(inputs, "end", end);
+
+    // Tidal flow field for time-dependent costs (undefined = tides off/unavailable)
+    const env = await this.prepareEnv(inputs, [start, ...via, end]);
+
+    // Build bounding box with initial margin, try A* with expansion on failure
+    const bboxWarnings: RouteWarning[] = [];
+
+    if (via.length > 0 || request.endMode === "manual") {
+      return await this.routeViaPoints(
+        start,
+        end,
+        via,
+        coastDistanceMeters,
+        inputs,
+        bboxWarnings,
+        env,
+        request.endMode,
+      );
+    }
+    // Fall through for non-via routes (bbox search below)
+
+    // Try A* with expanding bounding box. A search that "succeeds" but
+    // only got there by crossing a depth/air-draft/beam-violating edge
+    // (see pathViolationMeters) gets the same expansion treatment as an
+    // outright failure, since the real route may just be sitting outside
+    // the current box. The best result seen across attempts is kept —
+    // see isBetterCandidate for the fewer-violating-meters-first ordering.
+    let currentMargin = this._options.bboxMarginDeg;
+    const maxMargin = this._options.bboxMaxExtentDeg;
+
+    const candidates: RouteCandidate[] = [];
+    // The attempt before this one, by reference: refreshCandidateLimits may
+    // rescore it after a wider box loads a region.
+    let previousAttempt: RouteCandidate | null = null;
+    let retriedForPenalty = false;
+    // The last A* failure, for the final message when no box finds a path.
+    let lastSearchError: RouteSearchError | undefined;
+
+    while (currentMargin <= maxMargin) {
+      this.checkStop(inputs);
+      const bbox = bboxFromPoints(start, end, currentMargin);
+
+      // §4a.1 task 4: preload transit regions — databases this attempt's box
+      // passes through but that have no start/end waypoint inside them
+      // (ensureRegionsLoaded above only covers waypoint containment).
+      //
+      // Per attempt, for the box that attempt will actually examine — not
+      // once up front for the widest box the expansion loop could ever reach.
+      // That is what this used to do, and at routingBBoxMaxExtent (10°) it
+      // meant every route, however short, synchronously read in every
+      // database within ~1100km of the start-end chord: with the US east
+      // coast tiled by state, a route inside Chesapeake Bay loaded Maine.
+      // Each load blocks the event loop for seconds, and a working set past
+      // maxLoadedRegions then thrashed against the LRU cap, reloading on the
+      // next route what it had just evicted. Nearly every route answers on
+      // the first, routingBBoxMargin-sized attempt; the wider boxes only
+      // exist for the ones that don't, and now only load regions when the
+      // search actually widens to look at them.
+      try {
+        // Inside the try: a region that fails to load on a wider box must
+        // not throw away a route an earlier box already found.
+        await this.ensureRegions(inputs, () =>
+          this.db.ensureRegionsForBbox(bbox),
+        );
+        // Taken before the search: a region another request loads while
+        // this one searches or scores is then caught by
+        // refreshCandidateLimits, not stamped as already seen.
+        const generation = this.db.graphGeneration;
+        const result = await this.astarSearch(
+          start.latitude,
+          start.longitude,
+          end.latitude,
+          end.longitude,
+          coastDistanceMeters,
+          inputs,
+          bbox,
+          env,
+        );
+
+        const cost = result.features[0].properties.totalCost ?? 0;
+        const distance = result.features[0].properties.totalDistance ?? 0;
+        candidates.push({
+          result,
+          violatingMeters: await this.pathViolationMeters(result, inputs, env),
+          cost,
+          distance,
+          generation,
+        });
+        // This attempt's box may have loaded a region that tightened a seam
+        // edge an earlier candidate runs along, and a load while this one was
+        // scored can have done the same to it: rescore all of them (only
+        // those whose generation is behind are touched).
+        await this.refreshCandidateLimits(candidates, inputs, env);
+        const { violatingMeters } = candidates[candidates.length - 1];
+
+        const penalized = violatingMeters > 0;
+        const stalled =
+          previousAttempt !== null &&
+          !this.isBetterCandidate(
+            violatingMeters,
+            cost,
+            previousAttempt.violatingMeters,
+            previousAttempt.cost,
+            distance,
+            previousAttempt.distance,
+          );
+
+        if (!penalized) {
+          break;
+        }
+        if (currentMargin >= maxMargin || stalled) {
+          this.log.info(
+            `Route search kept a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — bounding box expansion ${stalled ? "stopped improving" : "reached max extent"}`,
+          );
+          break;
+        }
+
+        const newMargin = Math.min(currentMargin * 2, maxMargin);
+        // Defensive: a margin that does not grow would repeat the same box.
+        if (!(newMargin > currentMargin)) break;
+        this.log.info(
+          `Route search found a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`,
+        );
+        retriedForPenalty = true;
+        previousAttempt = candidates[candidates.length - 1];
+        currentMargin = newMargin;
+      } catch (e) {
+        // A budget or abort ends the request, whatever was found so far.
+        if (isStopFailure(e)) throw e;
+        // Only an A* failure is worth a wider box. Anything else is a bug:
+        // it propagates, unless an earlier box already found a route, which
+        // is kept rather than thrown away.
+        if (!(e instanceof RouteSearchError)) {
+          if (candidates.length === 0) throw e;
+          this.log.error(
+            `[routeiq] Route search failed after a route was found; keeping that route: ${e instanceof Error ? e.message : String(e)}`,
+          );
+          break;
+        }
+        lastSearchError = e;
+        // Expand bounding box and retry
+        if (currentMargin < maxMargin) {
+          const newMargin = Math.min(currentMargin * 2, maxMargin);
+          // Defensive: a margin that does not grow would repeat the same box.
+          if (!(newMargin > currentMargin)) break;
+          this.log.info(
+            `Route search expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box`,
+          );
+          currentMargin = newMargin;
+        } else {
+          break;
+        }
+      }
+    }
+
+    // A box that threw may have merged seam edges before it failed
+    // (ensureRegionsForBbox runs inside the try): rescore again.
+    await this.refreshCandidateLimits(candidates, inputs, env);
+    const best = this.selectBestCandidate(candidates);
+    if (best) {
+      const result = best.result;
+      if (retriedForPenalty) {
+        this.log.info(
+          `Route search penalized-result retry ${best.violatingMeters > 0 ? "did not clear the penalty" : "won"} (final cost ${best.cost.toFixed(0)}, ${best.violatingMeters.toFixed(0)}m constraint-violating)`,
+        );
+      }
+
+      // Connect user's start/end to the route coordinates
+      await this.connectUserPoint(start, result, "start", inputs);
+      await this.connectUserPoint(end, result, "end", inputs);
+
+      // Check for constraint violations (draft, beam, air draft) on the found path
+      const violationWarnings: RouteWarning[] = [];
+      await this.addViolationWarnings(
+        result,
+        violationWarnings,
+        "route",
+        start,
+        end,
+        inputs,
+        env,
+      );
+
+      // Attach any warning types
+      result.warnings = [
+        ...(result.warnings || []),
+        ...bboxWarnings,
+        ...violationWarnings,
+      ];
+      if (result.warnings.length === 0) delete result.warnings;
+      await this.finalizeRoute(result, inputs, [], env);
+      return result;
+    }
+
+    // All bbox attempts failed — try fallback routing (unconstrained graph).
+    // (Only reachable on the all-auto path, where both nodes were verified.)
+    return await this.fallbackRoute(
+      startNode!,
+      endNode!,
+      start,
+      end,
+      coastDistanceMeters,
+      via,
+      inputs,
+      env,
+      true,
+      lastSearchError,
+    );
+  }
+
+  /**
+   * The order a scan visits its steps in: both ends of the window first, then
+   * the midpoint of every interval already bracketed, and so on down to
+   * neighbouring steps. Every index is still visited exactly once — only the
+   * order changes — so a caller that collects the whole thing is unaffected.
+   *
+   * It exists for the caller that renders results as they arrive. Each step is
+   * a full route calculation, and a long route can take minutes to scan; walked
+   * left to right, the window is meaningless until it is nearly complete. Coarse
+   * to fine, the shape of the day is legible after a handful of results and
+   * sharpens from there, which is usually enough to answer "when should I
+   * leave" long before the scan finishes.
+   */
+  static departureScanOrder(steps: number): number[] {
+    if (steps <= 0) return [];
+    if (steps === 1) return [0];
+    const order: number[] = [];
+    const taken = new Array<boolean>(steps).fill(false);
+    const take = (i: number): void => {
+      if (i >= 0 && i < steps && !taken[i]) {
+        taken[i] = true;
+        order.push(i);
+      }
+    };
+    take(0);
+    take(steps - 1);
+    // Breadth-first so whole levels of detail land together, rather than one
+    // half of the window being refined before the other is touched.
+    const queue: Array<[number, number]> = [[0, steps - 1]];
+    while (queue.length > 0) {
+      const [lo, hi] = queue.shift()!;
+      if (hi - lo < 2) continue;
+      const mid = (lo + hi) >> 1;
+      take(mid);
+      queue.push([lo, mid], [mid, hi]);
+    }
+    return order;
+  }
+
+  /**
+   * Scan a range of departure times, yielding each result as it is computed so
+   * a caller can stream them. Each step is a full route calculation (the optimal
+   * route may differ per tide); repeated tide API fetches are absorbed by the
+   * tide provider cache.
+   *
+   * Results arrive in `departureScanOrder`, not chronological order — each
+   * carries its `index` into the window so a caller can place it. Pass a signal
+   * to stop early: a scan whose client has gone away is pure wasted CPU, and at
+   * one full search per step there is a lot of it to waste.
+   */
+  async *streamDepartures(
+    request: RoutingRequest,
+    scanHours: number = 24,
+    stepMinutes: number = 60,
+    options: RouteCallOptions = {},
+    baseMs: number = RoutingEngine.departureScanBase(request),
+  ): AsyncGenerator<DepartureScanStep> {
+    // Count the whole scan as one route in flight, on top of the per-step
+    // bracket calculateRoute does for itself (so the counter runs 1→2→1 and
+    // never reaches 0 between steps). Every step routes the same waypoints
+    // and therefore wants the same regions, but endRoute() at 0 triggers the
+    // LRU cap: a working set larger than maxLoadedRegions would otherwise be
+    // evicted and re-read from disk ~25 times over, once per step. The
+    // regions are evicted once, when the scan is done.
+    //
+    // Safe for a scan that stops early: an async generator runs `finally` on
+    // .return(), which is what a consumer that stops iterating triggers; an
+    // abort or an overrun budget throws out of the generator and runs it too.
+    // The effective inputs are fixed once for the whole scan (strict mode
+    // refuses an incomplete request here, before the first step) and handed to
+    // every step in the request, so all steps plan against the same boat.
+    const inputs = resolveRouteInputs(request, this._options);
+    // One control for the whole scan: the budget is spent over all its steps.
+    const control = this.newControl(options);
+    this.controls.set(inputs, control);
+    const fixed: RoutingRequest = {
+      ...request,
+      draft: inputs.draft,
+      beam: inputs.beam,
+      airDraft: inputs.airDraft,
+      speedKnots: inputs.speedKnots,
+      safetyMarginDraft: inputs.safetyMarginDraft,
+      safetyMarginBeam: inputs.safetyMarginBeam,
+      safetyMarginAirDraft: inputs.safetyMarginAirDraft,
+      lockWaitMinutes: inputs.lockWaitMinutes,
+      bridgeWaitMinutes: inputs.bridgeWaitMinutes,
+    };
+    this.db.beginRoute();
+    try {
+      yield* this.streamDeparturesInner(
+        fixed,
+        scanHours,
+        stepMinutes,
+        control,
+        inputs,
+        baseMs,
+      );
+    } finally {
+      this.db.endRoute();
+    }
+  }
+
+  /** Body of streamDepartures — see the region-eviction bracket there. */
+  private async *streamDeparturesInner(
+    request: RoutingRequest,
+    scanHours: number,
+    stepMinutes: number,
+    control: RequestControl,
+    scanInputs: RouteInputs,
+    baseMs: number,
+  ): AsyncGenerator<DepartureScanStep> {
+    // A stop between steps (no calculation is running to count it) is counted
+    // here; one inside a step was counted by that step.
+    const checkBetween = (): void => {
+      const stop = control.check();
+      if (!stop) return;
+      const failure = this.stopFailure(scanInputs, stop);
+      this.counters.routeFailed(failure.code);
+      throw failure;
+    };
+    for (const i of RoutingEngine.departureScanOrder(
+      RoutingEngine.departureScanSteps(scanHours, stepMinutes),
+    )) {
+      checkBetween();
+      const departureTime = RoutingEngine.departureScanTime(
+        baseMs,
+        i,
+        stepMinutes,
+      );
+      try {
+        const r = await this.runRoute(
+          {
+            ...request,
+            departureTime,
+            useTides: true,
+            describe: false,
+          },
+          control,
+        );
+        // Checked again on the way out: a result that finished just as the
+        // scan was aborted belongs to a scan nobody is receiving.
+        checkBetween();
+        yield {
+          index: i,
+          departureTime,
+          totalSeconds: r.totalSeconds,
+          totalSecondsNoTide: r.totalSecondsNoTide,
+          arrivalTime: r.arrivalTime,
+          totalDistance: r.totalDistance,
+        };
+      } catch (e) {
+        // A budget or abort ends the scan; only a step's own failure is a row.
+        if (isStopFailure(e)) throw e;
+        yield {
+          index: i,
+          departureTime,
+          error: e instanceof Error ? e.message : String(e),
+          ...(e instanceof RouteFailure
+            ? { code: e.code, params: e.params }
+            : {}),
+        };
+      }
+    }
+  }
+
+  /** Number of steps a scan of this length covers, ends included. */
+  static departureScanSteps(scanHours: number, stepMinutes: number): number {
+    return Math.min(97, Math.floor((scanHours * 60) / stepMinutes) + 1);
+  }
+
+  /**
+   * The instant a scan counts its steps from. Resolved once and passed around,
+   * never re-derived per step: a request that omits `departureTime` falls back
+   * to "now", and re-reading the clock for each step makes every step land on a
+   * slightly different base. The times announced up front then disagree with
+   * the times attached to the results — by milliseconds, but a client that
+   * places results by departure time (the only way to place them when a request
+   * covers part of a window) matches none of them and silently drops the lot.
+   */
+  static departureScanBase(request: RoutingRequest): number {
+    const parsed = request.departureTime
+      ? Date.parse(request.departureTime)
+      : NaN;
+    return Number.isFinite(parsed) ? parsed : Date.now();
+  }
+
+  /** The departure time of step `index`, counted from `baseMs`. */
+  static departureScanTime(
+    baseMs: number,
+    index: number,
+    stepMinutes: number,
+  ): string {
+    return new Date(baseMs + index * stepMinutes * 60_000).toISOString();
+  }
+
+  /**
+   * Collect a whole scan, in chronological order. The streaming form is what
+   * the scan actually runs on; this keeps the single-response API unchanged.
+   */
+  async scanDepartures(
+    request: RoutingRequest,
+    scanHours: number = 24,
+    stepMinutes: number = 60,
+    options: RouteCallOptions = {},
+  ): Promise<DepartureScanStep[]> {
+    const out: DepartureScanStep[] = [];
+    for await (const d of this.streamDepartures(
+      request,
+      scanHours,
+      stepMinutes,
+      options,
+    )) {
+      out.push(d);
+    }
+    return out.sort((a, b) => a.index - b.index);
+  }
+
+  /**
+   * Fallback routing when A* fails (disconnected components or constraints).
+   * Routes as far as possible and returns warnings for the unreachable section.
+   */
+  private async fallbackRoute(
+    startNode: number,
+    endNode: number,
+    start: { latitude: number; longitude: number },
+    end: { latitude: number; longitude: number },
+    coastDistanceMeters: number,
+    _via: Array<{ latitude: number; longitude: number }>,
+    inputs: RouteInputs,
+    env?: RouteEnv,
+    // When this result is a LEG of a via route it must stay un-finalized:
+    // finalizeRoute ends in splitToSegmentFeatures, which replaces
+    // features[0] with per-segment features that carry no
+    // properties.segments — routeViaPoints' merge then crashes with
+    // "segments is not iterable". The via caller finalizes once at the end.
+    finalize: boolean = true,
+    // The bounding-box loop's last A* failure, reported when this gives up.
+    searchError?: Error,
+  ): Promise<RouteResult> {
+    const warnings: RouteWarning[] = [];
+    const reachableFromStart = this.db.getReachableNodes(startNode);
+    const endReachable = reachableFromStart.has(endNode);
+
+    if (!endReachable) {
+      // Disconnected components — pick the larger component as the primary routing network
+      const reachableFromEnd = this.db.getReachableNodes(endNode);
+      const useEndAsPrimary = reachableFromEnd.size >= reachableFromStart.size;
+      const primaryComponent = useEndAsPrimary
+        ? reachableFromEnd
+        : reachableFromStart;
+
+      // Find connection points in the primary component nearest to each user point
+      const entry = await this.db.findNearestNodeInSet(
+        start.latitude,
+        start.longitude,
+        primaryComponent,
+        50000,
+      );
+      const exit = await this.db.findNearestNodeInSet(
+        end.latitude,
+        end.longitude,
+        primaryComponent,
+        50000,
+      );
+
+      if (!entry || !exit) {
+        throw this.failure(inputs, "NO_PATH", { reason: "disconnected" });
+      }
+
+      // Route through the primary component from entry to exit
+      let route: RouteResult;
+      if (entry.id === exit.id) {
+        route = await this.buildEmptyRoute(entry.id);
+      } else {
+        try {
+          route = await this.astarSearch(
+            entry.lat,
+            entry.lon,
+            exit.lat,
+            exit.lon,
+            coastDistanceMeters,
+            inputs,
+            undefined,
+            env,
+          );
+        } catch (e) {
+          if (isStopFailure(e)) throw e;
+          throw this.failure(inputs, "NO_PATH", {
+            reason: "primary_network",
+            cause: this.causeOf(e),
+          });
+        }
+      }
+
+      // Connect user points to the primary network entry/exit
+      await this.connectUserPoint(start, route, "start", inputs);
+      await this.connectUserPoint(end, route, "end", inputs);
+
+      if (finalize) await this.finalizeRoute(route, inputs, [], env);
+      return route;
+    }
+
+    throw this.failure(inputs, "NO_PATH", {
+      reason: "graph_connected",
+      ...(searchError ? { cause: this.causeOf(searchError) } : {}),
+    });
+  }
+
+  /**
+   * Route through a list of via points sequentially.
+   * Handles individual segment failures by trying relaxed constraints
+   * (zero draft, beam, airDraft, coast distance) instead of failing entirely.
+   */
+  private async routeViaPoints(
+    start: { latitude: number; longitude: number },
+    end: { latitude: number; longitude: number },
+    via: Array<{ latitude: number; longitude: number; mode?: LegMode }>,
+    coastDistanceMeters: number,
+    inputs: RouteInputs,
+    globalWarnings?: RouteWarning[],
+    env?: RouteEnv,
+    endMode?: LegMode,
+  ): Promise<RouteResult> {
+    let currentStart = start;
+    let elapsedSec = 0; // time offset of the current leg's departure
+    const allSegments: RouteResult["features"][0]["properties"]["segments"] =
+      [];
+    const allCoordinates: [number, number][] = [];
+    const warnings: RouteWarning[] = [];
+    // The legs in route order, for recheckViaLegs.
+    const legs: RouteResult[] = [];
+    let totalDistanceMeters = 0;
+    let totalCostAccum = 0;
+    // Route vertex → via index: where each leg to a via ends. Taken from the
+    // legs as they are joined, so it never depends on which vertex happens to
+    // lie nearest the via's raw position (a later pass can lie nearer).
+    const viaAt = new Map<number, number>();
+
+    // Compute an adaptive margin from the overall span of all waypoints.
+    // Water routes can make large lat/lon excursions (e.g. Lisbon→Italy via
+    // Gibraltar is ~3° south of both endpoints), so the per-segment bbox must
+    // be generous enough to contain the full water path, not just the chord.
+    const allPts = [start, ...via, end];
+    const minPtLat = Math.min(...allPts.map((p) => p.latitude));
+    const maxPtLat = Math.max(...allPts.map((p) => p.latitude));
+    const minPtLon = Math.min(...allPts.map((p) => p.longitude));
+    const maxPtLon = Math.max(...allPts.map((p) => p.longitude));
+    const spanLat = maxPtLat - minPtLat;
+    const spanLon = maxPtLon - minPtLon;
+    const adaptiveMargin = Math.min(
+      this._options.bboxMaxExtentDeg,
+      Math.max(this._options.bboxMarginDeg, spanLat * 0.3, spanLon * 0.2),
+    );
+
+    for (let i = 0; i < via.length; i++) {
+      let nextPoint: { latitude: number; longitude: number; mode?: LegMode } =
+        via[i];
+      const legEnv = env ? { ...env, offsetSec: elapsedSec } : undefined;
+      let segmentResult: RouteResult | null;
+      if (nextPoint.mode === "manual") {
+        // User-drawn straight line, bypassing the graph. Snap the endpoint to
+        // a nearby graph node only when the NEXT leg is auto-routed, so it
+        // picks up exactly where the manual line ends; between two manual
+        // legs (or before a manual final leg) the line must pass exactly
+        // through the user's clicked point.
+        const nextLegMode =
+          i + 1 < via.length
+            ? (via[i + 1].mode ?? "auto")
+            : (endMode ?? "auto");
+        const manual = await this.buildManualLeg(
+          currentStart,
+          nextPoint,
+          { via: i + 1 },
+          warnings,
+          inputs,
+          nextLegMode !== "manual",
+        );
+        segmentResult = manual.route;
+        nextPoint = { ...nextPoint, ...manual.snappedEnd };
+      } else {
+        const segmentBbox = bboxFromPoints(
+          currentStart,
+          nextPoint,
+          adaptiveMargin,
+        );
+        segmentResult = await this.tryRouteSegment(
+          currentStart.latitude,
+          currentStart.longitude,
+          nextPoint.latitude,
+          nextPoint.longitude,
+          coastDistanceMeters,
+          i,
+          warnings,
+          inputs,
+          segmentBbox,
+          legEnv,
+        );
+      }
+      if (!segmentResult) {
+        // via point completely unreachable — skip it
+        warnings.push({
+          ...makeWarning(this.msgLang(inputs), "via_skipped", "VIA_SKIPPED", {
+            via: i + 1,
+          }),
+          from: {
+            latitude: currentStart.latitude,
+            longitude: currentStart.longitude,
+          },
+          to: { latitude: nextPoint.latitude, longitude: nextPoint.longitude },
+        });
+        continue;
+      }
+
+      // Snap the start of this segment to the user's currentStart coordinate
+      // (important for the first segment and for each via point)
+      await this.connectUserPoint(currentStart, segmentResult, "start", inputs);
+
+      if (allCoordinates.length === 0) {
+        allCoordinates.push(...segmentResult.features[0].geometry.coordinates);
+      } else {
+        allCoordinates.push(
+          ...segmentResult.features[0].geometry.coordinates.slice(1),
+        );
+      }
+
+      viaAt.set(allCoordinates.length - 1, i);
+      allSegments.push(...segmentResult.features[0].properties.segments!);
+      legs.push(segmentResult);
+      totalDistanceMeters +=
+        segmentResult.features[0].properties.totalDistance ?? 0;
+      totalCostAccum += segmentResult.features[0].properties.totalCost ?? 0;
+      elapsedSec = this.annotateSegmentTimes(
+        segmentResult.features[0].geometry.coordinates,
+        segmentResult.features[0].properties.segments!,
+        env,
+        inputs,
+        elapsedSec,
+      );
+      currentStart = nextPoint;
+    }
+
+    let finalResult: RouteResult | null;
+    const finalFailure: { reason?: string; cause?: unknown } = {};
+    if (endMode === "manual") {
+      // Final leg drawn by hand — end exactly at the user's destination
+      // (no node snapping; there is no following leg to pick up from it).
+      finalResult = (
+        await this.buildManualLeg(
+          currentStart,
+          end,
+          "end",
+          warnings,
+          inputs,
+          false,
+        )
+      ).route;
+    } else {
+      const finalBbox = bboxFromPoints(currentStart, end, adaptiveMargin);
+      finalResult = await this.tryRouteSegment(
+        currentStart.latitude,
+        currentStart.longitude,
+        end.latitude,
+        end.longitude,
+        coastDistanceMeters,
+        -1,
+        warnings,
+        inputs,
+        finalBbox,
+        env ? { ...env, offsetSec: elapsedSec } : undefined,
+        finalFailure,
+      );
+    }
+
+    if (!finalResult) {
+      throw this.failure(inputs, "NO_PATH", {
+        reason: "destination",
+        ...(finalFailure.cause !== undefined
+          ? { cause: finalFailure.cause }
+          : {}),
+      });
+    }
+
+    // Snap the final segment's start to currentStart (last via point or start if no vias)
+    await this.connectUserPoint(currentStart, finalResult, "start", inputs);
+
+    if (allCoordinates.length === 0) {
+      allCoordinates.push(...finalResult.features[0].geometry.coordinates);
+    } else {
+      allCoordinates.push(
+        ...finalResult.features[0].geometry.coordinates.slice(1),
+      );
+    }
+    allSegments.push(...finalResult.features[0].properties.segments!);
+    legs.push(finalResult);
+    totalDistanceMeters +=
+      finalResult.features[0].properties.totalDistance ?? 0;
+    totalCostAccum += finalResult.features[0].properties.totalCost ?? 0;
+
+    // A later leg's wider box may have loaded a region that tightened a seam
+    // edge an earlier leg runs along.
+    await this.recheckViaLegs(legs, warnings);
+
+    const allWarnings = [...warnings, ...(globalWarnings || [])];
+
+    const result: RouteResult = {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: { type: "LineString", coordinates: allCoordinates },
+          properties: {
+            totalDistance: totalDistanceMeters,
+            totalCost: totalCostAccum,
+            segments: allSegments,
+          },
+        },
+      ],
+      warnings: allWarnings.length > 0 ? allWarnings : undefined,
+    };
+
+    // Connect only the overall end coordinate (start is handled per-segment above)
+    await this.connectUserPoint(end, result, "end", inputs);
+
+    await this.finalizeRoute(result, inputs, via, env, viaAt);
+    return result;
+  }
+
+  /**
+   * Try routing a segment with full constraints and optional bounding box;
+   * on failure fall back to relaxed constraints (zero vessel dimensions,
+   * zero coast distance). Returns null if both attempts fail.
+   */
+  private async tryRouteSegment(
+    startLat: number,
+    startLon: number,
+    endLat: number,
+    endLon: number,
+    coastDistanceMeters: number,
+    viaIndex: number,
+    warnings: RouteWarning[],
+    inputs: RouteInputs,
+    bbox?: BBox,
+    env?: RouteEnv,
+    // Filled with why the segment failed when this returns null.
+    failure: { reason?: string; cause?: unknown } = {},
+  ): Promise<RouteResult | null> {
+    const target: LegTarget = viaIndex >= 0 ? { via: viaIndex + 1 } : "end";
+    const label = legLabel(target);
+    const startPt = { latitude: startLat, longitude: startLon };
+    const endPt = { latitude: endLat, longitude: endLon };
+
+    let currentMargin = this._options.bboxMarginDeg;
+    const segmentMaxMargin = this._options.bboxMaxExtentDeg;
+
+    const candidates: RouteCandidate[] = [];
+    // The attempt before this one, by reference: refreshCandidateLimits may
+    // rescore it after a wider box loads a region.
+    let previousAttempt: RouteCandidate | null = null;
+    let retriedForPenalty = false;
+    // The last A* failure, for the fallback's message when no box finds a path.
+    let lastSearchError: RouteSearchError | undefined;
+
+    while (currentMargin <= segmentMaxMargin) {
+      this.checkStop(inputs);
+      const segmentBbox = bbox ?? bboxFromPoints(startPt, endPt, currentMargin);
+
+      // §4a.1 task 4: preload this segment's transit regions — see the
+      // matching call in calculateRouteImpl for why it is per attempt and
+      // not once up front for the widest reachable box. Here it also covers
+      // the caller-supplied box (routeViaPoints' adaptiveMargin one), which
+      // is dropped on the first retry (`bbox = undefined` below) so later
+      // attempts fall through to the expanding bboxFromPoints box.
+      try {
+        // Inside the try, as in calculateRouteImpl.
+        await this.ensureRegions(inputs, () =>
+          this.db.ensureRegionsForBbox(segmentBbox),
+        );
+        // Taken before the search: a region another request loads while
+        // this one searches or scores is then caught by
+        // refreshCandidateLimits, not stamped as already seen.
+        const generation = this.db.graphGeneration;
+        const result = await this.astarSearch(
+          startLat,
+          startLon,
+          endLat,
+          endLon,
+          coastDistanceMeters,
+          inputs,
+          segmentBbox,
+          env,
+        );
+
+        const cost = result.features[0].properties.totalCost ?? 0;
+        const distance = result.features[0].properties.totalDistance ?? 0;
+        candidates.push({
+          result,
+          violatingMeters: await this.pathViolationMeters(result, inputs, env),
+          cost,
+          distance,
+          generation,
+        });
+        // This attempt's box may have loaded a region that tightened a seam
+        // edge an earlier candidate runs along, and a load while this one was
+        // scored can have done the same to it: rescore all of them (only
+        // those whose generation is behind are touched).
+        await this.refreshCandidateLimits(candidates, inputs, env);
+        const { violatingMeters } = candidates[candidates.length - 1];
+
+        const penalized = violatingMeters > 0;
+        const stalled =
+          previousAttempt !== null &&
+          !this.isBetterCandidate(
+            violatingMeters,
+            cost,
+            previousAttempt.violatingMeters,
+            previousAttempt.cost,
+            distance,
+            previousAttempt.distance,
+          );
+
+        if (!penalized) break;
+        bbox = undefined;
+        if (currentMargin >= segmentMaxMargin || stalled) {
+          this.log.info(
+            `Route search for ${label} kept a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — bounding box expansion ${stalled ? "stopped improving" : "reached max extent"}`,
+          );
+          break;
+        }
+
+        const newMargin = Math.min(currentMargin * 2, segmentMaxMargin);
+        // Defensive: a margin that does not grow would repeat the same box.
+        if (!(newMargin > currentMargin)) break;
+        this.log.info(
+          `Route search for ${label} found a penalized result (${violatingMeters.toFixed(0)}m constraint-violating, cost ${cost.toFixed(0)} vs distance ${distance.toFixed(0)}m) — retrying with expanded bounding box from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km`,
+        );
+        retriedForPenalty = true;
+        previousAttempt = candidates[candidates.length - 1];
+        currentMargin = newMargin;
+      } catch (e) {
+        if (isStopFailure(e)) throw e;
+        // As in calculateRouteImpl: widen only on an A* failure; a bug
+        // propagates unless a route was already found.
+        if (!(e instanceof RouteSearchError)) {
+          if (candidates.length === 0) throw e;
+          this.log.error(
+            `[routeiq] Route search for ${label} failed after a route was found; keeping that route: ${e instanceof Error ? e.message : String(e)}`,
+          );
+          break;
+        }
+        lastSearchError = e;
+        bbox = undefined;
+        if (currentMargin >= segmentMaxMargin) break;
+        const newMargin = Math.min(currentMargin * 2, segmentMaxMargin);
+        // Defensive: a margin that does not grow would repeat the same box.
+        if (!(newMargin > currentMargin)) break;
+        this.log.info(
+          `Route search for ${label} expanded from ${(currentMargin * 111).toFixed(0)}km to ${(newMargin * 111).toFixed(0)}km bounding box`,
+        );
+        currentMargin = newMargin;
+      }
+    }
+
+    // A box that threw may have merged seam edges before it failed
+    // (ensureRegionsForBbox runs inside the try): rescore again.
+    await this.refreshCandidateLimits(candidates, inputs, env);
+    const best = this.selectBestCandidate(candidates);
+    if (best) {
+      if (retriedForPenalty) {
+        this.log.info(
+          `Route search for ${label} penalized-result retry ${best.violatingMeters > 0 ? "did not clear the penalty" : "won"} (final cost ${best.cost.toFixed(0)}, ${best.violatingMeters.toFixed(0)}m constraint-violating)`,
+        );
+      }
+      const before = warnings.length;
+      // The generation the winner's limits were last read at, not the
+      // current one: the check below awaits, and refreshCandidateLimits may
+      // have stopped at MAX_REFRESH_PASSES with the winner still behind.
+      const generation = best.generation;
+      await this.addViolationWarnings(
+        best.result,
+        warnings,
+        target,
+        startPt,
+        endPt,
+        inputs,
+        env,
+      );
+      legChecks.set(best.result, {
+        target,
+        startPt,
+        endPt,
+        inputs,
+        env,
+        warnings: warnings.slice(before),
+        generation,
+      });
+      return best.result;
+    }
+
+    // A* failed entirely — graph is physically disconnected. Bridge the gap.
+    const startNode = await this.db.findNearestNode(startLat, startLon);
+    const endNode = await this.db.findNearestNode(endLat, endLon);
+    if (startNode && endNode) {
+      const viaLeg = typeof target === "object";
+      warnings.push({
+        ...makeWarning(
+          this.msgLang(inputs),
+          "via_constrained",
+          viaLeg ? "VIA_LEG_DISCONNECTED" : "END_LEG_DISCONNECTED",
+          viaLeg ? { via: target.via } : {},
+        ),
+        from: startPt,
+        to: endPt,
+      });
+      try {
+        const fallback = await this.fallbackRoute(
+          startNode,
+          endNode,
+          startPt,
+          endPt,
+          coastDistanceMeters,
+          [],
+          inputs,
+          env,
+          // This is a via leg, left un-finalized (below) so the merged route is
+          // scheduled once, as a whole.
+          false,
+          lastSearchError,
+        );
+        if (fallback.warnings) {
+          warnings.push(...fallback.warnings);
+          fallback.warnings = undefined;
+        }
+        return fallback;
+      } catch (e) {
+        if (isStopFailure(e)) throw e;
+        failure.reason = e instanceof Error ? e.message : String(e);
+        failure.cause = this.causeOf(e);
+        this.log.info(`[routeiq] ${label}: ${failure.reason}`);
+        return null;
+      }
+    }
+    failure.reason = lastSearchError?.message;
+    if (lastSearchError) failure.cause = this.causeOf(lastSearchError);
+    return null;
+  }
+
+  /**
+   * Build a manual (user-drawn) leg: a straight rhumb line from `from` to
+   * `to`, bypassing the A* graph entirely. When `snapEnd` is true (default)
+   * the endpoint is snapped to the nearest graph node within
+   * MANUAL_SNAP_RADIUS_M so a following auto leg picks up seamlessly — the
+   * caller must continue from the returned `snappedEnd`.
+   *
+   * The segment carries no depth/air-draft data (mode:'manual', minDepth -1)
+   * — the user takes responsibility for its navigability. A line-of-sight
+   * sample against the graph flags likely land crossings as a warning.
+   */
+  private async buildManualLeg(
+    from: { latitude: number; longitude: number },
+    to: { latitude: number; longitude: number },
+    target: LegTarget,
+    warnings: RouteWarning[],
+    inputs: RouteInputs,
+    snapEnd: boolean = true,
+  ): Promise<{
+    route: RouteResult;
+    snappedEnd: { latitude: number; longitude: number };
+  }> {
+    const MANUAL_SNAP_RADIUS_M = 150;
+    let endLat = to.latitude;
+    let endLon = to.longitude;
+    let endNodeId = -1;
+
+    if (snapEnd) {
+      const nearId = await this.db.findNearestNode(
+        to.latitude,
+        to.longitude,
+        MANUAL_SNAP_RADIUS_M,
+      );
+      if (nearId != null) {
+        const node = await this.db.getNodeById(nearId);
+        if (node) {
+          endLat = node.lat;
+          endLon = node.lon;
+          endNodeId = nearId;
+        }
+      }
+    }
+
+    const distance = Math.round(
+      this.haversineDistance(from.latitude, from.longitude, endLat, endLon),
+    );
+
+    // Best-effort land check: sample the straight line against the graph.
+    // Manual mode exists precisely for areas with poor graph coverage, so
+    // this can only ever be a warning, never a rejection.
+    const samples = Math.max(5, Math.min(40, Math.round(distance / 200)));
+    if (
+      distance > 20 &&
+      this.db.isLineCrossingLand(
+        from.latitude,
+        from.longitude,
+        endLat,
+        endLon,
+        samples,
+      )
+    ) {
+      const viaLeg = typeof target === "object";
+      warnings.push({
+        ...makeWarning(
+          this.msgLang(inputs),
+          "manual_segment",
+          viaLeg
+            ? "MANUAL_LEG_MAY_CROSS_LAND_VIA"
+            : "MANUAL_LEG_MAY_CROSS_LAND_END",
+          viaLeg ? { via: target.via } : {},
+        ),
+        from: { latitude: from.latitude, longitude: from.longitude },
+        to: { latitude: endLat, longitude: endLon },
+        distanceMeters: distance,
+      });
+    }
+
+    const route: RouteResult = {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: {
+            type: "LineString",
+            coordinates: [
+              [from.longitude, from.latitude],
+              [endLon, endLat],
+            ],
+          },
+          properties: {
+            totalDistance: distance,
+            totalCost: distance,
+            segments: [
+              {
+                from: -1,
+                to: endNodeId,
+                distance,
+                minDepth: -1,
+                minDepthKnown: false,
+                maxAirDraft: -1,
+                costFactor: 1.0,
+                trafficMode: TRAFFIC_TWO_WAY,
+                mode: "manual",
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    return { route, snappedEnd: { latitude: endLat, longitude: endLon } };
+  }
+
+  /**
+   * The warning for one connector leg — the straight line joining a requested
+   * start/destination to the charted graph.
+   *
+   * Short ones are ordinary and are reported as `start_connecting`/
+   * `end_connecting`, which clients are entitled to treat as noise (this
+   * repo's own webapp drops them from the warnings pane outright). Long ones
+   * are not ordinary: the leg is not a routed path, and it carries
+   * `minDepth: -1`, so every constraint check skips it. That is how an
+   * un-stitched seam between two regional databases fails today — silently.
+   * The start is projected onto the nearest *reachable* waterway, which can
+   * be on the far side of the hole, and joined with a straight line; one such
+   * route came back shorter than its single-file baseline by cutting the
+   * corner (STITCHING_DESIGN.md §9.3). Route distance alone therefore says
+   * nothing about whether the water was ever charted.
+   *
+   * Above `coverageGapMeters` the same leg is reported as a `coverage_gap`
+   * instead, so it reaches the helm rather than being filtered out with the
+   * routine ones. The route is still returned: a straight line across an
+   * uncharted stretch may be perfectly navigable, and refusing to answer
+   * would help nobody. It just has to say so.
+   */
+  private connectorWarning(
+    position: "start" | "end",
+    meters: number,
+    from: { latitude: number; longitude: number },
+    to: { latitude: number; longitude: number },
+    inputs: RouteInputs,
+  ): RouteWarning {
+    const m = Math.round(meters);
+    const gap =
+      this._options.coverageGapM > 0 && m > this._options.coverageGapM;
+    const code: RouteWarningCode = gap
+      ? position === "start"
+        ? "COVERAGE_GAP_START"
+        : "COVERAGE_GAP_END"
+      : position === "start"
+        ? "CONNECTOR_START"
+        : "CONNECTOR_END";
+    return makeWarning(
+      this.msgLang(inputs),
+      gap
+        ? "coverage_gap"
+        : position === "start"
+          ? "start_connecting"
+          : "end_connecting",
+      code,
+      { distance: m },
+      { from, to, distanceMeters: m },
+    );
+  }
+
+  /**
+   * Connect a user-requested point to the nearest route coordinate.
+   * Prepends/appends the user point and adds a connecting segment + warning.
+   * When that changes the geometry, crossings detected before are dropped:
+   * the connector may pass a bridge or lock, and every chainage shifts, so
+   * the next consumer detects them again on the final line.
+   */
+  private async connectUserPoint(
+    userPoint: { latitude: number; longitude: number },
+    route: RouteResult,
+    position: "start" | "end",
+    inputs: RouteInputs,
+  ): Promise<void> {
+    if (await this.attachUserPoint(userPoint, route, position, inputs))
+      delete route.crossings;
+  }
+
+  /**
+   * The geometry work of connectUserPoint.
+   *
+   * @returns Whether the route's line changed (false when the point was
+   *   already on it, or the route is empty).
+   */
+  private async attachUserPoint(
+    userPoint: { latitude: number; longitude: number },
+    route: RouteResult,
+    position: "start" | "end",
+    inputs: RouteInputs,
+  ): Promise<boolean> {
+    const coords = route.features[0].geometry.coordinates;
+    const segments = route.features[0].properties.segments!;
+
+    const markOverland = (
+      segIdx: number,
+      fromLon: number,
+      fromLat: number,
+      toLon: number,
+      toLat: number,
+    ) => {
+      const seg = segments[segIdx];
+      if (!seg) return;
+      connectorLegs.add(seg);
+      if (!this._options.losSearchRadiusM) return;
+      if (this.db.isLineCrossingLand(fromLat, fromLon, toLat, toLon, 5)) {
+        seg.minDepth = 0;
+        seg.minDepthKnown = true;
+        // Flagged, not left to be inferred from the 0: that value is
+        // indistinguishable from a charted drying height, and something has to
+        // stop the tide being added to a leg that crosses dry land.
+        seg.crossesLand = true;
+      }
+    };
+    if (coords.length === 0) return false;
+
+    if (position === "start") {
+      const firstCoord = coords[0];
+      const directDist = this.haversineDistance(
+        userPoint.latitude,
+        userPoint.longitude,
+        firstCoord[1],
+        firstCoord[0],
+      );
+      if (directDist <= 1) return false;
+
+      // Project user onto the first route edge (coords[0] → coords[1])
+      // and split the edge at that point so the connection doesn't backtrack.
+      let didSplit = false;
+      if (coords.length >= 2) {
+        const secondCoord = coords[1];
+        const proj = this.db.projectOnEdge(
+          firstCoord[0],
+          firstCoord[1],
+          secondCoord[0],
+          secondCoord[1],
+          userPoint.longitude,
+          userPoint.latitude,
+        );
+
+        if (
+          proj.distance < directDist &&
+          proj.fraction > 0.01 &&
+          proj.fraction < 0.99
+        ) {
+          const firstSeg = segments[0];
+          const portionDist = firstSeg
+            ? Math.round(firstSeg.distance * (1 - proj.fraction))
+            : 0;
+
+          // Replace the first route coordinate with the projection point P
+          coords[0] = [proj.point.lon, proj.point.lat];
+          // Prepend user position
+          coords.unshift([userPoint.longitude, userPoint.latitude]);
+
+          // Replace first segment with the edge portion P → secondCoord
+          segments[0] = {
+            from: -1,
+            to: firstSeg?.to ?? -1,
+            distance: portionDist,
+            minDepth: firstSeg?.minDepth ?? -1,
+            minDepthKnown: firstSeg?.minDepthKnown ?? false,
+            maxAirDraft: firstSeg?.maxAirDraft ?? -1,
+            costFactor: firstSeg?.costFactor ?? 1.2,
+            trafficMode: firstSeg?.trafficMode ?? TRAFFIC_TWO_WAY,
+            edgeTypeId: firstSeg?.edgeTypeId,
+          };
+          keepSegmentEdges(firstSeg, segments[0]);
+          // Prepend over-land segment user → P
+          segments.unshift({
+            from: -1,
+            to: -1,
+            distance: Math.round(proj.distance),
+            minDepth: -1,
+            minDepthKnown: false,
+            maxAirDraft: -1,
+            costFactor: 1.2,
+            trafficMode: TRAFFIC_TWO_WAY,
+          });
+
+          markOverland(
+            0,
+            userPoint.longitude,
+            userPoint.latitude,
+            proj.point.lon,
+            proj.point.lat,
+          );
+          route.features[0].properties.totalDistance! += Math.round(
+            proj.distance,
+          );
+
+          if (!route.warnings) route.warnings = [];
+          // to = the projection point, not secondCoord: the leg this warning
+          // is about is user → P, which is what proj.distance measures, what
+          // the prepended segment covers and what markOverland just checked.
+          // secondCoord is the far end of the edge P sits on. Same mismatch as
+          // the append path's nodeToSnap, and it matters more now that from/to
+          // may be locating a coverage gap for someone.
+          route.warnings.push(
+            this.connectorWarning(
+              "start",
+              proj.distance,
+              {
+                latitude: userPoint.latitude,
+                longitude: userPoint.longitude,
+              },
+              { latitude: proj.point.lat, longitude: proj.point.lon },
+              inputs,
+            ),
+          );
+
+          didSplit = true;
+        }
+      }
+
+      if (!didSplit) {
+        // Fall back to straight line
+        coords.unshift([userPoint.longitude, userPoint.latitude]);
+        segments.unshift({
+          from: -1,
+          to: -1,
+          distance: Math.round(directDist),
+          minDepth: -1,
+          minDepthKnown: false,
+          maxAirDraft: -1,
+          costFactor: 1.2,
+          trafficMode: TRAFFIC_TWO_WAY,
+        });
+        markOverland(
+          0,
+          userPoint.longitude,
+          userPoint.latitude,
+          firstCoord[0],
+          firstCoord[1],
+        );
+        route.features[0].properties.totalDistance! += Math.round(directDist);
+        if (!route.warnings) route.warnings = [];
+        route.warnings.push(
+          this.connectorWarning(
+            "start",
+            directDist,
+            { latitude: userPoint.latitude, longitude: userPoint.longitude },
+            { latitude: firstCoord[1], longitude: firstCoord[0] },
+            inputs,
+          ),
+        );
+      }
+    } else {
+      const lastCoord = coords[coords.length - 1];
+      const directDist = this.haversineDistance(
+        userPoint.latitude,
+        userPoint.longitude,
+        lastCoord[1],
+        lastCoord[0],
+      );
+      if (directDist <= 1) return false;
+
+      // ── Try truncation: project end point onto the last graph edge ─────
+      // If the last route segment's edge passes close to the end point, we
+      // can truncate that edge at the projection and avoid overshooting.
+      const lastSegIdx = segments.length - 1;
+      let didTruncate = false;
+
+      if (lastSegIdx >= 0) {
+        const lastSeg = segments[lastSegIdx];
+        if (lastSeg.from >= 0 && lastSeg.to >= 0) {
+          const segFrom = this.db.getNodeSync(lastSeg.from);
+          const segTo = this.db.getNodeSync(lastSeg.to);
+          if (segFrom && segTo) {
+            const proj = this.db.projectOnEdge(
+              segFrom.lon,
+              segFrom.lat,
+              segTo.lon,
+              segTo.lat,
+              userPoint.longitude,
+              userPoint.latitude,
+            );
+            if (
+              proj.fraction > 0.02 &&
+              proj.fraction < 0.98 &&
+              proj.distance < directDist * 0.7
+            ) {
+              const truncatedDist = Math.round(
+                lastSeg.distance * proj.fraction,
+              );
+
+              // Replace last coord with the projection, then add the real end
+              coords[coords.length - 1] = [proj.point.lon, proj.point.lat];
+              coords.push([userPoint.longitude, userPoint.latitude]);
+
+              segments[lastSegIdx] = {
+                from: lastSeg.from,
+                to: -1,
+                distance: truncatedDist,
+                minDepth: lastSeg.minDepth,
+                minDepthKnown: lastSeg.minDepthKnown,
+                maxAirDraft: lastSeg.maxAirDraft,
+                costFactor: lastSeg.costFactor,
+                trafficMode: lastSeg.trafficMode,
+                edgeTypeId: lastSeg.edgeTypeId,
+              };
+              keepSegmentEdges(lastSeg, segments[lastSegIdx]);
+
+              segments.push({
+                from: -1,
+                to: -1,
+                distance: Math.round(proj.distance),
+                minDepth: -1,
+                minDepthKnown: false,
+                maxAirDraft: -1,
+                costFactor: 1.2,
+                trafficMode: TRAFFIC_TWO_WAY,
+              });
+              markOverland(
+                segments.length - 1,
+                proj.point.lon,
+                proj.point.lat,
+                userPoint.longitude,
+                userPoint.latitude,
+              );
+
+              route.features[0].properties.totalDistance! += Math.round(
+                truncatedDist + proj.distance - lastSeg.distance,
+              );
+
+              if (!route.warnings) route.warnings = [];
+              route.warnings.push(
+                this.connectorWarning(
+                  "end",
+                  proj.distance,
+                  { latitude: proj.point.lat, longitude: proj.point.lon },
+                  {
+                    latitude: userPoint.latitude,
+                    longitude: userPoint.longitude,
+                  },
+                  inputs,
+                ),
+              );
+              didTruncate = true;
+            }
+          }
+        }
+      }
+
+      // Only the append path below uses this, and it's a grid scan over a 20 km
+      // default radius — skip it once truncation has already handled the point.
+      const edgeSnap = didTruncate
+        ? null
+        : await this.db.findNearestEdge(
+            userPoint.latitude,
+            userPoint.longitude,
+          );
+      if (
+        !didTruncate &&
+        edgeSnap &&
+        edgeSnap.distance < directDist &&
+        edgeSnap.fraction > 0.01 &&
+        edgeSnap.fraction < 0.99
+      ) {
+        // ── Append path (existing fallback) ──────────────────────────────
+        const nodeToSnap = this.haversineDistance(
+          lastCoord[1],
+          lastCoord[0],
+          edgeSnap.point.lat,
+          edgeSnap.point.lon,
+        );
+        const edgePortion =
+          edgeSnap.fraction <= 0.5
+            ? edgeSnap.edge.distance * edgeSnap.fraction
+            : edgeSnap.edge.distance * (1 - edgeSnap.fraction);
+
+        coords.push(
+          [edgeSnap.point.lon, edgeSnap.point.lat],
+          [userPoint.longitude, userPoint.latitude],
+        );
+        segments.push(
+          {
+            from: -1,
+            to: -1,
+            distance: Math.round(nodeToSnap + edgePortion),
+            minDepth: edgeSnap.edge.min_depth,
+            minDepthKnown:
+              edgeSnap.edge.min_depth_known ?? edgeSnap.edge.min_depth >= 0,
+            maxAirDraft: edgeSnap.edge.max_air_draft,
+            costFactor: edgeSnap.edge.cost_factor,
+            trafficMode: edgeSnap.edge.traffic_mode,
+            edgeTypeId: edgeSnap.edge.edge_type_id,
+          },
+          {
+            from: -1,
+            to: -1,
+            distance: Math.round(edgeSnap.distance),
+            minDepth: -1,
+            minDepthKnown: false,
+            maxAirDraft: -1,
+            costFactor: 1.2,
+            trafficMode: TRAFFIC_TWO_WAY,
+          },
+        );
+        markOverland(
+          segments.length - 1,
+          edgeSnap.point.lon,
+          edgeSnap.point.lat,
+          userPoint.longitude,
+          userPoint.latitude,
+        );
+        // Delta = travel from last route node to snap point + snap point to user.
+        // edgePortion (fraction of the last edge) is already counted in the route cost; don't add it again.
+        route.features[0].properties.totalDistance! += Math.round(
+          edgeSnap.distance + nodeToSnap,
+        );
+        if (!route.warnings) route.warnings = [];
+        // edgeSnap.distance, not nodeToSnap: the unverified straight line is
+        // the snap point → user leg pushed above (minDepth -1). nodeToSnap is
+        // travel along the last real edge to reach the snap point, and
+        // reporting it here disagreed with this warning's own message.
+        route.warnings.push(
+          this.connectorWarning(
+            "end",
+            edgeSnap.distance,
+            { latitude: edgeSnap.point.lat, longitude: edgeSnap.point.lon },
+            {
+              latitude: userPoint.latitude,
+              longitude: userPoint.longitude,
+            },
+            inputs,
+          ),
+        );
+      } else if (!didTruncate) {
+        // Fall back to straight line
+        coords.push([userPoint.longitude, userPoint.latitude]);
+        segments.push({
+          from: -1,
+          to: -1,
+          distance: Math.round(directDist),
+          minDepth: -1,
+          minDepthKnown: false,
+          maxAirDraft: -1,
+          costFactor: 1.2,
+          trafficMode: TRAFFIC_TWO_WAY,
+        });
+        markOverland(
+          segments.length - 1,
+          lastCoord[0],
+          lastCoord[1],
+          userPoint.longitude,
+          userPoint.latitude,
+        );
+        route.features[0].properties.totalDistance! += Math.round(directDist);
+        if (!route.warnings) route.warnings = [];
+        route.warnings.push(
+          this.connectorWarning(
+            "end",
+            directDist,
+            { latitude: lastCoord[1], longitude: lastCoord[0] },
+            { latitude: userPoint.latitude, longitude: userPoint.longitude },
+            inputs,
+          ),
+        );
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Build a minimal route result containing just a single node
+   */
+  private async buildEmptyRoute(nodeId: number): Promise<RouteResult> {
+    const node = await this.db.getNodeById(nodeId);
+    return {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: {
+            type: "LineString",
+            coordinates: node ? [[node.lon, node.lat]] : [],
+          },
+          properties: { totalDistance: 0, totalCost: 0, segments: [] },
+        },
+      ],
+    };
+  }
+
+  /**
+   * When both start and end fall inside the same navmesh_regions polygon,
+   * the route is a single funnel path with no point-graph traversal at all.
+   * Returns null (falls through to normal A*) whenever that's not the case,
+   * including when either point resolves to no region or to different regions.
+   */
+  /**
+   * splitToSegmentFeatures (called from finalizeRoute) assumes
+   * coordinates.length === segments.length + 1 — one LineString hop per
+   * segment. A funnel-computed multi-point polyline breaks that invariant if
+   * represented as a single segment spanning many coordinates (the extra
+   * points silently get dropped). This expands an N-point polyline into N-1
+   * segments, one per consecutive coordinate pair, so every point survives
+   * into the final per-segment GeoJSON features. Only the true endpoints
+   * (when known) carry a real node id; interior synthetic points use -1,
+   * matching connectUserPoint's existing off-graph-point convention.
+   */
+  private buildSubSegments(
+    points: Array<[number, number]>, // [lat, lon], >= 2 points
+    attrs: {
+      minDepth: number;
+      minDepthKnown: boolean;
+      maxAirDraft: number;
+      minWidth?: number;
+      costFactor: number;
+      trafficMode: number;
+      edgeTypeId?: number;
+    },
+    fromNodeId: number,
+    toNodeId: number,
+  ): NonNullable<RouteResult["features"][0]["properties"]["segments"]> {
+    const segs: NonNullable<
+      RouteResult["features"][0]["properties"]["segments"]
+    > = [];
+    for (let i = 0; i < points.length - 1; i++) {
+      const distance = Math.round(
+        this.haversineDistance(
+          points[i][0],
+          points[i][1],
+          points[i + 1][0],
+          points[i + 1][1],
+        ),
+      );
+      segs.push({
+        from: i === 0 ? fromNodeId : -1,
+        to: i === points.length - 2 ? toNodeId : -1,
+        distance,
+        minDepth: attrs.minDepth,
+        minDepthKnown: attrs.minDepthKnown,
+        maxAirDraft: attrs.maxAirDraft,
+        minWidth: attrs.minWidth,
+        costFactor: attrs.costFactor,
+        trafficMode: attrs.trafficMode,
+        edgeTypeId: attrs.edgeTypeId,
+      });
+    }
+    return segs;
+  }
+
+  private async trySameRegionNavmeshRoute(
+    start: { latitude: number; longitude: number },
+    end: { latitude: number; longitude: number },
+    _inputs: RouteInputs,
+  ): Promise<RouteResult | null> {
+    const startRegion = this.db.findNavmeshRegionAt(
+      start.latitude,
+      start.longitude,
+    );
+    if (!startRegion) return null;
+    const endRegion = this.db.findNavmeshRegionAt(end.latitude, end.longitude);
+    if (!endRegion || endRegion !== startRegion) return null;
+
+    const result = this.db.funnelPathBetweenPoints(
+      startRegion,
+      start.latitude,
+      start.longitude,
+      end.latitude,
+      end.longitude,
+    );
+    if (!result) return null;
+
+    const coordinates: [number, number][] = result.path.map(([lat, lon]) => [
+      lon,
+      lat,
+    ]);
+    const segments = this.buildSubSegments(
+      result.path,
+      {
+        minDepth: startRegion.depthCeilingM,
+        minDepthKnown: true,
+        maxAirDraft: -1,
+        costFactor: 1.0,
+        trafficMode: TRAFFIC_TWO_WAY,
+      },
+      -1,
+      -1,
+    );
+    const distance = Math.round(result.distance);
+
+    return {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: { type: "LineString", coordinates },
+          properties: {
+            totalDistance: distance,
+            totalCost: distance,
+            segments,
+          },
+        },
+      ],
+    };
+  }
+
+  /**
+   * Build the multi-candidate boundary-node seed map for a navmesh region a
+   * user point falls inside: a live `funnelPathFromPoint` call for each of
+   * the region's anchors, plus a cheap composed (anchor result + precomputed
+   * anchor<->node shortcut edge) cost for every other boundary node — never
+   * a second live call per node. See the boundary-shortcut-sparsification
+   * fix in NEXT_PHASES.md: this is what turns 695+713 uncached live calls
+   * into ~40, without narrowing the actual candidate set A* searches/tests
+   * against (narrowing that set is what caused the regression — see the
+   * comment at this method's call site).
+   */
+  private seedNavmeshCandidates(
+    region: NavmeshRegion,
+    lat: number,
+    lon: number,
+  ): Map<number, FunnelResult> | null {
+    const candidates = new Map<number, FunnelResult>();
+    for (const anchorId of region.anchorNodeIds) {
+      const r = this.db.funnelPathFromPoint(region, lat, lon, anchorId);
+      if (r) candidates.set(anchorId, r);
+    }
+
+    for (const nodeId of region.boundaryNodeIds) {
+      if (candidates.has(nodeId)) continue;
+      let bestDistance = Infinity;
+      let bestAnchorPrefix: FunnelResult | null = null;
+      let bestShortcut: {
+        distance: number;
+        path_points?: Array<[number, number]>;
+      } | null = null;
+      for (const [anchorId, anchorPrefix] of candidates) {
+        const shortcut = this.db.getPrecomputedNavmeshShortcut(
+          anchorId,
+          nodeId,
+        );
+        if (!shortcut) continue;
+        const total = anchorPrefix.distance + shortcut.distance;
+        if (total < bestDistance) {
+          bestDistance = total;
+          bestAnchorPrefix = anchorPrefix;
+          bestShortcut = shortcut;
+        }
+      }
+      if (!bestAnchorPrefix || !bestShortcut) continue;
+
+      const nodeCoord = this.db.getNodeSync(nodeId);
+      if (!nodeCoord) continue;
+      const path: Array<[number, number]> = [
+        ...bestAnchorPrefix.path,
+        ...(bestShortcut.path_points ?? []),
+        [nodeCoord.lat, nodeCoord.lon],
+      ];
+      candidates.set(nodeId, { distance: bestDistance, path });
+    }
+
+    return candidates.size > 0 ? candidates : null;
+  }
+
+  /**
+   * Splice a funnel-computed prefix (user start point -> boundary node) and/or
+   * suffix (boundary node -> user end point) onto an astarSearch result whose
+   * first/last node was resolved via navmesh multi-candidate seeding. Mirrors
+   * connectUserPoint's synthetic-segment convention (from/to: -1 for the
+   * off-graph endpoint) — and makes connectUserPoint itself a no-op afterward,
+   * since coords[0]/coords[last] already exactly equal the user's point.
+   * Crossings detected on the graph-only line are dropped: a prefix shifts
+   * every chainage, and a structure on the spliced stretches was never looked
+   * for. The next consumer detects them again on the final line.
+   */
+  private splicePrefixSuffix(
+    result: RouteResult,
+    prefix?: { boundaryNodeId: number } & FunnelResult,
+    suffix?: { boundaryNodeId: number } & FunnelResult,
+  ): void {
+    const feature = result.features[0];
+    if (!feature) return;
+    delete result.crossings;
+    const coords = feature.geometry.coordinates;
+    const segments = feature.properties.segments!;
+
+    const attrs = {
+      minDepth: -1,
+      minDepthKnown: false,
+      maxAirDraft: -1,
+      costFactor: 1.0,
+      trafficMode: TRAFFIC_TWO_WAY,
+    };
+
+    if (prefix) {
+      // prefix.path goes userPoint -> boundary node vertex; drop the last
+      // point, which duplicates coords[0] (the boundary node's own coordinate).
+      const pts: [number, number][] = prefix.path
+        .slice(0, -1)
+        .map(([lat, lon]) => [lon, lat]);
+      coords.unshift(...pts);
+      segments.unshift(
+        ...this.buildSubSegments(prefix.path, attrs, -1, prefix.boundaryNodeId),
+      );
+      feature.properties.totalDistance =
+        (feature.properties.totalDistance ?? 0) + Math.round(prefix.distance);
+    }
+
+    if (suffix) {
+      // suffix.path goes userPoint -> boundary node vertex (funnelPathFromPoint's
+      // direction); reverse to boundary node -> userPoint before appending.
+      const reversed = [...suffix.path].reverse();
+      const pts: [number, number][] = reversed
+        .slice(1)
+        .map(([lat, lon]) => [lon, lat]);
+      coords.push(...pts);
+      segments.push(
+        ...this.buildSubSegments(reversed, attrs, suffix.boundaryNodeId, -1),
+      );
+      feature.properties.totalDistance =
+        (feature.properties.totalDistance ?? 0) + Math.round(suffix.distance);
+    }
+  }
+
+  /**
+   * Core A* search algorithm with nautical cost function.
+   * Optionally constrains search to a bounding box for performance.
+   */
+  private async astarSearch(
+    startLat: number,
+    startLon: number,
+    endLat: number,
+    endLon: number,
+    minCoastDistanceMeters: number,
+    inputs: RouteInputs,
+    bbox?: BBox,
+    env?: RouteEnv,
+    // false: search from the literal nearest nodes, without the "better
+    // depth" swap — the retry when a swapped endpoint led nowhere.
+    improveEndpoints: boolean = true,
+  ): Promise<RouteResult> {
+    let startNode: number | null = await this.db.findNearestNode(
+      startLat,
+      startLon,
+    );
+    let endNode: number | null = await this.db.findNearestNode(endLat, endLon);
+
+    const startRegion = this.db.findNavmeshRegionAt(startLat, startLon);
+    const endRegion = this.db.findNavmeshRegionAt(endLat, endLon);
+
+    if ((!startNode && !startRegion) || (!endNode && !endRegion)) {
+      throw this.searchFailure(inputs, "NO_NODE_NEAR_POINT", {
+        point: "either",
+        reason: "search",
+      });
+    }
+
+    // Multi-candidate boundary-node seeding/goal-testing (spec §6 items 1-4):
+    // when a point lands inside a navmesh region, let real A* cost comparison
+    // pick the cheapest boundary node to enter/exit through, rather than
+    // pre-selecting a single "nearest" one — important in concave regions
+    // where nearest-by-straight-line isn't necessarily cheapest by graph cost.
+    // Every boundary node stays a valid candidate (dropping the rest would
+    // narrow the A* goal test to just the anchors, whose "last mile" funnel
+    // cost back to the literal point isn't reflected by the search
+    // heuristic — that let A* settle on a cheap-to-reach-but-far anchor with
+    // a large, unaccounted-for suffix, worse than not restricting at all).
+    // What NEXT_PHASES.md's fix actually buys is avoiding a *live*
+    // `funnelPathFromPoint` call per boundary node (695+713 of them,
+    // uncached, in the confirmed regression): only the ~40 anchors get a
+    // live call; every other node's cost is composed cheaply from the
+    // nearest live anchor result plus a precomputed anchor<->node shortcut
+    // edge (`addAnchorShortcutEdges`, database.ts).
+    const startCandidates = startRegion
+      ? this.seedNavmeshCandidates(startRegion, startLat, startLon)
+      : null;
+    const endCandidates = endRegion
+      ? this.seedNavmeshCandidates(endRegion, endLat, endLon)
+      : null;
+    if (!startCandidates && startNode === null) {
+      throw this.searchFailure(inputs, "NO_NODE_NEAR_POINT", {
+        point: "start",
+        reason: "search",
+      });
+    }
+    if (!endCandidates && endNode === null) {
+      throw this.searchFailure(inputs, "NO_NODE_NEAR_POINT", {
+        point: "end",
+        reason: "search",
+      });
+    }
+
+    const minDepth = this.requiredDepth(inputs);
+
+    // When the endpoints are judged, in the tide's terms. The start is judged
+    // at departure; the end at a rough transit estimate away, since the real
+    // arrival time is not known until the search that this runs before has
+    // happened. A crude estimate beats assuming low water all day, which is
+    // what relocating an endpoint on charted depth alone amounts to — and it
+    // relocates it *away* from the shallows the tide was going to open, which
+    // is exactly the approach to a berth the helm wanted.
+    const directSec = env
+      ? this.haversineDistance(startLat, startLon, endLat, endLon) / env.speedMs
+      : 0;
+    const improveAtMs = (label: string): number | undefined =>
+      env
+        ? env.departureMs +
+          (env.offsetSec + (label === "Start" ? 0 : directSec)) * 1000
+        : undefined;
+
+    const improveNode = async (
+      node: number,
+      nodeLat: number,
+      nodeLon: number,
+      label: string,
+    ): Promise<number> => {
+      const nodePos = this.db.getNodeSync(node);
+      if (!nodePos) return node;
+      const atMs = improveAtMs(label);
+      const depthKnownOf = (e: EdgeRow): boolean =>
+        e.min_depth_known ?? e.min_depth >= 0;
+      /** This edge's depth where and when the vessel would meet it. */
+      const depthOf = (e: EdgeRow, lat: number, lon: number): number =>
+        this.depthAtPassage(e.min_depth, depthKnownOf(e), lat, lon, atMs, env);
+      const edges = await this.db.getOutgoingEdges(node);
+      // For end nodes with no outgoing edges, the node is still valid as a destination.
+      // For start nodes with no outgoing edges, we must find an alternative.
+      if (edges.length === 0 && label !== "Start") return node;
+
+      if (label === "Start") {
+        // For start nodes: check if all edges leading toward the destination are shallow.
+        // Compute bearing from start point to destination; then for each edge to its target,
+        // if the edge direction is within 90° of the destination bearing and is deep, keep the node.
+        const destBearing = bearingDeg(
+          nodePos.lat,
+          nodePos.lon,
+          endLat,
+          endLon,
+        );
+        let anyTowardDeep = false;
+        for (const e of edges) {
+          const tPos = this.db.getNodeSync(e.target);
+          if (!tPos) continue;
+          const edgeBearing = bearingDeg(
+            nodePos.lat,
+            nodePos.lon,
+            tPos.lat,
+            tPos.lon,
+          );
+          const bearingDiff = Math.abs(edgeBearing - destBearing);
+          const towardDest = Math.min(bearingDiff, 360 - bearingDiff) < 90;
+          const d = depthOf(e, nodePos.lat, nodePos.lon);
+          const isDeep = !depthKnownOf(e) || d >= minDepth;
+          if (towardDest && isDeep) {
+            anyTowardDeep = true;
+            break;
+          }
+        }
+        if (anyTowardDeep) return node;
+      } else {
+        // For end nodes: keep the original logic — if all outgoing edges are shallow, improve.
+        const allShallow = edges.every(
+          (e) =>
+            typeof e.min_depth === "number" &&
+            depthKnownOf(e) &&
+            depthOf(e, nodePos.lat, nodePos.lon) < minDepth,
+        );
+        if (!allShallow) return node;
+      }
+
+      // Search radius: 2000m for start (need to find a fundamentally better entry), 1000m for end
+      const radius = label === "Start" ? 2000 : 1000;
+      const candidates = await this.db.getNodesInRadius(
+        nodeLat,
+        nodeLon,
+        radius,
+      );
+      // The nearest candidate with a deep edge, with two exclusions.
+      //
+      // A node joined to this one along the waterway close by is no better
+      // endpoint: the vessel has to sail that stretch anyway, and A* takes
+      // it and reports its depth. Swapping would only cut the shallow
+      // stretch out of the route and put an unchecked straight connector
+      // in its place — a 1.5 km harbour channel became a "coverage gap"
+      // with no depth warning. For the start that is a node this one leads
+      // to; for the end, a node that leads to this one (the approach). So
+      // the swap is only for water not joined to this node nearby.
+      //
+      // A node that leads nowhere is no entry at all: a small island of its
+      // own (a stray overlay edit, an unconnected basin) has a deep edge
+      // too, and swapping to it left A* nothing to search, so a slightly
+      // shallow harbour exit failed outright instead of routing with a
+      // depth warning. Reaching the node being replaced or the other
+      // endpoint, or a few thousand nodes, counts as leading somewhere.
+      // Computed only once a deep candidate turns up: most calls find none.
+      let localReach: Set<number> | null = null;
+      const other = label === "Start" ? endNode : startNode;
+      const targets = new Set<number>([node]);
+      if (other !== null) targets.add(other);
+      const sorted = [...candidates].sort((a, b) => a.distance - b.distance);
+      let best = node;
+      let bestDist = Infinity;
+      for (const c of sorted) {
+        if (c.id === node) continue;
+        const cEdges = await this.db.getOutgoingEdges(c.id);
+        if (cEdges.length === 0) continue; // skip dead-end candidates for start node
+        const hasDeep = cEdges.some((e) => {
+          const d = depthOf(e, c.lat, c.lon);
+          return !depthKnownOf(e) || d >= minDepth;
+        });
+        if (!hasDeep) continue;
+        if (!localReach) {
+          localReach = await this.localGraphReach(
+            node,
+            nodePos.lat,
+            nodePos.lon,
+            radius * 2,
+            label === "Start" ? "from" : "to",
+          );
+        }
+        if (localReach.has(c.id)) continue;
+        if (!this.db.leadsAnywhere(c.id, targets, IMPROVE_NODE_MIN_REACH)) {
+          continue;
+        }
+        bestDist = c.distance;
+        best = c.id;
+        break;
+      }
+      if (best !== node) {
+        this.log.debug(
+          `[routeiq] ${label} node ${node} → ${best} (better depth, ${Math.round(bestDist)}m away)`,
+        );
+      }
+      return best;
+    };
+
+    // Skip the shallow-water node-improvement heuristic when a region resolved
+    // valid boundary candidates — navmesh regions are open water by
+    // construction, so "improve to a deeper nearby node" doesn't apply, and
+    // real A* cost comparison across candidates already does a better job.
+    const literalStart = startNode;
+    const literalEnd = endNode;
+    if (improveEndpoints && !endCandidates && endNode !== null) {
+      const improvedEnd = await improveNode(endNode, endLat, endLon, "End");
+      if (improvedEnd !== endNode) endNode = improvedEnd;
+    }
+    if (improveEndpoints && !startCandidates && startNode !== null) {
+      const improvedStart = await improveNode(
+        startNode,
+        startLat,
+        startLon,
+        "Start",
+      );
+      if (improvedStart !== startNode) startNode = improvedStart;
+    }
+
+    // Expand bbox to include the actual snapped node coordinates (and, for
+    // navmesh-resolved endpoints, the whole region's extent) so the strict
+    // isInsideBBox check below never rejects a valid start/end candidate.
+    if (bbox) {
+      if (startNode !== null) {
+        const snapStart = await this.db.getNodeById(startNode);
+        if (snapStart) {
+          bbox.minLat = Math.min(bbox.minLat, snapStart.lat);
+          bbox.maxLat = Math.max(bbox.maxLat, snapStart.lat);
+          bbox.minLon = Math.min(bbox.minLon, snapStart.lon);
+          bbox.maxLon = Math.max(bbox.maxLon, snapStart.lon);
+        }
+      }
+      if (endNode !== null) {
+        const snapEnd = await this.db.getNodeById(endNode);
+        if (snapEnd) {
+          bbox.minLat = Math.min(bbox.minLat, snapEnd.lat);
+          bbox.maxLat = Math.max(bbox.maxLat, snapEnd.lat);
+          bbox.minLon = Math.min(bbox.minLon, snapEnd.lon);
+          bbox.maxLon = Math.max(bbox.maxLon, snapEnd.lon);
+        }
+      }
+      if (startRegion) {
+        bbox.minLat = Math.min(bbox.minLat, startRegion.bbox.minLat);
+        bbox.maxLat = Math.max(bbox.maxLat, startRegion.bbox.maxLat);
+        bbox.minLon = Math.min(bbox.minLon, startRegion.bbox.minLon);
+        bbox.maxLon = Math.max(bbox.maxLon, startRegion.bbox.maxLon);
+      }
+      if (endRegion) {
+        bbox.minLat = Math.min(bbox.minLat, endRegion.bbox.minLat);
+        bbox.maxLat = Math.max(bbox.maxLat, endRegion.bbox.maxLat);
+        bbox.minLon = Math.min(bbox.minLon, endRegion.bbox.minLon);
+        bbox.maxLon = Math.max(bbox.maxLon, endRegion.bbox.maxLon);
+      }
+    }
+
+    // A* data structures
+    const openSet = new MinHeap<SearchState>((state) => state.f);
+    const closedSet = new Set<number>();
+    const gScore = new Map<number, number>();
+    const parent = new Map<number, number | null>();
+    // Elapsed sailing seconds from the (sub-)route departure per settled node —
+    // used to sample the tidal flow field at the right moment.
+    const tSec = new Map<number, number>();
+
+    // Minimum possible cost multiplier — ensures A* heuristic never overestimates.
+    // 0.8 is the fairway cost_factor floor; if custom edges go lower, update this.
+    // With tides, an edge's effective distance can shrink to STW/(STW+maxCurrent)
+    // of its length on a fully fair current — fold that into the heuristic bound.
+    //
+    // Still sound now that transitTime can sample an edge's current more than
+    // once: this bound comes from FlowField's own contract (`maxSpeedMs`, an
+    // upper bound on |flow| everywhere), not from any particular sample, so
+    // every chunk's sog is bounded the same way a single sample's was —
+    // `sog <= speedMs + maxSpeedMs` per chunk, hence `chunkSec >=
+    // chunkDist/(speedMs+maxSpeedMs)`, and summing chunks gives the identical
+    // `effDistance >= edge.distance * speedMs/(speedMs+maxSpeedMs)` the
+    // one-sample version already relied on. Subdividing only makes the actual
+    // cost more accurate within that same bound; it cannot loosen it.
+    const minMultiplier =
+      0.8 * (env ? env.speedMs / (env.speedMs + env.flow.maxSpeedMs) : 1);
+
+    // Initialize: either the single literal nearest node (unchanged path), or
+    // one open-set entry per navmesh boundary-node candidate with g = the
+    // funnel prefix distance from the user's point to that boundary node.
+    if (startCandidates) {
+      for (const [nodeId, prefix] of startCandidates) {
+        const coord = this.db.getNodeSync(nodeId);
+        if (!coord) continue;
+        gScore.set(nodeId, prefix.distance);
+        tSec.set(nodeId, 0);
+        const h =
+          this.haversineDistance(coord.lat, coord.lon, endLat, endLon) *
+          minMultiplier;
+        openSet.push({
+          nodeId,
+          g: prefix.distance,
+          f: prefix.distance + h,
+          parent: null,
+        });
+      }
+    } else {
+      gScore.set(startNode!, 0);
+      tSec.set(startNode!, 0);
+      openSet.push({
+        nodeId: startNode!,
+        g: 0,
+        f:
+          this.haversineDistance(startLat, startLon, endLat, endLon) *
+          minMultiplier,
+        parent: null,
+      });
+    }
+
+    let goalReached = false;
+    let reachedNode: number | null = null;
+    const searchStartedAt = performance.now();
+    let iterations = 0;
+    // Per-search safety limit (EngineOptions.maxSearchIterations); the
+    // request-wide budget is counted separately, in `control`.
+    const maxIterations =
+      this._options.maxSearchIterations ?? DEFAULT_MAX_SEARCH_ITERATIONS;
+    const control = this.controls.get(inputs);
+    const skipReasons: SearchSkipReasons = {
+      land: 0,
+      obstacle: 0,
+      airDraft: 0,
+      draft: 0,
+      beam: 0,
+      coastDistance: 0,
+      bbox: 0,
+    };
+
+    // Ensure start is inside the bounding box (skipped for navmesh-resolved
+    // starts — the bbox was already expanded to cover the whole region above).
+    if (bbox && !startCandidates && startNode !== null) {
+      const startCoords = await this.db.getNodeById(startNode);
+      if (
+        startCoords &&
+        !isInsideBBox(startCoords.lat, startCoords.lon, bbox)
+      ) {
+        throw this.searchFailure(inputs, "NO_PATH", {
+          reason: "start_outside_box",
+        });
+      }
+    }
+
+    // Best true total cost found so far for finishing the route, and the
+    // node it finishes through — see the goal-test note below for why this
+    // can't just stop on the first candidate touched.
+    let bestGoalCost = Infinity;
+
+    // Edge rows carry no coordinates; every relaxation resolves its target
+    // node's position from here. Hoisted out of the loop so that's one
+    // Map.get per edge rather than a getNodeSync() call (the map is mutated
+    // in place, never replaced, so this stays valid across the awaits below).
+    const nodeMap = this.db.getNodeMap();
+
+    try {
+      while (!openSet.isEmpty() && iterations < maxIterations) {
+        iterations++;
+        if (control) {
+          const stop = control.expand();
+          if (stop) throw this.stopFailure(inputs, stop);
+          // Abort and wall time every 1024 expansions, and again after each
+          // yield below (an abort usually arrives while the loop is yielded).
+          if ((iterations & 1023) === 0) this.checkStop(inputs);
+        }
+
+        // Yield to the macrotask queue periodically so a long CPU-bound search
+        // doesn't starve the SignalK server's event loop (I/O, NMEA, WebSocket
+        // broadcasts). await on the synchronously-resolved getOutgoingEdges below
+        // only drains microtasks, which never lets macrotasks run — setImmediate
+        // does. ~10k iterations keeps each blocking burst to a few ms.
+        if (iterations % 10000 === 0) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          this.checkStop(inputs);
+        }
+
+        // Once any goal candidate is known, no future pop can beat it once the
+        // open set's best remaining f (an admissible lower bound on true
+        // remaining cost, including any navmesh suffix) is no better than that
+        // candidate's already-known true total — stop.
+        if (reachedNode !== null) {
+          const top = openSet.peek();
+          if (!top || top.f >= bestGoalCost) break;
+        }
+
+        const current = openSet.pop()!;
+
+        if (closedSet.has(current.nodeId)) {
+          continue;
+        }
+
+        closedSet.add(current.nodeId);
+
+        // A node finishes the route one of two ways: it IS the literal
+        // nearest-graph-node target (suffix cost 0), or it's one of the
+        // destination navmesh region's boundary-node candidates, whose own
+        // precomputed funnel "suffix" (that boundary node -> the literal end
+        // point, from seedNavmeshCandidates) still has to be paid before the
+        // journey is actually over. Reaching *some* boundary node cheaply via
+        // the graph does not mean the cheapest finish has been found — a
+        // pricier-to-reach boundary node can still be cheaper overall if its
+        // own suffix is much shorter (e.g. one that's actually close to the
+        // literal end point vs. one that's merely close by graph distance).
+        // Comparing true totals here (instead of stopping on first touch) is
+        // the fix for a real regression: the old immediate-stop let A* settle
+        // for whichever boundary node was cheapest to reach by graph alone,
+        // even when that meant crossing a heavily constraint-penalized edge
+        // while a clean, only-slightly-more-expensive-to-reach boundary node
+        // (e.g. next to an opening bridge) sat unexplored in the open set.
+        const suffix = endCandidates?.get(current.nodeId);
+        let candidateTotal: number | null = null;
+        if (current.nodeId === endNode) candidateTotal = current.g;
+        if (suffix !== undefined) {
+          const withSuffix = current.g + suffix.distance;
+          if (candidateTotal === null || withSuffix < candidateTotal)
+            candidateTotal = withSuffix;
+        }
+        if (candidateTotal !== null && candidateTotal < bestGoalCost) {
+          bestGoalCost = candidateTotal;
+          reachedNode = current.nodeId;
+          goalReached = true;
+        }
+
+        // Get outgoing edges from current node
+        const edges = await this.db.getOutgoingEdges(current.nodeId);
+
+        for (const edge of edges) {
+          if (closedSet.has(edge.target)) {
+            continue;
+          }
+
+          // The target's position is resolved once per relaxation and reused
+          // by the bbox test, the tidal sample below and the heuristic. An
+          // edge whose target has no node can't be scored (nor arrived at),
+          // so it's skipped.
+          const toPos = nodeMap.get(edge.target);
+          if (!toPos) continue;
+
+          // Bounding box check — skip nodes outside the box
+          if (bbox && !isInsideBBox(toPos.lat, toPos.lon, bbox)) {
+            skipReasons.bbox++;
+            continue;
+          }
+
+          // Where and when this edge is crossed. Hoisted above the penalty
+          // because the depth check needs it too, and computed only when tides
+          // are on — with env undefined none of this runs and the search stays
+          // bit-identical to the untimed one.
+          const fromNode = env ? this.db.getNodeSync(current.nodeId) : null;
+          const elapsed = env ? (tSec.get(current.nodeId) ?? 0) : 0;
+          const atMs = this.passageMsAt(env, elapsed);
+          const midLat = fromNode ? (fromNode.lat + toPos.lat) / 2 : toPos.lat;
+          const midLon = fromNode ? (fromNode.lon + toPos.lon) / 2 : toPos.lon;
+
+          // Apply soft safety constraints
+          const penalty = this.getEdgePenalty(
+            edge,
+            minCoastDistanceMeters,
+            inputs,
+            skipReasons,
+            env?.heights
+              ? {
+                  env,
+                  heights: env.heights,
+                  atMs,
+                  lat: midLat,
+                  lon: midLon,
+                }
+              : undefined,
+          );
+          if (penalty === -1) {
+            continue;
+          }
+
+          // Tidal current: scale the edge to an "effective distance" so all
+          // existing cost factors and penalties keep their meaning. A fair
+          // current shortens the edge, a foul one lengthens it; with tides off
+          // (env undefined) this is a no-op and results match the old engine.
+          //
+          // transitTime resamples the current along the way rather than once
+          // for the whole edge — most edges are short enough that this is
+          // still exactly one sample, at the same cost as before, but a real
+          // edge can run to tens of kilometres (the ocean-tiled US East Coast
+          // data has some at ~34 km, hours at cruising speed) and a current
+          // sampled once at entry cannot be trusted for that long.
+          let effDistance = edge.distance;
+          let edgeSeconds = 0;
+          if (env) {
+            if (fromNode) {
+              edgeSeconds = this.transitTime(
+                fromNode.lat,
+                fromNode.lon,
+                toPos.lat,
+                toPos.lon,
+                edge.distance,
+                atMs!,
+                env,
+              ).sec;
+            } else {
+              edgeSeconds = edge.distance / env.speedMs;
+            }
+            // Derived from the true (possibly multi-chunk) elapsed time rather
+            // than from a single sog, so a subdivided edge's cost reflects the
+            // same current variation its time tracking does — a fair current
+            // at entry followed by a foul one further along must not be scored
+            // as though the fair one held for the whole edge.
+            effDistance = env.speedMs * edgeSeconds;
+          }
+
+          const baseCost = this.calculateEdgeCost(edge, effDistance);
+          // penalty is a sum of per-meter violation RATES (see
+          // VIOLATION_RATE_CONSTRAINT/VIOLATION_RATE_COAST) — multiplying by
+          // the edge's own length keeps the surcharge proportional to how
+          // much violating distance is actually being crossed, rather than a
+          // flat per-edge charge that would bias the search toward many
+          // short violating edges over one long one. Math.max(1, ...) only
+          // guards against a zero-length edge silently escaping the penalty.
+          const edgeCost = baseCost + penalty * Math.max(1, edge.distance);
+
+          const tentativeG = gScore.get(current.nodeId)! + edgeCost;
+
+          if (
+            !gScore.has(edge.target) ||
+            tentativeG < gScore.get(edge.target)!
+          ) {
+            gScore.set(edge.target, tentativeG);
+            parent.set(edge.target, current.nodeId);
+            if (env)
+              tSec.set(
+                edge.target,
+                (tSec.get(current.nodeId) ?? 0) + edgeSeconds,
+              );
+
+            const h =
+              this.haversineDistance(toPos.lat, toPos.lon, endLat, endLon) *
+              minMultiplier;
+
+            openSet.push({
+              nodeId: edge.target,
+              g: tentativeG,
+              f: tentativeG + h,
+              parent: current.nodeId,
+            });
+          }
+        }
+      }
+    } finally {
+      // Also when the loop is left by a stop failure: counted once.
+      this.noteSearch(iterations, searchStartedAt);
+    }
+
+    if (
+      (!goalReached || reachedNode === null) &&
+      improveEndpoints &&
+      (startNode !== literalStart || endNode !== literalEnd)
+    ) {
+      // A swapped endpoint can still lead nowhere the island check above
+      // missed (a basin bigger than IMPROVE_NODE_MIN_REACH that misses the
+      // other endpoint). The literal nearest nodes route with a depth
+      // penalty instead of not at all, so search again from those.
+      this.log.info(
+        `[routeiq] No path from the better-depth endpoint(s) — retrying from the nearest nodes`,
+      );
+      try {
+        return await this.astarSearch(
+          startLat,
+          startLon,
+          endLat,
+          endLon,
+          minCoastDistanceMeters,
+          inputs,
+          bbox,
+          env,
+          false,
+        );
+      } catch (e) {
+        if (!(e instanceof RouteSearchError)) throw e;
+        throw new RouteSearchError(
+          e.message + format("ROUTE_RETRIED_SUFFIX", {}, this.msgLang(inputs)),
+          e.code,
+          { ...e.params, retried: true },
+          e.blocking,
+          e.catalogued,
+        );
+      }
+    }
+
+    if (!goalReached || reachedNode === null) {
+      // Report what the search actually ran into instead of always blaming
+      // vessel constraints — a disconnected graph, an undersized bounding
+      // box, or a genuine land/obstacle block all hit this same failure
+      // path, and previously got the identical generic message regardless.
+      // What the search tallied, as numbers; the catalogue words it. The
+      // vessel dimensions that blocked edges are the only cause named in
+      // `blocking` (nothing is analysed here, only what was counted).
+      const skipped = { ...skipReasons };
+      const blocking: BlockingCause[] = [];
+      if (skipReasons.draft > 0)
+        blocking.push({
+          dimension: "draft",
+          value: inputs.draft,
+          need: this.requiredDepth(inputs),
+        });
+      if (skipReasons.airDraft > 0)
+        blocking.push({
+          dimension: "airDraft",
+          value: inputs.airDraft,
+          need: this.requiredAirDraft(inputs),
+        });
+      if (skipReasons.beam > 0)
+        blocking.push({
+          dimension: "beam",
+          value: inputs.beam,
+          need: this.requiredWidth(inputs),
+        });
+      throw this.searchFailure(
+        inputs,
+        "NO_PATH",
+        {
+          reason: "search",
+          skipped,
+          iterationLimit: iterations >= maxIterations,
+          draft: inputs.draft,
+          beam: inputs.beam,
+          airDraft: inputs.airDraft,
+          minCoastDistance: minCoastDistanceMeters,
+        },
+        blocking,
+      );
+    }
+
+    // Reconstruct path. path[0] is whichever seeded candidate A* actually
+    // used (the literal startNode, or — with multi-candidate seeding — the
+    // real-cost-cheapest boundary node), since only seed nodes are absent
+    // from `parent`.
+    const path: number[] = [];
+    let current: number | null = reachedNode;
+    while (current !== null) {
+      path.unshift(current);
+      current = parent.get(current) ?? null;
+    }
+
+    // Compress collinear waypoints (cheap pre-pass before LOS smoothing)
+    const compressedPath = this.compressCollinear(path);
+
+    // Apply string-pulling to remove unnecessary grid staircasing
+    this.checkStop(inputs);
+    const smoothedPath = await this.smoothPath(compressedPath, inputs);
+
+    // Build GeoJSON response
+    const result = await this.buildRouteResult(
+      smoothedPath,
+      path,
+      gScore.get(reachedNode) || 0,
+    );
+
+    const prefix = startCandidates?.get(path[0]);
+    const suffix = endCandidates?.get(reachedNode);
+    if (prefix || suffix) {
+      this.splicePrefixSuffix(
+        result,
+        prefix ? { boundaryNodeId: path[0], ...prefix } : undefined,
+        suffix ? { boundaryNodeId: reachedNode, ...suffix } : undefined,
+      );
+    }
+
+    return result;
+  }
+
+  /**
+   * Re-read a found route's depth, air-draft and width limits from the graph
+   * as it is now, and keep the tighter of each against the segment's own.
+   *
+   * A candidate holds the limits its edges had when its box searched. A
+   * wider box can then load a region whose copy of a shared seam edge is
+   * tighter (spliceEdge folds the two with tighterDepth/tighterLimit), and
+   * the earlier candidate can still win selection or be the route kept after
+   * a later box throws. Without this its segments would miss a shallower or
+   * lower limit it actually passes.
+   *
+   * Only segments whose every covered edge is in the graph are touched
+   * (expandSegmentEdges, with the hops recorded at build); a connector or
+   * synthetic leg keeps what it has. Tighter only, never looser: a merge
+   * only ever tightens, and a segment may carry a stricter value than its
+   * edges on purpose (a crossed-land leg's 0 m).
+   *
+   * @param result - The route; its segments are updated in place.
+   * @returns Whether any segment changed.
+   */
+  private refreshSegmentLimits(result: RouteResult): boolean {
+    const segments = result.features[0]?.properties.segments;
+    if (!segments || segments.length === 0) return false;
+    type Live = {
+      depth: number;
+      depthKnown: boolean;
+      air: number;
+      width: number;
+      complete: boolean;
+    };
+    const live = new Map<number, Live>();
+    for (const u of this.expandSegmentEdges(segments, (s) =>
+      segmentHops.get(s),
+    )) {
+      let l = live.get(u.seg);
+      if (!l) {
+        l = {
+          depth: -1,
+          depthKnown: false,
+          air: -1,
+          width: -1,
+          complete: true,
+        };
+        live.set(u.seg, l);
+      }
+      if (!l.complete) continue;
+      const edge =
+        u.from >= 0 && u.to >= 0 ? this.db.getEdgeSync(u.from, u.to) : null;
+      if (!edge) {
+        l.complete = false;
+        continue;
+      }
+      const d = RoutingDatabase.tighterDepth(
+        l.depth,
+        l.depthKnown,
+        edge.min_depth,
+        edge.min_depth_known ?? edge.min_depth >= 0,
+      );
+      l.depth = d.value;
+      l.depthKnown = d.known;
+      l.air = RoutingDatabase.tighterLimit(l.air, edge.max_air_draft);
+      l.width = RoutingDatabase.tighterLimit(l.width, edge.min_width ?? -1);
+    }
+    let changed = false;
+    for (const [si, l] of live) {
+      const seg = segments[si];
+      if (!l.complete || !seg) continue;
+      const d = RoutingDatabase.tighterDepth(
+        seg.minDepth,
+        seg.minDepthKnown,
+        l.depth,
+        l.depthKnown,
+      );
+      const air = RoutingDatabase.tighterLimit(seg.maxAirDraft, l.air);
+      const width = RoutingDatabase.tighterLimit(seg.minWidth ?? -1, l.width);
+      if (d.value !== seg.minDepth || d.known !== seg.minDepthKnown) {
+        seg.minDepth = d.value;
+        seg.minDepthKnown = d.known;
+        changed = true;
+      }
+      if (air !== seg.maxAirDraft) {
+        seg.maxAirDraft = air;
+        changed = true;
+      }
+      if (width >= 0 && width !== seg.minWidth) {
+        seg.minWidth = width;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  /**
+   * Bring every candidate the graph has changed under since it was scored up
+   * to the graph as it is now: its limits (refreshSegmentLimits) and its
+   * cached crossings, which a newly loaded file's `edge_pois` can add to.
+   * The violating meters are recounted when either may have changed, so
+   * selection and the warnings judge what the route really passes. Its A*
+   * cost stays as searched: it only breaks ties.
+   *
+   * Repeated while a recount's own awaits let another load land, up to
+   * MAX_REFRESH_PASSES (a steady stream of edits must not hold a route
+   * forever).
+   */
+  private async refreshCandidateLimits(
+    candidates: RouteCandidate[],
+    inputs: RouteInputs,
+    env?: RouteEnv,
+  ): Promise<void> {
+    for (
+      let pass = 0;
+      pass < RoutingEngine.MAX_REFRESH_PASSES &&
+      candidates.some((c) => c.generation !== this.db.graphGeneration);
+      pass++
+    )
+      await this.refreshCandidatesOnce(candidates, inputs, env);
+  }
+
+  private static readonly MAX_REFRESH_PASSES = 4;
+
+  /** One pass of refreshCandidateLimits. */
+  private async refreshCandidatesOnce(
+    candidates: RouteCandidate[],
+    inputs: RouteInputs,
+    env?: RouteEnv,
+  ): Promise<void> {
+    for (const c of candidates) {
+      // Read per candidate, before anything awaits: a load during an earlier
+      // candidate's recount must not pass for one this candidate has seen.
+      const generation = this.db.graphGeneration;
+      if (c.generation === generation) continue;
+      this.refreshSegmentLimits(c.result);
+      // Only cached with tides on (pathViolationMeters); the next consumer
+      // detects them again.
+      delete c.result.crossings;
+      // Recounted whenever the candidate is behind, not only when this pass
+      // changed something: a pass whose recount threw (a worker error, caught
+      // by the bbox loop) has already tightened the segments and dropped the
+      // crossings, so the retry would see nothing left to change.
+      c.violatingMeters = await this.pathViolationMeters(c.result, inputs, env);
+      // Stamped only once the recount is in, so one that throws leaves the
+      // candidate behind for the final refresh to try again.
+      c.generation = generation;
+    }
+  }
+
+  /**
+   * Check a via route's legs again once every leg is found: a later leg's
+   * wider box may have loaded a region that tightened a seam edge an earlier
+   * leg runs along, or linked a lock or bridge to one (its `edge_pois`). A
+   * leg whose limits or cached crossings may have changed gets its violation
+   * warning rebuilt in place of the one tryRouteSegment added. The legs'
+   * segments are the merged route's segment objects, so the refresh reaches
+   * it too. Repeated like refreshCandidateLimits.
+   *
+   * @param legs - The legs in route order; ones tryRouteSegment did not
+   *   return (manual, fallback) are skipped.
+   * @param warnings - The via route's warnings, updated in place.
+   */
+  private async recheckViaLegs(
+    legs: RouteResult[],
+    warnings: RouteWarning[],
+  ): Promise<void> {
+    const stale = (leg: RouteResult) => {
+      const check = legChecks.get(leg);
+      return !!check && check.generation !== this.db.graphGeneration;
+    };
+    for (
+      let pass = 0;
+      pass < RoutingEngine.MAX_REFRESH_PASSES && legs.some(stale);
+      pass++
+    )
+      await this.recheckViaLegsOnce(legs, warnings);
+  }
+
+  /** One pass of recheckViaLegs. */
+  private async recheckViaLegsOnce(
+    legs: RouteResult[],
+    warnings: RouteWarning[],
+  ): Promise<void> {
+    for (const leg of legs) {
+      // Per leg, before anything awaits (as in refreshCandidateLimits).
+      const generation = this.db.graphGeneration;
+      const check = legChecks.get(leg);
+      if (!check || check.generation === generation) continue;
+      check.generation = generation;
+      const changed = this.refreshSegmentLimits(leg);
+      // With tides on the warning read the crossings (a new lock or bridge
+      // changes the passage times and so the depth at passage), so it is
+      // rebuilt on any graph change. Asked of check.env, not of the cache:
+      // connectUserPoint deletes leg.crossings when it adds a connector.
+      delete leg.crossings;
+      if (!changed && !check.env) continue;
+      const fresh: RouteWarning[] = [];
+      await this.addViolationWarnings(
+        leg,
+        fresh,
+        check.target,
+        check.startPt,
+        check.endPt,
+        check.inputs,
+        check.env,
+      );
+      let at = -1;
+      for (const w of check.warnings) {
+        const i = warnings.indexOf(w);
+        if (i < 0) continue;
+        if (at < 0 || i < at) at = i;
+        warnings.splice(i, 1);
+      }
+      if (at < 0) warnings.push(...fresh);
+      else warnings.splice(at, 0, ...fresh);
+      check.warnings = fresh;
+    }
+  }
+
+  /**
+   * Total length (meters) of segments in a result whose depth, air-draft,
+   * or beam falls short of the given vessel's requirement — i.e. the
+   * portion of the route that only "succeeded" by crossing a hard-
+   * constraint-violating edge (see VIOLATION_RATE_CONSTRAINT). Zero means
+   * the path is clean on these three classes.
+   *
+   * Coast-distance is deliberately excluded: VIOLATION_RATE_COAST is a
+   * comfort preference (stay N meters off the coast), not a physical
+   * limit, and it legitimately fires on plenty of otherwise-fine routes
+   * near any coastline. Counting it here would make the bbox-expansion
+   * retry (below) trigger almost unconditionally instead of only when a
+   * route is actually forced through a depth/air/beam violation.
+   */
+  private async pathViolationMeters(
+    result: RouteResult,
+    inputs: RouteInputs,
+    env?: RouteEnv,
+  ): Promise<number> {
+    const segments = result.features[0]?.properties.segments;
+    if (!segments) return 0;
+    const minDepth = this.requiredDepth(inputs);
+    const minAirDraft = this.requiredAirDraft(inputs);
+    const minBeam = this.requiredWidth(inputs);
+
+    const coords = result.features[0]?.geometry.coordinates ?? [];
+    // Reuse crossings this same result already carries (an earlier consumer
+    // set them; a splice or connector that changes the line drops them),
+    // and keep fresh ones on it for the next consumer, as
+    // addViolationWarnings does. Never detected at all with tides off,
+    // matching truePassageTimes' own early-out.
+    const crossings = env
+      ? (result.crossings ??
+        (await this.detectRouteStructures(coords, segments)))
+      : [];
+    if (env && !result.crossings) result.crossings = crossings;
+    const times = await this.truePassageTimes(
+      coords,
+      segments,
+      env,
+      crossings,
+      inputs,
+    );
+    let meters = 0;
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const depth = this.segmentDepthAtPassage(
+        seg,
+        coords[i],
+        coords[i + 1],
+        times[i],
+        env,
+      );
+      const depthViolation = seg.minDepthKnown && depth < minDepth;
+      const airDraftViolation =
+        seg.maxAirDraft >= 0 && seg.maxAirDraft < minAirDraft;
+      const beamViolation =
+        typeof seg.minWidth === "number" &&
+        seg.minWidth >= 0 &&
+        seg.minWidth < minBeam;
+      if (depthViolation || airDraftViolation || beamViolation) {
+        meters += seg.distance || 0;
+      }
+    }
+    return meters;
+  }
+
+  /**
+   * Ordering used to pick the "best" result across bbox-expansion retries
+   * (see pathViolationMeters): fewer constraint-violating meters wins first,
+   * regardless of cost — the whole point of retrying with a wider box is to
+   * escape one that's hiding a clean route, so a clean result must beat a
+   * penalized one even if the penalized one happens to be cheaper on paper.
+   * Cost only breaks ties between two results at the same violation level.
+   *
+   * That preference is BOUNDED by `maxPenaltyDetourRatio`: clearing a
+   * violation is worth a detour, but not an unbounded one. Unbounded, this
+   * ordering answered an 18km cross-seam request with a 242km fully-compliant
+   * route in preference to a 36km one carrying 3.6km of "shallow" water — much
+   * of which is a coarse DEPARE band (DRVAL1=0, DRVAL2=18.2m) rather than a
+   * survey. Past the ratio the shorter route wins and its violations surface as
+   * warnings, which the helm can act on; a 6.7x detour cannot be acted on.
+   *
+   * Only used now to ask whether one attempt improved on the one before it,
+   * for deciding when to stop expanding the box — a genuinely pairwise
+   * question between consecutive attempts. Picking the winner across all
+   * attempts is selectBestCandidate's job, because this relation is not
+   * transitive once the ratio bound applies.
+   */
+  /**
+   * Choose among every attempt at once, rather than folding them pairwise
+   * into a running best.
+   *
+   * The ratio bound makes the pairwise relation NON-TRANSITIVE, so folding it
+   * let an over-long route win by arriving in the right order. With a ratio of
+   * 3 and attempts of (10m violating, 10km), (5m, 25km), (0m, 70km), each
+   * consecutive step is inside the bound (25 <= 30, 70 <= 75) so the bound
+   * never fires, and the 70km route is kept — even though head-to-head it
+   * loses to the 10km one at 7x. Laundering a 7x detour through an
+   * intermediate is exactly what the bound exists to prevent.
+   *
+   * Measuring every candidate against one fixed yardstick — the shortest
+   * route anybody found — removes the order dependence: the answer is a
+   * property of the set, not of the sequence.
+   */
+  private selectBestCandidate(
+    candidates: RouteCandidate[],
+  ): RouteCandidate | null {
+    if (candidates.length === 0) return null;
+    const ratio = this._options.maxPenaltyDetourRatio;
+
+    // A route with no measured distance can't be judged as a detour; it stays
+    // eligible rather than being silently dropped.
+    const measured = candidates.filter((c) => c.distance > 0);
+    const baseline = measured.length
+      ? Math.min(...measured.map((c) => c.distance))
+      : 0;
+    const limit = ratio > 0 && baseline > 0 ? baseline * ratio : Infinity;
+    const eligible = candidates.filter(
+      (c) => c.distance <= 0 || c.distance <= limit,
+    );
+    // A ratio below 1 would exclude even the shortest route; never return
+    // nothing when an attempt did succeed.
+    const pool = eligible.length > 0 ? eligible : candidates;
+
+    return pool.reduce((best, c) => {
+      if (c.violatingMeters !== best.violatingMeters) {
+        return c.violatingMeters < best.violatingMeters ? c : best;
+      }
+      return c.cost < best.cost ? c : best;
+    });
+  }
+
+  private isBetterCandidate(
+    violatingMetersA: number,
+    costA: number,
+    violatingMetersB: number,
+    costB: number,
+    distanceA = 0,
+    distanceB = 0,
+  ): boolean {
+    if (violatingMetersA !== violatingMetersB) {
+      const aIsCleaner = violatingMetersA < violatingMetersB;
+      const cleanerDistance = aIsCleaner ? distanceA : distanceB;
+      const dirtierDistance = aIsCleaner ? distanceB : distanceA;
+      const ratio = this._options.maxPenaltyDetourRatio;
+      if (
+        ratio > 0 &&
+        dirtierDistance > 0 &&
+        cleanerDistance > dirtierDistance * ratio
+      ) {
+        return !aIsCleaner;
+      }
+      return aIsCleaner;
+    }
+    return costA < costB;
+  }
+
+  // Per-class violation RATES: unitless "one violating meter costs N clean
+  // meters", multiplied by edge.distance in the A* edge-cost term below
+  // (getEdgePenalty returns the sum of rates for whichever classes an edge
+  // violates; multiple violated classes stack, e.g. depth+air = 600x/m).
+  // Replaces the old flat +1,000,000 (constraint) / +50,000 (coast) added
+  // per edge regardless of its length, which made a single mis-flagged
+  // edge cost more than a 100x detour (Round 14 regression) and made many
+  // short violating edges collectively cheaper than one long clean edge
+  // (a contour-hugging bias) since the flat constant dwarfed edge.distance.
+  //
+  // depth/air-draft/beam: physical constraint violations — strongly
+  // avoided, but a genuinely-only-option crossing should still beat an
+  // absurd detour. At 300x, a 211m violating edge costs ~63km-equivalent:
+  // enough to lose to almost any real detour, but not enough to lose to a
+  // 100x-longer one.
+  private static readonly VIOLATION_RATE_CONSTRAINT = 300;
+  // coast-distance: a comfort preference (stay clear of the coast by the
+  // requested margin), not a hard physical limit — softer than the
+  // constraint classes above so it doesn't dominate route choice the way
+  // it did at the old flat +50,000.
+  private static readonly VIOLATION_RATE_COAST = 50;
+
+  /** Rise below which the tide is not worth reporting as having changed
+   *  anything. Shared by the per-segment passage depth and the warning text so
+   *  they cannot disagree about whether a tide applied — a few millimetres
+   *  would otherwise set depthAware and render as "tide +0.0 m". */
+  private static readonly TIDE_REPORT_MIN_RISE_M = 0.05;
+
+  /** Water the vessel needs under it: design draft plus the configured
+   *  under-keel margin. Four places used to compute this independently — the
+   *  start/end node improvement, the A* edge penalty, the post-search audit
+   *  and the warning text — and they have to agree, because a route the
+   *  search accepted and the audit then counted as violating is a route the
+   *  helm is told about but was never offered an alternative to.
+   *
+   *  `??`, not `||`: a draft of 0 is a real answer (an unknown draft is
+   *  `undefined`), and treating it as 2 m was a bug once already. */
+  private requiredDepth(inputs: RouteInputs): number {
+    return toCm(inputs.draft + inputs.safetyMarginDraft);
+  }
+
+  /** Width the vessel needs: beam plus the configured side margin. The
+   *  search cost, the violation audit and the leg warnings all use this. */
+  private requiredWidth(inputs: RouteInputs): number {
+    return toCm(inputs.beam + inputs.safetyMarginBeam);
+  }
+
+  /** Air draft plus mast clearance margin; an unknown air draft counts as 0.
+   *  The search cost, the violation audit and the warnings all use this. */
+  private requiredAirDraft(inputs: RouteInputs): number {
+    return toCm(inputs.airDraft + inputs.safetyMarginAirDraft);
+  }
+
+  /**
+   * The depth under the keel at the moment the vessel is actually there:
+   * charted depth plus however far the tide has risen. A charted depth is
+   * referenced to LAT, so it is the low-water case and this can only ever add
+   * water — which is also why every mistake it can make is the dangerous kind,
+   * and why the rise itself is deliberately conservative (see TideHeightField).
+   *
+   * Falls back to the charted value, unchanged, whenever the tide cannot be
+   * spoken for: an unknown depth must stay unknown rather than become a
+   * number, and a height field that declines to answer must leave the route
+   * judged exactly as it is today. `known` is the caller's word for whether
+   * chartedDepth is real data -- NOT `chartedDepth < 0`, since a genuine
+   * charted drying height (a bank exposed above chart datum) is exactly the
+   * case the tide is supposed to answer, and it is negative too.
+   */
+  private depthAtPassage(
+    chartedDepth: number,
+    known: boolean,
+    lat: number,
+    lon: number,
+    atMs: number | undefined,
+    env: RouteEnv | undefined,
+  ): number {
+    if (!known) return chartedDepth;
+    if (!env?.heights || atMs === undefined) return chartedDepth;
+    const rise = env.heights.riseAt(lat, lon, atMs);
+    return rise === null ? chartedDepth : chartedDepth + rise;
+  }
+
+  /**
+   * Clock time at the start of each segment, for the post-search audit and
+   * the warning text — both of which run before finalizeRoute exists to hand
+   * them the real one, so they need their own reckoning.
+   *
+   * This used to be a cruder, STW-only approximation with no wait awareness —
+   * worse than even the search's own clock, which at least adjusts for
+   * current. It now shares walkPassageClock with annotateSegmentTimes: same
+   * current-adjusted SOG, same lock/bridge waits, detected and scheduled
+   * fresh for this candidate/leg (crossings depend on which path was found,
+   * so they can't be precomputed once and reused across bbox-retry
+   * candidates). Both consumers sharing one real walk matters for the same
+   * reason sharing the old approximate one did — a route the audit counts as
+   * violating but the warning stays quiet about is one the helm is never
+   * told about — except now "real" instead of "consistently approximate".
+   *
+   * What this does NOT fix: the search's own decision (getEdgePenalty, during
+   * pathfinding) still has no wait information, because the path a wait would
+   * apply to doesn't exist until the search finishes. See
+   * feature-tidal-routing.md, "Tide-aware depth" — that gap is structural,
+   * not an oversight, and it only ever makes the search more conservative
+   * than strictly necessary, never less safe.
+   *
+   * Takes `crossings` rather than detecting them itself, so a caller that
+   * already has them — because it just detected them for the same route, or
+   * because a downstream finalizeRoute will want to reuse them — never pays
+   * for a second lookup. Detection itself must still run per candidate: which
+   * locks/bridges a route crosses depends on which path was found, so it
+   * cannot be shared *across* bbox-retry attempts, only reused within one.
+   */
+  private async truePassageTimes(
+    coords: Array<[number, number]>,
+    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
+    env: RouteEnv | undefined,
+    crossings: RouteCrossing[],
+    inputs: RouteInputs,
+  ): Promise<Array<number | undefined>> {
+    if (!env) return segments.map(() => undefined);
+    const waits = this.crossingWaitSchedule(
+      coords,
+      segments,
+      crossings,
+      inputs,
+    );
+    const { perSegment } = this.walkPassageClock(
+      coords,
+      segments,
+      env,
+      inputs,
+      env.offsetSec,
+      waits,
+    );
+    return perSegment.map((p) => p.atMs);
+  }
+
+  /**
+   * A segment's depth at the time of passage. Only segments that are real
+   * graph edges get the tide: connector and manual legs carry minDepthKnown
+   * false, and markOverland writes 0 with minDepthKnown true but crossesLand
+   * true to mean "this crosses land" rather than "charted 0 m" — adding tide
+   * to that would quietly clear a land warning. Requiring two real node ids
+   * excludes all of them.
+   */
+  private segmentDepthAtPassage(
+    seg: { minDepth: number; minDepthKnown: boolean; crossesLand?: boolean },
+    fromCoord: number[] | undefined,
+    toCoord: number[] | undefined,
+    atMs: number | undefined,
+    env: RouteEnv | undefined,
+  ): number {
+    if (!seg.minDepthKnown || !env?.heights || atMs === undefined) {
+      return seg.minDepth;
+    }
+    // The only exclusion: a leg the router had to draw across land. Its 0 is a
+    // statement about land, not a sounding, and no amount of tide answers it.
+    if (seg.crossesLand) return seg.minDepth;
+    if (!fromCoord || !toCoord) return seg.minDepth;
+    return this.depthAtPassage(
+      seg.minDepth,
+      seg.minDepthKnown,
+      (fromCoord[1] + toCoord[1]) / 2,
+      (fromCoord[0] + toCoord[0]) / 2,
+      atMs,
+      env,
+    );
+  }
+
+  /** Absolute clock time at which the search expects to be leaving `nodeId`. */
+  private passageMsAt(
+    env: RouteEnv | undefined,
+    elapsedSec: number,
+  ): number | undefined {
+    return env
+      ? env.departureMs + (env.offsetSec + elapsedSec) * 1000
+      : undefined;
+  }
+
+  /**
+   * Nodes joined to `node` within `maxDistance` metres of sailing (edge
+   * lengths, a bounded Dijkstra): the ones it leads to (`"from"`) or the
+   * ones that lead to it (`"to"`). Only edges A* could sail in that
+   * direction count — not a wrong-way one-way edge, not one that crosses
+   * land or an obstacle.
+   */
+  private async localGraphReach(
+    node: number,
+    lat: number,
+    lon: number,
+    maxDistance: number,
+    direction: "from" | "to",
+  ): Promise<Set<number>> {
+    // The graph only indexes outgoing edges. Every node on a path of at
+    // most maxDistance lies within maxDistance of `node` as the crow flies,
+    // so the incoming edges that matter come from the nodes in that circle.
+    let incoming: Map<number, Array<{ id: number; distance: number }>> | null =
+      null;
+    if (direction === "to") {
+      incoming = new Map();
+      const near = await this.db.getNodesInRadius(lat, lon, maxDistance);
+      const ids = new Set<number>(near.map((n) => n.id));
+      ids.add(node);
+      for (const id of ids) {
+        for (const e of await this.db.getOutgoingEdges(id)) {
+          if (!ids.has(e.target) || !isSailableEdge(e)) continue;
+          let list = incoming.get(e.target);
+          if (!list) incoming.set(e.target, (list = []));
+          list.push({ id, distance: e.distance });
+        }
+      }
+    }
+    const neighbours = async (
+      id: number,
+    ): Promise<Array<{ id: number; distance: number }>> => {
+      if (incoming) return incoming.get(id) ?? [];
+      return (await this.db.getOutgoingEdges(id))
+        .filter(isSailableEdge)
+        .map((e) => ({ id: e.target, distance: e.distance }));
+    };
+
+    const dist = new Map<number, number>([[node, 0]]);
+    const done = new Set<number>();
+    const heap = new MinHeap<{ id: number; d: number }>((x) => x.d);
+    heap.push({ id: node, d: 0 });
+    while (!heap.isEmpty()) {
+      const { id, d } = heap.pop()!;
+      if (done.has(id)) continue;
+      done.add(id);
+      for (const n of await neighbours(id)) {
+        const nd = d + n.distance;
+        if (nd > maxDistance) continue;
+        const known = dist.get(n.id);
+        if (known === undefined || nd < known) {
+          dist.set(n.id, nd);
+          heap.push({ id: n.id, d: nd });
+        }
+      }
+    }
+    return done;
+  }
+
+  private getEdgePenalty(
+    edge: EdgeRow,
+    minCoastDistanceMeters: number,
+    inputs: RouteInputs,
+    skipReasons?: SearchSkipReasons,
+    tide?: EdgeTideContext,
+  ): number {
+    if (edge.crosses_land === 1) {
+      if (skipReasons) skipReasons.land++;
+      return -1;
+    }
+    if (edge.crosses_obstacle === 1) {
+      if (skipReasons) skipReasons.obstacle++;
+      return -1;
+    }
+
+    let penalty = 0;
+
+    if (
+      typeof edge.max_air_draft === "number" &&
+      edge.max_air_draft >= 0 &&
+      edge.max_air_draft < this.requiredAirDraft(inputs)
+    ) {
+      penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
+      if (skipReasons) skipReasons.airDraft++;
+    }
+
+    const minDepth = this.requiredDepth(inputs);
+    const edgeDepthKnown = edge.min_depth_known ?? edge.min_depth >= 0;
+    if (
+      typeof edge.min_depth === "number" &&
+      edgeDepthKnown &&
+      edge.min_depth < minDepth
+    ) {
+      // Charted depth is the low-water case, so before calling this a
+      // violation, ask whether the tide covers it at the time we would be
+      // here. Only worth asking when the tide could plausibly settle it: an
+      // edge that no rise in the whole window can rescue is a violation
+      // either way, and skipping the lookup keeps the common case free.
+      const depth =
+        tide && edge.min_depth + tide.heights.maxRiseM >= minDepth
+          ? this.depthAtPassage(
+              edge.min_depth,
+              edgeDepthKnown,
+              tide.lat,
+              tide.lon,
+              tide.atMs,
+              tide.env,
+            )
+          : edge.min_depth;
+      if (depth < minDepth) {
+        penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
+        if (skipReasons) skipReasons.draft++;
+      }
+    }
+    if (
+      typeof edge.min_width === "number" &&
+      edge.min_width >= 0 &&
+      edge.min_width < this.requiredWidth(inputs)
+    ) {
+      penalty += RoutingEngine.VIOLATION_RATE_CONSTRAINT;
+      if (skipReasons) skipReasons.beam++;
+    }
+    if (
+      edge.edge_type_id === EDGE_TYPE_COASTAL &&
+      edge.distance_to_land < minCoastDistanceMeters
+    ) {
+      penalty += RoutingEngine.VIOLATION_RATE_COAST;
+      if (skipReasons) skipReasons.coastDistance++;
+    }
+
+    return penalty;
+  }
+
+  /**
+   * Check if a straight line between two coordinates stays within navigable water.
+   *
+   * Primary check: sample points along the line and verify each lies inside a
+   * water polygon (coastal_water_polygons.geojson).  This correctly rejects
+   * shortcuts that cross land without depending on node density, which was the
+   * root cause of staircase routes on the open Markermeer where the coarse
+   * 0.005° grid leaves gaps larger than the node-proximity search radius.
+   *
+   * If the water polygon data is unavailable the check falls back to the
+   * original node-proximity heuristic so the smoother still works on graphs
+   * built without coastal water polygons.
+   */
+  private hasLineOfSight(
+    lat1: number,
+    lon1: number,
+    lat2: number,
+    lon2: number,
+  ): boolean {
+    if (!this._options.losSearchRadiusM) {
+      return true;
+    }
+    const dist = this.haversineDistance(lat1, lon1, lat2, lon2);
+
+    // Cap samples so very long LOS candidates don't stall the smoother.
+    // 50m spacing gives fine resolution; 60 samples caps at ~3 km per check.
+    const numSamples = Math.min(60, Math.max(3, Math.ceil(dist / 50)));
+
+    if (this.db.isLineCrossingLand(lat1, lon1, lat2, lon2, numSamples)) {
+      return false;
+    }
+
+    const searchRadius = this._options.losSearchRadiusM;
+    for (let i = 1; i < numSamples; i++) {
+      const t = i / numSamples;
+      // Pure linear interpolation in degree-space: this correctly places points
+      // along the straight segment between the two graph nodes. Cosine correction
+      // belongs only in distance measurement (haversineDistance), not here —
+      // applying it to lon would displace samples off the actual path.
+      const lat = lat1 + (lat2 - lat1) * t;
+      const lon = lon1 + (lon2 - lon1) * t;
+      if (!this.db.hasNodeWithinRadius(lat, lon, searchRadius)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Calculate the cost for an edge using the multi-layered cost function
+   * Cost = Distance × CostFactor × OneWayPenalty
+   *
+   * `effectiveDistance` defaults to the edge length; tide-aware search passes
+   * the current-adjusted equivalent (distance × STW / SOG) instead.
+   */
+  private calculateEdgeCost(edge: EdgeRow, effectiveDistance?: number): number {
+    let cost = (effectiveDistance ?? edge.distance) * edge.cost_factor;
+
+    // One-way penalty: traffic_mode=2 means only reverse direction (target→source)
+    // is allowed, so traversing source→target is wrong-way.
+    if (edge.traffic_mode === TRAFFIC_ONE_WAY_REV) {
+      cost *= 1e6; // virtually impassable wrong-way
+    }
+
+    return cost;
+  }
+
+  /**
+   * Haversine distance between two coordinates (returns meters)
+   */
+  private haversineDistance(
+    lat1: number,
+    lon1: number,
+    lat2: number,
+    lon2: number,
+  ): number {
+    const R = 6371000; // Earth radius in meters
+    const dLat = this.toRadians(lat2 - lat1);
+    const dLon = this.toRadians(lon2 - lon1);
+
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(this.toRadians(lat1)) *
+        Math.cos(this.toRadians(lat2)) *
+        Math.sin(dLon / 2) *
+        Math.sin(dLon / 2);
+
+    const c =
+      2 *
+      Math.atan2(
+        Math.sqrt(Math.min(1, Math.max(0, a))),
+        Math.sqrt(Math.min(1, Math.max(0, 1 - a))),
+      );
+    return R * c;
+  }
+
+  private toRadians(degrees: number): number {
+    return (degrees * Math.PI) / 180;
+  }
+
+  /**
+   * Where a route has to stop, and for how long: locks, and bridges that have
+   * to open. One entry per obstacle, at the distance along the route where it
+   * is met. A fixed span costs nothing — the vessel either fits under it or
+   * the route should not be crossing it at all.
+   *
+   * A schedule rather than a total because the wait has to be spent at the
+   * right moment. An hour in a lock puts every later leg an hour further into
+   * the tide, and sampling the flow field without that is the failure this
+   * whole feature exists to remove — see feature-bridge-lock-waits.md.
+   *
+   * Deliberately applied to the ETA and never to the search cost, so a wait
+   * cannot make the router prefer a longer way round. Doing that properly needs
+   * the wait to be FIFO-safe, which a flat constant is not — same document,
+   * tier 3.
+   *
+   * A per-crossing `waitMinutes` wins over the configured default, so a
+   * database that knows a particular lock takes twenty minutes rather than an
+   * hour needs no change here.
+   *
+   * Mutates `crossings`: each obstacle group's wait is recorded on the crossing
+   * that owns it, and a lock the route is only known to have used from the
+   * edges is added to the list so it appears in the itinerary rather than being
+   * a silent hour. The itinerary then adds up to the total.
+   */
+  private crossingWaitSchedule(
+    coords: Array<[number, number]>,
+    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
+    crossings: RouteCrossing[],
+    inputs: RouteInputs,
+  ): Array<{ atMetres: number; seconds: number }> {
+    const lockDefault = inputs.lockWaitMinutes;
+    const bridgeDefault = inputs.bridgeWaitMinutes;
+
+    // Chainage for each crossing, derived the same way buildItinerary does it
+    // — that runs later, off the segment times this schedule feeds into.
+    const cum = cumulativeDistances(coords, segments);
+    for (const c of crossings) {
+      if (typeof c.distanceFromStart !== "number") {
+        c.distanceFromStart = c.position
+          ? Math.round(
+              cum[
+                closestCoordIndex(
+                  coords,
+                  c.position.latitude,
+                  c.position.longitude,
+                )
+              ],
+            )
+          : 0;
+      }
+      delete c.waitSeconds; // recomputed below; never carried over from before
+      delete c.passesClosed;
+      delete c.note;
+    }
+
+    // An opening span low enough to clear while closed is not something to
+    // wait for. The request's air draft and margin, or the engine defaults.
+    for (const c of crossings) {
+      if (passesClosedSpan(c, inputs.airDraft, inputs.safetyMarginAirDraft))
+        c.passesClosed = true;
+    }
+
+    // Locks the route demonstrably passed through, from the edges it used, at
+    // the chainage where it used them. Distinct ids: a lock spans several edges
+    // and they are one locking. Only pipeline-built databases record this.
+    // One span per passage: a route that leaves the lock and comes back
+    // through it (turning back) passes it again, and one span stretching from
+    // the first passage to the second would swallow every crossing between.
+    const spans: Array<{ id: number; from: number; to: number }> = [];
+    const openSpan = new Map<
+      number,
+      { id: number; from: number; to: number }
+    >();
+    let along = 0;
+    for (const seg of segments) {
+      const end = along + (seg.distance ?? 0);
+      for (const id of seg.lockIds ?? []) {
+        const span = openSpan.get(id);
+        // Extended rather than replaced: a lock is several edges, and its far
+        // head is where its bridges are. A short stretch without the id (an
+        // unlinked edge between a head and the chamber) is still the same
+        // locking; a longer one is the route coming back.
+        if (span && along - span.to <= RoutingEngine.CROSSING_GROUP_METRES) {
+          span.to = Math.max(span.to, end);
+        } else {
+          const fresh = { id, from: along, to: end };
+          spans.push(fresh);
+          openSpan.set(id, fresh);
+        }
+      }
+      along = end;
+    }
+    // Zandkreeksluis and Hansweert have edge_pois rows naming the lock AND a POI
+    // of the same name in the database. A span's start is always the earliest
+    // point in its group, so left unreconciled it would always win the "who
+    // owns the wait" contest in groupCrossings below — leaving the real,
+    // named lock in the itinerary with nothing on it and a bare "Lock" entry
+    // carrying the hour in its place. Reconcile them here instead: a POI
+    // already on the list for the same locking gets the span attached to it,
+    // rather than being shadowed by a synthetic duplicate.
+    const poiLocks = crossings.filter((c) => c.type === "lock");
+    const claimedPois = new Set<RouteCrossing>();
+    // Chainage order, not Map insertion order, so which span reaches for
+    // which POI cannot depend on the order lock ids happened to be inserted.
+    spans.sort((a, b) => a.from - b.from);
+    for (const { id: lockId, from, to } of spans) {
+      // The charted POI and the traversed edges rarely land on the same
+      // metre, so allow the usual grouping tolerance at each end of the span.
+      const lo = from - RoutingEngine.CROSSING_GROUP_METRES;
+      const hi = to + RoutingEngine.CROSSING_GROUP_METRES;
+      // Nearest unclaimed POI wins, and each POI can be claimed once: a
+      // staircase lock's two distinct spans must not both reach for the one
+      // POI sitting between them (that would silently turn two lockings back
+      // into one), and Hansweert's Oost- and Westsluis sit at the same
+      // chainage inside a single span but only one of them needs the span —
+      // the other groups alongside it the same way it always has.
+      let owner: RouteCrossing | undefined;
+      let ownerDistance = Infinity;
+      for (const c of poiLocks) {
+        if (claimedPois.has(c)) continue;
+        const at = c.distanceFromStart ?? 0;
+        if (at < lo || at > hi) continue;
+        const distance = Math.abs(at - (from + to) / 2);
+        if (distance < ownerDistance) {
+          owner = c;
+          ownerDistance = distance;
+        }
+      }
+      if (owner) {
+        claimedPois.add(owner);
+        owner.lockSpan = [Math.round(from), Math.round(to)];
+        continue;
+      }
+      // No POI for this locking — Krammersluizen's database has none named —
+      // so fall back to a synthetic entry, same as before.
+      const at = Math.round(from);
+      // A position so the itinerary can place it like any other crossing.
+      let idx = 0;
+      while (idx < cum.length - 1 && cum[idx] < at) idx++;
+      const coord = coords[Math.min(idx, coords.length - 1)];
+      // `lockIds` holds the whole, so a chamber's own wait override is not
+      // available here; linked chambers normally appear as crossings
+      // themselves and claim the span above.
+      const whole = this.db?.getPoiRow(lockId);
+      const wholeWait = whole
+        ? parsePoiJson(whole.properties).typical_wait_minutes
+        : undefined;
+      crossings.push({
+        type: "lock",
+        name: (whole && this.db.poiDisplayName(whole)) || "Lock",
+        ...(typeof wholeWait === "number" &&
+        Number.isFinite(wholeWait) &&
+        wholeWait >= 0
+          ? { waitMinutes: wholeWait }
+          : {}),
+        position: coord
+          ? { latitude: coord[1], longitude: coord[0] }
+          : { latitude: 0, longitude: 0 },
+        distanceFromStart: at,
+        lockSpan: [Math.round(from), Math.round(to)],
+      });
+    }
+
+    const schedule: Array<{ atMetres: number; seconds: number }> = [];
+    for (const group of RoutingEngine.groupCrossings(crossings)) {
+      // Where the group is first met, and so where its wait is spent. A lock
+      // whose extent came from the edges begins at its span, not at the point
+      // of interest marking it: you wait at the gate, not part-way into the
+      // chamber. annotateSegmentTimes only spends a wait at a segment boundary
+      // at or past this point, so taking it from the POI charges the hour
+      // somewhere inside the lock — or, where the segments are coarse, not
+      // until the end of the route.
+      const at = Math.min(
+        ...group.map((c) => c.lockSpan?.[0] ?? c.distanceFromStart ?? 0),
+      );
+      // A lock complex is a lock. Whichever chamber you take you lock through
+      // once, and the spans carried over its heads open with it — so the
+      // bridges in this group cost nothing on top, however the lock was found.
+      // A span that passes closed never owns the wait; any other opening span
+      // in the same group still does.
+      const owner =
+        group.find((c) => c.type === "lock") ??
+        group.find(
+          (c) =>
+            c.type === "bridge" && c.subtype === "opening" && !c.passesClosed,
+        );
+      for (const c of group) {
+        if (!c.passesClosed) continue;
+        const noteCode: CrossingNoteCode = owner
+          ? "CROSSING_PASSES_CLOSED"
+          : "CROSSING_PASSES_CLOSED_NO_WAIT";
+        const noteParams = {
+          airDraft: inputs.airDraft,
+          margin: inputs.safetyMarginAirDraft,
+          closedHeight: c.closedHeight!,
+        };
+        c.note = format(noteCode, noteParams, this.msgLang(inputs));
+        c.noteCode = noteCode;
+        c.noteParams = noteParams;
+      }
+      if (!owner) continue; // fixed or passable spans only — nothing to wait for
+      const minutes =
+        owner.waitMinutes ??
+        (owner.type === "lock" ? lockDefault : bridgeDefault);
+      if (minutes <= 0) continue;
+      // Whole seconds, like the route total: the per-structure waits must add
+      // up to totalWaitSeconds (and the saved profile's duration.waiting).
+      const seconds = Math.round(minutes * 60);
+      owner.waitSeconds = seconds;
+      schedule.push({ atMetres: at, seconds });
+    }
+    return schedule.sort((a, b) => a.atMetres - b.atMetres);
+  }
+
+  /** Crossings closer together than this are treated as one obstacle. */
+  private static readonly CROSSING_GROUP_METRES = 250;
+
+  /**
+   * Collapse crossings that sit on top of each other into one obstacle.
+   *
+   * The crossing list comes from POIs near the route, which cannot tell which
+   * of several parallel structures the vessel actually uses. Krammersluizen is
+   * four chambers side by side; Middelburg has an opening span and a fixed one
+   * carrying different roads over the same cut; a footbridge sits alongside its
+   * road bridge. Charged individually, one passage through a lock complex was
+   * billed as four locks.
+   *
+   * Grouped by chainage, so this needs `distanceFromStart` — which buildItinerary
+   * assigns. Single-linkage, because a lock and the bridge over its outer head
+   * belong together even when the two ends of the complex are further apart than
+   * the threshold. A lock carrying a `lockSpan` is measured from that span, so
+   * its own bridges group with it regardless of which end you enter from.
+   *
+   * This is an approximation standing in for data the databases do not carry:
+   * the databases' `edge_pois` rows (see detectRouteStructures) say
+   * exactly which chamber was traversed, and nothing marks opening-bridge edges
+   * at all. Both would beat guessing from proximity.
+   */
+  static groupCrossings(crossings: RouteCrossing[]): RouteCrossing[][] {
+    const placed = crossings.filter(
+      (c) => typeof c.distanceFromStart === "number",
+    );
+    // Without chainage there is nothing to group by; treat each on its own
+    // rather than silently merging unrelated crossings.
+    const unplaced = crossings
+      .filter((c) => typeof c.distanceFromStart !== "number")
+      .map((c) => [c]);
+    if (placed.length === 0) return unplaced;
+
+    // A crossing occupies a range, not a point: a lock the edges placed knows
+    // the stretch it covers. Measuring the gap from the end of that stretch is
+    // what keeps the bridge over a lock's far head in the lock's group — from
+    // the entry point it can be a few hundred metres away, and how far depends
+    // on which way you are going.
+    const extent = (c: RouteCrossing): [number, number] =>
+      c.lockSpan ?? [c.distanceFromStart ?? 0, c.distanceFromStart ?? 0];
+
+    const sorted = [...placed].sort((a, b) => extent(a)[0] - extent(b)[0]);
+    const groups: RouteCrossing[][] = [[sorted[0]]];
+    // Two ends per group: how far the last crossing reached, and how far it
+    // sat. A span absorbs the bridges over the lock's heads, but a second lock
+    // is a second locking however tightly the two abut — staircase locks share
+    // a head and the edge data has already said they are distinct.
+    let groupEndSpan = extent(sorted[0])[1];
+    let groupEndPoint = sorted[0].distanceFromStart ?? 0;
+    // Detection numbers each pass through a structure (`passage`, per type: a
+    // lock and the bridge over its head share the lock's id). Another pass of
+    // a structure already in the group is the route passing it again, after
+    // turning back: a group of its own with its own wait, however close. The
+    // same pass listed twice (the spans over both heads of a long lock) stays
+    // together. No `passage` reads as one pass, as on the clients.
+    const structureKey = (c: RouteCrossing): string | undefined =>
+      c.structure === undefined ? undefined : `${c.type}:${c.structure}`;
+    let groupPasses = new Map<string, number | undefined>();
+    const note = (c: RouteCrossing) => {
+      const key = structureKey(c);
+      if (key) groupPasses.set(key, c.passage);
+    };
+    const anotherPass = (c: RouteCrossing): boolean => {
+      const key = structureKey(c);
+      return (
+        key !== undefined &&
+        groupPasses.has(key) &&
+        groupPasses.get(key) !== c.passage
+      );
+    };
+    note(sorted[0]);
+    for (let i = 1; i < sorted.length; i++) {
+      const c = sorted[i];
+      const [start, end] = extent(c);
+      const from = c.lockSpan ? groupEndPoint : groupEndSpan;
+      if (
+        start - from <= RoutingEngine.CROSSING_GROUP_METRES &&
+        !anotherPass(c)
+      ) {
+        groups[groups.length - 1].push(c);
+        groupEndSpan = Math.max(groupEndSpan, end);
+        groupEndPoint = Math.max(groupEndPoint, c.distanceFromStart ?? 0);
+      } else {
+        groups.push([c]);
+        groupEndSpan = end;
+        groupEndPoint = c.distanceFromStart ?? 0;
+        groupPasses = new Map();
+      }
+      note(c);
+    }
+    return [...groups, ...unplaced];
+  }
+
+  /**
+   * Finalize a computed single-feature route for delivery: detect crossings
+   * (when a merge dropped them), derive the simplified navigable waypoints and
+   * the annotated itinerary, then split into per-segment features.
+   * Must be called exactly once, as the last step of every successful route.
+   */
+  private async finalizeRoute(
+    route: RouteResult,
+    inputs: RouteInputs,
+    via: Array<{ latitude: number; longitude: number }> = [],
+    env?: RouteEnv,
+    viaAt?: ReadonlyMap<number, number>,
+  ): Promise<void> {
+    const feature = route.features[0];
+    // The effective inputs, as a copy: nothing downstream may change them.
+    // Set first, so a route with no length (start and end on one node) still
+    // says what it was calculated from.
+    route.inputs = { ...inputs, data: this.db.getDataVersion() };
+    if (!feature || feature.geometry.coordinates.length < 2) return;
+    const coords = feature.geometry.coordinates;
+    const segments = feature.properties.segments || [];
+
+    // Crossings first: a lock or an opening span costs time to get through,
+    // and the totals below have to include it.
+    if (!route.crossings) {
+      route.crossings = await this.detectRouteStructures(coords, segments);
+    }
+
+    // Where the route has to stop, and for how long. Built before the times
+    // are computed, because a wait shifts every later leg's tide sample.
+    // A lock the edges know about but no point of interest does gets appended
+    // here, so the list has to exist even when detection found nothing.
+    route.crossings = route.crossings ?? [];
+    const waits = this.crossingWaitSchedule(
+      coords,
+      segments,
+      route.crossings,
+      inputs,
+    );
+    const waitSec = waits.reduce((t, w) => t + w.seconds, 0);
+
+    // Sailing time & estimated current per segment (covers segments added by
+    // connectUserPoint too — this runs after all geometry mutations). Returns
+    // moving time and waiting time together, with the tide sampled at the real
+    // clock time on each leg.
+    const totalSec = this.annotateSegmentTimes(
+      coords,
+      segments,
+      env,
+      inputs,
+      0,
+      waits,
+    );
+
+    const { waypoints, itinerary } = buildItinerary(
+      coords,
+      segments,
+      route.crossings || [],
+      via,
+      this._options.waypointToleranceM,
+      {
+        requiredDepth: this.requiredDepth(inputs),
+        beam: inputs.beam,
+        requiredWidth: this.requiredWidth(inputs),
+        // Same threshold as the via_constrained check in reportViolations.
+        requiredAirDraft: this.requiredAirDraft(inputs),
+      },
+      viaAt,
+      this.msgLang(inputs),
+    );
+    route.waypoints = waypoints;
+    route.itinerary = itinerary;
+
+    // Where the route runs, by water. A failure here never fails the route.
+    if (inputs.describe) {
+      try {
+        // One unit per graph edge: an aggregated segment (collinear
+        // compression, line-of-sight) spans several, and only edges are in
+        // the databases' sequence tables.
+        // `seg` ties each edge to its route segment, for warning locations.
+        // A piece of an edge cut at the user's point (from or to -1) keeps
+        // the edge's nodes only in segmentHops (keepSegmentEdges); read them
+        // so the piece lies in that edge's water, not in none. Its distance
+        // is the clipped piece, shared over the edges it covers.
+        const cutHops = (seg: (typeof segments)[number]) =>
+          (seg.from === -1 || seg.to === -1) && !seg.nodes
+            ? segmentHops.get(seg)
+            : undefined;
+        const units = this.expandSegmentEdges(segments, cutHops).map((u) => {
+          const seg = segments[u.seg];
+          let distance: number;
+          if (seg.nodes && seg.nodes.length >= 2) {
+            distance = this.db.getEdgeSync(u.from, u.to)?.distance ?? 0;
+          } else {
+            const hops = cutHops(seg);
+            if (hops && hops.length > 2) {
+              let full = 0;
+              for (let k = 0; k + 1 < hops.length; k++)
+                full +=
+                  this.db.getEdgeSync(hops[k], hops[k + 1])?.distance ?? 0;
+              const edge = this.db.getEdgeSync(u.from, u.to)?.distance ?? 0;
+              distance =
+                full > 0
+                  ? ((seg.distance ?? 0) * edge) / full
+                  : (seg.distance ?? 0) / (hops.length - 1);
+            } else {
+              distance = seg.distance ?? 0;
+            }
+          }
+          return { ...u, distance };
+        });
+        const described = await this.db.describeRoute(
+          units,
+          inputs.lang ?? undefined,
+        );
+        const geometry = {
+          coords: coords as Array<[number, number]>,
+          cum: cumulativeDistances(coords, segments),
+        };
+        const description = buildRouteDescription(
+          units,
+          described,
+          geometry,
+          this.msgLang(inputs),
+        );
+        if (description) {
+          route.description = description;
+          attachWaters(itinerary, description, geometry);
+        }
+      } catch (e) {
+        this.log.warn(
+          `[routeiq] Route description unavailable: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        route.warnings = [
+          ...(route.warnings ?? []),
+          makeWarning(
+            this.msgLang(inputs),
+            "description_unavailable",
+            "DESCRIPTION_UNAVAILABLE",
+            { reason: "read_failed" },
+          ),
+        ];
+      }
+    }
+
+    // What to call the two ends, for clients that have no name for them.
+    // Skipped with the description: a departure scan reads only times.
+    if (inputs.describe) {
+      // The straight connectors from the user's points to the graph
+      // (connectorLegs, drawn by connectUserPoint) lie in no water, so the
+      // water reach is counted from where the route joins it. The cut edge
+      // piece next to a connector also has from/to -1 but is water, so it is
+      // not counted.
+      let startConnector = 0;
+      for (const seg of segments) {
+        if (!connectorLegs.has(seg)) break;
+        startConnector += seg.distance ?? 0;
+      }
+      let endConnector = 0;
+      for (let k = segments.length - 1; k >= 0; k--) {
+        if (!connectorLegs.has(segments[k])) break;
+        endConnector += segments[k].distance ?? 0;
+      }
+      nameEndpoints(
+        itinerary,
+        route.description,
+        (lat, lon) => this.db.nearestPoiName(lat, lon, ENDPOINT_POI_RADIUS_M),
+        { start: startConnector, end: endConnector },
+      );
+    }
+
+    route.totalSeconds = Math.round(totalSec);
+    if (waitSec > 0) route.totalWaitSeconds = Math.round(waitSec);
+    // What those times rest on, from the same sources annotateSegmentTimes and
+    // crossingWaitSchedule read — the saved passage profile reports them.
+    route.calculatedAt = new Date().toISOString();
+    route.timingAssumptions = {
+      averageSpeedKnots: inputs.speedKnots,
+      lockWaitMinutes: inputs.lockWaitMinutes,
+      bridgeWaitMinutes: inputs.bridgeWaitMinutes,
+    };
+    if (env) {
+      const totalDistance =
+        feature.properties.totalDistance ??
+        segments.reduce((s, seg) => s + (seg.distance || 0), 0);
+      // Waiting is unaffected by tide, so it belongs on both sides — leaving it
+      // out here would make the no-tide comparison look like a tide saving.
+      route.totalSecondsNoTide = Math.round(
+        totalDistance / env.speedMs + waitSec,
+      );
+      route.departureTime = new Date(env.departureMs).toISOString();
+      route.arrivalTime = new Date(
+        env.departureMs + totalSec * 1000,
+      ).toISOString();
+      route.tide = {
+        enabled: true,
+        estimated: env.flow.estimated,
+        source: env.flow.source,
+        // Current stations and tide-height stations both: with current
+        // stations the flow lists only those, but the depth still used the
+        // height stations.
+        stations: [
+          ...new Set(
+            [...env.flow.stations, ...(env.heights?.stations ?? [])].map(
+              (s) => s.name,
+            ),
+          ),
+        ],
+        // Whether the tide was actually counted towards depth anywhere on
+        // this route, not merely whether a height source existed: it needs
+        // enough stations in range to answer, and needs to have made a
+        // difference somewhere. A client can tell "deeper than charted
+        // because of the tide" from "charted, tide had nothing to add".
+        depthAware: (route.features[0]?.properties.segments ?? []).some(
+          (seg) => seg.minDepthAtPassage !== undefined,
+        ),
+      };
+    }
+
+    this.splitToSegmentFeatures(route);
+  }
+
+  /** How long a single edge's current sample may be trusted for before the
+   *  tide itself could have moved on enough to matter. Most graph edges are
+   *  short enough that one sample covers their whole transit, at zero extra
+   *  cost when it does (see transitTime below — this reduces to exactly
+   *  one sample for anything under the threshold). But real edges run much
+   *  longer: the ocean-tiled US East Coast data has edges up to ~34 km,
+   *  three to four hours at cruising speed — close to a third of the
+   *  ~12.42 h M2 cycle — and a current sampled once at entry and held for
+   *  the whole crossing can be badly wrong by the far end of it. Reported
+   *  live: a sailed route running much longer than the ETA predicted, on a
+   *  multi-hour offshore leg. */
+  private static readonly MAX_CURRENT_SAMPLE_SEC = 1800; // 30 min
+
+  // Matches the floor already applied in finalizeRoute: a foul current can
+  // never make an edge impossible, only slow.
+  private static readonly MIN_SOG_FRACTION = 0.2;
+
+  /** Current/SOG at one point along an edge, current-adjusted. */
+  private sampleAlong(
+    lat: number,
+    lon: number,
+    atMs: number,
+    bearing: number,
+    env: RouteEnv,
+  ): { sog: number; currentKn?: number; sogKn?: number } {
+    let sog = env.speedMs;
+    let currentKn: number | undefined;
+    let sogKn: number | undefined;
+    const flow = env.flow.sample(lat, lon, atMs);
+    if (flow.u !== 0 || flow.v !== 0) {
+      const along = flow.u * Math.sin(bearing) + flow.v * Math.cos(bearing);
+      sog = Math.max(
+        RoutingEngine.MIN_SOG_FRACTION * env.speedMs,
+        env.speedMs + along,
+      );
+      currentKn = Math.round((along / KNOTS_TO_MS) * 100) / 100;
+      sogKn = Math.round((sog / KNOTS_TO_MS) * 100) / 100;
+    }
+    return { sog, currentKn, sogKn };
+  }
+
+  /**
+   * Elapsed sailing time across one edge/segment, current-adjusted,
+   * resampling the flow field every MAX_CURRENT_SAMPLE_SEC of *actual*
+   * transit instead of once for the whole edge.
+   *
+   * Shared by astarSearch (the routing decision) and walkPassageClock (the
+   * report), so a long edge cannot be handled two different ways — same
+   * reasoning as sharing walkPassageClock itself between the audit and the
+   * finalize pass.
+   *
+   * The short-circuit below is exact, not a heuristic: even at the worst
+   * case (a dead-foul current, floored at MIN_SOG_FRACTION of STW for the
+   * whole edge), this distance still can't take longer than the resample
+   * window, so a single midpoint sample is provably as accurate as
+   * subdividing would be — byte-identical to what both call sites computed
+   * inline before this existed, at the same one-sample cost. Subdividing
+   * only ever adds work on the edges long enough to need it.
+   *
+   * Above that, this walks the edge in slices sized from the *sampled* SOG
+   * at each slice's start, not from a distance guessed off STW alone —
+   * otherwise a foul current can stretch a single sample well past the
+   * window it's supposed to bound (a 5 km slice at 1 m/s is 83 minutes, not
+   * 30, if the slice count were fixed from STW instead of measured SOG).
+   * The SOG floor bounds this loop: the smallest a slice can be is
+   * MIN_SOG_FRACTION * speedMs * MAX_CURRENT_SAMPLE_SEC, so even a fully
+   * foul multi-hour edge takes a bounded number of iterations.
+   *
+   * Returns the *first* slice's SOG/current alongside the true integrated
+   * time, for callers that report one representative figure per edge
+   * (walkPassageClock's per-segment entry) — the value in effect where the
+   * edge is entered, not an average across a current that may have reversed
+   * by the far end.
+   */
+  private transitTime(
+    fromLat: number,
+    fromLon: number,
+    toLat: number,
+    toLon: number,
+    distanceM: number,
+    entryAtMs: number,
+    env: RouteEnv,
+  ): { sec: number; sog: number; currentKn?: number; sogKn?: number } {
+    const bearing = this.toRadians(bearingDeg(fromLat, fromLon, toLat, toLon));
+    const floorSog = RoutingEngine.MIN_SOG_FRACTION * env.speedMs;
+    const worstCaseSec = distanceM / floorSog;
+
+    if (worstCaseSec <= RoutingEngine.MAX_CURRENT_SAMPLE_SEC) {
+      const midLat = fromLat + (toLat - fromLat) * 0.5;
+      const midLon = fromLon + (toLon - fromLon) * 0.5;
+      const s = this.sampleAlong(midLat, midLon, entryAtMs, bearing, env);
+      return { sec: distanceM / s.sog, ...s };
+    }
+
+    let coveredM = 0;
+    let cum = 0;
+    let atMs = entryAtMs;
+    let first: { sog: number; currentKn?: number; sogKn?: number } | undefined;
+    while (coveredM < distanceM - 1e-6) {
+      const frac = coveredM / distanceM;
+      const lat = fromLat + (toLat - fromLat) * frac;
+      const lon = fromLon + (toLon - fromLon) * frac;
+      const s = this.sampleAlong(lat, lon, atMs, bearing, env);
+      if (!first) first = s;
+
+      const sliceDist = Math.min(
+        distanceM - coveredM,
+        s.sog * RoutingEngine.MAX_CURRENT_SAMPLE_SEC,
+      );
+      const sliceSec = sliceDist / s.sog;
+      cum += sliceSec;
+      coveredM += sliceDist;
+      atMs += sliceSec * 1000;
+    }
+    return { sec: cum, ...first! };
+  }
+
+  /**
+   * The per-segment clock/speed walk, shared by the mutating finalize-time
+   * pass (annotateSegmentTimes, below) and the read-only audit/warning pass
+   * (truePassageTimes, near passageTimes' old home) so the two can never
+   * compute a different answer for the same route — the same reasoning that
+   * used to justify sharing the cruder `passageTimes`, now extended to the
+   * real clock instead of an approximation of it.
+   *
+   * Spends any wait reached before each segment starts, so the flow field is
+   * sampled at the clock time the vessel actually gets there — a lock passed
+   * early otherwise leaves every later leg reading the tide an hour young —
+   * and adjusts for tidal current (SOG, not STW) when a flow field is
+   * active. Returns the clock at the *start* of each segment and the total
+   * elapsed seconds at the end of the path (including any trailing wait at
+   * the destination). Does not mutate `segments`.
+   */
+  private walkPassageClock(
+    coords: Array<[number, number]>,
+    segments: Array<{ distance: number }>,
+    env: RouteEnv | undefined,
+    inputs: RouteInputs,
+    startOffsetSec: number,
+    waits: Array<{ atMetres: number; seconds: number }>,
+  ): {
+    perSegment: Array<{
+      atMs: number | undefined;
+      sog: number;
+      currentKn?: number;
+      sogKn?: number;
+      sec: number;
+    }>;
+    totalSec: number;
+  } {
+    const speedMs = env?.speedMs ?? inputs.speedKnots * KNOTS_TO_MS;
+    const perSegment: Array<{
+      atMs: number | undefined;
+      sog: number;
+      currentKn?: number;
+      sogKn?: number;
+      sec: number;
+    }> = [];
+    let cum = startOffsetSec;
+    let alongM = 0;
+    let nextWait = 0;
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      while (nextWait < waits.length && waits[nextWait].atMetres <= alongM) {
+        cum += waits[nextWait].seconds;
+        nextWait++;
+      }
+      const from = coords[i];
+      const to = coords[i + 1];
+      const atMs = env ? env.departureMs + cum * 1000 : undefined;
+      let sog = speedMs;
+      let currentKn: number | undefined;
+      let sogKn: number | undefined;
+      let sec: number;
+      if (env && from && to) {
+        // transitTime resamples the current every MAX_CURRENT_SAMPLE_SEC of
+        // transit instead of once for the whole segment — a segment can be a
+        // single graph edge tens of kilometres long (the ocean-tiled US East
+        // Coast data reaches ~34 km), and a current held constant for a
+        // multi-hour crossing was reported here exactly as wrongly as it was
+        // acted on during the search.
+        const t = this.transitTime(
+          from[1],
+          from[0],
+          to[1],
+          to[0],
+          seg.distance || 0,
+          atMs!,
+          env,
+        );
+        sog = t.sog;
+        currentKn = t.currentKn;
+        sogKn = t.sogKn;
+        sec = t.sec;
+      } else {
+        sec = (seg.distance || 0) / sog;
+      }
+      perSegment.push({ atMs, sog, currentKn, sogKn, sec });
+      cum += sec;
+      alongM += seg.distance || 0;
+    }
+    // Anything due at or past the end of the route — a lock at the destination.
+    while (nextWait < waits.length) {
+      cum += waits[nextWait].seconds;
+      nextWait++;
+    }
+    return { perSegment, totalSec: cum };
+  }
+
+  /**
+   * Annotate each path segment with sailing seconds and (when a flow field is
+   * active) the estimated along-track current, SOG and tide-corrected depth
+   * at the vessel's actual passage time — the real clock, from
+   * walkPassageClock. Returns the cumulative seconds at the end of the path
+   * (startOffsetSec + sailing time).
+   */
+  private annotateSegmentTimes(
+    coords: Array<[number, number]>,
+    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
+    env: RouteEnv | undefined,
+    inputs: RouteInputs,
+    startOffsetSec: number,
+    waits: Array<{ atMetres: number; seconds: number }> = [],
+  ): number {
+    const { perSegment, totalSec } = this.walkPassageClock(
+      coords,
+      segments,
+      env,
+      inputs,
+      startOffsetSec,
+      waits,
+    );
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const { atMs, sec, currentKn, sogKn } = perSegment[i];
+      if (currentKn !== undefined) seg.currentKn = currentKn;
+      if (sogKn !== undefined) seg.sogKn = sogKn;
+      // This is the first point at which a segment knows the real time it is
+      // crossed — waits included, which the search's own clock does not have.
+      // Report the depth against that clock, so what the helm reads is at
+      // least as good as what the search decided on.
+      const from = coords[i];
+      const to = coords[i + 1];
+      if (env?.heights && from && to) {
+        const atPassage = this.segmentDepthAtPassage(seg, from, to, atMs, env);
+        if (atPassage - seg.minDepth >= RoutingEngine.TIDE_REPORT_MIN_RISE_M) {
+          seg.minDepthAtPassage = Math.round(atPassage * 100) / 100;
+          seg.tideRiseM = Math.round((atPassage - seg.minDepth) * 100) / 100;
+        }
+      }
+      seg.seconds = Math.round(sec * 10) / 10;
+    }
+    return totalSec;
+  }
+
+  /**
+   * Split a single-feature route (LineString + segments array) into individual
+   * per-segment features so the frontend can color each segment independently
+   * based on its minDepth / maxAirDraft properties.
+   */
+  private splitToSegmentFeatures(route: RouteResult): void {
+    const feature = route.features[0];
+    const segments = feature.properties.segments;
+    if (!feature || !segments || segments.length === 0) return;
+
+    const coords = feature.geometry.coordinates;
+    const totalDistance = feature.properties.totalDistance!;
+    const totalCost = feature.properties.totalCost!;
+    const crossings = route.crossings;
+
+    const segmentFeatures: RouteResult["features"] = [];
+
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const fromCoord = coords[i];
+      const toCoord = coords[i + 1];
+      if (!fromCoord || !toCoord) continue;
+
+      const segmentProps: Record<string, any> = {
+        minDepth: seg.minDepth,
+        minDepthKnown: seg.minDepthKnown,
+        maxAirDraft: seg.maxAirDraft,
+        costFactor: seg.costFactor,
+        trafficMode: seg.trafficMode,
+        edgeTypeId: seg.edgeTypeId,
+        distance: seg.distance,
+        ...(seg.mode !== undefined ? { mode: seg.mode } : {}),
+        ...(seg.seconds !== undefined ? { seconds: seg.seconds } : {}),
+        ...(seg.currentKn !== undefined
+          ? { currentKn: seg.currentKn, sogKn: seg.sogKn }
+          : {}),
+        ...(seg.minDepthAtPassage !== undefined
+          ? {
+              minDepthAtPassage: seg.minDepthAtPassage,
+              tideRiseM: seg.tideRiseM,
+            }
+          : {}),
+      };
+
+      segmentFeatures.push({
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates: [fromCoord, toCoord],
+        },
+        properties: segmentProps as any,
+      });
+    }
+
+    route.features = segmentFeatures;
+    route.totalDistance = totalDistance;
+    route.totalCost = totalCost;
+    if (crossings) route.crossings = crossings;
+  }
+
+  /**
+   * Record on `segments` (those at `owners`) the lock a linked POI row
+   * belongs to, for `crossingWaitSchedule`'s lock spans: the lock whole that
+   * owns a chamber the edge runs through, or the lock under a span carried
+   * over one of its heads. Known from the edge (`edge_pois`, spec §2.14), so
+   * no guessing from nearby points. Anything else is ignored.
+   */
+  private noteLockId(
+    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
+    owners: number[],
+    row: PoiRow,
+  ): void {
+    if (
+      row.type_id !== POI_TYPE_LOCK_CHAMBER &&
+      row.type_id !== POI_TYPE_BRIDGE_SPAN
+    )
+      return;
+    const whole = this.db.getPoiParent(row);
+    if (!whole || whole.type_id !== POI_TYPE_LOCK) return;
+    for (const si of owners) {
+      const seg = segments[si];
+      if (!seg.lockIds) seg.lockIds = [];
+      if (!seg.lockIds.includes(whole.id)) seg.lockIds.push(whole.id);
+    }
+  }
+
+  /**
+   * Build GeoJSON RouteResult from path node IDs
+   */
+  private async buildRouteResult(
+    smoothedPath: number[],
+    originalPath: number[],
+    totalCost: number,
+  ): Promise<RouteResult> {
+    const coordinates: [number, number][] = [];
+    const segments: RouteResult["features"][0]["properties"]["segments"] = [];
+    let totalDistance = 0;
+
+    for (let i = 0; i < smoothedPath.length; i++) {
+      if (i > 0) {
+        const prevNode = smoothedPath[i - 1];
+        const currNode = smoothedPath[i];
+        let edge = await this.db.getEdge(prevNode, currNode);
+        // The graph nodes an aggregated segment spans, for the route
+        // description (the segment itself only names its two ends).
+        let spanned: number[] | undefined;
+
+        if (!edge && originalPath !== smoothedPath) {
+          edge = this.db.aggregateSegmentEdges(
+            prevNode,
+            currNode,
+            originalPath,
+          );
+          if (edge) {
+            spanned = originalPath.slice(
+              originalPath.indexOf(prevNode),
+              originalPath.indexOf(currNode) + 1,
+            );
+          }
+        }
+
+        if (edge) {
+          totalDistance += edge.distance;
+          if (edge.path_points && edge.path_points.length > 0) {
+            // A funnel-computed navmesh edge carries the interior polyline of
+            // its taut path — expand it into one sub-segment per point pair
+            // (see buildSubSegments) instead of one segment spanning many
+            // coordinates, which splitToSegmentFeatures can't represent.
+            const fromCoord = this.db.getNodeSync(prevNode);
+            const toCoord = this.db.getNodeSync(currNode);
+            const pts: Array<[number, number]> = [
+              fromCoord ? [fromCoord.lat, fromCoord.lon] : edge.path_points[0],
+              ...edge.path_points,
+              toCoord
+                ? [toCoord.lat, toCoord.lon]
+                : edge.path_points[edge.path_points.length - 1],
+            ];
+            for (const [lat, lon] of edge.path_points)
+              coordinates.push([lon, lat]);
+            const subs = this.buildSubSegments(
+              pts,
+              {
+                minDepth: edge.min_depth,
+                minDepthKnown: edge.min_depth_known ?? edge.min_depth >= 0,
+                maxAirDraft: edge.max_air_draft,
+                minWidth: edge.min_width,
+                costFactor: edge.cost_factor,
+                trafficMode: edge.traffic_mode,
+                edgeTypeId: edge.edge_type_id,
+              },
+              prevNode,
+              currNode,
+            );
+            // One sub-segment per hop: when the polyline is exactly the
+            // spanned graph nodes, say which edge each one is.
+            if (spanned && spanned.length === pts.length) {
+              subs.forEach((sub, k) => {
+                sub.nodes = [spanned[k], spanned[k + 1]];
+              });
+            }
+            // Which graph edges each sub-segment covers, for detectRouteStructures.
+            // Without a one-to-one match every sub-segment gets the whole
+            // edge's nodes: a lock's extent must cover the edge's full length
+            // (crossingWaitSchedule keys spans by lock id and extends them,
+            // so repeating an id never charges a second locking).
+            subs.forEach((sub, k) =>
+              segmentHops.set(
+                sub,
+                spanned && spanned.length === pts.length
+                  ? [spanned[k], spanned[k + 1]]
+                  : (spanned ?? [prevNode, currNode]),
+              ),
+            );
+            segments.push(...subs);
+          } else {
+            const seg: (typeof segments)[number] = {
+              from: prevNode,
+              to: currNode,
+              distance: edge.distance,
+              minDepth: edge.min_depth,
+              minDepthKnown: edge.min_depth_known ?? edge.min_depth >= 0,
+              maxAirDraft: edge.max_air_draft,
+              minWidth: edge.min_width,
+              costFactor: edge.cost_factor,
+              trafficMode: edge.traffic_mode,
+              edgeTypeId: edge.edge_type_id,
+              ...(spanned && spanned.length > 2 ? { nodes: spanned } : {}),
+            };
+            segmentHops.set(seg, spanned ?? [prevNode, currNode]);
+            segments.push(seg);
+          }
+        } else {
+          const fromNode = await this.db.getNodeById(prevNode);
+          const toNode = await this.db.getNodeById(currNode);
+          if (fromNode && toNode) {
+            const dist = Math.round(
+              this.haversineDistance(
+                fromNode.lat,
+                fromNode.lon,
+                toNode.lat,
+                toNode.lon,
+              ),
+            );
+            totalDistance += dist;
+            segments.push({
+              from: prevNode,
+              to: currNode,
+              distance: dist,
+              minDepth: -1,
+              minDepthKnown: false,
+              maxAirDraft: -1,
+              costFactor: 1.2,
+              trafficMode: TRAFFIC_TWO_WAY,
+            });
+          }
+        }
+      }
+
+      const node = await this.db.getNodeById(smoothedPath[i]);
+      if (node) coordinates.push([node.lon, node.lat]);
+    }
+
+    // Crossings (and segments' lockIds) are not detected here: a connector
+    // or splice usually changes the line next, which would throw them away.
+    // The first consumer detects them (`result.crossings ?? detect`) and
+    // keeps them on the result, empty included.
+    return {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: {
+            type: "LineString",
+            coordinates,
+          },
+          properties: {
+            totalDistance,
+            totalCost,
+            segments,
+          },
+        },
+      ],
+    };
+  }
+
+  /**
+   * Human-readable span suffix for a bridge crossing, e.g. " (opening span)",
+   * " (opening, closed 6.6m)", " (fixed, 18.4m)" or, for a structure that is
+   * not a bridge, " (power line, 38.8m)". S-57 gives every span of a bridge
+   * the same OBJNAM, so this is what lets a route report distinguish which
+   * span was crossed.
+   *
+   * @param subtype - POI `subtype`: "opening", "fixed", or unknown.
+   * @param height - Clearance of a fixed span in metres, when known.
+   * @param closedHeight - Closed clearance of an opening span in metres, when known.
+   * @param opts - `kind`: the span's structure kind (`info.kind`), absent or
+   *   "bridge" for a bridge; `heightUnknown`: the source has no usable height,
+   *   so `height` (if any) is an estimate, shown as "~".
+   * @returns The suffix, with a leading space, or "" for an unknown subtype
+   *   of a bridge.
+   */
+  static formatSpanSuffix(
+    subtype: string | undefined,
+    height: number | undefined,
+    closedHeight?: number,
+    opts: { kind?: string; heightUnknown?: boolean } = {},
+  ): string {
+    const kind = opts.kind && opts.kind !== "bridge" ? opts.kind : undefined;
+    const label =
+      kind === undefined
+        ? undefined
+        : kind === "cable"
+          ? "power line"
+          : kind.replace(/_/g, " ");
+    if (subtype === "opening") {
+      const prefix = label ? `${label}, ` : "";
+      return typeof closedHeight === "number"
+        ? ` (${prefix}opening, closed ${closedHeight.toFixed(1)}m)`
+        : ` (${prefix}opening span)`;
+    }
+    const h =
+      typeof height === "number"
+        ? `${opts.heightUnknown ? "~" : ""}${height.toFixed(1)}m`
+        : opts.heightUnknown
+          ? "height unknown"
+          : undefined;
+    if (label) return h ? ` (${label}, ${h})` : ` (${label})`;
+    if (subtype === "fixed") return h ? ` (fixed, ${h})` : " (fixed span)";
+    return "";
+  }
+
+  /**
+   * Metres from a point to the segment a-b, on a local flat projection around
+   * the point: fine for the few hundred metres a crossing spans.
+   *
+   * @param lat - Latitude of the point, degrees.
+   * @param lon - Longitude of the point, degrees.
+   * @param a - Segment start, [lon, lat].
+   * @param b - Segment end, [lon, lat].
+   * @returns Shortest distance from the point to the segment, metres.
+   */
+  static pointSegmentMetres(
+    lat: number,
+    lon: number,
+    a: [number, number],
+    b: [number, number],
+  ): number {
+    return RoutingEngine.pointSegmentProjection(lat, lon, a, b).dist;
+  }
+
+  /**
+   * As pointSegmentMetres, and where along the segment the nearest point is.
+   *
+   * @returns `dist` in metres, and `t` in [0, 1] from a (0) to b (1).
+   */
+  static pointSegmentProjection(
+    lat: number,
+    lon: number,
+    a: [number, number],
+    b: [number, number],
+  ): { dist: number; t: number } {
+    const kx = 111320 * Math.cos((lat * Math.PI) / 180);
+    const ky = 110540;
+    const ax = (a[0] - lon) * kx;
+    const ay = (a[1] - lat) * ky;
+    const dx = (b[0] - lon) * kx - ax;
+    const dy = (b[1] - lat) * ky - ay;
+    const len2 = dx * dx + dy * dy;
+    const t =
+      len2 > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
+    return { dist: Math.hypot(ax + t * dx, ay + t * dy), t };
+  }
+
+  /**
+   * The graph edges the route segments cover, one unit per edge, each tagged
+   * with the index of its segment. An aggregated segment (collinear
+   * compression, line-of-sight) spans several edges and names them in
+   * `nodes`; one without goes from `from` to `to`. Shared by finalizeRoute's
+   * description and detectRouteStructures. They differ only on a funnel
+   * edge whose polyline does not match its graph nodes: detection passes
+   * the recorded hops (every sub-segment gets the whole edge's nodes, so a
+   * lock spans its full length), the description reads `nodes`.
+   *
+   * @param segments - The route's segments.
+   * @param nodesOf - The node sequence of a segment, when it differs from
+   *   `nodes` (undefined falls back to `nodes`, then to `from`/`to`).
+   * @returns One `{from, to, seg}` per edge.
+   */
+  private expandSegmentEdges(
+    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
+    nodesOf?: (seg: (typeof segments)[number]) => number[] | undefined,
+  ): Array<{ from: number; to: number; seg: number }> {
+    const units: Array<{ from: number; to: number; seg: number }> = [];
+    segments.forEach((seg, si) => {
+      const n = nodesOf?.(seg) ?? seg.nodes;
+      if (n && n.length >= 2) {
+        for (let k = 0; k + 1 < n.length; k++)
+          units.push({ from: n[k], to: n[k + 1], seg: si });
+      } else {
+        units.push({ from: seg.from, to: seg.to, seg: si });
+      }
+    });
+    return units;
+  }
+
+  /**
+   * The bridges and locks a route passes, one entry per passage, in route
+   * order, bridges first. Each entry names the span or chamber nearest the
+   * route line.
+   *
+   * Where the databases know the edges (`edge_pois`, spec §2.14), exactly the
+   * parts linked to the route's edges are listed. Where they do not (an edge
+   * in no file: connector, navmesh shortcut, overlay), parts within
+   * FALLBACK_MAX_DIST of that stretch of the line are listed instead.
+   * It also sets `segments[].lockIds` (the lock whole of each chamber the
+   * edges run through), from the same single `routePois` request.
+   *
+   * @param coordinates - The route line, [lon, lat] per point.
+   * @param segments - The route's segments; segment i runs from coordinate i
+   *   to i + 1.
+   * @returns The crossings; empty for an empty route.
+   */
+  private async detectRouteStructures(
+    coordinates: [number, number][],
+    segments: NonNullable<RouteResult["features"][0]["properties"]["segments"]>,
+  ): Promise<RouteCrossing[]> {
+    if (coordinates.length === 0) return [];
+
+    const MARGIN = 0.001; // ~111 m of latitude, comfortably larger than FALLBACK_MAX_DIST
+    const CHUNK = 64; // points per segmented bbox query
+    const nSegs = coordinates.length - 1;
+
+    // One request for the whole route: the graph edges (hops recorded where
+    // the segment was built, else as the description does), deduplicated by
+    // pair, each pair remembering the segments that contain it.
+    const units = this.expandSegmentEdges(segments, (s) => segmentHops.get(s));
+    const pairs: Array<[number, number]> = [];
+    const owners: number[][] = [];
+    const indexOf = new Map<string, number>();
+    const pairOf: number[] = []; // per unit: its index in pairs
+    for (const u of units) {
+      const lo = Math.min(u.from, u.to);
+      const hi = Math.max(u.from, u.to);
+      const key = `${lo}:${hi}`;
+      let idx = indexOf.get(key);
+      if (idx === undefined) {
+        idx = pairs.length;
+        indexOf.set(key, idx);
+        pairs.push([lo, hi]);
+        owners.push([]);
+      }
+      if (!owners[idx].includes(u.seg)) owners[idx].push(u.seg);
+      pairOf.push(idx);
+    }
+    const found = pairs.length > 0 ? await this.db.getRoutePois(pairs) : [];
+
+    // Per segment: the parts linked to it. Per edge: whether every file is
+    // unknown to it (then the geometric fallback covers that edge's stretch).
+    type Poi = Omit<PoiBBoxResult, "info" | "displayName">;
+    const poiById = new Map<number, Poi>();
+    const linkedSegs = new Map<number, Set<number>>(); // part id -> segments
+    found.forEach((r, idx) => {
+      for (const poiId of r.poiIds) {
+        const row = this.db.getPoiRow(poiId);
+        if (!row) continue;
+        this.noteLockId(segments, owners[idx], row);
+        if (!ROUTE_PART_TYPES.has(row.type_id)) continue;
+        if (!poiById.has(poiId))
+          poiById.set(poiId, {
+            id: row.id,
+            name: row.name,
+            typeId: row.type_id,
+            parentId: row.parent_id ?? null,
+            properties: parsePoiJson(row.properties),
+            lat: row.lat,
+            lon: row.lon,
+          });
+        let set = linkedSegs.get(poiId);
+        if (!set) linkedSegs.set(poiId, (set = new Set()));
+        for (const si of owners[idx]) if (si < nSegs) set.add(si);
+      }
+    });
+
+    // The stretches no file knows, each a line (a, b) of [lon, lat] on
+    // segment `si`. An unknown edge is its own stretch, not its whole
+    // segment: in an aggregated segment (line-of-sight, collinear, a funnel
+    // polyline) the known edges keep their links and only the unknown one is
+    // judged by distance. It is drawn between its two nodes when the segment
+    // spans several edges, else as the segment itself. A coordinate span with
+    // no segment (fewer segments than spans) has no edge data: one stretch.
+    type Stretch = { si: number; a: [number, number]; b: [number, number] };
+    const unitsPerSeg = new Map<number, number>();
+    for (const u of units)
+      unitsPerSeg.set(u.seg, (unitsPerSeg.get(u.seg) ?? 0) + 1);
+    const segLine = (si: number): Stretch => ({
+      si,
+      a: coordinates[si],
+      b: coordinates[si + 1],
+    });
+    const stretches: Stretch[] = [];
+    units.forEach((u, ui) => {
+      if (u.seg >= nSegs) return;
+      const r = found[pairOf[ui]];
+      if (r?.known) return;
+      if ((unitsPerSeg.get(u.seg) ?? 0) <= 1) {
+        stretches.push(segLine(u.seg));
+        return;
+      }
+      const a = this.db.getNodeSync(u.from);
+      const b = this.db.getNodeSync(u.to);
+      stretches.push(
+        a && b
+          ? { si: u.seg, a: [a.lon, a.lat], b: [b.lon, b.lat] }
+          : segLine(u.seg),
+      );
+    });
+    for (let si = segments.length; si < nSegs; si++)
+      stretches.push(segLine(si));
+    stretches.sort((x, y) => x.si - y.si);
+
+    // The fallback's POIs: only those near the unknown stretches. Query in
+    // chunks of at most CHUNK stretches on consecutive segments, each over the
+    // chunk's own small bbox: the chunk's extent expanded by MARGIN >=
+    // FALLBACK_MAX_DIST, so any part within that distance of a stretch is
+    // fetched.
+    for (let i = 0; i < stretches.length; ) {
+      let end = i + 1;
+      while (
+        end < stretches.length &&
+        end - i < CHUNK &&
+        stretches[end].si <= stretches[end - 1].si + 1
+      )
+        end++;
+      let cMinLat = Infinity,
+        cMaxLat = -Infinity,
+        cMinLon = Infinity,
+        cMaxLon = -Infinity;
+      for (let j = i; j < end; j++) {
+        for (const [lon, lat] of [stretches[j].a, stretches[j].b]) {
+          if (lat < cMinLat) cMinLat = lat;
+          if (lat > cMaxLat) cMaxLat = lat;
+          if (lon < cMinLon) cMinLon = lon;
+          if (lon > cMaxLon) cMaxLon = lon;
+        }
+      }
+      i = end;
+      // A degree of longitude shrinks with latitude: widen the margin so it
+      // stays at least ~111 m wide (clamped near the poles).
+      const lonMargin =
+        MARGIN /
+        Math.max(0.2, Math.cos((((cMinLat + cMaxLat) / 2) * Math.PI) / 180));
+      const chunkPois = await this.db.getPoisInBBox(
+        cMinLat - MARGIN,
+        cMinLon - lonMargin,
+        cMaxLat + MARGIN,
+        cMaxLon + lonMargin,
+        // Parts only, uncapped, and no info: the map's 500 cap must never
+        // hide a span or chamber from a route; info is read below for the
+        // parts that are listed.
+        Number.MAX_SAFE_INTEGER,
+        { types: ROUTE_PART_TYPES, includeInfo: false },
+      );
+      for (const poi of chunkPois)
+        if (!poiById.has(poi.id)) poiById.set(poi.id, poi);
+    }
+    const pois = [...poiById.values()];
+
+    // The parts a route passes: spans (bridges, including those over a lock
+    // head) and chambers (locks). Wholes and harbours are not detected here.
+    const bridgePois = pois.filter((p) => p.typeId === POI_TYPE_BRIDGE_SPAN);
+    const lockPois = pois.filter((p) => p.typeId === POI_TYPE_LOCK_CHAMBER);
+    const MERGE_ROUTE_DIST = 300; // m along-route: same-structure events closer than this are one physical crossing
+
+    // Cumulative along-route distance per coordinate, used only to decide
+    // whether two hits on one structure are the same physical crossing or two
+    // distinct passages of a like-named feature further down the route.
+    // The same basis as crossingWaitSchedule and buildItinerary (segment
+    // distance, else haversine), so the chainage a crossing carries matches
+    // theirs.
+    const cumDist = cumulativeDistances(coordinates, segments);
+
+    // The directed graph edges of each segment, to tell a turn-around (the
+    // route coming back over an edge it just took) from one passage that
+    // spans consecutive segments. Only real graph edges: a connector's
+    // synthetic edge (-1 to -1) reversed is itself, and two connector
+    // segments in a row (the end connector adds two) are one passage.
+    const segEdges = new Map<number, string[]>();
+    const synthetic = new Set<number>(); // segments with no graph edge
+    for (const u of units) synthetic.add(u.seg);
+    for (const u of units) {
+      if (u.from < 0 || u.to < 0 || u.from === u.to) continue;
+      synthetic.delete(u.seg);
+      const list = segEdges.get(u.seg);
+      if (list) list.push(`${u.from}>${u.to}`);
+      else segEdges.set(u.seg, [`${u.from}>${u.to}`]);
+    }
+    const turnsBack = (seen: Set<string>, si: number): boolean =>
+      (segEdges.get(si) ?? []).some((k) => {
+        const [a, b] = k.split(">");
+        return seen.has(`${b}>${a}`);
+      });
+    // The bearing of travel along segment si (degrees true), or undefined
+    // for a zero-length one.
+    const segDir = (si: number): number | undefined => {
+      const [lon1, lat1] = coordinates[si];
+      const [lon2, lat2] = coordinates[si + 1];
+      return lon1 === lon2 && lat1 === lat2
+        ? undefined
+        : bearingDeg(lat1, lon1, lat2, lon2);
+    };
+    /** True when bearings u and v are more than 150 degrees apart: coming
+     *  back. Not 120: a hard turn under a bridge at a junction is one
+     *  passage. */
+    const opposes = (u: number | undefined, v: number | undefined): boolean =>
+      u !== undefined &&
+      v !== undefined &&
+      Math.abs(((v - u + 540) % 360) - 180) > 150;
+
+    /**
+     * For a set of same-typed parts: group by whole (`parent_id`), then walk
+     * the route's segments once per group. A segment is hit by the group's
+     * nearest part that is linked to it (any distance: the data says the edge
+     * passes it) or, on an unknown segment, lies within FALLBACK_MAX_DIST of
+     * it. Consecutive hit segments collapse into a single run (one physical
+     * crossing); runs close together along the route are merged too, so a
+     * cluster of spans near one crossing point never produces more than one
+     * entry. The part listed for a run is the one nearest the route line
+     * over that run.
+     *
+     * @param groupPois - Parts of one type (bridges or locks).
+     * @param build - Makes the crossing entry for the part that is listed.
+     * @returns The crossings of this type, in route order.
+     */
+    const detectForGroup = (
+      groupPois: Poi[],
+      build: (poi: Poi) => RouteCrossing,
+    ): RouteCrossing[] => {
+      const byStructure = new Map<string, Poi[]>();
+      for (const poi of groupPois) {
+        // One whole, one group; a part whose whole is not loaded is a whole
+        // of its own (spec §2.10).
+        const whole = this.db.getPoiParent({ parent_id: poi.parentId });
+        const key = `p:${whole ? whole.id : poi.id}`;
+        const arr = byStructure.get(key);
+        if (arr) arr.push(poi);
+        else byStructure.set(key, [poi]);
+      }
+
+      const out: Array<{ crossing: RouteCrossing; chain: number }> = [];
+      // `afterTurn`: the run starts where the route came back past the
+      // structure (over the edges of the previous run, or heading the other
+      // way), a passage of its own that is never merged back. `dir`: the
+      // direction of travel on the run's latest hit segment.
+      // `line`: the distance to the segment's own line, which breaks a tie in
+      // `dist` (sub-segments sharing one unknown edge are all as far from it).
+      type Hit = { poi: Poi; dist: number; line: number; chain: number };
+      // `first`/`last`: the chainage of the run's first and latest hit, so
+      // runs merge by the gap between them, not between their nearest hits.
+      type Run = Hit & {
+        afterTurn?: boolean;
+        dir?: number;
+        first: number;
+        last: number;
+      };
+      const nearer = (a: Hit, b: Hit): boolean =>
+        a.dist < b.dist || (a.dist === b.dist && a.line < b.line);
+      for (const group of byStructure.values()) {
+        // Where each part can hit: its linked segments, and the unknown ones
+        // within reach (a cheap box test first, the exact distance after).
+        const reach = new Map<number, Hit[]>();
+        const add = (
+          si: number,
+          poi: Poi,
+          d: { dist: number; line: number; chain: number },
+        ) => {
+          const list = reach.get(si);
+          if (list) list.push({ poi, ...d });
+          else reach.set(si, [{ poi, ...d }]);
+        };
+        // Distance to the segment, and the chainage of its nearest point.
+        const segDist = (poi: Poi, si: number) => {
+          const { dist, t } = RoutingEngine.pointSegmentProjection(
+            poi.lat,
+            poi.lon,
+            coordinates[si],
+            coordinates[si + 1],
+          );
+          return {
+            dist,
+            chain: cumDist[si] + t * (cumDist[si + 1] - cumDist[si]),
+          };
+        };
+        for (const poi of group) {
+          const linked = linkedSegs.get(poi.id);
+          if (linked)
+            for (const si of linked) {
+              const d = segDist(poi, si);
+              add(si, poi, { ...d, line: d.dist });
+            }
+          const dLat = FALLBACK_MAX_DIST / 110540;
+          const dLon =
+            FALLBACK_MAX_DIST /
+            (111320 * Math.cos((poi.lat * Math.PI) / 180) || 1);
+          for (const { si, a, b } of stretches) {
+            if (linked?.has(si)) continue;
+            const [lonA, latA] = a;
+            const [lonB, latB] = b;
+            if (
+              poi.lat < Math.min(latA, latB) - dLat ||
+              poi.lat > Math.max(latA, latB) + dLat ||
+              poi.lon < Math.min(lonA, lonB) - dLon ||
+              poi.lon > Math.max(lonA, lonB) + dLon
+            )
+              continue;
+            // Judged against the unknown edge itself; placed along the route
+            // by where the segment passes it, and ranked by that too when
+            // several segments are as near the edge.
+            const { dist } = RoutingEngine.pointSegmentProjection(
+              poi.lat,
+              poi.lon,
+              a,
+              b,
+            );
+            if (dist <= FALLBACK_MAX_DIST) {
+              const onSeg = segDist(poi, si);
+              add(si, poi, { dist, line: onSeg.dist, chain: onSeg.chain });
+            }
+          }
+        }
+        const hitSegs = [...reach.keys()].sort((a, b) => a - b);
+
+        const runs: Run[] = [];
+        let current: Run | null = null;
+        let seen = new Set<string>(); // directed edges of the current run
+        let prevSi = -2;
+        for (const si of hitSegs) {
+          let best = reach.get(si)![0];
+          for (const c of reach.get(si)!) if (nearer(c, best)) best = c;
+          // A connector segment is never a turn: it has no graph edge to
+          // retrace, and its heading is the way to the user's point.
+          const dir = synthetic.has(si) ? undefined : segDir(si);
+          const turned: boolean =
+            current !== null &&
+            !synthetic.has(si) &&
+            (turnsBack(seen, si) || opposes(current.dir, dir));
+          if (current && si === prevSi + 1 && !turned) {
+            if (nearer(best, current)) {
+              current.poi = best.poi;
+              current.dist = best.dist;
+              current.line = best.line;
+              current.chain = best.chain;
+            }
+            if (dir !== undefined) current.dir = dir;
+            current.last = Math.max(current.last, best.chain);
+          } else {
+            if (current) runs.push(current);
+            current = {
+              ...best,
+              first: best.chain,
+              last: best.chain,
+              ...(dir !== undefined ? { dir } : {}),
+              ...(turned ? { afterTurn: true } : {}),
+            };
+            seen = new Set();
+          }
+          for (const k of segEdges.get(si) ?? []) seen.add(k);
+          prevSi = si;
+        }
+        if (current) runs.push(current);
+
+        // Merge runs *within this structure group* that are close together
+        // along the route into one crossing, keeping the nearest hit. "Close"
+        // is the gap from the previous run's latest hit to this run's first,
+        // so a long run (a lock over several edges) is measured from where it
+        // ends, and whether runs merge never depends on which hit was nearest.
+        const merged: Run[] = [];
+        let prevLast = -Infinity;
+        for (const run of runs) {
+          const prev =
+            merged.length > 0 ? merged[merged.length - 1] : undefined;
+          if (
+            prev &&
+            !run.afterTurn &&
+            run.first - prevLast < MERGE_ROUTE_DIST
+          ) {
+            // A turn-back that starts the merged run stays with it, whichever
+            // hit is kept: it is what tells this pass from the one before.
+            merged[merged.length - 1] = nearer(run, prev)
+              ? { ...run, ...(prev.afterTurn ? { afterTurn: true } : {}) }
+              : prev;
+          } else {
+            merged.push(run);
+          }
+          prevLast = run.last;
+        }
+        // The pass index, from 0 in route order. A run after a turn-back is
+        // always the next pass. A run split off only by the MERGE_ROUTE_DIST
+        // gap is the next pass too (a loop round an island under the same
+        // bridge), except under a lock whole: a lock is passed twice only by
+        // turning back, so its runs that far apart are parts of one locking
+        // (the spans over both heads of a long lock). `passage` counts per
+        // type, so clients key on type + structure + passage.
+        const groupWhole = this.db.getPoiParent({
+          parent_id: group[0].parentId,
+        });
+        const lockWhole = groupWhole?.type_id === POI_TYPE_LOCK;
+        let passage = -1;
+        merged.forEach((run, i) => {
+          if (i === 0 || run.afterTurn || !lockWhole) passage++;
+          // build's object itself (it is keyed for the info lookup below).
+          const crossing = build(run.poi);
+          // Where the line passes the part, not the nearest route vertex:
+          // two structures on one long edge must not share a chainage.
+          crossing.distanceFromStart = Math.round(run.chain);
+          crossing.passage = passage;
+          out.push({ crossing, chain: run.chain });
+        });
+      }
+      out.sort((a, b) => a.chain - b.chain);
+      return out.map((e) => e.crossing);
+    };
+
+    const validWait = (v: unknown): number | undefined =>
+      typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
+
+    /**
+     * The typical wait for the part a route uses. A part reads its own value
+     * where the spec lets it carry one (a chamber, which overrides its lock's,
+     * so `0` is a real value; a span whose parent is a lock, whose bridge has
+     * its own wait; a part with no loaded whole), else the whole's. A span
+     * under a bridge whole carries none: the whole's value applies.
+     *
+     * @param part - The chamber or span the route passes.
+     * @param whole - Its whole, when loaded.
+     * @returns Minutes (>= 0), or undefined when the database gives none.
+     */
+    const poiWaitMinutes = (
+      part: Poi,
+      whole: PoiRow | undefined,
+    ): number | undefined => {
+      const ownCounts =
+        part.typeId === POI_TYPE_LOCK_CHAMBER ||
+        !whole ||
+        whole.type_id === POI_TYPE_LOCK;
+      const own = ownCounts
+        ? validWait(part.properties?.typical_wait_minutes)
+        : undefined;
+      if (own !== undefined) return own;
+      return whole
+        ? validWait(parsePoiJson(whole.properties).typical_wait_minutes)
+        : undefined;
+    };
+
+    /**
+     * What every crossing carries about its whole: `structure` is the whole's
+     * id as a string (a part without a loaded whole is its own structure),
+     * `partId` the chamber or span used.
+     */
+    const identity = (
+      poi: Poi,
+      whole: PoiRow | undefined,
+    ): { structure: string; partId: number } => ({
+      structure: String(whole?.id ?? poi.id),
+      partId: poi.id,
+    });
+
+    const spanOf = new Map<
+      RouteCrossing,
+      { poi: Poi; base: string; closedHeight?: number }
+    >();
+    const bridgeCrossings = detectForGroup(bridgePois, (poi) => {
+      const whole = this.db.getPoiParent({ parent_id: poi.parentId });
+      const props = poi.properties;
+      const subtype =
+        typeof props.subtype === "string" ? props.subtype : undefined;
+      // Opening spans only, and only a real figure: absent means unknown.
+      const ch = props.closed_height;
+      const closedHeight =
+        subtype === "opening" &&
+        typeof ch === "number" &&
+        Number.isFinite(ch) &&
+        ch > 0
+          ? ch
+          : undefined;
+      // A bridge whole gives the name; a span carried over a lock head has no
+      // bridge whole and carries the bridge's own name.
+      const name =
+        (whole && whole.type_id === POI_TYPE_BRIDGE ? whole.name : poi.name) ||
+        poi.name ||
+        whole?.name ||
+        "";
+      const crossing: RouteCrossing = {
+        type: "bridge",
+        name: `${name}${RoutingEngine.formatSpanSuffix(subtype, undefined, closedHeight)}`,
+        subtype,
+        ...(closedHeight !== undefined ? { closedHeight } : {}),
+        waitMinutes: poiWaitMinutes(poi, whole),
+        position: { latitude: poi.lat, longitude: poi.lon },
+        ...identity(poi, whole),
+      };
+      spanOf.set(crossing, { poi, base: name, closedHeight });
+      return crossing;
+    });
+    // Display facts only for the spans that were listed: `info.height`, and
+    // the kind and height-unknown flag (`spanKind`, `spanHeightUnknown`: the
+    // span's own, else its bridge whole's).
+    if (spanOf.size > 0) {
+      const info = await this.db.getPoiInfo(
+        this.db.withSpanKindSources([...spanOf.values()].map((e) => e.poi.id)),
+      );
+      for (const [c, e] of spanOf) {
+        const own = info[String(e.poi.id)];
+        const h = own?.height;
+        if (typeof h === "number" && Number.isFinite(h)) c.height = h;
+        if (this.db.spanHeightUnknown(e.poi.id, info)) c.heightUnknown = true;
+        const kind = this.db.spanKind(e.poi.id, info);
+        if (kind !== undefined) c.kind = kind;
+        c.name = `${e.base}${RoutingEngine.formatSpanSuffix(c.subtype, c.height, e.closedHeight, { kind: c.kind, heightUnknown: c.heightUnknown })}`;
+      }
+    }
+    const lockCrossings = detectForGroup(lockPois, (poi) => {
+      const whole = this.db.getPoiParent({ parent_id: poi.parentId });
+      return {
+        type: "lock",
+        name: whole?.name || poi.name || "",
+        waitMinutes: poiWaitMinutes(poi, whole),
+        position: { latitude: poi.lat, longitude: poi.lon },
+        ...identity(poi, whole),
+      };
+    });
+
+    return [...bridgeCrossings, ...lockCrossings];
+  }
+
+  private async addViolationWarnings(
+    result: RouteResult,
+    warnings: RouteWarning[],
+    target: LegTarget,
+    startPt: { latitude: number; longitude: number },
+    endPt: { latitude: number; longitude: number },
+    inputs: RouteInputs,
+    env?: RouteEnv,
+  ): Promise<void> {
+    if (!result.features[0] || !result.features[0].properties.segments) return;
+    const coords = result.features[0].geometry.coordinates;
+    const segments = result.features[0].properties.segments!;
+    const minDepth = this.requiredDepth(inputs);
+    const airDraft = this.requiredAirDraft(inputs);
+    // Beam is tested exactly as pathViolationMeters tests it. The two must
+    // agree: that function decides a route is violating and may now be KEPT
+    // anyway once maxPenaltyDetourRatio bounds the detour, so anything it
+    // counts and this does not is a violation the helm is never told about.
+    const minBeam = this.requiredWidth(inputs);
+
+    let totalViolationSegments = 0;
+    let totalViolationDist = 0;
+    // Stashed onto `result.crossings` below (when freshly detected) so
+    // finalizeRoute's own `if (!route.crossings)` guard — already there,
+    // unchanged — picks it up instead of detecting a second time. Safe only
+    // because nothing mutates `coords` between here and finalizeRoute on the
+    // paths where the same object reaches it (the single-leg route, and the
+    // same-region navmesh route); on a multi-leg via route this result is a
+    // per-leg object that finalizeRoute never sees directly (routeViaPoints
+    // builds a fresh merged one), so the write is simply never read there —
+    // harmless, not wrong.
+    const crossings = env
+      ? (result.crossings ??
+        (await this.detectRouteStructures(coords, segments)))
+      : [];
+    if (env && !result.crossings) result.crossings = crossings;
+    const times = await this.truePassageTimes(
+      coords,
+      segments,
+      env,
+      crossings,
+      inputs,
+    );
+    let worstDepth = Infinity;
+    // The charted figure behind the worst passage depth, so the message can
+    // show both when the tide is what makes the difference.
+    let worstCharted = Infinity;
+    let worstAirDraft = Infinity;
+    let worstBeam = Infinity;
+    let firstFromCoord: number[] | null = null;
+    let lastToCoord: number[] | null = null;
+
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      // Same passage depth the audit and the search used — see
+      // pathViolationMeters; the three have to agree.
+      const depth = this.segmentDepthAtPassage(
+        seg,
+        coords[i],
+        coords[i + 1],
+        times[i],
+        env,
+      );
+      const depthViolation = seg.minDepthKnown && depth < minDepth;
+      const airDraftViolation =
+        seg.maxAirDraft >= 0 && seg.maxAirDraft < airDraft;
+      const beamViolation =
+        typeof seg.minWidth === "number" &&
+        seg.minWidth >= 0 &&
+        seg.minWidth < minBeam;
+
+      if (depthViolation || airDraftViolation || beamViolation) {
+        const fromCoord = coords[i];
+        const toCoord = coords[i + 1];
+        if (!fromCoord || !toCoord) continue;
+
+        totalViolationSegments++;
+        totalViolationDist += seg.distance || 0;
+        if (depthViolation && depth < worstDepth) {
+          worstDepth = depth;
+          worstCharted = seg.minDepth;
+        }
+        if (airDraftViolation && seg.maxAirDraft < worstAirDraft)
+          worstAirDraft = seg.maxAirDraft;
+        if (beamViolation && seg.minWidth! < worstBeam)
+          worstBeam = seg.minWidth!;
+        if (!firstFromCoord) firstFromCoord = fromCoord;
+        lastToCoord = toCoord;
+      }
+    }
+
+    if (totalViolationSegments > 0 && firstFromCoord && lastToCoord) {
+      // Numbers only: the wording (and the "also at passage" variant, present
+      // when the tide moved the depth figure) is the catalogue's.
+      const params: MessageParams = {
+        legs: totalViolationSegments,
+        distance: totalViolationDist,
+      };
+      if (typeof target === "object") params.via = target.via;
+      if (worstDepth < Infinity) {
+        params.depth = worstDepth;
+        params.depthRequired = minDepth;
+        // Only mention the tide where it actually moved the figure — with
+        // tides off, or where the rise made no difference, the message reads
+        // exactly as it always has rather than acquiring unexplained wording.
+        if (worstDepth - worstCharted >= RoutingEngine.TIDE_REPORT_MIN_RISE_M)
+          params.depthCharted = worstCharted;
+      }
+      if (worstAirDraft < Infinity) {
+        params.airDraft = worstAirDraft;
+        params.airDraftRequired = airDraft;
+      }
+      if (worstBeam < Infinity) {
+        params.width = worstBeam;
+        params.beamRequired = minBeam;
+      }
+      const constrainedCode: RouteWarningCode =
+        target === "route"
+          ? "ROUTE_CONSTRAINED"
+          : target === "end"
+            ? "END_LEG_CONSTRAINED"
+            : "VIA_LEG_CONSTRAINED";
+      warnings.push({
+        ...makeWarning(
+          this.msgLang(inputs),
+          "via_constrained",
+          constrainedCode,
+          params,
+        ),
+        from: { latitude: firstFromCoord[1], longitude: firstFromCoord[0] },
+        to: { latitude: lastToCoord[1], longitude: lastToCoord[0] },
+        distanceMeters: totalViolationDist,
+      });
+    }
+  }
+
+  /**
+   * Compress collinear waypoints: remove intermediate nodes that are nearly
+   * collinear with their neighbors (cross-track distance < 2m).
+   * This is a lightweight pre-pass before the more expensive LOS smoothing.
+   */
+  private compressCollinear(path: number[]): number[] {
+    if (path.length <= 2) return path;
+
+    const coordsCache = new Map<number, { lat: number; lon: number }>();
+
+    const getCoord = (id: number): { lat: number; lon: number } | null => {
+      let c = coordsCache.get(id);
+      if (!c) {
+        const node = this.db.getNodeSync(id);
+        if (!node) return null;
+        c = { lat: node.lat, lon: node.lon };
+        coordsCache.set(id, c);
+      }
+      return c;
+    };
+
+    // Convert signed area calculation to equirectangular meters
+    const isCollinear = (
+      n1: number,
+      n2: number,
+      n3: number,
+      thresholdMeters = 2,
+    ): boolean => {
+      const p1 = getCoord(n1);
+      const p2 = getCoord(n2);
+      const p3 = getCoord(n3);
+      if (!p1 || !p2 || !p3) return false;
+
+      // Equirectangular approximation: project to meters around mid-latitude
+      const midLat = (((p1.lat + p3.lat) / 2) * Math.PI) / 180;
+      const cosMid = Math.cos(midLat);
+      const R = 6371000;
+      const toRad = (d: number) => (d * Math.PI) / 180;
+
+      const x1 = toRad(p1.lon) * cosMid * R;
+      const y1 = toRad(p1.lat) * R;
+      const x2 = toRad(p2.lon) * cosMid * R;
+      const y2 = toRad(p2.lat) * R;
+      const x3 = toRad(p3.lon) * cosMid * R;
+      const y3 = toRad(p3.lat) * R;
+
+      // Cross-track distance = area of parallelogram / base length
+      const cross = Math.abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1));
+      const base = Math.sqrt((x3 - x1) ** 2 + (y3 - y1) ** 2);
+      if (base < 1) return true; // p1 and p3 are the same point
+
+      return cross / base < thresholdMeters;
+    };
+
+    const compressed: number[] = [path[0]];
+    for (let i = 1; i < path.length - 1; i++) {
+      const prev = compressed[compressed.length - 1];
+      const next = path[i + 1];
+
+      if (!isCollinear(prev, path[i], next)) {
+        compressed.push(path[i]);
+      }
+    }
+    compressed.push(path[path.length - 1]);
+
+    return compressed;
+  }
+
+  /**
+   * Apply string-pulling (line-of-sight smoothing) to a grid-based A* path.
+   * Greedy lookahead: for each anchor node, find the furthest node ahead
+   * that has a clear line-of-sight (no land or constraint gaps), and skip
+   * the intermediate grid nodes.
+   */
+  private async smoothPath(
+    path: number[],
+    inputs: RouteInputs,
+  ): Promise<number[]> {
+    if (path.length <= 2 || !this._options.losSearchRadiusM) return path;
+
+    const smoothed: number[] = [path[0]];
+    let i = 0;
+
+    const nodeMap = new Map<number, any>();
+    for (const id of path) {
+      const n = await this.db.getNodeById(id);
+      nodeMap.set(id, n);
+    }
+
+    // Lookahead cap: any LOS shortcut spanning > 300 graph nodes covers hundreds
+    // of km and is very unlikely to be valid. Capping avoids O(N²) worst case.
+    const MAX_LOOKAHEAD = 300;
+
+    while (i < path.length - 1) {
+      this.checkStop(inputs);
+      const maxJ = Math.min(path.length - 1, i + MAX_LOOKAHEAD);
+      let j = maxJ;
+      while (j > i + 1) {
+        let skippingInland = false;
+        for (let k = i + 1; k < j; k++) {
+          if (getNodeTypeInt(path[k]) === NODE_TYPE_INLAND) {
+            skippingInland = true;
+            break;
+          }
+        }
+
+        // Never string-pull across a funnel-augmented hop: it's already the
+        // taut/optimal path through its navmesh region, and this straight-line
+        // LOS check samples too coarsely to trust cutting a corner across it.
+        if (!skippingInland) {
+          for (let m = i; m < j; m++) {
+            const hopEdge = this.db.getEdgeSync(path[m], path[m + 1]);
+            if (hopEdge?.path_points && hopEdge.path_points.length > 0) {
+              skippingInland = true;
+              break;
+            }
+          }
+        }
+
+        if (!skippingInland) {
+          const coordsI = nodeMap.get(path[i]);
+          const coordsJ = nodeMap.get(path[j]);
+          if (
+            coordsI &&
+            coordsJ &&
+            this.hasLineOfSight(
+              coordsI.lat,
+              coordsI.lon,
+              coordsJ.lat,
+              coordsJ.lon,
+            )
+          ) {
+            break;
+          }
+        }
+        j--;
+      }
+
+      smoothed.push(path[j]);
+      i = j;
+    }
+
+    return smoothed;
+  }
+}

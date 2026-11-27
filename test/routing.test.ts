@@ -3,10 +3,12 @@ import * as path from 'path';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { RoutingDatabase } from '../dist/database.js';
-import { RoutingEngine } from '../dist/routing.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+import { RoutingDatabase } from 'routeiq-core';
+import { createDirectoryDatabase } from '../dist-tsc/data-dir.js';
+import { RoutingEngine } from 'routeiq-core';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 import { upgradeToPoiModel } from './poi-model-fixture.js';
+import { testOptions } from './engine-helper.js';
 
 describe('RoutingEngine', () => {
   let db: RoutingDatabase;
@@ -110,11 +112,11 @@ describe('RoutingEngine', () => {
     }));
 
     // Open via RoutingDatabase with the fixtures directory
-    db = new RoutingDatabase(fixturesDir);
+    db = createDirectoryDatabase(fixturesDir);
     await db.init();
     await db.loadGraph();
 
-    engine = new RoutingEngine(db, DEFAULT_CONFIG);
+    engine = new RoutingEngine(db, testOptions(DEFAULT_CONFIG));
   });
 
   after(async () => {
@@ -177,11 +179,12 @@ describe('RoutingEngine', () => {
     });
 
     it('should return warnings when vessel draft constraints block the route', async () => {
-      engine.setVesselDimensions({ draft: 100.0, beam: 4.0, airDraft: 10.0 });
-
       const route = await engine.calculateRoute({
         start: { latitude: 52.0, longitude: 5.0 },
         end: { latitude: 52.04, longitude: 5.04 },
+        draft: 100.0,
+        beam: 4.0,
+        airDraft: 10.0,
         minCoastDistance: 0,
       });
 
@@ -284,24 +287,19 @@ describe('RoutingEngine', () => {
 
     it('rejects nothing: a manual leg never fails, even where auto routing would', async () => {
       // Draft that blocks every edge of the graph — manual ignores constraints
-      engine.setVesselDimensions({ draft: 100.0, beam: 4.0, airDraft: 10.0 });
       const route = await engine.calculateRoute({
         start: { latitude: 52.0, longitude: 5.0 },
         end: { latitude: 52.04, longitude: 5.04 },
         endMode: 'manual',
+        draft: 100.0,
+        beam: 4.0,
+        airDraft: 10.0,
         minCoastDistance: 0,
       });
-      engine.setVesselDimensions({ draft: 2.0, beam: 4.0, airDraft: 10.0 });
       assert.strictEqual(route.features[0].properties.mode, 'manual');
       // No depth violations reported for manual segments (minDepth is unknown)
       const depthWarnings = (route.warnings || []).filter(w => w.type === 'via_constrained');
       assert.strictEqual(depthWarnings.length, 0, 'manual legs carry no constraint violations');
-    });
-  });
-
-  describe('setVesselDimensions', () => {
-    it('should update vessel dimensions', () => {
-      engine.setVesselDimensions({ draft: 3.0, beam: 5.0, airDraft: 15.0 });
     });
   });
 
@@ -355,7 +353,7 @@ describe('RoutingEngine', () => {
 });
 
 describe('Itinerary', async () => {
-  const { simplifyIndices, buildItinerary, clipLocation } = await import('../dist/itinerary.js');
+  const { simplifyIndices, buildItinerary, clipLocation } = await import('routeiq-core');
 
   // L-shaped route: 10 segments due east along lat 52.0 (lon 4.00→4.10),
   // then 5 segments due north along lon 4.10 (lat 52.00→52.05).

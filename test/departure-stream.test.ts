@@ -9,8 +9,8 @@ import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import type { Router } from 'express';
 import type { ServerAPI } from '@signalk/server-api';
-import { ApiHandler } from '../dist/api.js';
-import { DEFAULT_CONFIG } from '../dist/types.js';
+import { ApiHandler } from '../dist-tsc/api.js';
+import { DEFAULT_CONFIG } from '../dist-tsc/types.js';
 
 describe('POST /route/departures streaming', () => {
   const STEPS = 25; // 24 h at 60 min, ends included
@@ -33,12 +33,12 @@ describe('POST /route/departures streaming', () => {
         _req: unknown,
         hours: number,
         step: number,
-        signal?: { aborted: boolean },
+        options?: { signal?: AbortSignal },
       ) {
-        const { RoutingEngine } = await import('../dist/routing.js');
+        const { RoutingEngine } = await import('routeiq-core');
         const steps = RoutingEngine.departureScanSteps(hours, step);
         for (const i of RoutingEngine.departureScanOrder(steps)) {
-          if (signal?.aborted) return;
+          if (options?.signal?.aborted) return;
           visited.push(i);
           if (opts.failAt === i) throw new Error('engine blew up');
           yield {
