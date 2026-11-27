@@ -161,8 +161,16 @@ const START = { latitude: 51.613, longitude: 3.885 };
 const END = { latitude: 51.609, longitude: 3.896 };
 const VESSEL = { draft: 1.6, beam: 4.2, airDraft: 12, speedKnots: 6 };
 
+// The examples that open with `readOnly: true` need a `node:sqlite` that honours
+// that option (Node 22.12 and later; older ones refuse the file by design).
+const [NODE_MAJOR = 0, NODE_MINOR = 0] = process.versions.node.split('.').map(Number);
+const READ_ONLY_SUPPORTED = NODE_MAJOR > 22 || (NODE_MAJOR === 22 && NODE_MINOR >= 12);
+const READ_ONLY_SKIP = READ_ONLY_SUPPORTED
+  ? false
+  : `read-only mode needs Node 22.12 or later (running ${process.versions.node})`;
+
 describe('README examples', () => {
-  it('quick start routes in-process, read-only, with a budget', async () => {
+  it('quick start routes in-process, read-only, with a budget', { skip: READ_ONLY_SKIP }, async () => {
     const route = await quickStart(DATA_FILE);
     assert.ok(route.features.length > 0);
     assert.strictEqual(route.inputs?.draft, 1.6);
@@ -170,7 +178,7 @@ describe('README examples', () => {
     assert.ok(route.inputs?.data?.some((d) => d.filename === 'netherlands.sqlite'));
   });
 
-  it('the worker host routes and exports GPX by result id', async () => {
+  it('the worker host routes and exports GPX by result id', { skip: READ_ONLY_SKIP }, async () => {
     const gpx = await inWorker(DATA_FILE);
     assert.match(gpx, /<gpx/);
   });
@@ -191,7 +199,7 @@ describe('README examples', () => {
     assert.throws(() => parseBody({ start: { latitude: 91, longitude: 0 }, end: END, ...VESSEL }), /start/);
   });
 
-  it('a strict engine refuses an incomplete request with a coded failure', async () => {
+  it('a strict engine refuses an incomplete request with a coded failure', { skip: READ_ONLY_SKIP }, async () => {
     const lines: string[] = [];
     const database = new RoutingDatabase({
       files: [{ path: DATA_FILE, enabled: true }],

@@ -31,8 +31,8 @@ Node.js `>=22.5.0`, because the engine reads the routing files with `node:sqlite
   opens the data, which for the worker host means the process that creates the
   `EngineClient` (worker threads inherit it).
 - Node 22.13 and later, 23.4 and later, and 24: no flag is needed.
-- Read-only mode (`readOnly: true`) needs a `node:sqlite` that honours the
-  `readOnly` open option. Node 22.5.0 ignores it and would open the file
+- Read-only mode (`readOnly: true`) needs Node.js 22.12 or later: it needs a
+  `node:sqlite` that honours the `readOnly` open option. Node 22.5.0 ignores it and would open the file
   read-write, so each region file is checked when it is opened read-only: a
   write is tried inside a transaction that is always rolled back, and a
   connection that accepts it is refused with an error, rather than writing

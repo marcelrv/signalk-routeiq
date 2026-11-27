@@ -8,6 +8,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { format } from 'node:util';
 import assert from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import type { IRouter, Router } from 'express';
@@ -163,14 +164,29 @@ const SENT_COORDINATES: RegExp[] = [51.613, 3.885, 51.609, 3.896].map((n) => {
   return new RegExp(`(?<![\\d.])(?:${[...forms].map((f) => f.replace('.', '\\.')).join('|')})(?!\\d)`);
 });
 
+const leaksCoordinate = (text: string): boolean => SENT_COORDINATES.some((re) => re.test(text.replace(/<DIR>\S*/g, '')));
+
 describe('plugin: console output', () => {
+  it('privacy check detects a coordinate passed as an object argument (negative control)', () => {
+    const seen: string[] = [];
+    const saved = console.log;
+    console.log = (...args: unknown[]) => void seen.push(format(...args));
+    try {
+      console.log('position', { latitude: 51.613, longitude: 3.885 });
+    } finally {
+      console.log = saved;
+    }
+    assert.strictEqual(seen.length, 1);
+    assert.ok(leaksCoordinate(seen[0]), `the check missed: ${seen[0]}`);
+  });
+
   it('is what it was before the core had an injected logger', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'routeiq-plugin-log-'));
     fs.copyFileSync(path.join('test', 'fixtures', 'zeelandbrug', 'netherlands.sqlite'), path.join(dir, 'netherlands.sqlite'));
     const seen: Array<{ stream: 'log' | 'warn' | 'error'; text: string }> = [];
     const saved = { log: console.log, warn: console.warn, error: console.error };
     for (const stream of ['log', 'warn', 'error'] as const) {
-      console[stream] = (...args: unknown[]) => void seen.push({ stream, text: args.map(String).join(' ') });
+      console[stream] = (...args: unknown[]) => void seen.push({ stream, text: format(...args) });
     }
     try {
       const { plugin, router } = await startPlugin(dir);
@@ -208,7 +224,7 @@ describe('plugin: console output', () => {
     assert.ok(lines.every((l) => !/-?\d{1,3}\.\d{4,}/.test(l.text.replace(/<DIR>\S*/g, ''))), 'a coordinate-like number in the output');
     // The coordinates this test sends (three decimals), in the forms a log
     // line could print them.
-    const leaks = (text: string): boolean => SENT_COORDINATES.some((re) => re.test(text.replace(/<DIR>\S*/g, '')));
+    const leaks = leaksCoordinate;
     assert.ok(
       lines.every((l) => !leaks(l.text)),
       `a coordinate this test sent is in the output: ${lines.find((l) => leaks(l.text))?.text}`,
